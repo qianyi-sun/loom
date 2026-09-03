@@ -120,23 +120,43 @@ def _candidate_issued_at(candidate_sha: str) -> datetime:
     return issued_at
 
 
+def _release_is_ancestor(release_sha: str, candidate_sha: str) -> bool:
+    completed = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "merge-base", "--is-ancestor", release_sha, candidate_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    raise subprocess.CalledProcessError(
+        completed.returncode,
+        completed.args,
+        output=completed.stdout,
+        stderr=completed.stderr,
+    )
+
+
 def _release_binding(
     record: dict[str, object],
     *,
-    candidate_sha: str,
     component: str,
     image_name: str,
-) -> tuple[str, dict[str, object]]:
+) -> tuple[str, dict[str, object], str]:
     if record.get("schema_version") != 1:
         raise ValueError(f"{component} release record schema is invalid")
     image = _object(record.get("image"), label=f"{component} release image")
     release = _object(record.get("release"), label=f"{component} release")
     subject = _object(record.get("subject"), label=f"{component} release subject")
     scan = _object(record.get("scan"), label=f"{component} release scan")
+    release_sha = release.get("commit")
     if (
         image.get("component") != component
         or image.get("platform") != "linux/amd64"
-        or release.get("commit") != candidate_sha
+        or not isinstance(release_sha, str)
+        or _SHA.fullmatch(release_sha) is None
         or release.get("ref") != "refs/heads/dev"
         or subject.get("name") != f"ghcr.io/qianyi-sun/{image_name}"
     ):
@@ -144,7 +164,7 @@ def _release_binding(
     digest = subject.get("digest")
     if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
         raise ValueError(f"{component} release digest is invalid")
-    return f"{subject['name']}@{digest}", scan
+    return f"{subject['name']}@{digest}", scan, release_sha
 
 
 def prepare(args: argparse.Namespace) -> dict[str, object]:
@@ -168,17 +188,22 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         "execution_runtime": args.execution_runtime_release_record,
     }
     bindings: dict[str, dict[str, str]] = {}
+    component_candidate_shas: dict[str, str] = {}
     scan_policies: list[dict[str, object]] = []
     for key, component, image_name in _COMPONENTS:
         release_record, release_bytes = _read_json(
             release_inputs[key], label=f"{component} release record"
         )
-        source_ref, scan = _release_binding(
+        source_ref, scan, release_sha = _release_binding(
             release_record,
-            candidate_sha=args.candidate_sha,
             component=component,
             image_name=image_name,
         )
+        if key == "execution_runtime" and release_sha != args.candidate_sha:
+            raise ValueError("execution-runtime release must match the profile candidate")
+        if key != "execution_runtime" and not _release_is_ancestor(release_sha, args.candidate_sha):
+            raise ValueError(f"{component} release is not an ancestor of the profile candidate")
+        component_candidate_shas[key] = release_sha
         mirrored = _object(mirror_images.get(key), label=f"mirrored {component}")
         observed = _object(evidence_images.get(key), label=f"observed {component}")
         target_ref = mirrored.get("target_ref")
@@ -314,6 +339,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         "policy_sha256": policy_sha256,
         "signing_key_id": args.signing_key_id,
         "public_key_sha256": "sha256:" + hashlib.sha256(public_bytes).hexdigest(),
+        "component_candidate_shas": component_candidate_shas,
     }
 
 
