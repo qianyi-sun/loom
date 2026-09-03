@@ -1,0 +1,24 @@
+{
+  "schema": "loom.task-image-builder-supervisor-config/v1",
+  "release_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "cpu_arch": "arm64",
+  "guard": {
+    "socket_path": "/opt/loom-task-image-builder-provider/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/run/guard.sock",
+    "max_packet_bytes": 4096,
+    "ack_timeout_seconds": 5
+  },
+  "runtime": {
+    "rootlesskit": {
+      "path": "/opt/loom-task-image-builder-provider/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bin/rootlesskit",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "buildctl": {
+      "path": "/opt/loom-task-image-builder-provider/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runtime/buildctl",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "buildkitd": {
+      "path": "/opt/loom-task-image-builder-provider/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runtime/buildkitd",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  }
+}
