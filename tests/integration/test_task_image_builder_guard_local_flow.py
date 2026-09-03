@@ -10,13 +10,13 @@ from threading import Thread
 from loom_task_image_builder_guard.protocol import (
     LOCAL_SCHEMA,
     read_sealed_memfd,
-    receive_request,
     send_packet,
 )
 from tests.unit.test_task_image_builder_guard_service import (
     BOOTSTRAP,
     GRANT,
     _json,
+    _receive_projected_secret,
     _service,
 )
 
@@ -52,7 +52,7 @@ def test_real_unix_seqpacket_projection_keeps_secrets_descriptor_only(
                 }
             ),
         )
-        response_payload, descriptor = receive_request(client, maximum=4096)
+        response_payload, descriptor = _receive_projected_secret(client)
         assert descriptor is not None
         try:
             receipt = json.loads(read_sealed_memfd(descriptor, maximum=65536))

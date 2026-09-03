@@ -22,6 +22,7 @@ from loom_task_image_builder_guard.models import (
     ProtocolConfig,
     ServiceConfig,
     SlurmConfig,
+    StorageConfig,
 )
 from loom_task_image_builder_guard.safeio import read_stable_file
 
@@ -121,6 +122,7 @@ class GuardConfig(GuardConfigValue):
                     "commands",
                     "slurm",
                     "containment",
+                    "storage",
                     "service",
                 }
             ),
@@ -380,6 +382,36 @@ class GuardConfig(GuardConfigValue):
             bpf_map_schema_sha256=_digest(containment_raw["bpf_map_schema_sha256"]),
         )
 
+        storage_raw = _object(
+            raw["storage"],
+            keys=frozenset(
+                {
+                    "root",
+                    "mount_device",
+                    "project_id",
+                    "byte_limit",
+                    "inode_limit",
+                }
+            ),
+        )
+        mount_device = storage_raw["mount_device"]
+        if not isinstance(mount_device, str) or _DEVICE.fullmatch(mount_device) is None:
+            raise GuardError("config_storage_invalid")
+        byte_limit = _integer(
+            storage_raw["byte_limit"], minimum=1024, maximum=(1 << 63) - 1
+        )
+        if byte_limit % 1024 != 0:
+            raise GuardError("config_storage_invalid")
+        storage = StorageConfig(
+            root=_path(storage_raw["root"]),
+            mount_device=mount_device,
+            project_id=_integer(storage_raw["project_id"], minimum=1),
+            byte_limit=byte_limit,
+            inode_limit=_integer(
+                storage_raw["inode_limit"], minimum=1, maximum=(1 << 63) - 1
+            ),
+        )
+
         service_raw = _object(
             raw["service"],
             keys=frozenset(
@@ -409,6 +441,7 @@ class GuardConfig(GuardConfigValue):
             commands=commands,
             slurm=slurm,
             containment=containment,
+            storage=storage,
             service=service,
         )
 

@@ -16,6 +16,8 @@ REQUEST = UUID("22222222-2222-2222-2222-222222222222")
 PROOF = UUID("33333333-3333-3333-3333-333333333333")
 EXCHANGE = UUID("44444444-4444-4444-4444-444444444444")
 SESSION = UUID("55555555-5555-5555-5555-555555555555")
+NEXT_SESSION = UUID("66666666-6666-4666-8666-666666666666")
+RENEWAL = UUID("77777777-7777-4777-8777-777777777777")
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
 REQUEST_SHA256 = "e5a07b1184d14e7b988f16558813e635ef105d450926cce6707e60353f72da77"
@@ -106,6 +108,78 @@ def _proof() -> dict[str, object]:
     }
 
 
+def _storage() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "path": f"/var/lib/loom-task-builder/jobs/{GRANT}",
+        "device": 66305,
+        "inode": 1234567,
+        "project_id": 300993,
+        "byte_limit": 107374182400,
+        "inode_limit": 1000000,
+        "quota_sha256": DIGEST_A,
+    }
+
+
+def test_containment_cannot_begin_before_storage_is_durable(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _intent(ledger)
+    _record_challenge(ledger)
+
+    with pytest.raises(GuardError) as caught:
+        ledger.record_containment_pending(GRANT)
+
+    assert caught.value.code == "ledger_replay_conflict"
+    assert ledger.get(GRANT).state == "challenged"  # type: ignore[union-attr]
+    ledger.close()
+
+
+def _record_storage(ledger: GuardLedger) -> None:
+    ledger.record_storage_pending(GRANT)
+    storage = _storage()
+    ledger.record_storage(
+        GRANT,
+        storage=storage,
+        storage_sha256=ledger.document_sha256(storage),
+    )
+    ledger.record_containment_pending(GRANT)
+
+
+def _exchange(ledger: GuardLedger) -> None:
+    _intent(ledger)
+    _record_challenge(ledger)
+    _record_storage(ledger)
+    proof = _proof()
+    ledger.record_attachment(
+        GRANT,
+        proof=proof,
+        proof_sha256=ledger.document_sha256(proof),
+        pin_path=PINS,
+        link_ids=tuple(range(101, 125)),
+        program_ids=tuple(range(201, 225)),
+        map_ids=tuple(range(301, 319)),
+        attestation_generation=1,
+        attestation_sha256=DIGEST_B,
+        attestation_expires_at="2026-09-02T16:00:50Z",
+    )
+    ledger.record_projection(
+        GRANT,
+        receipt_public_binding_sha256=DIGEST_B,
+        bootstrap_token_sha256=DIGEST_A,
+    )
+    ledger.record_exchange(
+        GRANT,
+        exchange_id=EXCHANGE,
+        exchange_public_binding_sha256=DIGEST_A,
+        session_id=SESSION,
+        session_generation=1,
+        session_public_binding_sha256=DIGEST_B,
+        session_token_sha256=DIGEST_A,
+        session_wire_sha256=DIGEST_B,
+        session_expires_at="2026-09-02T16:10:00Z",
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("request-digest", "challenge-nonce", "attachment-ids"),
@@ -117,6 +191,7 @@ def test_attachment_proof_must_bind_the_persisted_request_challenge_and_ids(
     ledger = _ledger(tmp_path)
     _intent(ledger)
     _record_challenge(ledger)
+    _record_storage(ledger)
     proof = _proof()
     if mutation == "request-digest":
         proof["request_sha256"] = DIGEST_A
@@ -142,7 +217,7 @@ def test_attachment_proof_must_bind_the_persisted_request_challenge_and_ids(
         )
 
     assert caught.value.code == "ledger_binding_invalid"
-    assert ledger.get(GRANT).state == "challenged"  # type: ignore[union-attr]
+    assert ledger.get(GRANT).state == "containment_pending"  # type: ignore[union-attr]
     ledger.close()
 
 
@@ -193,6 +268,7 @@ def test_reload_recomputes_each_persisted_document_digest(
     ledger = _ledger(tmp_path)
     _intent(ledger)
     _record_challenge(ledger)
+    _record_storage(ledger)
     proof = _proof()
     ledger.record_attachment(
         GRANT,
@@ -241,6 +317,7 @@ def test_reload_rejects_a_rehashed_proof_that_breaks_persisted_bindings(
     ledger = _ledger(tmp_path)
     _intent(ledger)
     _record_challenge(ledger)
+    _record_storage(ledger)
     proof = _proof()
     ledger.record_attachment(
         GRANT,
@@ -317,6 +394,7 @@ def test_records_only_public_attachment_exchange_and_attestation_bindings(
     ledger = _ledger(tmp_path)
     _intent(ledger)
     _record_challenge(ledger)
+    _record_storage(ledger)
     proof = _proof()
     ledger.record_attachment(
         GRANT,
@@ -340,27 +418,291 @@ def test_records_only_public_attachment_exchange_and_attestation_bindings(
         exchange_id=EXCHANGE,
         exchange_public_binding_sha256=DIGEST_A,
         session_id=SESSION,
+        session_generation=1,
         session_public_binding_sha256=DIGEST_B,
         session_token_sha256=DIGEST_A,
+        session_wire_sha256=DIGEST_B,
         session_expires_at="2026-09-02T16:10:00Z",
     )
-    ledger.record_attestation(
-        GRANT,
-        generation=2,
-        attestation_sha256=DIGEST_A,
-        expires_at="2026-09-02T16:01:00Z",
-    )
-
     payload = (tmp_path / "ledger" / f"{GRANT}.json").read_bytes()
     document = json.loads(payload)
 
     assert document["state"] == "exchanged"
-    assert document["attestation_generation"] == 2
+    assert document["attestation_generation"] == 1
     assert document["pin_path"] == PINS
     assert b"loom_tibp_" not in payload
     assert b"loom_tibs_" not in payload
     assert b"bootstrap_token\"" not in payload
     assert b"session_token\"" not in payload
+    ledger.close()
+
+
+def test_guard_mediated_renewal_binds_current_session_and_stores_only_hashes(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _exchange(ledger)
+    attestation = {
+        "schema_version": 1,
+        "attestation_id": str(RENEWAL),
+        "grant_id": str(GRANT),
+        "generation": 2,
+        "node_name": "trt-gb10-1",
+        "node_boot_id": "66666666-6666-6666-6666-666666666666",
+        "slurm_cluster_id": "gb10",
+        "slurm_job_id": "12345",
+        "cgroup_path": "/sys/fs/cgroup/slurm/job_12345/step_batch/user/task_0",
+        "cgroup_inode": 987654,
+        "attachment": _proof()["attachment"],
+        "issued_at": "2026-09-02T16:00:15Z",
+        "expires_at": "2026-09-02T16:01:15Z",
+    }
+    public_renewal = {
+        "schema_version": 1,
+        "renewal_id": str(RENEWAL),
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token_sha256": DIGEST_A,
+        "attestation": attestation,
+        "observed_at": "2026-09-02T16:00:15Z",
+    }
+    renewal_sha = ledger.document_sha256(public_renewal)
+
+    pending = ledger.record_pending_renewal(
+        GRANT,
+        renewal_id=RENEWAL,
+        current_session_id=SESSION,
+        current_session_generation=1,
+        current_session_wire_sha256=DIGEST_B,
+        public_renewal=public_renewal,
+        public_renewal_sha256=renewal_sha,
+    )
+    completed = ledger.record_renewal(
+        GRANT,
+        renewal_id=RENEWAL,
+        public_renewal_sha256=renewal_sha,
+        session_id=NEXT_SESSION,
+        session_generation=2,
+        session_public_binding_sha256=DIGEST_A,
+        session_token_sha256=DIGEST_B,
+        session_wire_sha256=REQUEST_SHA256,
+        session_expires_at="2026-09-02T16:10:15Z",
+        attestation_sha256=ledger.document_sha256(attestation),
+        attestation_expires_at="2026-09-02T16:01:15Z",
+    )
+
+    assert pending.document()["pending_renewal_public"] == public_renewal
+    document = completed.document()
+    assert document["state"] == "exchanged"
+    assert document["session_id"] == str(NEXT_SESSION)
+    assert document["session_generation"] == 2
+    assert document["renewal_id"] == str(RENEWAL)
+    assert document["pending_renewal_public"] == public_renewal
+    assert document["pending_renewal_public_sha256"] == renewal_sha
+    raw = completed.raw
+    assert b"loom_tibs_" not in raw
+    assert b"session_token\"" not in raw
+
+    with pytest.raises(GuardError) as caught:
+        ledger.record_pending_renewal(
+            GRANT,
+            renewal_id=RENEWAL,
+            current_session_id=SESSION,
+            current_session_generation=1,
+            current_session_wire_sha256="f" * 64,
+            public_renewal=public_renewal,
+            public_renewal_sha256=renewal_sha,
+        )
+    assert caught.value.code == "ledger_replay_conflict"
+    ledger.close()
+
+
+def test_completed_renewal_replay_document_is_replaced_by_next_generation(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _exchange(ledger)
+    first_attestation = {
+        "schema_version": 1,
+        "attestation_id": str(RENEWAL),
+        "grant_id": str(GRANT),
+        "generation": 2,
+        "node_name": "trt-gb10-1",
+        "node_boot_id": "66666666-6666-6666-6666-666666666666",
+        "slurm_cluster_id": "gb10",
+        "slurm_job_id": "12345",
+        "cgroup_path": "/sys/fs/cgroup/slurm/job_12345/step_batch/user/task_0",
+        "cgroup_inode": 987654,
+        "attachment": _proof()["attachment"],
+        "issued_at": "2026-09-02T16:00:15Z",
+        "expires_at": "2026-09-02T16:01:15Z",
+    }
+    first_public = {
+        "schema_version": 1,
+        "renewal_id": str(RENEWAL),
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token_sha256": DIGEST_A,
+        "attestation": first_attestation,
+        "observed_at": "2026-09-02T16:00:15Z",
+    }
+    first_sha256 = ledger.document_sha256(first_public)
+    ledger.record_pending_renewal(
+        GRANT,
+        renewal_id=RENEWAL,
+        current_session_id=SESSION,
+        current_session_generation=1,
+        current_session_wire_sha256=DIGEST_B,
+        public_renewal=first_public,
+        public_renewal_sha256=first_sha256,
+    )
+    ledger.record_renewal(
+        GRANT,
+        renewal_id=RENEWAL,
+        public_renewal_sha256=first_sha256,
+        session_id=NEXT_SESSION,
+        session_generation=2,
+        session_public_binding_sha256=DIGEST_A,
+        session_token_sha256=DIGEST_B,
+        session_wire_sha256=REQUEST_SHA256,
+        session_expires_at="2026-09-02T16:10:15Z",
+        attestation_sha256=ledger.document_sha256(first_attestation),
+        attestation_expires_at="2026-09-02T16:01:15Z",
+    )
+
+    next_renewal = UUID("88888888-8888-4888-8888-888888888888")
+    next_attestation = dict(first_attestation)
+    next_attestation.update(
+        {
+            "attestation_id": str(next_renewal),
+            "generation": 3,
+            "issued_at": "2026-09-02T16:00:30Z",
+            "expires_at": "2026-09-02T16:01:30Z",
+        }
+    )
+    next_public = {
+        "schema_version": 1,
+        "renewal_id": str(next_renewal),
+        "grant_id": str(GRANT),
+        "session_id": str(NEXT_SESSION),
+        "session_generation": 2,
+        "session_token_sha256": DIGEST_B,
+        "attestation": next_attestation,
+        "observed_at": "2026-09-02T16:00:30Z",
+    }
+    next_sha256 = ledger.document_sha256(next_public)
+
+    pending = ledger.record_pending_renewal(
+        GRANT,
+        renewal_id=next_renewal,
+        current_session_id=NEXT_SESSION,
+        current_session_generation=2,
+        current_session_wire_sha256=REQUEST_SHA256,
+        public_renewal=next_public,
+        public_renewal_sha256=next_sha256,
+    )
+
+    document = pending.document()
+    assert document["renewal_id"] == str(next_renewal)
+    assert document["renewal_public_binding_sha256"] is None
+    assert document["renewal_predecessor_session_wire_sha256"] is None
+    assert document["pending_renewal_public"] == next_public
+    assert document["pending_renewal_public_sha256"] == next_sha256
+    ledger.close()
+
+
+def test_storage_identity_is_durable_before_containment_and_exactly_replayed(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _intent(ledger)
+    _record_challenge(ledger)
+    storage = _storage()
+    storage_sha = ledger.document_sha256(storage)
+
+    pending = ledger.record_storage_pending(GRANT)
+    ready = ledger.record_storage(
+        GRANT,
+        storage=storage,
+        storage_sha256=storage_sha,
+    )
+    replay = ledger.record_storage(
+        GRANT,
+        storage=storage,
+        storage_sha256=storage_sha,
+    )
+
+    assert pending.state == "storage_pending"
+    assert ready.state == "storage_ready"
+    assert replay.raw == ready.raw
+    assert ready.document()["storage"] == storage
+    assert ready.document()["storage_sha256"] == storage_sha
+    assert ledger.record_containment_pending(GRANT).state == "containment_pending"
+    ledger.close()
+
+
+def test_finish_persists_typed_nonsecret_cleanup_and_moves_to_finishing(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _exchange(ledger)
+    cleanup = {
+        "descendant_processes": 0,
+        "mounts": 0,
+        "sockets": 0,
+        "open_files": 0,
+    }
+    cleanup_sha = ledger.document_sha256(cleanup)
+
+    first = ledger.record_finish(
+        GRANT,
+        operation_id=RENEWAL,
+        cleanup=cleanup,
+        cleanup_sha256=cleanup_sha,
+    )
+    replay = ledger.record_finish(
+        GRANT,
+        operation_id=RENEWAL,
+        cleanup=cleanup,
+        cleanup_sha256=cleanup_sha,
+    )
+
+    assert first.state == "finishing"
+    assert replay.raw == first.raw
+    assert first.document()["cleanup"] == cleanup
+    with pytest.raises(GuardError) as caught:
+        ledger.record_finish(
+            GRANT,
+            operation_id=RENEWAL,
+            cleanup=cleanup | {"mounts": 1},
+            cleanup_sha256=ledger.document_sha256(cleanup | {"mounts": 1}),
+        )
+    assert caught.value.code == "ledger_replay_conflict"
+    ledger.close()
+
+
+def test_exchanged_session_cannot_advance_an_attestation_without_renewal(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _exchange(ledger)
+
+    with pytest.raises(GuardError) as caught:
+        ledger.record_pending_attestation(
+            GRANT,
+            generation=2,
+            attestation={
+                "schema_version": 1,
+                "attestation_id": str(RENEWAL),
+                "grant_id": str(GRANT),
+                "generation": 2,
+            },
+            attestation_sha256=DIGEST_A,
+        )
+
+    assert caught.value.code == "ledger_attestation_invalid"
     ledger.close()
 
 
@@ -450,7 +792,7 @@ def test_rejects_symlink_hardlink_unknown_file_and_crash_staging(tmp_path: Path)
 
 
 def test_bounds_entry_count_and_entry_bytes(tmp_path: Path) -> None:
-    ledger = _ledger(tmp_path, maximum_entries=1, maximum_entry_bytes=1024)
+    ledger = _ledger(tmp_path, maximum_entries=1, maximum_entry_bytes=2048)
     _intent(ledger)
     with pytest.raises(GuardError) as caught:
         _record_challenge(ledger)
@@ -484,6 +826,7 @@ def test_quarantine_preserves_attachment_and_remove_requires_terminal_empty(
     ledger = _ledger(tmp_path)
     _intent(ledger)
     _record_challenge(ledger)
+    _record_storage(ledger)
     proof = _proof()
     ledger.record_attachment(
         GRANT,

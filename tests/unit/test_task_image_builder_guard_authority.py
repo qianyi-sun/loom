@@ -24,6 +24,7 @@ from loom_task_image_builder_guard import authority as authority_module
 from loom_task_image_builder_guard.authority import AuthorityClient
 from loom_task_image_builder_guard.errors import GuardError
 from loom_task_image_builder_guard.models import AuthorityConfig
+from loom_task_image_builder_guard.protocol import read_sealed_memfd
 
 NOW = datetime(2026, 9, 2, 16, 0, tzinfo=UTC)
 GRANT = UUID("11111111-1111-1111-1111-111111111111")
@@ -32,7 +33,11 @@ CHALLENGE = UUID("33333333-3333-3333-3333-333333333333")
 PROOF = UUID("44444444-4444-4444-4444-444444444444")
 EXCHANGE = UUID("55555555-5555-5555-5555-555555555555")
 SESSION = UUID("66666666-6666-6666-6666-666666666666")
+NEXT_SESSION = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 ATTESTATION = UUID("77777777-7777-7777-7777-777777777777")
+MATERIALIZATION = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+ATTEMPT = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+OPERATION = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
 DIGEST_C = "3" * 64
@@ -206,6 +211,7 @@ class _Server(ThreadingHTTPServer):
         self.socket = context.wrap_socket(self.socket, server_side=True)
         self.responses: dict[str, tuple[int, bytes, dict[str, str]]] = {}
         self.requests: list[tuple[str, dict[str, str], bytes, str | None]] = []
+        self.methods: list[str] = []
         self.drip_paths: set[str] = set()
 
 
@@ -213,6 +219,13 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_PUT(self) -> None:
+        self._handle()
+
+    def do_POST(self) -> None:
+        self._handle()
+
+    def _handle(self) -> None:
+        self.server.methods.append(self.command)  # type: ignore[attr-defined]
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length)
         self.server.requests.append(  # type: ignore[attr-defined]
@@ -340,7 +353,7 @@ def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
         server.responses = {
             f"{base}/challenge": _json_response(
                 {
-                    "schema_version": 1,
+                        "schema_version": 1,
                     "request_id": str(REQUEST),
                     "grant_id": str(GRANT),
                     "request_sha256": request_sha,
@@ -364,7 +377,7 @@ def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
             ),
             f"{base}/exchange": _json_response(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "grant_id": str(GRANT),
                     "session_id": str(SESSION),
                     "purpose": "production",
@@ -372,6 +385,7 @@ def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
                     "pool_id": "staging-gb10-task-image",
                     "cpu_arch": "arm64",
                     "session_token": SESSION_TOKEN,
+                    "generation": 1,
                     "attestation_generation": 1,
                     "attestation_sha256": DIGEST_A,
                     "issued_at": _timestamp(NOW + timedelta(seconds=3)),
@@ -397,6 +411,7 @@ def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
         assert receipt.bootstrap_token == BOOTSTRAP_TOKEN
         assert BOOTSTRAP_TOKEN not in repr(receipt)
         assert session.session_token == SESSION_TOKEN
+        assert session.generation == 1
         assert SESSION_TOKEN not in repr(session)
         assert accepted.generation == 2
         assert [item[0] for item in server.requests] == [
@@ -410,6 +425,151 @@ def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
             assert headers["authorization"] == f"Bearer {BEARER}"
             assert headers["content-type"] == "application/json"
             assert tls_version == "TLSv1.3"
+
+
+def test_fixed_session_and_materialization_routes_keep_capabilities_sealed(
+    tmp_path: Path,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config,
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+            now_factory=lambda: NOW + timedelta(seconds=6),
+        )
+        attestation = _attestation()
+        renewal = {
+            "schema_version": 1,
+            "renewal_id": str(OPERATION),
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+            "attestation": attestation,
+            "observed_at": _timestamp(NOW + timedelta(seconds=4)),
+        }
+        current = {
+            "schema_version": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(NEXT_SESSION),
+            "session_generation": 2,
+            "session_token": "loom_tibs_" + "C" * 64,
+        }
+        claim = current | {"claim_id": str(OPERATION)}
+        operation = current | {
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+        }
+        claim_payload = json.dumps(
+            {
+                "schema_version": "loom.task-image-materialization-claim.v1",
+                "claim_id": str(OPERATION),
+                "materialization_id": str(MATERIALIZATION),
+                "attempt_id": str(ATTEMPT),
+                "lease_epoch": 3,
+                "state": "claimed",
+                "deterministic_failure_count": 0,
+                "lease_expires_at": _timestamp(NOW + timedelta(seconds=40)),
+                "plan": {"dockerfile_path": "bundle/private/Dockerfile"},
+            },
+            separators=(",", ":"),
+        ).encode("ascii")
+        bundle_payload = b'{"presigned_url":"https://object.invalid/private?signature=SECRET"}'
+        operation_response = {
+            "schema_version": "loom.task-image-materialization-operation.v1",
+            "operation": "start",
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "state": "running",
+            "deterministic_failure_count": 0,
+            "lease_expires_at": _timestamp(NOW + timedelta(seconds=40)),
+        }
+        base = f"/v1/projections/{GRANT}"
+        materialization_base = f"{base}/materializations/{MATERIALIZATION}"
+        server.responses = {
+            f"{base}/sessions/1/renew": _json_response(
+                {
+                    "schema_version": 2,
+                    "grant_id": str(GRANT),
+                    "session_id": str(NEXT_SESSION),
+                    "purpose": "production",
+                    "shadow_campaign_id": None,
+                    "pool_id": "staging-gb10-task-image",
+                    "cpu_arch": "arm64",
+                    "session_token": current["session_token"],
+                    "generation": 2,
+                    "attestation_generation": 2,
+                    "attestation_sha256": client.request_sha256(attestation),
+                    "issued_at": _timestamp(NOW + timedelta(seconds=4)),
+                    "expires_at": _timestamp(NOW + timedelta(minutes=10)),
+                }
+            ),
+            f"{base}/materializations/claim": (
+                200,
+                claim_payload,
+                {"Content-Type": "application/json"},
+            ),
+            f"{materialization_base}/start": _json_response(operation_response),
+            f"{materialization_base}/heartbeat": _json_response(
+                operation_response | {"operation": "heartbeat"}
+            ),
+            f"{materialization_base}/release": _json_response(
+                operation_response
+                | {"operation": "release", "state": "queued", "lease_expires_at": None}
+            ),
+            f"{materialization_base}/fail": _json_response(
+                operation_response
+                | {
+                    "operation": "containment_release",
+                    "state": "queued",
+                    "lease_expires_at": None,
+                }
+            ),
+            f"{materialization_base}/bundle": (
+                200,
+                bundle_payload,
+                {"Content-Type": "application/json"},
+            ),
+        }
+
+        session = client.renew(GRANT, 1, renewal)
+        claimed = client.claim(GRANT, claim)
+        assert claimed is not None
+        started = client.start(GRANT, MATERIALIZATION, operation)
+        heartbeat = client.heartbeat(GRANT, MATERIALIZATION, operation)
+        released = client.release(GRANT, MATERIALIZATION, operation)
+        failed = client.fail(
+            GRANT,
+            MATERIALIZATION,
+            operation | {"failure_kind": "containment"},
+        )
+        bundled = client.bundle(GRANT, MATERIALIZATION, operation)
+        try:
+            assert session.generation == 2
+            assert read_sealed_memfd(claimed.descriptor, maximum=4096) == claim_payload
+            assert read_sealed_memfd(bundled.descriptor, maximum=4096) == bundle_payload
+            assert "Dockerfile" not in repr(claimed)
+            assert "signature" not in repr(bundled)
+            assert (started.operation, heartbeat.operation) == ("start", "heartbeat")
+            assert (released.state, failed.operation) == ("queued", "containment_release")
+        finally:
+            claimed.close()
+            bundled.close()
+
+        assert [item[0] for item in server.requests] == [
+            f"{base}/sessions/1/renew",
+            f"{base}/materializations/claim",
+            f"{materialization_base}/start",
+            f"{materialization_base}/heartbeat",
+            f"{materialization_base}/release",
+            f"{materialization_base}/fail",
+            f"{materialization_base}/bundle",
+        ]
+        assert server.methods == ["PUT", "POST", "PUT", "PUT", "PUT", "PUT", "PUT"]
 
 
 @pytest.mark.parametrize(

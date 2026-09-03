@@ -8,11 +8,11 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/__main__.py",
-      "sha256": "8d1784e8ce07793b9aaefa27161d3d307fff427b3d11eb88f379333c79d80edc"
+      "sha256": "b4ea7b60680c2482ff8ae4d193e6734e45d294e4e75b5a9097aca68b9c6993ad"
     },
     {
       "path": "src/loom_task_image_builder_guard/authority.py",
-      "sha256": "c1515e73a5b0e4e8f8a41d81a4553a2a10e2bb3c13452d39e5c642a733e8704b"
+      "sha256": "e98dd0ba41e59143d6b0a3bacb1f560ffd3da45536f2a8a7d5543c7048d39e7b"
     },
     {
       "path": "src/loom_task_image_builder_guard/bpf.py",
@@ -20,7 +20,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/config.py",
-      "sha256": "a3acd5008b37ca7c94374ff2c83c7e574d4ea1ab548280d6f2c35e9d42d222c1"
+      "sha256": "74261fea7acb26b7de50a449875cec5899f589ac99d77126f0d25d6b8add6464"
     },
     {
       "path": "src/loom_task_image_builder_guard/containment.py",
@@ -36,15 +36,15 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/ledger.py",
-      "sha256": "1772ffb3f95a9075828df1a3f54911b3f59876fcad24f8ff71da2c5512abc44b"
+      "sha256": "955df2a22098ff614a7ccc76925f55a9bfc016e3fef373aeb19d1d14075b98d7"
     },
     {
       "path": "src/loom_task_image_builder_guard/models.py",
-      "sha256": "68bdf7eb49c49c0521143489aad727c411deb4762fb4fd35b4290bafbde43b2c"
+      "sha256": "b576fc59b236aaaf82cf0770d3865c9463761a405ed0455b30fa36719ea942a2"
     },
     {
       "path": "src/loom_task_image_builder_guard/protocol.py",
-      "sha256": "a752f0f479a34421938d0930e058bf913506a4393686a577d227afe66c7d6c1d"
+      "sha256": "1904588ee38727b833e502f775978f66635321ab30ebb04703afccfc877c8d34"
     },
     {
       "path": "src/loom_task_image_builder_guard/safeio.py",
@@ -52,11 +52,15 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/service.py",
-      "sha256": "91571b57096fb42a34e81659b5371ddefb296b1190fa574387108d385ae1e150"
+      "sha256": "8802c5c150b14bf8a56baf1c0839a82f7cac0406315e894821a02fb96c6e5f93"
     },
     {
       "path": "src/loom_task_image_builder_guard/slurm.py",
-      "sha256": "5906ff85da3222dbc9a70c0d5fbf7d37ddab3b76d445e2ce7bb05c8b063f600d"
+      "sha256": "446fc17d1d5adbd2a47d80584ff4a6b45a57f56c3001c23a660470674a5c4a8b"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/storage.py",
+      "sha256": "990541c754f7e432ed3fe69df09a74f96acdbc909c738cf5b77227e2c61bf54a"
     }
   ],
   "bpf_source": {

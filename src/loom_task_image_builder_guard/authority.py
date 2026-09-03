@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -218,6 +218,7 @@ class BuildSession:
     issued_at: datetime
     expires_at: datetime
     wire_payload: bytes = field(repr=False)
+    generation: int = 1
 
     @property
     def public_binding_sha256(self) -> str:
@@ -237,6 +238,33 @@ class AcceptedAttestation:
     issued_at: datetime
     expires_at: datetime
     sha256: str
+
+
+@dataclass(slots=True)
+class SealedAuthorityPayload:
+    """Own an opaque authority response without exposing it through repr."""
+
+    descriptor: int = field(repr=False)
+    sha256: str
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        os.close(self.descriptor)
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseAcknowledgement:
+    operation: str
+    operation_id: UUID
+    materialization_id: UUID
+    attempt_id: UUID
+    lease_epoch: int
+    state: str
+    deterministic_failure_count: int
+    lease_expires_at: datetime | None
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -419,8 +447,34 @@ class AuthorityClient:
     def request_sha256(value: object) -> str:
         return hashlib.sha256(_canonical(value)).hexdigest()
 
-    def _request(self, route: str, body: object, *, expected_status: int) -> bytes:
+    def _request(
+        self,
+        route: str,
+        body: object,
+        *,
+        expected_status: int | tuple[int, ...],
+        method: Literal["POST", "PUT"] = "PUT",
+        maximum_bytes: int | None = None,
+    ) -> bytes:
         payload = _canonical(body)
+        response_maximum = (
+            self._config.max_response_bytes
+            if maximum_bytes is None
+            else maximum_bytes
+        )
+        if (
+            type(response_maximum) is not int
+            or response_maximum <= 0
+            or response_maximum > 8 * 1024 * 1024
+        ):
+            raise GuardError("authority_response_too_large")
+        statuses: tuple[int, ...] = (
+            (expected_status,)
+            if type(expected_status) is int
+            else cast(tuple[int, ...], expected_status)
+        )
+        if not statuses or any(type(item) is not int for item in statuses):
+            raise GuardError("authority_response_invalid")
         deadline = self._monotonic() + self._config.timeout_seconds
         expired = threading.Event()
         connection = _PinnedHTTPSConnection(
@@ -442,7 +496,7 @@ class AuthorityClient:
         try:
             self._progress()
             connection.request(
-                "PUT",
+                method,
                 route,
                 body=payload,
                 headers={
@@ -457,13 +511,13 @@ class AuthorityClient:
             response = connection.getresponse()
             self._progress()
             connection.assert_before_deadline()
-            if response.status != expected_status:
+            if response.status not in statuses:
                 raise GuardError("authority_http_failed")
             transfer = response.headers.get_all("Transfer-Encoding", failobj=[])
             lengths = response.headers.get_all("Content-Length", failobj=[])
             if transfer or len(lengths) > 1:
                 raise GuardError("authority_response_invalid")
-            if expected_status == 204:
+            if response.status == 204:
                 if lengths and _content_length(lengths[0], maximum=None) != 0:
                     raise GuardError("authority_response_invalid")
                 if response.read(1):
@@ -475,12 +529,12 @@ class AuthorityClient:
             if content_types != ["application/json"] or len(lengths) != 1:
                 raise GuardError("authority_response_invalid")
             declared = _content_length(
-                lengths[0], maximum=self._config.max_response_bytes
+                lengths[0], maximum=response_maximum
             )
-            result = response.read(self._config.max_response_bytes + 1)
+            result = response.read(response_maximum + 1)
             self._progress()
             connection.assert_before_deadline()
-            if len(result) > self._config.max_response_bytes:
+            if len(result) > response_maximum:
                 raise GuardError("authority_response_too_large")
             if len(result) != declared or not result:
                 raise GuardError("authority_response_invalid")
@@ -507,6 +561,107 @@ class AuthorityClient:
         if not isinstance(value, UUID) or value.int == 0:
             raise GuardError("authority_grant_invalid")
         return value
+
+    def _session(
+        self,
+        raw: bytes,
+        *,
+        grant: UUID,
+        expected_generation: int,
+        expected_attestation_sha256: str | None = None,
+    ) -> BuildSession:
+        value = _exact(
+            _document(raw),
+            frozenset(
+                {
+                    "schema_version",
+                    "grant_id",
+                    "session_id",
+                    "purpose",
+                    "shadow_campaign_id",
+                    "pool_id",
+                    "cpu_arch",
+                    "session_token",
+                    "generation",
+                    "attestation_generation",
+                    "attestation_sha256",
+                    "issued_at",
+                    "expires_at",
+                }
+            ),
+            code="authority_session_invalid",
+        )
+        issued, expires = _active_interval(
+            value["issued_at"],
+            value["expires_at"],
+            now=self._now_utc(),
+            maximum=timedelta(minutes=15),
+            code="authority_session_invalid",
+        )
+        purpose = value["purpose"]
+        shadow = value["shadow_campaign_id"]
+        if purpose not in {"production", "shadow"}:
+            raise GuardError("authority_session_invalid")
+        shadow_id = None if shadow is None else _uuid(shadow, code="authority_session_invalid")
+        pool = value["pool_id"]
+        architecture = value["cpu_arch"]
+        if (
+            not isinstance(pool, str)
+            or _IDENTIFIER.fullmatch(pool) is None
+            or architecture not in {"x86_64", "arm64"}
+            or (purpose == "production") != (shadow_id is None)
+        ):
+            raise GuardError("authority_session_invalid")
+        session = BuildSession(
+            grant_id=_uuid(value["grant_id"], code="authority_session_invalid"),
+            session_id=_uuid(value["session_id"], code="authority_session_invalid"),
+            purpose=purpose,
+            shadow_campaign_id=shadow_id,
+            pool_id=pool,
+            cpu_arch=architecture,
+            session_token=_token(
+                value["session_token"], kind="session", code="authority_session_invalid"
+            ),
+            attestation_generation=_integer(
+                value["attestation_generation"], code="authority_session_invalid"
+            ),
+            attestation_sha256=_digest(
+                value["attestation_sha256"], code="authority_session_invalid"
+            ),
+            issued_at=issued,
+            expires_at=expires,
+            wire_payload=raw,
+            generation=_integer(value["generation"], code="authority_session_invalid"),
+        )
+        if (
+            value["schema_version"] != 2
+            or session.grant_id != grant
+            or session.generation != expected_generation
+            or session.attestation_generation != expected_generation
+            or (
+                expected_attestation_sha256 is not None
+                and session.attestation_sha256 != expected_attestation_sha256
+            )
+        ):
+            raise GuardError("authority_session_invalid")
+        return session
+
+    def parse_session(self, payload: bytes) -> BuildSession:
+        """Validate one current sealed-session wire document."""
+
+        try:
+            value = _document(payload)
+            grant = _uuid(value.get("grant_id"), code="authority_session_invalid")
+            generation = _integer(value.get("generation"), code="authority_session_invalid")
+            return self._session(
+                payload,
+                grant=grant,
+                expected_generation=generation,
+            )
+        except GuardError:
+            raise
+        except Exception:
+            raise GuardError("authority_session_invalid") from None
 
     def challenge(
         self,
@@ -629,70 +784,212 @@ class AuthorityClient:
         if _uuid(request.get("grant_id"), code="authority_session_invalid") != grant:
             raise GuardError("authority_session_invalid")
         raw = self._request(f"/v1/projections/{grant}/exchange", request, expected_status=200)
+        return self._session(raw, grant=grant, expected_generation=1)
+
+    def renew(
+        self,
+        grant_id: UUID,
+        generation: int,
+        request: dict[str, object],
+    ) -> BuildSession:
+        grant = self._grant(grant_id)
+        attestation = request.get("attestation")
+        if (
+            type(generation) is not int
+            or generation <= 0
+            or _uuid(request.get("grant_id"), code="authority_session_invalid") != grant
+            or request.get("session_generation") != generation
+            or not isinstance(attestation, dict)
+            or attestation.get("generation") != generation + 1
+        ):
+            raise GuardError("authority_session_invalid")
+        attestation_sha256 = self.request_sha256(attestation)
+        raw = self._request(
+            f"/v1/projections/{grant}/sessions/{generation}/renew",
+            request,
+            expected_status=200,
+        )
+        return self._session(
+            raw,
+            grant=grant,
+            expected_generation=generation + 1,
+            expected_attestation_sha256=attestation_sha256,
+        )
+
+    @staticmethod
+    def _request_binding(
+        grant: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> tuple[UUID, UUID, int]:
+        if (
+            _uuid(request.get("grant_id"), code="authority_lease_invalid") != grant
+            or _uuid(
+                request.get("materialization_id"), code="authority_lease_invalid"
+            )
+            != materialization_id
+        ):
+            raise GuardError("authority_lease_invalid")
+        return (
+            _uuid(request.get("operation_id"), code="authority_lease_invalid"),
+            _uuid(request.get("attempt_id"), code="authority_lease_invalid"),
+            _integer(request.get("lease_epoch"), code="authority_lease_invalid"),
+        )
+
+    def claim(
+        self,
+        grant_id: UUID,
+        request: dict[str, object],
+    ) -> SealedAuthorityPayload | None:
+        grant = self._grant(grant_id)
+        claim_id = _uuid(request.get("claim_id"), code="authority_lease_invalid")
+        if _uuid(request.get("grant_id"), code="authority_lease_invalid") != grant:
+            raise GuardError("authority_lease_invalid")
+        raw = self._request(
+            f"/v1/projections/{grant}/materializations/claim",
+            request,
+            expected_status=(200, 204),
+            method="POST",
+        )
+        if not raw:
+            return None
         value = _exact(
             _document(raw),
             frozenset(
                 {
                     "schema_version",
-                    "grant_id",
-                    "session_id",
-                    "purpose",
-                    "shadow_campaign_id",
-                    "pool_id",
-                    "cpu_arch",
-                    "session_token",
-                    "attestation_generation",
-                    "attestation_sha256",
-                    "issued_at",
-                    "expires_at",
+                    "claim_id",
+                    "materialization_id",
+                    "attempt_id",
+                    "lease_epoch",
+                    "state",
+                    "deterministic_failure_count",
+                    "lease_expires_at",
+                    "plan",
                 }
             ),
-            code="authority_session_invalid",
+            code="authority_lease_invalid",
         )
-        issued, expires = _active_interval(
-            value["issued_at"],
-            value["expires_at"],
-            now=self._now_utc(),
-            maximum=timedelta(minutes=15),
-            code="authority_session_invalid",
-        )
-        purpose = value["purpose"]
-        shadow = value["shadow_campaign_id"]
-        if purpose not in {"production", "shadow"}:
-            raise GuardError("authority_session_invalid")
-        shadow_id = None if shadow is None else _uuid(shadow, code="authority_session_invalid")
-        pool = value["pool_id"]
-        architecture = value["cpu_arch"]
         if (
-            not isinstance(pool, str)
-            or _IDENTIFIER.fullmatch(pool) is None
-            or architecture not in {"x86_64", "arm64"}
-            or (purpose == "production") != (shadow_id is None)
+            value["schema_version"] != "loom.task-image-materialization-claim.v1"
+            or _uuid(value["claim_id"], code="authority_lease_invalid") != claim_id
+            or value["state"] not in {"claimed", "running"}
         ):
-            raise GuardError("authority_session_invalid")
-        session = BuildSession(
-            grant_id=_uuid(value["grant_id"], code="authority_session_invalid"),
-            session_id=_uuid(value["session_id"], code="authority_session_invalid"),
-            purpose=purpose,
-            shadow_campaign_id=shadow_id,
-            pool_id=pool,
-            cpu_arch=architecture,
-            session_token=_token(
-                value["session_token"], kind="session", code="authority_session_invalid"
-            ),
-            attestation_generation=_integer(
-                value["attestation_generation"], code="authority_session_invalid"
-            ),
-            attestation_sha256=_digest(
-                value["attestation_sha256"], code="authority_session_invalid"
-            ),
-            issued_at=issued,
-            expires_at=expires,
-            wire_payload=raw,
+            raise GuardError("authority_lease_invalid")
+        return self._seal_response("guard-claim", raw)
+
+    def _lease_operation(
+        self,
+        operation: Literal["start", "heartbeat", "release", "fail"],
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> LeaseAcknowledgement:
+        grant = self._grant(grant_id)
+        operation_id, attempt_id, lease_epoch = self._request_binding(
+            grant, materialization_id, request
         )
-        if value["schema_version"] != 1 or session.grant_id != grant:
-            raise GuardError("authority_session_invalid")
-        return session
+        raw = self._request(
+            f"/v1/projections/{grant}/materializations/{materialization_id}/{operation}",
+            request,
+            expected_status=200,
+        )
+        value = _exact(
+            _document(raw),
+            frozenset(
+                {
+                    "schema_version",
+                    "operation",
+                    "operation_id",
+                    "materialization_id",
+                    "attempt_id",
+                    "lease_epoch",
+                    "state",
+                    "deterministic_failure_count",
+                    "lease_expires_at",
+                }
+            ),
+            code="authority_lease_invalid",
+        )
+        expected_operation: str = operation
+        if operation == "fail":
+            expected_operation = (
+                "containment_release"
+                if request.get("failure_kind") == "containment"
+                else "deterministic_fail"
+            )
+        expires = (
+            None
+            if value["lease_expires_at"] is None
+            else _time(value["lease_expires_at"], code="authority_lease_invalid")
+        )
+        state = value["state"]
+        count = value["deterministic_failure_count"]
+        if (
+            value["schema_version"] != "loom.task-image-materialization-operation.v1"
+            or value["operation"] != expected_operation
+            or _uuid(value["operation_id"], code="authority_lease_invalid") != operation_id
+            or _uuid(value["materialization_id"], code="authority_lease_invalid")
+            != materialization_id
+            or _uuid(value["attempt_id"], code="authority_lease_invalid") != attempt_id
+            or value["lease_epoch"] != lease_epoch
+            or state not in {"claimed", "running", "queued", "failed"}
+            or type(count) is not int
+            or count < 0
+            or ((state in {"claimed", "running"}) != (expires is not None))
+        ):
+            raise GuardError("authority_lease_invalid")
+        return LeaseAcknowledgement(
+            expected_operation,
+            operation_id,
+            materialization_id,
+            attempt_id,
+            lease_epoch,
+            state,
+            count,
+            expires,
+        )
+
+    def start(
+        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object]
+    ) -> LeaseAcknowledgement:
+        return self._lease_operation("start", grant_id, materialization_id, request)
+
+    def heartbeat(
+        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object]
+    ) -> LeaseAcknowledgement:
+        return self._lease_operation("heartbeat", grant_id, materialization_id, request)
+
+    def release(
+        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object]
+    ) -> LeaseAcknowledgement:
+        return self._lease_operation("release", grant_id, materialization_id, request)
+
+    def fail(
+        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object]
+    ) -> LeaseAcknowledgement:
+        return self._lease_operation("fail", grant_id, materialization_id, request)
+
+    @staticmethod
+    def _seal_response(name: str, raw: bytes) -> SealedAuthorityPayload:
+        descriptor = create_sealed_memfd(name, raw, maximum=8 * 1024 * 1024)
+        return SealedAuthorityPayload(descriptor, hashlib.sha256(raw).hexdigest())
+
+    def bundle(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> SealedAuthorityPayload:
+        grant = self._grant(grant_id)
+        self._request_binding(grant, materialization_id, request)
+        raw = self._request(
+            f"/v1/projections/{grant}/materializations/{materialization_id}/bundle",
+            request,
+            expected_status=200,
+            maximum_bytes=8 * 1024 * 1024,
+        )
+        return self._seal_response("guard-bundle", raw)
 
     def attest(
         self,
@@ -750,6 +1047,8 @@ __all__ = [
     "AcceptedAttestation",
     "AuthorityClient",
     "BuildSession",
+    "LeaseAcknowledgement",
     "ProjectionChallenge",
     "ProjectionReceipt",
+    "SealedAuthorityPayload",
 ]

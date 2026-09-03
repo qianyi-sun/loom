@@ -23,17 +23,35 @@ REQUIRED_MEMFD_SEALS = 0x0001 | 0x0002 | 0x0004 | 0x0008
 _MFD_CLOEXEC = 0x0001
 _MFD_ALLOW_SEALING = 0x0002
 _DIGEST_LENGTH = 64
-_MAX_JSON_FIELDS = 5
+_MAX_JSON_FIELDS = 9
 _PEER_CREDENTIALS = struct.Struct("3i")
 
 
 @dataclass(frozen=True, slots=True)
 class LocalRequest:
-    operation: Literal["project", "exchange", "ack"]
+    operation: Literal[
+        "project",
+        "exchange",
+        "renew",
+        "claim",
+        "start",
+        "heartbeat",
+        "bundle",
+        "release",
+        "fail",
+        "finish",
+        "ack",
+    ]
     grant_id: UUID | None = None
     exchange_id: UUID | None = None
     proof_sha256: str | None = None
     response_id: UUID | None = None
+    operation_id: UUID | None = None
+    materialization_id: UUID | None = None
+    attempt_id: UUID | None = None
+    lease_epoch: int | None = None
+    failure_kind: Literal["deterministic", "containment"] | None = None
+    cleanup: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +103,25 @@ def _digest(value: object) -> str:
     return value
 
 
+def _positive_integer(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= (1 << 63) - 1:
+        raise ValueError("invalid integer")
+    return value
+
+
+def _cleanup(value: object) -> dict[str, int]:
+    keys = {"descendant_processes", "mounts", "sockets", "open_files"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError("invalid cleanup")
+    result: dict[str, int] = {}
+    for key in sorted(keys):
+        item = value[key]
+        if type(item) is not int or not 0 <= item <= (1 << 31) - 1:
+            raise ValueError("invalid cleanup")
+        result[key] = item
+    return result
+
+
 def parse_local_request(payload: bytes) -> LocalRequest:
     """Parse one exact nonsecret local request without reflecting its body."""
 
@@ -109,6 +146,63 @@ def parse_local_request(payload: bytes) -> LocalRequest:
                 grant_id=_uuid(document["grant_id"]),
                 exchange_id=_uuid(document["exchange_id"]),
                 proof_sha256=_digest(document["proof_sha256"]),
+            )
+        if operation in {"renew", "claim"} and set(document) == {
+            "schema",
+            "operation",
+            "grant_id",
+            "operation_id",
+        }:
+            return LocalRequest(
+                operation=operation,
+                grant_id=_uuid(document["grant_id"]),
+                operation_id=_uuid(document["operation_id"]),
+            )
+        lease_keys = {
+            "schema",
+            "operation",
+            "grant_id",
+            "operation_id",
+            "materialization_id",
+            "attempt_id",
+            "lease_epoch",
+        }
+        if operation in {"start", "heartbeat", "bundle", "release"} and set(
+            document
+        ) == lease_keys:
+            return LocalRequest(
+                operation=operation,
+                grant_id=_uuid(document["grant_id"]),
+                operation_id=_uuid(document["operation_id"]),
+                materialization_id=_uuid(document["materialization_id"]),
+                attempt_id=_uuid(document["attempt_id"]),
+                lease_epoch=_positive_integer(document["lease_epoch"]),
+            )
+        if operation == "fail" and set(document) == lease_keys | {"failure_kind"}:
+            failure_kind = document["failure_kind"]
+            if failure_kind not in {"deterministic", "containment"}:
+                raise ValueError("invalid failure kind")
+            return LocalRequest(
+                operation="fail",
+                grant_id=_uuid(document["grant_id"]),
+                operation_id=_uuid(document["operation_id"]),
+                materialization_id=_uuid(document["materialization_id"]),
+                attempt_id=_uuid(document["attempt_id"]),
+                lease_epoch=_positive_integer(document["lease_epoch"]),
+                failure_kind=failure_kind,
+            )
+        if operation == "finish" and set(document) == {
+            "schema",
+            "operation",
+            "grant_id",
+            "operation_id",
+            "cleanup",
+        }:
+            return LocalRequest(
+                operation="finish",
+                grant_id=_uuid(document["grant_id"]),
+                operation_id=_uuid(document["operation_id"]),
+                cleanup=_cleanup(document["cleanup"]),
             )
         if operation == "ack" and set(document) == {"schema", "operation", "response_id"}:
             return LocalRequest(operation="ack", response_id=_uuid(document["response_id"]))
@@ -233,12 +327,34 @@ def send_packet(
     payload: bytes,
     *,
     descriptor: int | None = None,
+    descriptors: tuple[int, ...] = (),
 ) -> None:
-    """Send one complete packet with zero or one already sealed memfd."""
+    """Send one packet with no rights, one sealed memfd, or projected rights."""
 
     _require_seqpacket(connection)
     if not isinstance(payload, bytes) or not payload:
         raise GuardError("local_packet_invalid")
+    if descriptor is not None and descriptors:
+        raise GuardError("local_descriptor_invalid")
+    rights = (descriptor,) if descriptor is not None else descriptors
+    if len(rights) not in {0, 1, 3} or any(
+        type(item) is not int or item < 0 for item in rights
+    ):
+        raise GuardError("local_descriptor_invalid")
+    try:
+        for item in rights:
+            if not fcntl.fcntl(item, fcntl.F_GETFD) & fcntl.FD_CLOEXEC:
+                raise GuardError("local_descriptor_invalid")
+        if rights:
+            _validate_sealed_descriptor(rights[0])
+        if len(rights) == 3:
+            for item in rights[1:]:
+                if not stat.S_ISDIR(os.fstat(item).st_mode):
+                    raise GuardError("local_descriptor_invalid")
+    except GuardError as exc:
+        raise GuardError("local_descriptor_invalid") from exc
+    except OSError as exc:
+        raise GuardError("local_descriptor_invalid") from exc
     ancillary: list[tuple[int, int, bytes | array.array[int]]] = [
         (
             socket.SOL_SOCKET,
@@ -246,9 +362,8 @@ def send_packet(
             _PEER_CREDENTIALS.pack(os.getpid(), os.geteuid(), os.getegid()),
         )
     ]
-    if descriptor is not None:
-        _validate_sealed_descriptor(descriptor)
-        ancillary.append((socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [descriptor])))
+    if rights:
+        ancillary.append((socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", rights)))
     try:
         written = connection.sendmsg([payload], ancillary)
     except OSError as exc:

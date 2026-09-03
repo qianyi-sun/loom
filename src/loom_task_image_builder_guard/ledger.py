@@ -28,10 +28,13 @@ _STATES = frozenset(
         "intent",
         "challenge_pending",
         "challenged",
+        "storage_pending",
+        "storage_ready",
         "containment_pending",
         "attached",
         "projected",
         "exchanged",
+        "finishing",
         "terminal",
         "quarantined",
     }
@@ -52,6 +55,8 @@ _FIELDS = frozenset(
         "challenge_sha256",
         "proof",
         "proof_sha256",
+        "storage",
+        "storage_sha256",
         "pin_path",
         "link_ids",
         "program_ids",
@@ -61,14 +66,24 @@ _FIELDS = frozenset(
         "exchange_id",
         "exchange_public_binding_sha256",
         "session_id",
+        "session_generation",
         "session_public_binding_sha256",
         "session_token_sha256",
+        "session_wire_sha256",
         "session_expires_at",
         "attestation_generation",
         "attestation_sha256",
         "attestation_expires_at",
         "pending_attestation",
         "pending_attestation_sha256",
+        "renewal_id",
+        "renewal_public_binding_sha256",
+        "renewal_predecessor_session_wire_sha256",
+        "pending_renewal_public",
+        "pending_renewal_public_sha256",
+        "finish_operation_id",
+        "cleanup",
+        "cleanup_sha256",
         "terminal_reason",
         "quarantine_reason",
     }
@@ -354,12 +369,17 @@ class GuardLedger:
             "projection_request_sha256",
             "challenge_sha256",
             "proof_sha256",
+            "storage_sha256",
             "receipt_public_binding_sha256",
             "bootstrap_token_sha256",
             "exchange_public_binding_sha256",
             "session_public_binding_sha256",
             "session_token_sha256",
+            "session_wire_sha256",
             "attestation_sha256",
+            "renewal_public_binding_sha256",
+            "renewal_predecessor_session_wire_sha256",
+            "cleanup_sha256",
         ):
             _digest(document[name], optional=True)
         for value_name, digest_name in (
@@ -367,6 +387,9 @@ class GuardLedger:
             ("challenge", "challenge_sha256"),
             ("proof", "proof_sha256"),
             ("pending_attestation", "pending_attestation_sha256"),
+            ("storage", "storage_sha256"),
+            ("pending_renewal_public", "pending_renewal_public_sha256"),
+            ("cleanup", "cleanup_sha256"),
         ):
             value = document[value_name]
             recorded_digest = document[digest_name]
@@ -418,7 +441,7 @@ class GuardLedger:
                 raise GuardError("ledger_document_invalid")
         if document["pin_path"] is not None:
             _safe_path(document["pin_path"], absolute=True)
-        for name in ("exchange_id", "session_id"):
+        for name in ("exchange_id", "session_id", "renewal_id", "finish_operation_id"):
             if document[name] is not None:
                 _uuid(document[name])
         for name in ("session_expires_at", "attestation_expires_at"):
@@ -426,6 +449,12 @@ class GuardLedger:
         generation = document["attestation_generation"]
         if generation is not None and (
             type(generation) is not int or not 1 <= generation <= (1 << 63) - 1
+        ):
+            raise GuardError("ledger_document_invalid")
+        session_generation = document["session_generation"]
+        if session_generation is not None and (
+            type(session_generation) is not int
+            or not 1 <= session_generation <= (1 << 63) - 1
         ):
             raise GuardError("ledger_document_invalid")
         pending = document["pending_attestation"]
@@ -471,6 +500,76 @@ class GuardLedger:
                 raise GuardError("ledger_document_invalid")
             _timestamp(pending.get("issued_at"))
             _timestamp(pending.get("expires_at"))
+        pending_renewal = document["pending_renewal_public"]
+        if pending_renewal is not None:
+            completed_renewal = document["renewal_public_binding_sha256"] is not None
+            if (
+                state != "exchanged"
+                or not isinstance(pending_renewal, dict)
+                or set(pending_renewal)
+                != {
+                    "schema_version",
+                    "renewal_id",
+                    "grant_id",
+                    "session_id",
+                    "session_generation",
+                    "session_token_sha256",
+                    "attestation",
+                    "observed_at",
+                }
+                or pending_renewal.get("schema_version") != 1
+                or _uuid(pending_renewal.get("renewal_id"))
+                != _uuid(document["renewal_id"])
+                or _uuid(pending_renewal.get("grant_id")) != grant
+                or _uuid(pending_renewal.get("session_id")).int == 0
+            ):
+                raise GuardError("ledger_document_invalid")
+            renewal_session_generation = pending_renewal.get("session_generation")
+            renewal_token_sha256 = pending_renewal.get("session_token_sha256")
+            _digest(renewal_token_sha256)
+            renewal_attestation = pending_renewal.get("attestation")
+            if (
+                not isinstance(renewal_attestation, dict)
+                or renewal_attestation.get("grant_id") != str(grant)
+                or type(session_generation) is not int
+                or pending_renewal.get("observed_at")
+                != renewal_attestation.get("issued_at")
+            ):
+                raise GuardError("ledger_document_invalid")
+            if completed_renewal:
+                if (
+                    renewal_session_generation != session_generation - 1
+                    or renewal_attestation.get("generation") != session_generation
+                    or document["pending_renewal_public_sha256"]
+                    != document["renewal_public_binding_sha256"]
+                    or document["renewal_predecessor_session_wire_sha256"] is None
+                    or document["attestation_sha256"]
+                    != self.document_sha256(renewal_attestation)
+                    or document["attestation_expires_at"]
+                    != renewal_attestation.get("expires_at")
+                ):
+                    raise GuardError("ledger_document_invalid")
+            elif (
+                _uuid(pending_renewal.get("session_id"))
+                != _uuid(document["session_id"])
+                or renewal_session_generation != session_generation
+                or renewal_token_sha256 != document["session_token_sha256"]
+                or renewal_attestation.get("generation") != session_generation + 1
+                or document["renewal_predecessor_session_wire_sha256"] is not None
+            ):
+                raise GuardError("ledger_document_invalid")
+            _timestamp(pending_renewal.get("observed_at"))
+        cleanup = document["cleanup"]
+        if cleanup is not None and (
+            not isinstance(cleanup, dict)
+            or set(cleanup)
+            != {"descendant_processes", "mounts", "sockets", "open_files"}
+            or any(
+                type(item) is not int or not 0 <= item <= (1 << 31) - 1
+                for item in cleanup.values()
+            )
+        ):
+            raise GuardError("ledger_document_invalid")
         for name in ("terminal_reason", "quarantine_reason"):
             reason = document[name]
             if reason is not None and (
@@ -499,6 +598,8 @@ class GuardLedger:
             raise GuardError("ledger_document_invalid")
         if state in {
             "challenged",
+            "storage_pending",
+            "storage_ready",
             "containment_pending",
             "attached",
             "projected",
@@ -506,6 +607,16 @@ class GuardLedger:
         } and (
             document["projection_request"] is None or document["challenge"] is None
         ):
+            raise GuardError("ledger_document_invalid")
+        if state == "storage_pending" and document["storage"] is not None:
+            raise GuardError("ledger_document_invalid")
+        if state in {
+            "storage_ready",
+            "containment_pending",
+            "attached",
+            "projected",
+            "exchanged",
+        } and document["storage"] is None:
             raise GuardError("ledger_document_invalid")
         if state in {"attached", "projected", "exchanged"} and (
             document["proof"] is None
@@ -521,7 +632,14 @@ class GuardLedger:
         ):
             raise GuardError("ledger_document_invalid")
         if state == "exchanged" and (
-            document["exchange_id"] is None or document["session_id"] is None
+            document["exchange_id"] is None
+            or document["session_id"] is None
+            or document["session_generation"] is None
+            or document["session_wire_sha256"] is None
+        ):
+            raise GuardError("ledger_document_invalid")
+        if state == "finishing" and (
+            document["finish_operation_id"] is None or document["cleanup"] is None
         ):
             raise GuardError("ledger_document_invalid")
         if state == "terminal" and document["terminal_reason"] is None:
@@ -651,6 +769,8 @@ class GuardLedger:
             "challenge_sha256": None,
             "proof": None,
             "proof_sha256": None,
+            "storage": None,
+            "storage_sha256": None,
             "pin_path": None,
             "link_ids": [],
             "program_ids": [],
@@ -660,14 +780,24 @@ class GuardLedger:
             "exchange_id": None,
             "exchange_public_binding_sha256": None,
             "session_id": None,
+            "session_generation": None,
             "session_public_binding_sha256": None,
             "session_token_sha256": None,
+            "session_wire_sha256": None,
             "session_expires_at": None,
             "attestation_generation": None,
             "attestation_sha256": None,
             "attestation_expires_at": None,
             "pending_attestation": None,
             "pending_attestation_sha256": None,
+            "renewal_id": None,
+            "renewal_public_binding_sha256": None,
+            "renewal_predecessor_session_wire_sha256": None,
+            "pending_renewal_public": None,
+            "pending_renewal_public_sha256": None,
+            "finish_operation_id": None,
+            "cleanup": None,
+            "cleanup_sha256": None,
             "terminal_reason": None,
             "quarantine_reason": None,
         }
@@ -788,10 +918,44 @@ class GuardLedger:
             raise GuardError("ledger_intent_missing")
         if prior.state == "containment_pending":
             return prior
-        if prior.state != "challenged":
+        if prior.state != "storage_ready":
             raise GuardError("ledger_replay_conflict")
         document = self._update(prior)
         document["state"] = "containment_pending"
+        return self._write(document, prior=prior)
+
+    def record_storage_pending(self, grant_id: UUID) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None:
+            raise GuardError("ledger_intent_missing")
+        if prior.state == "storage_pending":
+            return prior
+        if prior.state != "challenged":
+            raise GuardError("ledger_replay_conflict")
+        document = self._update(prior)
+        document["state"] = "storage_pending"
+        return self._write(document, prior=prior)
+
+    def record_storage(
+        self,
+        grant_id: UUID,
+        *,
+        storage: dict[str, object],
+        storage_sha256: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None:
+            raise GuardError("ledger_intent_missing")
+        if self.document_sha256(storage) != storage_sha256:
+            raise GuardError("ledger_digest_invalid")
+        expected = {"storage": storage, "storage_sha256": storage_sha256}
+        document = self._update(prior)
+        if prior.state != "storage_pending":
+            if all(document[name] == value for name, value in expected.items()):
+                return prior
+            raise GuardError("ledger_replay_conflict")
+        document.update(expected)
+        document["state"] = "storage_ready"
         return self._write(document, prior=prior)
 
     def record_attachment(
@@ -851,7 +1015,7 @@ class GuardLedger:
         for name in ("link_ids", "program_ids", "map_ids"):
             if not _ids(expected[name]):
                 raise GuardError("ledger_binding_invalid")
-        if prior.state not in {"challenged", "containment_pending"}:
+        if prior.state != "containment_pending":
             if all(document[name] == value for name, value in expected.items()):
                 return prior
             raise GuardError("ledger_replay_conflict")
@@ -891,8 +1055,10 @@ class GuardLedger:
         exchange_id: UUID,
         exchange_public_binding_sha256: str,
         session_id: UUID,
+        session_generation: int,
         session_public_binding_sha256: str,
         session_token_sha256: str,
+        session_wire_sha256: str,
         session_expires_at: str,
     ) -> LedgerEntry:
         prior = self.get(grant_id)
@@ -904,15 +1070,20 @@ class GuardLedger:
             exchange_public_binding_sha256,
             session_public_binding_sha256,
             session_token_sha256,
+            session_wire_sha256,
         ):
             _digest(digest)
+        if type(session_generation) is not int or session_generation != 1:
+            raise GuardError("ledger_binding_invalid")
         _timestamp(session_expires_at)
         expected: dict[str, object] = {
             "exchange_id": str(exchange_id),
             "exchange_public_binding_sha256": exchange_public_binding_sha256,
             "session_id": str(session_id),
+            "session_generation": session_generation,
             "session_public_binding_sha256": session_public_binding_sha256,
             "session_token_sha256": session_token_sha256,
+            "session_wire_sha256": session_wire_sha256,
             "session_expires_at": session_expires_at,
         }
         document = self._update(prior)
@@ -933,7 +1104,7 @@ class GuardLedger:
         expires_at: str,
     ) -> LedgerEntry:
         prior = self.get(grant_id)
-        if prior is None or prior.state not in {"projected", "exchanged"}:
+        if prior is None or prior.state != "projected":
             raise GuardError("ledger_attestation_invalid")
         _digest(attestation_sha256)
         _timestamp(expires_at)
@@ -972,7 +1143,7 @@ class GuardLedger:
         attestation_sha256: str,
     ) -> LedgerEntry:
         prior = self.get(grant_id)
-        if prior is None or prior.state not in {"projected", "exchanged"}:
+        if prior is None or prior.state != "projected":
             raise GuardError("ledger_attestation_invalid")
         if (
             self.document_sha256(attestation) != attestation_sha256
@@ -995,6 +1166,168 @@ class GuardLedger:
         document.update(expected)
         return self._write(document, prior=prior)
 
+    def record_pending_renewal(
+        self,
+        grant_id: UUID,
+        *,
+        renewal_id: UUID,
+        current_session_id: UUID,
+        current_session_generation: int,
+        current_session_wire_sha256: str,
+        public_renewal: dict[str, object],
+        public_renewal_sha256: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None or prior.state != "exchanged":
+            raise GuardError("ledger_renewal_invalid")
+        if (
+            not isinstance(renewal_id, UUID)
+            or renewal_id.int == 0
+            or self.document_sha256(public_renewal) != public_renewal_sha256
+        ):
+            raise GuardError("ledger_binding_invalid")
+        _digest(current_session_wire_sha256)
+        document = self._update(prior)
+        expected = {
+            "renewal_id": str(renewal_id),
+            "renewal_public_binding_sha256": None,
+            "renewal_predecessor_session_wire_sha256": None,
+            "pending_renewal_public": public_renewal,
+            "pending_renewal_public_sha256": public_renewal_sha256,
+        }
+        active_pending = (
+            document["pending_renewal_public"] is not None
+            and document["renewal_public_binding_sha256"] is None
+        )
+        if active_pending:
+            if (
+                all(document[name] == value for name, value in expected.items())
+                and document["session_id"] == str(current_session_id)
+                and document["session_generation"] == current_session_generation
+                and document["session_wire_sha256"] == current_session_wire_sha256
+            ):
+                return prior
+            raise GuardError("ledger_replay_conflict")
+        if document["renewal_id"] == str(renewal_id):
+            raise GuardError("ledger_replay_conflict")
+        if (
+            document["session_id"] != str(current_session_id)
+            or document["session_generation"] != current_session_generation
+            or document["session_wire_sha256"] != current_session_wire_sha256
+            or public_renewal.get("renewal_id") != str(renewal_id)
+            or public_renewal.get("grant_id") != str(grant_id)
+            or public_renewal.get("session_id") != str(current_session_id)
+            or public_renewal.get("session_generation") != current_session_generation
+            or public_renewal.get("session_token_sha256")
+            != document["session_token_sha256"]
+        ):
+            raise GuardError("ledger_binding_invalid")
+        document.update(expected)
+        return self._write(document, prior=prior)
+
+    def record_renewal(
+        self,
+        grant_id: UUID,
+        *,
+        renewal_id: UUID,
+        public_renewal_sha256: str,
+        session_id: UUID,
+        session_generation: int,
+        session_public_binding_sha256: str,
+        session_token_sha256: str,
+        session_wire_sha256: str,
+        session_expires_at: str,
+        attestation_sha256: str,
+        attestation_expires_at: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None or prior.state != "exchanged":
+            raise GuardError("ledger_renewal_invalid")
+        for digest in (
+            public_renewal_sha256,
+            session_public_binding_sha256,
+            session_token_sha256,
+            session_wire_sha256,
+            attestation_sha256,
+        ):
+            _digest(digest)
+        _timestamp(session_expires_at)
+        _timestamp(attestation_expires_at)
+        document = self._update(prior)
+        pending = document["pending_renewal_public"]
+        current_generation = document["session_generation"]
+        if (
+            not isinstance(renewal_id, UUID)
+            or renewal_id.int == 0
+            or not isinstance(session_id, UUID)
+            or session_id.int == 0
+            or type(current_generation) is not int
+            or session_generation != current_generation + 1
+            or document["renewal_id"] != str(renewal_id)
+            or document["pending_renewal_public_sha256"] != public_renewal_sha256
+            or not isinstance(pending, dict)
+        ):
+            raise GuardError("ledger_binding_invalid")
+        attestation = pending.get("attestation")
+        if (
+            not isinstance(attestation, dict)
+            or self.document_sha256(attestation) != attestation_sha256
+            or attestation.get("expires_at") != attestation_expires_at
+        ):
+            raise GuardError("ledger_binding_invalid")
+        predecessor = document["session_wire_sha256"]
+        document.update(
+            {
+                "session_id": str(session_id),
+                "session_generation": session_generation,
+                "session_public_binding_sha256": session_public_binding_sha256,
+                "session_token_sha256": session_token_sha256,
+                "session_wire_sha256": session_wire_sha256,
+                "session_expires_at": session_expires_at,
+                "attestation_generation": session_generation,
+                "attestation_sha256": attestation_sha256,
+                "attestation_expires_at": attestation_expires_at,
+                "renewal_public_binding_sha256": public_renewal_sha256,
+                "renewal_predecessor_session_wire_sha256": predecessor,
+            }
+        )
+        return self._write(document, prior=prior)
+
+    def record_finish(
+        self,
+        grant_id: UUID,
+        *,
+        operation_id: UUID,
+        cleanup: dict[str, object],
+        cleanup_sha256: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if (
+            prior is None
+            or not isinstance(operation_id, UUID)
+            or operation_id.int == 0
+            or self.document_sha256(cleanup) != cleanup_sha256
+        ):
+            raise GuardError("ledger_finish_invalid")
+        document = self._update(prior)
+        expected = {
+            "finish_operation_id": str(operation_id),
+            "cleanup": cleanup,
+            "cleanup_sha256": cleanup_sha256,
+        }
+        if prior.state == "finishing":
+            if all(document[name] == value for name, value in expected.items()):
+                return prior
+            raise GuardError("ledger_replay_conflict")
+        if prior.state != "exchanged" or (
+            document["pending_renewal_public"] is not None
+            and document["renewal_public_binding_sha256"] is None
+        ):
+            raise GuardError("ledger_finish_invalid")
+        document.update(expected)
+        document["state"] = "finishing"
+        return self._write(document, prior=prior)
+
     def quarantine(self, grant_id: UUID, *, reason: str) -> LedgerEntry:
         prior = self.get(grant_id)
         if prior is None or not isinstance(reason, str) or _REASON.fullmatch(reason) is None:
@@ -1008,6 +1341,8 @@ class GuardLedger:
         document["quarantine_reason"] = reason
         document["pending_attestation"] = None
         document["pending_attestation_sha256"] = None
+        document["pending_renewal_public"] = None
+        document["pending_renewal_public_sha256"] = None
         return self._write(document, prior=prior)
 
     def mark_terminal(self, grant_id: UUID, *, reason: str) -> LedgerEntry:
@@ -1025,6 +1360,8 @@ class GuardLedger:
         document["terminal_reason"] = reason
         document["pending_attestation"] = None
         document["pending_attestation_sha256"] = None
+        document["pending_renewal_public"] = None
+        document["pending_renewal_public_sha256"] = None
         return self._write(document, prior=prior)
 
     def removable_pin_paths(self, grant_id: UUID) -> tuple[Path, ...]:
