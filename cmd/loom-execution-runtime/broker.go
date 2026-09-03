@@ -368,6 +368,10 @@ func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileInd
 }
 
 func retryOperation(ctx context.Context, operation func() error) error {
+	return retryOperationIf(ctx, operation, func(error) bool { return true })
+}
+
+func retryOperationIf(ctx context.Context, operation func() error, retryable func(error) bool) error {
 	delay := 100 * time.Millisecond
 	var last error
 	for attempt := 0; attempt < 12; attempt++ {
@@ -375,6 +379,9 @@ func retryOperation(ctx context.Context, operation func() error) error {
 			return nil
 		} else {
 			last = err
+			if !retryable(err) {
+				return err
+			}
 		}
 		timer := time.NewTimer(delay)
 		select {

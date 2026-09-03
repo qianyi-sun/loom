@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,15 @@ import (
 )
 
 const maxInputManifestBytes = 16 * 1024 * 1024
+
+type brokerHTTPError struct {
+	statusCode int
+	body       string
+}
+
+func (e *brokerHTTPError) Error() string {
+	return fmt.Sprintf("broker HTTP %d: %s", e.statusCode, e.body)
+}
 
 type taskInputFile struct {
 	RelativePath string `json:"relative_path"`
@@ -36,7 +46,7 @@ func (b *workloadBroker) identityHeaders(request *http.Request) {
 	request.Header.Set("X-Loom-Execution-Role", b.identity.ExecutionRole)
 }
 
-func (b *workloadBroker) getInput(ctx context.Context, endpoint string) (*http.Response, error) {
+func (b *workloadBroker) getInputOnce(ctx context.Context, endpoint string) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -49,9 +59,34 @@ func (b *workloadBroker) getInput(ctx context.Context, endpoint string) (*http.R
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, fmt.Errorf("broker HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &brokerHTTPError{
+			statusCode: response.StatusCode,
+			body:       strings.TrimSpace(string(body)),
+		}
 	}
 	return response, nil
+}
+
+func workloadIdentityNotObserved(err error) bool {
+	var brokerErr *brokerHTTPError
+	if !errors.As(err, &brokerErr) || brokerErr.statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	var payload struct {
+		Detail string `json:"detail"`
+	}
+	return json.Unmarshal([]byte(brokerErr.body), &payload) == nil &&
+		payload.Detail == "workload_identity_not_observed"
+}
+
+func (b *workloadBroker) getInput(ctx context.Context, endpoint string) (*http.Response, error) {
+	var response *http.Response
+	err := retryOperationIf(ctx, func() error {
+		var err error
+		response, err = b.getInputOnce(ctx, endpoint)
+		return err
+	}, workloadIdentityNotObserved)
+	return response, err
 }
 
 func secureInputDirectory(root, directory string) error {
