@@ -11,7 +11,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from loom_execution_actuator.__main__ import ActuatorRuntimeHealth, _health_app
-from loom_execution_actuator.contracts import NormalizedJobState
+from loom_execution_actuator.contracts import ExecutionTerminationSummaryV1, NormalizedJobState
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _normalize
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -229,6 +229,36 @@ def test_termination_summary_is_identity_bound_and_retained() -> None:
     assert rejected.reason == "TerminationSummaryIdentityMismatch"
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "artifact_upload_failed",
+        "missing_required_artifacts",
+        "trajectory_flush_failed",
+    ],
+)
+def test_termination_summary_accepts_complete_bundle_failures(status: str) -> None:
+    payload = {
+        "schema_version": "loom.execution-termination-summary.v1",
+        "runtime_contract_sha256": "sha256:" + "1" * 64,
+        "command_identity_sha256": "sha256:" + "2" * 64,
+        "execution_role": "attempt",
+        "status": status,
+        "partial_evidence": True,
+        "phase_count": 2,
+        "finished_at": datetime.now(UTC).isoformat(),
+        "result_path": "result.json",
+        "output_committed": True,
+        "output_upload_session_id": "0194d739-8bec-7b7b-88f5-62f7cbd42cb3",
+        "output_manifest_sha256": "sha256:" + "3" * 64,
+        "output_marker_sha256": "sha256:" + "4" * 64,
+    }
+
+    summary = ExecutionTerminationSummaryV1.model_validate(payload)
+
+    assert summary.status == status
+
+
 def test_kubernetes_error_translation_handles_non_integer_status() -> None:
     api = InClusterKubernetesJobApi.__new__(InClusterKubernetesJobApi)
     translated = api._translate(_ns(status="transport", headers={}), "get")
@@ -331,9 +361,7 @@ def test_development_patch_persists_service_execution_scheduler_identity() -> No
 
 def test_development_service_patch_persists_backend_environment_identity() -> None:
     patch = yaml.safe_load(
-        (_ROOT / "deploy/k8s/nebius-service-development-patch.yaml").read_text(
-            encoding="utf-8"
-        )
+        (_ROOT / "deploy/k8s/nebius-service-development-patch.yaml").read_text(encoding="utf-8")
     )
     container = patch["spec"]["template"]["spec"]["containers"][0]
     assert container["name"] == "service"
@@ -349,9 +377,7 @@ def test_development_service_patch_persists_backend_environment_identity() -> No
 
 def test_development_gateway_patch_persists_model_provider_identity() -> None:
     patch = yaml.safe_load(
-        (_ROOT / "deploy/k8s/nebius-gateway-development-patch.yaml").read_text(
-            encoding="utf-8"
-        )
+        (_ROOT / "deploy/k8s/nebius-gateway-development-patch.yaml").read_text(encoding="utf-8")
     )
     container = patch["spec"]["template"]["spec"]["containers"][0]
     assert container["name"] == "gateway"

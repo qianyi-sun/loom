@@ -37,23 +37,35 @@ type phaseEvidence struct {
 	Stderr     streamEvidence `json:"stderr"`
 }
 
+type outputEvidence struct {
+	SourcePath   string `json:"source_path"`
+	RelativePath string `json:"relative_path"`
+	Kind         string `json:"kind"`
+	Required     bool   `json:"required"`
+	State        string `json:"state"`
+	SizeBytes    *int64 `json:"size_bytes"`
+	SHA256       string `json:"sha256,omitempty"`
+}
+
 type resultManifest struct {
-	SchemaVersion         string          `json:"schema_version"`
-	RuntimeContractSHA256 string          `json:"runtime_contract_sha256"`
-	CandidateSHA          string          `json:"candidate_sha"`
-	TaskRevisionSHA256    string          `json:"task_revision_sha256"`
-	CommandIdentitySHA256 string          `json:"command_identity_sha256"`
-	ExecutionRole         string          `json:"execution_role"`
-	ContainerRoles        []string        `json:"container_roles"`
-	TaskImageRef          string          `json:"task_image_ref"`
-	RuntimeImageRef       string          `json:"runtime_image_ref"`
-	RuntimeBinarySHA256   string          `json:"runtime_binary_sha256"`
-	ExecutionClassID      string          `json:"execution_class_id"`
-	Status                string          `json:"status"`
-	StartedAt             time.Time       `json:"started_at"`
-	FinishedAt            time.Time       `json:"finished_at"`
-	Phases                []phaseEvidence `json:"phases"`
-	PartialEvidence       bool            `json:"partial_evidence"`
+	SchemaVersion         string             `json:"schema_version"`
+	RuntimeContractSHA256 string             `json:"runtime_contract_sha256"`
+	CandidateSHA          string             `json:"candidate_sha"`
+	TaskRevisionSHA256    string             `json:"task_revision_sha256"`
+	CommandIdentitySHA256 string             `json:"command_identity_sha256"`
+	ExecutionRole         string             `json:"execution_role"`
+	ContainerRoles        []string           `json:"container_roles"`
+	TaskImageRef          string             `json:"task_image_ref"`
+	RuntimeImageRef       string             `json:"runtime_image_ref"`
+	RuntimeBinarySHA256   string             `json:"runtime_binary_sha256"`
+	ExecutionClassID      string             `json:"execution_class_id"`
+	Status                string             `json:"status"`
+	StartedAt             time.Time          `json:"started_at"`
+	FinishedAt            time.Time          `json:"finished_at"`
+	Phases                []phaseEvidence    `json:"phases"`
+	Outputs               []outputEvidence   `json:"outputs"`
+	VerifierRewards       map[string]float64 `json:"verifier_rewards,omitempty"`
+	PartialEvidence       bool               `json:"partial_evidence"`
 }
 
 type terminationSummary struct {

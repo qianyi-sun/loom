@@ -660,8 +660,8 @@ def _validate_plan(producer: CommitProducerV1, files: Sequence[UploadFilePlanV1]
     if kind == "service_execution_output":
         if (
             len(groups) != 1
-            or any(item.artifact_name != "runtime_evidence" for item in files)
-            or any(item.artifact_type != "loom.execution-runtime-evidence.v1" for item in files)
+            or any(item.artifact_name != "trial_bundle" for item in files)
+            or any(item.artifact_type != "loom.trial-artifact-bundle.v1" for item in files)
             or any(item.producer != "service" for item in files)
         ):
             raise ArtifactCommitError("invalid_service_execution_output_plan")

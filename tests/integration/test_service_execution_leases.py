@@ -59,6 +59,7 @@ from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
+    RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
@@ -402,6 +403,39 @@ def _runtime_contract(
             if verifier_execution == "in_attempt"
             else None
         ),
+    )
+
+
+def _complete_output_contract(*, now: datetime) -> ExecutionRuntimePlanV1:
+    return _runtime_contract(now=now).model_copy(
+        update={
+            "output_declarations": (
+                RuntimeOutputDeclarationV1(
+                    source_path="answer.txt",
+                    relative_path="artifacts/answer.txt",
+                    kind="task_artifact",
+                    required=True,
+                ),
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/agent/trajectory.jsonl",
+                    relative_path="trajectory/events.jsonl",
+                    kind="trajectory",
+                    required=True,
+                ),
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/agent/usage.json",
+                    relative_path="accounting/usage.json",
+                    kind="usage",
+                    required=True,
+                ),
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/verifier/output.json",
+                    relative_path="verifier/output.json",
+                    kind="verifier",
+                    required=True,
+                ),
+            )
+        }
     )
 
 
@@ -2530,10 +2564,17 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
     now = datetime.now(UTC)
     signing_key = "b" * 64
     pod_ip = "10.24.7.19"
+    runtime_contract = _complete_output_contract(now=now)
     try:
         async with sessions() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
-            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            lease = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now,
+                runtime_contract=runtime_contract,
+            )
             await enqueue_execution_transition(
                 session,
                 lease_id=lease.id,
@@ -2583,8 +2624,28 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
         assert token_context.service_execution_lease_id == lease.id
         assert token_context.service_execution_generation == 1
 
+        bundle_payloads = {
+            "artifacts/answer.txt": b"42\n",
+            "trajectory/events.jsonl": b'{"turn":0}\n',
+            "accounting/usage.json": b'{"call_count":1}\n',
+            "verifier/output.json": b'{"rewards":{"passed":1}}\n',
+        }
         result_document = _runtime_result_payload(authorized, started_at=now)
-        result_document.update(status="runtime_error", partial_evidence=True, phases=[])
+        result_document.update(
+            status="runtime_error",
+            partial_evidence=True,
+            phases=[],
+            outputs=[
+                {
+                    **declaration.model_dump(mode="json"),
+                    "state": "captured",
+                    "size_bytes": len(bundle_payloads[declaration.relative_path]),
+                    "sha256": digest_bytes(bundle_payloads[declaration.relative_path]),
+                }
+                for declaration in runtime_contract.output_declarations
+            ],
+            verifier_rewards={"passed": 1.0},
+        )
         result_payload = canonical_document(result_document)
         store = FakeObjectStore()
         repository = SqlArtifactCommitRepository(
@@ -2604,41 +2665,54 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             schema_version="loom.service-execution-output-prepare.v1",
             request_id=uuid4(),
             **identity.model_dump(),
-            files=(
+            files=tuple(
                 ServiceExecutionOutputFileV1(
-                    relative_path="result.json",
-                    media_type="application/json",
-                    size_bytes=len(result_payload),
-                    sha256=digest_bytes(result_payload),
-                ),
+                    relative_path=path,
+                    media_type=(
+                        "application/json"
+                        if path.endswith(".json")
+                        else "application/x-ndjson"
+                        if path.endswith(".jsonl")
+                        else "text/plain; charset=utf-8"
+                    ),
+                    size_bytes=len(payload),
+                    sha256=digest_bytes(payload),
+                )
+                for path, payload in {
+                    "result.json": result_payload,
+                    **dict(sorted(bundle_payloads.items())),
+                }.items()
             ),
         )
         grant = await route.prepare(lease=authorized, request=prepare)
         upload_session_id = UUID(grant["upload_session_id"])
         upload_token = str(grant["upload_token"])
 
-        async def body():  # type: ignore[no-untyped-def]
-            yield result_payload
+        ordered_payloads = [result_payload, *[body for _, body in sorted(bundle_payloads.items())]]
+        for file_index, payload in enumerate(ordered_payloads):
 
-        receipt = PartReceiptV1.model_validate(
-            await route.put_part(
+            async def body(payload: bytes = payload):  # type: ignore[no-untyped-def]
+                yield payload
+
+            receipt = PartReceiptV1.model_validate(
+                await route.put_part(
+                    lease=authorized,
+                    session_id=upload_session_id,
+                    file_index=file_index,
+                    part_number=1,
+                    content_length=len(payload),
+                    content_sha256=digest_bytes(payload),
+                    upload_token=upload_token,
+                    body=body(),
+                )
+            )
+            await route.complete_file(
                 lease=authorized,
                 session_id=upload_session_id,
-                file_index=0,
-                part_number=1,
-                content_length=len(result_payload),
-                content_sha256=digest_bytes(result_payload),
+                file_index=file_index,
+                ordered_parts=(receipt,),
                 upload_token=upload_token,
-                body=body(),
             )
-        )
-        await route.complete_file(
-            lease=authorized,
-            session_id=upload_session_id,
-            file_index=0,
-            ordered_parts=(receipt,),
-            upload_token=upload_token,
-        )
         committed = await route.commit(
             lease=authorized,
             session_id=upload_session_id,
@@ -2670,6 +2744,14 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert persisted.output_upload_session_id == upload_session_id
             assert persisted.desired_state == "finalize"
             assert artifact.content_hash == digest_bytes(result_payload)
+            assert artifact.name == "trial_bundle"
+            assert artifact.artifact_type == "loom.trial-artifact-bundle.v1"
+            assert artifact.file_count == 5
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.trajectory_index is not None
+            assert trial.trajectory_index["artifact_bundle_id"] == str(artifact.id)
+            assert trial.trajectory_index["verifier_rewards"] == {"passed": 1.0}
             assert (
                 await session.scalar(
                     select(func.count(ServiceExecutionEvent.id)).where(

@@ -44,7 +44,23 @@ def test_direct_completion_uses_provider_native_model_and_writes_artifact(
                         "message": {"role": "assistant", "content": "hello"},
                         "finish_reason": "stop",
                     }
-                ]
+                ],
+                "loom": {
+                    "input_tokens": 4,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 1,
+                    "thinking_tokens": 0,
+                    "provider_extras": {},
+                    "cost_usd": 0.01,
+                    "rate_card_hash": "rate-card-1",
+                    "finish_reason": "stop",
+                    "duration_sec": 0.2,
+                    "streamed": False,
+                    "time_to_first_token_sec": None,
+                    "gateway_request_id": "request-1",
+                    "attempt": 1,
+                },
             }
         )
 
@@ -58,3 +74,12 @@ def test_direct_completion_uses_provider_native_model_and_writes_artifact(
     assert request.full_url == "http://gateway-proxy/v1/chat/completions"
     assert request.data is not None
     assert json.loads(request.data)["model"] == "openai/gpt-5"
+    trajectory = (tmp_path / ".loom/agent/trajectory.jsonl").read_text(encoding="utf-8")
+    call = json.loads(trajectory)
+    assert call["request"]["messages"] == [{"role": "user", "content": "Return a greeting"}]
+    assert call["response"] == {"role": "assistant", "content": "hello"}
+    assert call["usage"]["gateway_request_id"] == "request-1"
+    usage = json.loads((tmp_path / ".loom/agent/usage.json").read_text(encoding="utf-8"))
+    assert usage["call_count"] == 1
+    assert usage["totals"]["input_tokens"] == 4
+    assert usage["totals"]["cost_usd"] == 0.01
