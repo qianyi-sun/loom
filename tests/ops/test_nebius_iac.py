@@ -127,11 +127,22 @@ def test_capacity_policy_rejects_lost_200_task_target(tmp_path: Path) -> None:
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
 
 
+def test_capacity_policy_rejects_lost_200_task_target_shape(tmp_path: Path) -> None:
+    repo_root, nebius_root = _copy_contract(tmp_path)
+    path = repo_root / "deploy" / "k8s" / "nebius-development-capacity-policy.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["target_execution_preset"] = "32vcpu-128gb"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="retain the 48-vCPU node shape"):
+        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
+
+
 def test_capacity_policy_rejects_terraform_shape_drift(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
     path = nebius_root / "targets" / "development-eu-north1.tfvars.json.example"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["target"]["execution_preset"] = "32vcpu-128gb"
+    document["target"]["execution_preset"] = "16vcpu-64gb"
     path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(ContractError, match="policy node shape must match Terraform"):
