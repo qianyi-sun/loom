@@ -87,12 +87,14 @@ Copy the sole shared-cluster input and its existing backend anchor to a protecte
 directory. Replace the placeholder tenant, project, globally unique bucket
 name, and state bucket; do not change topology fields without changing and
 reviewing the canonical topology contract. While the 512-vCPU request is
-pending, the committed active target is `0..4` regular `48vcpu-192gb` execution
+pending, the committed active target is `0..6` regular `32vcpu-128gb` execution
 nodes with 64 Pods per node. Its 192-vCPU execution envelope supports eighty
-2-vCPU tasks while preserving 8 vCPUs and 32 GiB per node for platform
-overhead. The requested target remains `0..10` and 200 concurrent tasks; move
-the committed active target only after the provider quota readback reaches 512
-non-GPU vCPUs and 16 VM slots.
+2-vCPU tasks while preserving 32 aggregate vCPUs and 128 GiB for platform
+overhead. This smaller node shape avoids depending on scarce 48-vCPU regional
+inventory. The requested target remains `0..10` at `48vcpu-192gb` and 200
+concurrent tasks; move the committed active target only after the provider quota
+readback reaches 512 non-GPU vCPUs and 16 VM slots and the requested shape has
+regional inventory.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
@@ -167,10 +169,11 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 Run live acceptance in this order; stop and clean up at the first failed gate.
 
 1. Apply only `development-eu-north1` with the committed execution bounds, the
-   pinned `48vcpu-192gb` shape, and 64 Pods per node. The current-quota profile
-   is `0..4` and requires readback of at least 200 non-GPU vCPUs and 12 VM
-   slots. The requested 200-task profile is `0..10` and may be committed only
-   after readback reaches 512 non-GPU vCPUs and 16 VM slots.
+   pinned `32vcpu-128gb` shape, and 64 Pods per node. The current-quota profile
+   is `0..6` and requires readback of at least 200 non-GPU vCPUs and 12 VM
+   slots. The requested 200-task profile is `0..10` at `48vcpu-192gb` and may
+   be committed only after readback reaches 512 non-GPU vCPUs, 16 VM slots,
+   and regional inventory for that shape.
 2. Prove Terraform convergence and cloud-side Ready/readback.
 3. Create only the development binding namespace with its canonical topology
    labels and install only its environment-local identities/policies.
@@ -286,7 +289,7 @@ the same merged candidate is idempotent.
 Every runtime apply also converges the repository-owned execution-capacity and
 execution-admission policies. For the current provider quota, both the global
 and `nebius-cpu` admission ceilings are 80 leases; this must match the 80-job
-pending/create limits and the four-node execution envelope rather than retain a
+pending/create limits and the six-node execution envelope rather than retain a
 bootstrap single-trial ceiling.
 
 The evidence collector uses checksum-pinned Trivy and `crane` binaries on the

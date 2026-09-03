@@ -183,6 +183,10 @@ def check_nebius_iac(
         f"{capacity_path}: requested target must retain 200-task capacity",
     )
     _require(
+        capacity.get("target_execution_preset") == "48vcpu-192gb",
+        f"{capacity_path}: requested target must retain the 48-vCPU node shape",
+    )
+    _require(
         int(capacity.get("accepted_concurrency", 0)) == 80
         and int(capacity.get("task_cpu_millis", 0)) == 2_000,
         f"{capacity_path}: current-quota acceptance must cover 80 concurrent 2-vCPU tasks",
@@ -228,8 +232,8 @@ def check_nebius_iac(
     node_memory_mib = int(preset_match.group("memory")) * 1_024
     max_nodes = int(target.get("execution_max_nodes", 0))
     _require(
-        max_nodes == 4 and int(target.get("execution_max_pods", 0)) == 64,
-        f"{path}: current quota requires 4 nodes and 64 Pods per node",
+        max_nodes == 6 and int(target.get("execution_max_pods", 0)) == 64,
+        f"{path}: current quota requires 6 nodes and 64 Pods per node",
     )
     _require(
         policy.get("enabled") is True
@@ -248,18 +252,37 @@ def check_nebius_iac(
     requested_cpu = int(capacity["accepted_concurrency"]) * int(capacity["task_cpu_millis"])
     _require(
         int(policy["max_vcpu_millis"]) - requested_cpu >= 32_000,
-        f"{capacity_path}: execution pool must preserve at least 8 vCPU per node for overhead",
+        f"{capacity_path}: execution pool must preserve at least 32 aggregate vCPUs for overhead",
     )
     _require(
         int(capacity["provider_current_quota_vcpu_millis"]) - int(policy["max_vcpu_millis"])
         >= 4_000,
         f"{capacity_path}: current provider quota must preserve fixed infrastructure headroom",
     )
+    target_preset_match = re.fullmatch(
+        r"(?P<cpu>[1-9][0-9]*)vcpu-(?P<memory>[1-9][0-9]*)gb",
+        str(capacity.get("target_execution_preset", "")),
+    )
+    _require(target_preset_match is not None, f"{capacity_path}: target preset must be explicit")
+    assert target_preset_match is not None
+    target_node_cpu_millis = int(target_preset_match.group("cpu")) * 1_000
+    target_pool_vcpu_millis = (
+        int(capacity["target_execution_max_nodes"]) * target_node_cpu_millis
+    )
     _require(
-        int(capacity["provider_required_quota_vcpu_millis"])
-        - int(capacity["target_execution_max_nodes"]) * node_cpu_millis
+        int(capacity["provider_required_quota_vcpu_millis"]) - target_pool_vcpu_millis
         >= 32_000,
         f"{capacity_path}: requested provider quota must preserve target infrastructure headroom",
+    )
+    _require(
+        target_pool_vcpu_millis
+        - int(capacity["target_concurrency"]) * int(capacity["task_cpu_millis"])
+        >= 32_000,
+        f"{capacity_path}: requested target must preserve execution overhead",
+    )
+    _require(
+        int(capacity["provider_current_quota_nodes"]) - max_nodes >= 4,
+        f"{capacity_path}: current VM quota must preserve fixed infrastructure slots",
     )
     _require(
         int(policy.get("max_pending_jobs", 0)) >= int(capacity["accepted_concurrency"])
