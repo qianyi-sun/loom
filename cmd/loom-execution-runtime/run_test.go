@@ -203,8 +203,23 @@ func TestPlanValidationRejectsImageAdmissionDriftButNotMetadataExpiry(t *testing
 	}
 	p = base()
 	p.ImageAdmission.Admissions[0].Statement.HighestVulnerabilitySeverity = "high"
+	if err := p.validate(); err != nil {
+		t.Fatalf("nonblocking high vulnerability evidence was rejected: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].Statement.HighestVulnerabilitySeverity = "unknown"
+	if err := p.validate(); err != nil {
+		t.Fatalf("nonblocking unknown vulnerability evidence was rejected: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].Statement.HighestVulnerabilitySeverity = "critical"
 	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "vulnerability") {
-		t.Fatalf("high vulnerability admission accepted: %v", err)
+		t.Fatalf("critical vulnerability admission accepted: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].Statement.HighestVulnerabilitySeverity = "invalid"
+	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "severity") {
+		t.Fatalf("invalid vulnerability severity accepted: %v", err)
 	}
 	p = base()
 	p.ImageAdmission.Admissions[0].Statement.ExpiresAt = time.Now().Add(-time.Minute)

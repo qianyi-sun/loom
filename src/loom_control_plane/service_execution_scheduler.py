@@ -236,7 +236,7 @@ async def run_service_execution_scheduler_loop(
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            _LOG.warning("service_execution_scheduler_error", extra={"err": str(exc)})
+            _LOG.warning("service_execution_scheduler_error: %s", exc, exc_info=True)
         await asyncio.sleep(interval_seconds)
 
 

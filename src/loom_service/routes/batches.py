@@ -2796,34 +2796,19 @@ async def cancel_batch(
         )
     require_team_or_admin(ctx, b.team_id)
     now = datetime.now(UTC)
-    active_rows = (
+    active_trial_ids = (
         await s.execute(
-            select(Trial.id, Task.config)
-            .join(Task, Task.id == Trial.task_id)
-            .where(
+            select(Trial.id).where(
                 Trial.batch_id == batch_id,
                 Trial.state.in_(["queued", "claimed", "running"]),
             )
         )
-    ).all()
-    service_execution_ids = [
-        trial_id
-        for trial_id, config in active_rows
-        if (
-            b.backend == NEBIUS_BACKEND
-            and isinstance(config, dict)
-            and config.get("service_execution") is not None
-        )
-    ]
-    legacy_ids = [
-        trial_id
-        for trial_id, config in active_rows
-        if (
-            b.backend != NEBIUS_BACKEND
-            or not isinstance(config, dict)
-            or config.get("service_execution") is None
-        )
-    ]
+    ).scalars().all()
+    # The explicit Batch backend owns the execution lifecycle. Ordinary
+    # user-uploaded tasks may receive the Nebius runtime plan automatically
+    # and therefore have no service_execution block in Task.config.
+    service_execution_ids = list(active_trial_ids) if b.backend == NEBIUS_BACKEND else []
+    legacy_ids = list(active_trial_ids) if b.backend != NEBIUS_BACKEND else []
 
     # Service execution has a second, provider-facing lifecycle authority.
     # Route cancellation through the Control Plane so the Trial update, lease

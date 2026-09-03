@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH" >&2
+  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH --execution-actuator-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -11,6 +11,7 @@ nebius_credentials=
 model_provider_api_key_file=
 image_admission_keyring=
 service_execution_runtime_profile=
+execution_actuator_image=
 while (($#)); do
   case "$1" in
     --kubeconfig)
@@ -38,6 +39,11 @@ while (($#)); do
       service_execution_runtime_profile=$2
       shift 2
       ;;
+    --execution-actuator-image)
+      (($# >= 2)) || usage
+      execution_actuator_image=$2
+      shift 2
+      ;;
     *) usage ;;
   esac
 done
@@ -45,6 +51,7 @@ done
 [[ -n "$kubeconfig" && -f "$kubeconfig" ]] || usage
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
 [[ -n "$service_execution_runtime_profile" && -s "$service_execution_runtime_profile" ]] || usage
+[[ $execution_actuator_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
   usage
 fi
@@ -143,13 +150,31 @@ fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
+
+render_execution_actuator_manifest() {
+  python3 - "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" \
+    "$execution_actuator_image" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+image = sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+matches = [index for index, line in enumerate(lines) if line.startswith("          image: ")]
+if len(matches) != 1:
+    raise SystemExit("execution actuator manifest must contain exactly one image field")
+ending = "\n" if lines[matches[0]].endswith("\n") else ""
+lines[matches[0]] = f"          image: {image}{ending}"
+sys.stdout.write("".join(lines))
+PY
+}
 capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
 [[ -s $capacity_policy ]] || {
   echo "Nebius development capacity policy is missing" >&2
   exit 1
 }
 
-read -r capacity_policy_target capacity_policy_request < <(
+read -r capacity_policy_target capacity_policy_request admission_policies_request < <(
   python3 - "$capacity_policy" <<'PY'
 import base64
 import json
@@ -177,7 +202,18 @@ if (
 encoded = base64.b64encode(
     json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).decode("ascii")
-print(target_id, encoded)
+admission_policies = document.get("admission_policies")
+if (
+    not isinstance(admission_policies, list)
+    or [(row.get("scope_kind"), row.get("scope_key"), row.get("max_concurrent")) for row in admission_policies]
+    != [("global", "*", 80), ("pool", "nebius-cpu", 80)]
+    or any(row.get("enabled") is not True for row in admission_policies)
+):
+    raise SystemExit("Nebius execution admission policies must permit exactly 80 leases")
+admission_encoded = base64.b64encode(
+    json.dumps(admission_policies, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).decode("ascii")
+print(target_id, encoded, admission_encoded)
 PY
 )
 
@@ -342,6 +378,7 @@ import urllib.request
 target_id = sys.argv[1]
 request_body = base64.b64decode(sys.argv[2], validate=True)
 expected = json.loads(request_body)
+admission_policies = json.loads(base64.b64decode(sys.argv[3], validate=True))
 with open("/var/run/loom/admin/secrets.toml", "rb") as handle:
     admin_token = tomllib.load(handle)["admin"]["token"]
 request = urllib.request.Request(
@@ -359,6 +396,43 @@ with urllib.request.urlopen(request, timeout=15) as response:
 for name, value in expected.items():
     if observed.get(name) != value:
         raise SystemExit(f"capacity policy readback mismatch for {name}")
+admission_readback = []
+for policy in admission_policies:
+    scope_kind = policy["scope_kind"]
+    scope_key = policy["scope_key"]
+    body = {
+        "max_concurrent": policy["max_concurrent"],
+        "enabled": policy["enabled"],
+        "reason": policy["reason"],
+    }
+    admission_request = urllib.request.Request(
+        "http://127.0.0.1:8080/admin/execution-admission-policies/"
+        + urllib.parse.quote(scope_kind, safe="")
+        + "/"
+        + urllib.parse.quote(scope_key, safe=""),
+        data=json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {admin_token}",
+            "Content-Type": "application/json",
+        },
+        method="PUT",
+    )
+    with urllib.request.urlopen(admission_request, timeout=15) as response:
+        admission_observed = json.load(response)
+    for name, value in body.items():
+        if admission_observed.get(name) != value:
+            raise SystemExit(
+                f"execution admission policy readback mismatch for {scope_kind}/{scope_key}.{name}"
+            )
+    admission_readback.append(
+        {
+            "scope_kind": admission_observed["scope_kind"],
+            "scope_key": admission_observed["scope_key"],
+            "max_concurrent": admission_observed["max_concurrent"],
+            "enabled": admission_observed["enabled"],
+            "version": admission_observed["version"],
+        }
+    )
 print(
     json.dumps(
         {
@@ -367,11 +441,12 @@ print(
             "max_nodes": observed["max_nodes"],
             "max_vcpu_millis": observed["max_vcpu_millis"],
             "version": observed["version"],
+            "admission_policies": admission_readback,
         },
         sort_keys=True,
     )
 )
-' "$capacity_policy_target" "$capacity_policy_request"
+' "$capacity_policy_target" "$capacity_policy_request" "$admission_policies_request"
 
 kubectl patch deployment -n loom loom-service --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null
@@ -380,7 +455,7 @@ kubectl patch deployment -n loom loom-service --type=merge \
   >/dev/null
 kubectl rollout status -n loom deployment/loom-service --timeout=180s
 
-kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null
+render_execution_actuator_manifest | kubectl apply --dry-run=server -f - >/dev/null
 kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
 
 kubectl create secret generic loom-execution-capacity-collector-nebius \
@@ -422,7 +497,7 @@ print(token, end="")
 fi
 
 kubectl apply -f "$repo_root/deploy/k8s/network-policies.yaml" >/dev/null
-kubectl apply -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null
+render_execution_actuator_manifest | kubectl apply -f - >/dev/null
 kubectl apply -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
 kubectl rollout status -n loom-nebius-development deployment/loom-execution-actuator --timeout=180s
 

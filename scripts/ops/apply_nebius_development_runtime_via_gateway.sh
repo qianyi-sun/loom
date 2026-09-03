@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-actuator-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -17,6 +17,7 @@ service_execution_runtime_profile=
 gateway_image=
 control_plane_image=
 service_image=
+execution_actuator_image=
 execution_runtime_image=
 while (($#)); do
   case "$1" in
@@ -75,6 +76,11 @@ while (($#)); do
       service_image=$2
       shift 2
       ;;
+    --execution-actuator-image)
+      (($# >= 2)) || usage
+      execution_actuator_image=$2
+      shift 2
+      ;;
     --execution-runtime-image)
       (($# >= 2)) || usage
       execution_runtime_image=$2
@@ -89,6 +95,7 @@ done
 [[ $gateway_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $control_plane_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
+[[ $execution_actuator_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $execution_runtime_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
 if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
@@ -203,7 +210,8 @@ ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
   "$provider_key_name" \
   "$keyring_name" \
   "$(basename "$service_execution_runtime_profile")" \
-  "$gateway_image" "$control_plane_image" "$service_image" <<'REMOTE'
+  "$gateway_image" "$control_plane_image" "$service_image" \
+  "$execution_actuator_image" <<'REMOTE'
 set -euo pipefail
 remote_stage=$1
 cluster_id=$2
@@ -214,6 +222,7 @@ runtime_profile_name=$6
 gateway_image=$7
 control_plane_image=$8
 service_image=$9
+execution_actuator_image=${10}
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
@@ -331,6 +340,7 @@ apply_args=(
   --kubeconfig "$remote_stage/kubeconfig"
   --nebius-credentials "$remote_stage/$credential_name"
   --service-execution-runtime-profile "$remote_stage/$runtime_profile_name"
+  --execution-actuator-image "$execution_actuator_image"
 )
 if [[ $provider_key_name != - ]]; then
   apply_args+=(--model-provider-api-key-file "$remote_stage/$provider_key_name")
