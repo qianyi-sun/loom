@@ -11,24 +11,45 @@ PRODUCTION_ROOT = Path("src")
 STORE_MODULE = "loom_task_image_authority.store"
 ALLOWED_AUTHORITY_IMPORTS = {
     "__future__",
+    "asyncio",
+    "base64",
+    "binascii",
     "collections.abc",
+    "contextlib",
     "dataclasses",
     "datetime",
+    "fastapi",
+    "fastapi.encoders",
+    "fastapi.exceptions",
+    "fastapi.responses",
     "hashlib",
     "hmac",
     "json",
     "loom.db.schema",
+    "loom.db.schema_startup",
     "loom.security.secret_store",
+    "loom_task_image_authority.api",
+    "loom_task_image_authority.auth",
+    "loom_task_image_authority.config",
     "loom_task_image_authority.contracts",
+    "loom_task_image_authority.store",
+    "os",
     "pathlib",
+    "prometheus_client",
     "pydantic",
+    "pydantic_settings",
     "re",
     "rfc8785",
     "secrets",
+    "ssl",
+    "stat",
     "sqlalchemy",
     "sqlalchemy.ext.asyncio",
+    "time",
     "typing",
+    "types",
     "uuid",
+    "uvicorn",
 }
 
 
@@ -67,7 +88,7 @@ def _imports_store(tree: ast.AST) -> bool:
     return False
 
 
-def test_authority_package_has_only_inert_contract_and_storage_dependencies() -> None:
+def test_authority_package_has_only_the_closed_service_dependency_set() -> None:
     sources = sorted(AUTHORITY_ROOT.glob("*.py"))
     assert sources
 
@@ -79,13 +100,42 @@ def test_authority_package_has_only_inert_contract_and_storage_dependencies() ->
     assert not unexpected
 
 
-def test_no_production_module_composes_the_inert_authority_store() -> None:
+def test_only_the_dedicated_authority_api_imports_the_projection_store() -> None:
     importers = {
         path
         for path in PRODUCTION_ROOT.rglob("*.py")
-        if not path.is_relative_to(AUTHORITY_ROOT) and _imports_store(_tree(path))
+        if _imports_store(_tree(path))
+    }
+    assert importers == {AUTHORITY_ROOT / "api.py"}
+
+
+def test_no_other_production_package_imports_the_authority_api() -> None:
+    api_module = "loom_task_image_authority.api"
+    importers = {
+        path
+        for path in PRODUCTION_ROOT.rglob("*.py")
+        if not path.is_relative_to(AUTHORITY_ROOT)
+        and api_module in _imported_modules(_tree(path))
     }
     assert not importers
+
+
+def test_authority_api_has_no_slurm_worker_provider_or_public_route_dependency() -> None:
+    imports = _imported_modules(_tree(AUTHORITY_ROOT / "api.py"))
+    forbidden_prefixes = (
+        "docker",
+        "loom_capacity_",
+        "loom_control_plane",
+        "loom_service",
+        "loom_worker",
+        "subprocess",
+    )
+
+    assert not {
+        imported
+        for imported in imports
+        if imported.startswith(forbidden_prefixes)
+    }
 
 
 def test_authority_package_is_in_default_static_validation() -> None:
