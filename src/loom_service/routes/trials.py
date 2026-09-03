@@ -19,16 +19,27 @@ with legacy `Trial.config["agent"]` fallback for older rows.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 
-from loom.db.schema import Artifact, LlmCall, Task, Team, Trial, TrialResourceUsage, User
+from loom.db.schema import (
+    Artifact,
+    ArtifactUploadFile,
+    ArtifactUploadSession,
+    LlmCall,
+    ServiceExecutionLease,
+    Task,
+    Team,
+    Trial,
+    TrialResourceUsage,
+    User,
+)
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
@@ -41,11 +52,18 @@ from loom_service.agent_catalog import (
     validate_agent_model_compat,
 )
 from loom_service.auth_guards import (
+    is_admin,
     require_scope,
     require_submitting_user,
     require_team_or_admin,
 )
 from loom_service.debug_evidence import build_trial_debug_evidence
+from loom_service.delivery_export import (
+    ArchiveBuildResult,
+    DeliveryExportError,
+    build_canonical_trial_bundle_archive,
+    canonical_bundle_for_trial,
+)
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_trial_diagnosis
 from loom_service.forwarders import forward, propagate
@@ -58,6 +76,7 @@ from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.service_execution_status import service_execution_lifecycle_stage
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.usage_accounting import (
@@ -535,6 +554,10 @@ def _find_projected_artifact(
 
 
 def _service_execution_file_key(artifact: Artifact, file_item: dict[str, Any]) -> str | None:
+    explicit_key = file_item.get("key")
+    explicit_bucket = file_item.get("bucket")
+    if isinstance(explicit_key, str) and explicit_key and isinstance(explicit_bucket, str):
+        return explicit_key
     provenance = artifact.provenance if isinstance(artifact.provenance, dict) else {}
     lease_id = provenance.get("lease_id")
     generation = provenance.get("generation")
@@ -566,9 +589,10 @@ def _projected_service_execution_artifacts(
     for artifact in artifacts:
         storage = artifact.storage if isinstance(artifact.storage, dict) else {}
         files = storage.get("files")
-        if not isinstance(files, list):
+        source_evidence = storage.get("source_evidence", [])
+        if not isinstance(files, list) or not isinstance(source_evidence, list):
             continue
-        for file_item in files:
+        for file_item in (*files, *source_evidence):
             if not isinstance(file_item, dict):
                 continue
             key = _service_execution_file_key(artifact, file_item)
@@ -659,6 +683,194 @@ async def get_trial(
     base["result"] = trial.result
     base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])
     trajectory_index = trial.trajectory_index or {}
+    materialization = (
+        await s.execute(
+            select(ServiceExecutionLease)
+            .where(
+                ServiceExecutionLease.trial_id == trial.id,
+                ServiceExecutionLease.execution_role == "attempt",
+            )
+            .order_by(ServiceExecutionLease.attempt.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    trial_result = trial.result if isinstance(trial.result, dict) else {}
+    raw_runtime_result = trial_result.get("runtime_result")
+    runtime_result = raw_runtime_result if isinstance(raw_runtime_result, dict) else {}
+    canonical_bundle = None
+    canonical_bundle_error: DeliveryExportError | None = None
+    try:
+        canonical_bundle = await canonical_bundle_for_trial(s, trial=trial)
+    except DeliveryExportError as exc:
+        canonical_bundle_error = exc
+    source_bundle = None
+    if materialization is not None and materialization.output_upload_session_id is not None:
+        upload = await s.get(
+            ArtifactUploadSession,
+            materialization.output_upload_session_id,
+        )
+        if upload is not None and upload.team_id == trial.team_id:
+            source_counts = (
+                await s.execute(
+                    select(
+                        func.count(ArtifactUploadFile.file_index).label("required_file_count"),
+                        func.coalesce(
+                            func.sum(
+                                func.coalesce(
+                                    ArtifactUploadFile.expected_size,
+                                    ArtifactUploadFile.expected_max_bytes,
+                                )
+                            ),
+                            0,
+                        ).label("required_size_bytes"),
+                        func.coalesce(
+                            func.sum(
+                                case((ArtifactUploadFile.state == "verified", 1), else_=0)
+                            ),
+                            0,
+                        ).label("committed_file_count"),
+                        func.coalesce(
+                            func.sum(
+                                case(
+                                    (
+                                        ArtifactUploadFile.state == "verified",
+                                        ArtifactUploadFile.actual_size,
+                                    ),
+                                    else_=0,
+                                )
+                            ),
+                            0,
+                        ).label("committed_size_bytes"),
+                    ).where(ArtifactUploadFile.session_id == upload.id)
+                )
+            ).one()
+            source_bundle = {
+                "state": upload.state,
+                "required_file_count": int(source_counts.required_file_count or 0),
+                "required_size_bytes": int(source_counts.required_size_bytes or 0),
+                "committed_file_count": int(source_counts.committed_file_count or 0),
+                "committed_size_bytes": int(source_counts.committed_size_bytes or 0),
+            }
+    base["materialization"] = (
+        {
+            "state": materialization.materialization_state,
+            "lifecycle_stage": service_execution_lifecycle_stage(
+                trial_state=trial.state,
+                observed_state=materialization.observed_state,
+                output_commit_state=materialization.output_commit_state,
+                materialization_state=materialization.materialization_state,
+                error_code=materialization.error_code,
+                error_class=materialization.error_class,
+            ),
+            "compute_state": runtime_result.get("status"),
+            "output_commit_state": materialization.output_commit_state,
+            "canonical_ready": (
+                materialization.materialization_state == "committed"
+                and canonical_bundle is not None
+            ),
+            "backend": "nebius",
+            "pool_id": materialization.selected_pool_id,
+            "target_id": materialization.target_id if is_admin(ctx) else None,
+            "execution_state": materialization.observed_state,
+            "submitted_at": trial.submitted_at.isoformat(),
+            "pod_scheduled_at": (
+                materialization.pod_scheduled_at.isoformat()
+                if materialization.pod_scheduled_at
+                else None
+            ),
+            "pod_started_at": (
+                materialization.pod_started_at.isoformat()
+                if materialization.pod_started_at
+                else None
+            ),
+            "pod_terminated_at": (
+                materialization.pod_terminated_at.isoformat()
+                if materialization.pod_terminated_at
+                else None
+            ),
+            "output_committed_at": (
+                materialization.output_committed_at.isoformat()
+                if materialization.output_committed_at
+                else None
+            ),
+            "source_bundle": source_bundle,
+            "attempts": materialization.materialization_attempts,
+            "next_attempt_at": (
+                materialization.materialization_next_attempt_at.isoformat()
+                if materialization.materialization_next_attempt_at
+                else None
+            ),
+            "started_at": (
+                materialization.materialization_started_at.isoformat()
+                if materialization.materialization_started_at
+                else None
+            ),
+            "committed_at": (
+                materialization.materialization_committed_at.isoformat()
+                if materialization.materialization_committed_at
+                else None
+            ),
+            "error": (
+                {
+                    "code": materialization.materialization_error_code,
+                    "message": (
+                        materialization.materialization_error_message
+                        if is_admin(ctx)
+                        else "Canonical transfer did not complete; Loom will retry automatically."
+                    ),
+                }
+                if materialization.materialization_error_code
+                else (
+                    {
+                        "code": canonical_bundle_error.code,
+                        "message": "The canonical Trial bundle failed integrity validation.",
+                    }
+                    if canonical_bundle_error is not None
+                    else None
+                )
+            ),
+            "trajectory_sha256": materialization.canonical_trajectory_sha256,
+            "atif_sha256": materialization.canonical_atif_sha256,
+            "source_cleanup_state": materialization.source_cleanup_state,
+            "source_cleanup_attempts": materialization.source_cleanup_attempts,
+            "source_cleanup_error_message": (
+                (
+                    materialization.source_cleanup_error_message
+                    if is_admin(ctx)
+                    else "Temporary source cleanup will retry automatically."
+                )
+                if materialization.source_cleanup_error_message
+                else None
+            ),
+            "source_retain_until": (
+                materialization.source_retain_until.isoformat()
+                if materialization.source_retain_until
+                else None
+            ),
+            "bundle": (
+                {
+                    "schema_version": "loom.canonical-trial-bundle-export.v1",
+                    "artifact_id": str(canonical_bundle.artifact_id),
+                    "file_count": len(canonical_bundle.files),
+                    "size_bytes": sum(file.size_bytes for file in canonical_bundle.files),
+                    "manifest_sha256": canonical_bundle.manifest_sha256,
+                    "content_sha256": canonical_bundle.content_sha256,
+                    "download_url": str(
+                        public_url_for(
+                            request,
+                            "download_trial_bundle",
+                            trial_id=str(trial.id),
+                        )
+                    ),
+                }
+                if canonical_bundle is not None
+                and materialization.materialization_state == "committed"
+                else None
+            ),
+        }
+        if materialization is not None
+        else None
+    )
     service_execution_artifacts = list(
         (
             await s.execute(
@@ -718,6 +930,62 @@ async def get_trial(
         )
         base["usage_by_role"] = usage_by_role(llm_calls)
     return base
+
+
+def _trial_bundle_body(archive: ArchiveBuildResult) -> Iterator[bytes]:
+    try:
+        while chunk := archive.body.read(1024 * 1024):
+            yield chunk
+    finally:
+        close = getattr(archive.body, "close", None)
+        if callable(close):
+            close()
+
+
+@router.get("/trials/{trial_id}/bundle/download")
+async def download_trial_bundle(
+    request: Request,
+    sc: SessionAndCtx,
+    trial_id: UUID,
+) -> StreamingResponse:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = (
+        await s.execute(select(Trial).where(Trial.id == trial_id))
+    ).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
+    try:
+        bundle = await canonical_bundle_for_trial(s, trial=trial)
+        if bundle is None:
+            raise HTTPException(status_code=409, detail="canonical Trial bundle is not ready")
+        archive = build_canonical_trial_bundle_archive(
+            client=request.app.state.minio_client,
+            bundle=bundle,
+        )
+    except DeliveryExportError as exc:
+        detail = (
+            exc.detail
+            if is_admin(ctx)
+            else {
+                "code": exc.code,
+                "message": "The canonical Trial bundle failed integrity validation.",
+            }
+        )
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    filename = f"{trial.id}-complete-trial-bundle.tar.gz"
+    return StreamingResponse(
+        _trial_bundle_body(archive),
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(archive.size_bytes),
+            "X-Content-SHA256": f"sha256:{archive.sha256}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/trials/{trial_id}/resource-usage")
@@ -894,9 +1162,10 @@ async def download_artifact(
             service_artifact.storage if isinstance(service_artifact.storage, dict) else {}
         )
         files = storage.get("files")
-        if not isinstance(files, list):
+        source_evidence = storage.get("source_evidence", [])
+        if not isinstance(files, list) or not isinstance(source_evidence, list):
             continue
-        for file_item in files:
+        for file_item in (*files, *source_evidence):
             if not isinstance(file_item, dict):
                 continue
             if _service_execution_file_key(service_artifact, file_item) != key:
@@ -904,7 +1173,11 @@ async def download_artifact(
             media_type = file_item.get("media_type")
             return stream_object_response(
                 client=request.app.state.minio_client,
-                bucket=settings.artifacts_bucket,
+                bucket=(
+                    file_item["bucket"]
+                    if isinstance(file_item.get("bucket"), str) and file_item["bucket"]
+                    else settings.artifacts_bucket
+                ),
                 key=key,
                 filename=_artifact_filename(key),
                 artifact_kind="service_execution_artifact",

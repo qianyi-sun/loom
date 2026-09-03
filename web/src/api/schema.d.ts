@@ -729,6 +729,7 @@ export interface components {
           queued: number;
           claimed: number;
           running: number;
+          materializing: number;
           succeeded: number;
           failed: number;
           cancelled: number;
@@ -745,6 +746,93 @@ export interface components {
         status: "blocked" | "waiting" | "running" | "idle" | string;
       };
       resources: components["schemas"]["ResourceSummary"];
+      service_execution: {
+        targets: {
+          provider: "nebius";
+          pool_id: string;
+          environment: string;
+          region: string;
+          desired_state: string;
+          health_status: string;
+          target_id?: string;
+          policy: {
+            enabled: boolean;
+            max_nodes: number;
+            max_vcpu_millis: number;
+            max_memory_mib: number;
+            max_storage_mib: number;
+            node_cpu_millis: number;
+            node_memory_mib: number;
+            node_storage_mib: number;
+            max_pending_jobs: number;
+            max_unschedulable_jobs: number;
+            max_image_pull_backoff_jobs: number;
+            observation_max_age_seconds: number;
+          } | null;
+          observation: {
+            observed_at: string;
+            fresh_until: string | null;
+            is_fresh: boolean;
+            provider_capacity_state: string;
+            provider_capacity_reason: string | null;
+            autoscaler_state: string;
+            autoscaler_reason: string | null;
+            provider_quota_nodes: number;
+            provider_used_nodes: number;
+            provider_quota_nodes_headroom: number;
+            provider_quota_vcpu_millis: number;
+            provider_used_vcpu_millis: number;
+            provider_quota_vcpu_millis_headroom: number;
+            active_nodes: number;
+            node_states: {
+              desired: number;
+              creating: number;
+              ready: number;
+              failed: number;
+              deleting: number;
+            } | null;
+            policy_nodes_headroom: number | null;
+            provisioned_vcpu_millis: number;
+            policy_vcpu_millis_headroom: number | null;
+            allocatable_cpu_millis: number;
+            requested_cpu_millis: number;
+            allocatable_cpu_millis_free: number;
+            pending_jobs: number;
+            unschedulable_jobs: number;
+            image_pull_backoff_jobs: number;
+            pending_reasons: Record<string, number> | string[];
+          } | null;
+          command_backlog: number;
+          blockers: string[];
+          resource_profile: {
+            forecast_is_fresh: boolean;
+            observed_fit_slots: number;
+            immediate_executable_slots: number;
+            configured_additional_nodes: number;
+            configured_slots_per_node: number;
+            configured_scale_headroom_slots: number;
+            configured_total_fit_slots: number;
+            blockers: string[];
+          } | null;
+        }[];
+        activity: {
+          lease_count: number;
+          execution_states: Record<string, number>;
+          lifecycle_stages: Record<string, number>;
+          materialization: {
+            states: Record<string, number>;
+            backlog: number;
+            retry_attempts: number;
+            oldest_next_attempt_at: string | null;
+            oldest_pending_at: string | null;
+            oldest_pending_age_seconds: number | null;
+            last_committed_at: string | null;
+            pending_bytes: number;
+            source_retained_bytes: number;
+          };
+          source_cleanup_states: Record<string, number>;
+        };
+      };
     };
     ResourceSummary: {
       aggregate: components["schemas"]["ResourceAggregate"];
@@ -902,10 +990,65 @@ export interface components {
         step_name?: string;
         key: string;
         size: number;
+        sha256?: string | null;
+        media_type?: string | null;
         download_url: string;
         share_status?: "pending_scan" | "shared" | "blocked";
         blocked_reason?: string | null;
       }[];
+      materialization?: {
+        state: string;
+        lifecycle_stage:
+          | "queued"
+          | "admission_blocked"
+          | "provisioning"
+          | "running"
+          | "verifying"
+          | "materializing"
+          | "succeeded"
+          | "failed"
+          | "cancelled"
+          | "output_unavailable";
+        compute_state: string | null;
+        output_commit_state: string;
+        canonical_ready: boolean;
+        backend: "nebius";
+        pool_id: string;
+        target_id?: string | null;
+        execution_state: string;
+        submitted_at: string;
+        pod_scheduled_at: string | null;
+        pod_started_at: string | null;
+        pod_terminated_at: string | null;
+        output_committed_at: string | null;
+        source_bundle: {
+          state: string;
+          required_file_count: number;
+          required_size_bytes: number;
+          committed_file_count: number;
+          committed_size_bytes: number;
+        } | null;
+        attempts: number;
+        next_attempt_at: string | null;
+        started_at: string | null;
+        committed_at: string | null;
+        error: { code: string; message: string } | null;
+        trajectory_sha256: string | null;
+        atif_sha256: string | null;
+        source_cleanup_state: string;
+        source_cleanup_attempts: number;
+        source_cleanup_error_message: string | null;
+        source_retain_until: string | null;
+        bundle: {
+          schema_version: "loom.canonical-trial-bundle-export.v1";
+          artifact_id: string;
+          file_count: number;
+          size_bytes: number;
+          manifest_sha256: string;
+          content_sha256: string;
+          download_url: string;
+        } | null;
+      } | null;
       price_snapshots?: components["schemas"]["PriceSnapshot"][];
       debug_evidence?: components["schemas"]["DebugEvidence"];
       diagnosis?: components["schemas"]["DiagnosisReport"];
@@ -1211,6 +1354,13 @@ export interface components {
     };
     BatchDetail: components["schemas"]["Batch"] & {
       trial_summary: Record<string, number>;
+      service_execution_summary?: {
+        lease_count: number;
+        lifecycle_stages: Record<string, number>;
+        output_commit_states: Record<string, number>;
+        materialization_states: Record<string, number>;
+        canonical_ready_count: number;
+      } | null;
       aggregate_reward: number | null;
       benchmark_summary: components["schemas"]["BenchmarkSummary"][];
       combination_summary: components["schemas"]["CombinationSummary"][];

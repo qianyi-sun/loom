@@ -1088,6 +1088,19 @@ export interface RunLibraryBatch {
 export interface RunLibraryBatchDetail extends RunLibraryBatch {
   artifact_inventory: ArtifactInventory;
   artifact_inventory_truncated?: boolean;
+  trial_bundles?: Array<{
+    trial_id: string;
+    task_id: string;
+    trial_state: string;
+    materialization_state: string;
+    attempts: number;
+    canonical_ready: boolean;
+    file_count: number;
+    size_bytes: number;
+    manifest_sha256: string | null;
+    content_sha256: string | null;
+    download_url: string | null;
+  }>;
 }
 
 export interface RunLibraryBatchList {
@@ -1366,6 +1379,11 @@ export const api = {
     apiDownload(
       `/api/v1/trials/${id}/trajectory/download`,
       `${id}-events.jsonl`,
+    ),
+  downloadTrialBundle: (id: string) =>
+    apiDownload(
+      `/api/v1/trials/${id}/bundle/download`,
+      `${id}-complete-trial-bundle.tar.gz`,
     ),
   downloadArtifact: (id: string, key: string, filename: string) =>
     apiDownload(

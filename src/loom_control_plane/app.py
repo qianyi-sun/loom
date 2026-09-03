@@ -62,6 +62,10 @@ from loom_control_plane.routes import (
     workers,
 )
 from loom_control_plane.scheduler.crash_detector import run_crash_detector_loop
+from loom_control_plane.service_execution_materializer import (
+    ServiceExecutionMaterializer,
+    run_service_execution_materializer_loop,
+)
 from loom_control_plane.service_execution_scheduler import (
     run_service_execution_scheduler_loop,
 )
@@ -279,6 +283,29 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 ),
                 name="loom-cp-service-execution-scheduler",
             )
+        service_execution_materializer_task: asyncio.Task[None] | None = None
+        if settings.service_execution_materializer_enabled:
+            service_execution_materializer_task = asyncio.create_task(
+                run_service_execution_materializer_loop(
+                    materializer=ServiceExecutionMaterializer(
+                        session_factory=session_factory,
+                        source_store=artifact_store,
+                        source_bucket=settings.artifacts_bucket,
+                        canonical_store=artifact_store,
+                        artifacts_bucket=settings.artifacts_bucket,
+                        trajectories_bucket=settings.trajectories_bucket,
+                        claim_ttl_seconds=(
+                            settings.service_execution_materializer_claim_ttl_sec
+                        ),
+                        source_retention_seconds=(
+                            settings.service_execution_source_retention_sec
+                        ),
+                    ),
+                    interval_seconds=settings.service_execution_materializer_interval_sec,
+                    concurrency=settings.service_execution_materializer_concurrency,
+                ),
+                name="loom-cp-service-execution-materializer",
+            )
         try:
             yield
         finally:
@@ -291,6 +318,8 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 slurm_controller_task.cancel()
             if service_execution_scheduler_task is not None:
                 service_execution_scheduler_task.cancel()
+            if service_execution_materializer_task is not None:
+                service_execution_materializer_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
             # cancellation arrives, asyncpg connection takes a moment
             # to release) doesn't block the entire lifespan shutdown —
@@ -305,6 +334,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 live_preview_reconciler_task,
                 slurm_controller_task,
                 service_execution_scheduler_task,
+                service_execution_materializer_task,
             ):
                 if t is None:
                     continue

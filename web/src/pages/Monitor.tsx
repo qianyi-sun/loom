@@ -49,6 +49,7 @@ const TRIAL_STATE_OPTIONS = [
   "queued",
   "claimed",
   "running",
+  "materializing",
   "succeeded",
   "failed",
   "cancelled",
@@ -63,12 +64,25 @@ const STATE_OPTION_LABELS: Record<string, string> = {
   finished: "Finished - all trials terminal",
   queued: "Queued - waiting for worker",
   running: "Running - in progress",
+  materializing: "Materializing - securing complete output",
   submitted: "Submitted - waiting for scheduling",
   succeeded: "Succeeded - platform run completed",
 };
 
 function stateOptionLabel(state: string): string {
   return STATE_OPTION_LABELS[state] ?? state.replaceAll("_", " ");
+}
+
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = size;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`;
 }
 
 function SegmentedToggle({
@@ -345,6 +359,93 @@ function ResourcePoolBreakdown({
   );
 }
 
+function NebiusExecutionBreakdown({
+  serviceExecution,
+}: {
+  serviceExecution: MonitorSummary["service_execution"];
+}): JSX.Element | null {
+  const activity = serviceExecution?.activity;
+  if (!serviceExecution || (!serviceExecution.targets.length && !activity?.lease_count)) {
+    return null;
+  }
+  return (
+    <div className="space-y-3 rounded-xl border border-sky-200 bg-sky-50/50 p-4">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-900">Nebius service execution</h3>
+        <p className="mt-1 text-xs text-slate-600">
+          Provider capacity is separate from Docker worker slots. Configured headroom is not executable capacity until a fresh observation confirms it.
+        </p>
+      </div>
+      {serviceExecution.targets.map((target) => {
+        const observation = target.observation;
+        const profile = target.resource_profile;
+        const healthy = target.health_status === "healthy" && observation?.is_fresh === true;
+        return (
+          <div key={`${target.pool_id}:${target.environment}`} className="rounded-lg border border-sky-200 bg-white p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-semibold text-slate-900">
+                {target.pool_id} · {target.environment} · {target.region}
+              </p>
+              <StatusPill variant={healthy ? "success" : "failed"}>
+                {healthy ? "fresh" : "blocked/stale"}
+              </StatusPill>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
+              <CountBox label="Executable now" value={`${profile?.immediate_executable_slots ?? 0} slots`} />
+              <CountBox label="Scale headroom" value={`${profile?.configured_scale_headroom_slots ?? 0} slots`} />
+              <CountBox label="Configured total" value={`${profile?.configured_total_fit_slots ?? 0} slots`} />
+              <CountBox label="Capacity-accounted nodes" value={`${observation?.active_nodes ?? 0} / ${target.policy?.max_nodes ?? 0}`} />
+              <CountBox label="Pending jobs" value={`${observation?.pending_jobs ?? 0}`} />
+            </div>
+            {observation?.node_states ? (
+              <p className="mt-2 text-xs text-slate-600">
+                Nodes: desired {observation.node_states.desired} · creating {observation.node_states.creating} · ready {observation.node_states.ready} · failed {observation.node_states.failed} · deleting {observation.node_states.deleting}
+              </p>
+            ) : null}
+            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+              <span>observed: {observation?.observed_at ? formatLocalDateTime(observation.observed_at) : "unavailable"}</span>
+              <span>autoscaler: {observation?.autoscaler_state ?? "unknown"}</span>
+              <span>provider: {observation?.provider_capacity_state ?? "unknown"}</span>
+              <span>quota: {Math.round((observation?.provider_used_vcpu_millis ?? 0) / 1000)} / {Math.round((observation?.provider_quota_vcpu_millis ?? 0) / 1000)} vCPU</span>
+              <span>commands waiting: {target.command_backlog}</span>
+            </div>
+            {[...target.blockers, ...(profile?.blockers ?? [])].length > 0 ? (
+              <p className="mt-2 break-words text-xs text-amber-800">
+                Blockers: {[...new Set([...target.blockers, ...(profile?.blockers ?? [])])].join(", ")}
+              </p>
+            ) : null}
+          </div>
+        );
+      })}
+      {activity ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+            <CountBox label="Execution leases" value={`${activity.lease_count}`} />
+            <CountBox label="Materializing" value={`${activity.materialization.backlog}`} />
+            <CountBox label="Oldest pending" value={activity.materialization.oldest_pending_age_seconds == null ? "—" : `${activity.materialization.oldest_pending_age_seconds}s`} />
+            <CountBox label="Unavailable" value={`${activity.materialization.states.unavailable ?? 0}`} />
+            <CountBox label="Transfer retries" value={`${activity.materialization.retry_attempts}`} />
+              <CountBox label="Transfer backlog bytes" value={formatBytes(activity.materialization.pending_bytes)} />
+              <CountBox label="Source spool retained" value={formatBytes(activity.materialization.source_retained_bytes)} />
+          </div>
+          <p className="text-xs text-slate-600">
+            Lifecycle: {Object.entries(activity.lifecycle_stages).filter(([, count]) => count > 0).map(([state, count]) => `${state} ${count}`).join(" · ") || "none"}
+          </p>
+          <p className="text-xs text-slate-600">
+            Provider execution: {Object.entries(activity.execution_states).map(([state, count]) => `${state} ${count}`).join(" · ") || "none"}
+          </p>
+          <p className="text-xs text-slate-600">
+            Source cleanup: {Object.entries(activity.source_cleanup_states).map(([state, count]) => `${state} ${count}`).join(" · ") || "none"}
+          </p>
+          <p className="text-xs text-slate-600">
+            Last canonical acknowledgement: {activity.materialization.last_committed_at ? formatLocalDateTime(activity.materialization.last_committed_at) : "none"}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MonitorHealthSummary({
   view,
   search,
@@ -508,6 +609,7 @@ function MonitorHealthSummary({
           </div>
         </div>
         <ResourcePoolBreakdown resources={data.resources} />
+        <NebiusExecutionBreakdown serviceExecution={data.service_execution} />
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
           <span>
             Batches: {data.state_counts.batches.submitted} submitted,{" "}
@@ -517,6 +619,7 @@ function MonitorHealthSummary({
           <span>
             Trials: {data.state_counts.trials.succeeded} succeeded,{" "}
             {data.state_counts.trials.failed} failed,{" "}
+            {data.state_counts.trials.materializing} materializing,{" "}
             {data.state_counts.trials.cancelled} cancelled
           </span>
         </div>

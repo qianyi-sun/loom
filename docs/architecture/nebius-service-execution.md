@@ -3,20 +3,23 @@
 Status: accepted hybrid target architecture for issue #1548. The
 provider-neutral durable control plane, namespace-scoped Kubernetes Job
 adapter, read-only capacity collector, and evidence-gated resource forecast
-are implemented but not
-traffic-enabled. Infrastructure,
-sandbox-runtime acceptance, live canaries, routing-policy changes, maintenance
+are implemented. Development opt-in traffic and current-quota live batches have
+run through the durable path; wider routing, the 200-overlap gate, maintenance
 drains, and any future pool retirement remain separately authorized work.
 
 ## Decision
 
 Loom service mode has one provider-neutral admission and authority model over
-three accepted concurrent pools: `nebius-cpu`, `oldlab`, and `gb10`. Nebius
+three accepted concurrent pools: `nebius-cpu`, `oldlab`, and `gb10`. A normal
+user explicitly selects the logical Batch backend: `backend=nebius` fences the
+attempt to `nebius-cpu`, while `backend=docker` fences it to OLDLAB/GB10.
+Nebius
 uses fenced Kubernetes Job execution units; OLDLAB and GB10 retain the existing
 worker-claim adapter. A trial declares `WorkloadRequirementsV1`; Loom records
 one versioned routing decision, then exactly one adapter may obtain execution
-authority for that attempt. Trials never select a provider, region, cluster,
-worker name, or reusable slot directly.
+authority for that attempt. Users never select a physical provider target,
+region, cluster, worker name, or reusable slot directly, and no cross-backend
+fallback is allowed.
 
 The checked contracts live in
 `src/loom/execution_contract.py`. Their generated JSON schemas and the complete
@@ -128,10 +131,22 @@ Automatic compilation is fail-closed and intentionally not a general Docker
 converter. It accepts one Linux x86 CPU task with explicit positive CPU, RAM,
 ephemeral-storage and timeout bounds; `/workspace`; one safe instruction; a
 direct-completion/LiteLLM API agent; one safe script verifier; and safe relative
-artifact paths. It rejects GPU, multi-step, custom identity, sidecar, skill,
+artifact paths. All declared and required artifact paths are frozen into the
+runtime plan together with the lossless model-call trajectory, attributed
+usage, and structured verifier output; multiple artifacts are part of the
+supported ordinary TaskSet matrix. It rejects GPU, multi-step, custom identity, sidecar, skill,
 MCP, environment-variable, custom DNS/host/tmpfs, health-check, capability,
 extended-runtime, mutable-image, or host-specialized shapes. Supporting one of
 those shapes requires a reviewed materializer change, not an implicit default.
+
+The candidate-bound acceptance TaskSet builder and authenticated staged runner
+are the executable acceptance path. The builder derives the immutable task
+image from the deployment runtime profile. The runner submits it through the
+public TaskSet API, creates explicit `backend=nebius` Batches, measures only
+running/node-backed overlap, verifies every complete canonical Trial archive,
+and waits for `0 -> N -> 0` before advancing. It automatically splits stages
+above the API per-combination sample limit without changing task semantics.
+Neither tool writes the database or manually joins a transfer after execution.
 
 When the environment scheduler is enabled, it fairly selects one queued,
 converted Trial, requires a fresh healthy target in the bound environment,
@@ -449,12 +464,56 @@ storage. The common multipart protocol verifies per-part and whole-object
 digests, parses and rebinds `result.json`, and writes immutable manifest/marker
 evidence before the lease becomes `committed`.
 
+`0129` separates successful compute from canonical publication. A committed
+source bundle puts the Trial in `materializing`; Kubernetes cleanup and node
+scale-to-zero may finish independently. A restart-safe Control Plane worker
+claims the persisted lease, verifies the root manifest, per-Artifact manifest,
+commit marker, file sizes, and every SHA-256, then streams every file to the
+stable `trials/<team>/<trial>/attempts/<attempt>/bundles/<artifact>/` namespace.
+It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
+commits Trial events, Artifact locations, the trajectory index, and the final
+Trial state in one database transaction. Temporary database or object-store
+errors return the lease to the persisted queue without rerunning the Pod;
+missing or contradictory source evidence fails with `output_unavailable`.
+Each Control Plane runs the configured number of materialization workers
+(default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple
+Control Plane replicas mutually exclusive without imposing a serial transfer
+bottleneck on large Nebius batches.
+
+The source prefix remains immutable for the configured recovery window after
+canonical acknowledgement. A second persisted claim then deletes only the
+manifest-enumerated source objects and records `source_cleanup_state=complete`.
+Cleanup is idempotent, survives process restarts, and remains valid after the
+Kubernetes execution lease itself is marked deleted. The canonical Artifact
+metadata always points at the stable Trial prefix, never at the expiring source
+spool.
+
+The canonical Artifact inventory includes every declared payload plus stable
+copies of the root manifest, committed marker, and per-Artifact manifest. The
+normal Trial download API exposes those canonical objects, and Batch Delivery
+Export adds the same immutable bundle under
+`trial_bundles/<task>/<trial>/`, verifies each recorded size and SHA-256 while
+streaming it into the archive, and emits a per-Trial `bundle.json`. This keeps
+benchmark evidence, SFT/RL traces, logs, diagnostics, accounting, and
+provenance together instead of treating `answer.txt` as the deliverable.
+`GET /api/v1/trials/{trial_id}/bundle/download` assembles the complete canonical
+Trial package on demand, revalidates every stored size and SHA-256 while
+streaming, and includes `bundle.json` plus `checksums/SHA256SUMS`. The SPA and
+`loom eval trial download --kind bundle` expose that same authenticated route.
+Run Library batch detail lists owner/admin-accessible complete bundles without
+loading full legacy Trial payloads. Integrity failure keeps the bundle
+unavailable and returns a sanitized error; it never falls back to a partial
+answer file.
+
 Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
 operator projections also return at most 500 event and 500 history rows. These
 limits are contract errors, not invitations to discard older authority.
 Prometheus service-execution metrics aggregate by command type or surface and
-never use trial, lease, Job, namespace, or team identifiers as labels.
+never use trial, lease, Job, namespace, or team identifiers as labels. The
+materializer additionally reports pending count, bytes, oldest age, retries,
+permanent-unavailable count/bytes, completed commits, and retained source-spool
+count/bytes.
 
 The schema downgrade is permitted only when every execution class, target, and
 lease row has been deliberately removed. An image rollback is forward-schema
@@ -583,13 +642,18 @@ The proportionate baseline is documented in
 at one system-node replica, bound to `nebius-eu-north1-development` and an
 immutable registry digest. It creates no execution node itself: ordinary
 persisted Batch/Trial demand creates a Job, and the managed node-group
-autoscaler remains the only authority that changes the `0..10` execution-node
-count. Ten 48-vCPU nodes provide a 480-vCPU target envelope for 200 concurrent
-2-vCPU tasks plus 80 vCPUs of aggregate node overhead. The one-time bootstrap
+autoscaler remains the only authority that changes the execution-node count.
+The current accepted envelope is `0..8` 16-vCPU nodes and 56 concurrent
+2-vCPU tasks. After provider readback confirms the requested 512-vCPU/16-VM
+quota and 48-vCPU regional stock, the target envelope becomes `0..10` 48-vCPU
+nodes: 480 vCPUs for 200 tasks plus 80 vCPUs of aggregate node overhead. The one-time bootstrap
 still requires the referenced database and credential Secrets; no per-Batch
 operator action is part of the path. Every runtime convergence also applies
 `deploy/k8s/nebius-development-capacity-policy.json`, so the control-plane
 admission envelope cannot depend on a remembered manual API call.
+The same checked patch explicitly enables the restart-safe materializer, its
+claim TTL, polling cadence, concurrency, and source-retention window; these are
+deployment state, not an operator command that must be repeated per Batch.
 The disposable k3s conformance test validates the real Kubernetes API seam
 with a suspended Job and makes no Nebius call.
 
@@ -655,6 +719,7 @@ backend keep their domain-specific names.
 | `POST /api/v1/batches.backend`, `Batch.backend`, clone/rerun payloads | User-visible, explicit execution choice: `docker` admits only GB10/OLDLAB worker execution; `nebius` admits only the `nebius-cpu` service-execution pool. | Retained as the stable user choice. No cross-backend fallback is allowed. |
 | `GET /api/v1/backends`, overview/monitor `available_backends` | Reports live-worker evidence separately from fresh scale-from-zero authority. | Retained as the user-facing backend catalog. |
 | NewBatch backend picker and BatchDetail/Run Library backend labels | Displays the explicit backend and whether it is live, scale-from-zero capable, or unavailable. | Retained. Users choose Docker or Nebius; they do not choose a physical node or target. |
+| Monitor and Trial Detail execution telemetry | Reports Nebius configured headroom separately from fresh executable slots, plus node/autoscaler/quota, Pod lifecycle, canonical-transfer backlog/retries, and source cleanup. | Retained as the user-visible persistent lifecycle; non-admin responses omit target identity and raw internal errors. |
 | `Trial.requires_caps` | Versioned frozen `WorkloadRequirementsV1` projection is stored alongside legacy JSON during bounded migration. | Legacy unversioned caps removed. |
 | Worker `capabilities[].backend` and `Worker.pool_name` | Observed adapter capability and pool identity; never normal user submission identity. | Retained for accepted OLDLAB/GB10 worker claims and joined with provider-neutral route observability. |
 | `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence within the already selected backend; user batches remain forbidden from setting it. | Operator control remains distinct from the stable user-facing backend choice. |

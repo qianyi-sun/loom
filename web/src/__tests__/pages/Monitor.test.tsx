@@ -21,6 +21,7 @@ const monitorSummaryPayload = {
       queued: 1,
       claimed: 0,
       running: 2,
+      materializing: 1,
       succeeded: 4,
       failed: 1,
       cancelled: 0,
@@ -116,16 +117,70 @@ const monitorSummaryPayload = {
       },
     ],
   },
+  service_execution: {
+    targets: [
+      {
+        provider: "nebius",
+        pool_id: "nebius-cpu",
+        environment: "development",
+        region: "eu-north1",
+        desired_state: "active",
+        health_status: "healthy",
+        policy: { max_nodes: 8 },
+        observation: {
+          is_fresh: true,
+          active_nodes: 2,
+          node_states: {
+            desired: 3,
+            creating: 1,
+            ready: 2,
+            failed: 0,
+            deleting: 0,
+          },
+          pending_jobs: 3,
+          autoscaler_state: "scaling",
+          provider_capacity_state: "available",
+          provider_used_vcpu_millis: 128000,
+          provider_quota_vcpu_millis: 200000,
+        },
+        command_backlog: 1,
+        blockers: [],
+        resource_profile: {
+          immediate_executable_slots: 12,
+          configured_scale_headroom_slots: 42,
+          configured_total_fit_slots: 54,
+          blockers: [],
+        },
+      },
+    ],
+    activity: {
+      lease_count: 56,
+      execution_states: { finalized: 56 },
+      lifecycle_stages: { succeeded: 54, materializing: 1, output_unavailable: 1 },
+      materialization: {
+        states: { committed: 54, pending: 1, running: 0, unavailable: 1 },
+        backlog: 1,
+        retry_attempts: 2,
+        oldest_next_attempt_at: "2026-09-03T10:00:00Z",
+        oldest_pending_at: "2026-09-03T09:58:00Z",
+        oldest_pending_age_seconds: 120,
+        last_committed_at: "2026-09-03T09:59:00Z",
+        pending_bytes: 1024,
+        source_retained_bytes: 4096,
+      },
+      source_cleanup_states: { retained: 54, complete: 2 },
+    },
+  },
 };
 
-function mockMonitorEndpoints(): FetchMock {
+function mockMonitorEndpoints(summary: unknown = monitorSummaryPayload): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
       if (url.includes("/api/v1/monitor/summary")) {
         return Promise.resolve(
-          new Response(JSON.stringify(monitorSummaryPayload), {
+          new Response(JSON.stringify(summary), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
@@ -515,6 +570,18 @@ describe("Monitor human-readable labels", () => {
     expect(screen.getByText("idle_excess_capacity")).toBeInTheDocument();
     expect(screen.getByText("scale_up")).toBeInTheDocument();
     expect(screen.getByText("pending_cap")).toBeInTheDocument();
+    expect(screen.getByText("Nebius service execution")).toBeInTheDocument();
+    expect(screen.getByText("nebius-cpu · development · eu-north1")).toBeInTheDocument();
+    expect(screen.getByText("12 slots")).toBeInTheDocument();
+    expect(screen.getByText("42 slots")).toBeInTheDocument();
+    expect(screen.getByText(/128 \/ 200 vCPU/)).toBeInTheDocument();
+    expect(screen.getByText(/Nodes: desired 3 · creating 1 · ready 2/)).toBeInTheDocument();
+    expect(screen.getByText("120s")).toBeInTheDocument();
+    expect(screen.getByText("Lifecycle: succeeded 54 · materializing 1 · output_unavailable 1")).toBeInTheDocument();
+    expect(screen.getByText("Provider execution: finalized 56")).toBeInTheDocument();
+    expect(screen.getByText("Source cleanup: retained 54 · complete 2")).toBeInTheDocument();
+    expect(screen.getByText("4.00 KB")).toBeInTheDocument();
+    expect(screen.getByText("1.00 KB")).toBeInTheDocument();
 
     await waitFor(() => {
       const summaryRequest = fetchMock.mock.calls.find(([input]) =>
@@ -534,6 +601,50 @@ describe("Monitor human-readable labels", () => {
       );
       expect(url.searchParams.get("provider_model_id")).toBe("qwen");
     });
+  });
+
+  it("shows stale Nebius capacity, blockers, and empty lifecycle evidence explicitly", async () => {
+    mockMonitorEndpoints({
+      ...monitorSummaryPayload,
+      service_execution: {
+        targets: [
+          {
+            ...monitorSummaryPayload.service_execution.targets[0],
+            health_status: "degraded",
+            observation: null,
+            blockers: ["provider_quota_exhausted"],
+            resource_profile: null,
+          },
+        ],
+        activity: {
+          lease_count: 1,
+          execution_states: {},
+          lifecycle_stages: {},
+          materialization: {
+            states: {},
+            backlog: 0,
+            retry_attempts: 0,
+            oldest_next_attempt_at: null,
+            oldest_pending_at: null,
+            oldest_pending_age_seconds: null,
+            last_committed_at: null,
+            pending_bytes: 0,
+            source_retained_bytes: 0,
+          },
+          source_cleanup_states: {},
+        },
+      },
+    });
+    renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
+
+    expect(await screen.findByText("blocked/stale")).toBeInTheDocument();
+    expect(screen.getByText("Blockers: provider_quota_exhausted")).toBeInTheDocument();
+    expect(screen.getByText("Lifecycle: none")).toBeInTheDocument();
+    expect(screen.getByText("Provider execution: none")).toBeInTheDocument();
+    expect(screen.getByText("Source cleanup: none")).toBeInTheDocument();
+    expect(screen.getByText("Last canonical acknowledgement: none")).toBeInTheDocument();
+    expect(screen.getAllByText("0 B")).toHaveLength(2);
+    expect(screen.getByText("—")).toBeInTheDocument();
   });
 
   it("groups failed trials by diagnostic reason with next-step links", async () => {

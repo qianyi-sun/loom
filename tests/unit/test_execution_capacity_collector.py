@@ -157,6 +157,13 @@ async def test_collector_publishes_only_after_complete_provider_and_cluster_capt
     assert receipt.created is True
     observation = control_plane.observations[0]
     assert observation.active_nodes == 4
+    assert observation.node_states.model_dump() == {
+        "desired": 4,
+        "creating": 1,
+        "ready": 3,
+        "failed": 0,
+        "deleting": 0,
+    }
     assert observation.provisioned_vcpu_millis == 16_000
     assert observation.provisioned_memory_mib == 32_768
     assert observation.provisioned_storage_mib == 409_600
@@ -663,6 +670,13 @@ def _observation(observed_at: datetime) -> Any:
         provider_used_memory_mib=0,
         provider_used_storage_mib=0,
         active_nodes=1,
+        node_states={
+            "desired": 1,
+            "creating": 0,
+            "ready": 1,
+            "failed": 0,
+            "deleting": 0,
+        },
         provisioned_vcpu_millis=4000,
         provisioned_memory_mib=8192,
         provisioned_storage_mib=102400,

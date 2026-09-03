@@ -323,13 +323,52 @@ After restore and before resuming submissions:
 6. require revoked generations to fail Gateway, heartbeat, artifact,
    trajectory, usage, and result writes before enabling any target.
 
+For `0129` and later, also group `execution_leases` by
+`materialization_state` and `source_cleanup_state`. A `pending` or expired
+`running` materialization is self-healing: restore canonical PostgreSQL and
+both object buckets, start the Control Plane with
+`service_execution_materializer_enabled=true`, and let the original claim be
+reclaimed. Do not reset attempts, synthesize a new upload session, copy an
+object manually, or change a digest. A temporary failure retains its bounded
+error and next-attempt time; an integrity failure becomes `unavailable` and the
+Trial exposes `output_unavailable` for diagnosis.
+
+`service_execution_materializer_concurrency` controls transfer concurrency per
+Control Plane process (default eight). Change it through the deployment
+configuration and normal rollout path; do not run ad hoc copier processes.
+
+Canonical success requires all of the following together:
+
+- `materialization_state=committed` and both canonical SHA-256 fields present;
+- the Trial is terminal and its schema-1 trajectory index points at the
+  configured trajectories bucket;
+- the service-execution Artifact file list contains explicit canonical bucket,
+  key, size, media type, and SHA-256 values;
+- the normal authenticated Trial/Artifact endpoints download those exact
+  bytes and the preserved commit evidence without an internal object-store URL;
+- Batch Delivery Export contains the matching `trial_bundles/<task>/<trial>/`
+  payload, `bundle.json`, root manifest, committed marker, and Artifact manifest,
+  and rejects any size or digest drift during archive assembly.
+
+After `service_execution_source_retention_sec`, the same worker claims source
+cleanup. `retained` or expired `running` rows are retryable operational debt;
+`complete` means every object named by the source root and item manifests has
+been deleted. Never shorten the retention deadline by editing the row, and
+never delete the source marker before canonical acknowledgement. Alert on the
+materialization backlog/oldest-age gauges and retained source-spool bytes; an
+increasing retry counter requires storage or database diagnosis, not a model
+rerun. Nonzero permanent-unavailable count or bytes means corrupt source
+evidence is being retained for diagnosis and must not be silently garbage
+collected.
+
 Retention runs only through the lifecycle GC inventory/approval path after
 object deletion has been verified. Its metadata delete order is
 `execution_leases` first (database cascades command, event, and history rows),
 then resource usage, trial events, LLM calls, artifacts, Trials, and Batches.
 Never delete command/event/history rows independently, and never downgrade
 `0113` while any execution class, target, or lease exists. Never downgrade
-`0114` while a runtime-bound or verifier lease exists. A failed provider
+`0114` while a runtime-bound or verifier lease exists, or `0129` while any
+materialization has started. A failed provider
 cleanup remains `pending`, `in_progress`, or `blocked`; it is operational debt,
 not permission to purge its authority record.
 

@@ -13,7 +13,15 @@ from loom.models.types import ModelSpec
 
 
 def test_trial_state_values():
-    for v in ("queued", "claimed", "running", "succeeded", "failed", "cancelled"):
+    for v in (
+        "queued",
+        "claimed",
+        "running",
+        "materializing",
+        "succeeded",
+        "failed",
+        "cancelled",
+    ):
         assert TrialState(v).value == v
 
 
@@ -41,6 +49,10 @@ def test_failure_reason_includes_missing_required_artifacts():
         FailureReason.MISSING_REQUIRED_ARTIFACTS.value
         == "missing_required_artifacts"
     )
+
+
+def test_failure_reason_includes_output_unavailable():
+    assert FailureReason.OUTPUT_UNAVAILABLE.value == "output_unavailable"
 
 
 def test_agent_info():

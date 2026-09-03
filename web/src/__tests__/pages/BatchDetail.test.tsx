@@ -278,6 +278,29 @@ describe("BatchDetail run plan", () => {
     expect(screen.queryByText("trial_config")).not.toBeInTheDocument();
   });
 
+  it("shows durable Nebius lifecycle and canonical readiness counts", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      backend: "nebius",
+      service_execution_summary: {
+        lease_count: 20,
+        lifecycle_stages: { succeeded: 18, materializing: 2 },
+        output_commit_states: { committed: 20 },
+        materialization_states: { committed: 18, running: 2 },
+        canonical_ready_count: 18,
+      },
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText("Nebius execution lifecycle")).toBeInTheDocument();
+    expect(screen.getByText("Canonical bundles ready")).toBeInTheDocument();
+    expect(screen.getByText("succeeded 18")).toBeInTheDocument();
+    expect(screen.getByText("materializing 2")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Follow live capacity, retries, and scale-to-zero/i }),
+    ).toHaveAttribute("href", `/monitor?view=trials&batch_id=${BATCH_ID}`);
+  });
+
   it("confirms cancellation and closes only after server success", async () => {
     const fetchMock = mockBatch();
     const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");

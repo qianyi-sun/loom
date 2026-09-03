@@ -305,6 +305,13 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
     kinds = [document["kind"] for document in documents]
     assert "ClusterRole" not in kinds
     assert "ClusterRoleBinding" not in kinds
+    quota = next(document for document in documents if document["kind"] == "ResourceQuota")
+    assert quota["metadata"]["namespace"] == "loom-nebius-development"
+    assert quota["spec"]["hard"] == {
+        "pods": "72",
+        "requests.cpu": "128",
+        "requests.memory": "512Gi",
+    }
     role = next(document for document in documents if document["kind"] == "Role")
     assert role["metadata"]["namespace"] == "loom-nebius-development"
     assert role["rules"] == [
@@ -354,6 +361,11 @@ def test_development_patch_persists_service_execution_scheduler_identity() -> No
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "True"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "development"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"] == "nebius-cpu"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED"]["value"] == "True"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_INTERVAL_SEC"]["value"] == "2.0"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_CLAIM_TTL_SEC"]["value"] == "300.0"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_CONCURRENCY"]["value"] == "8"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC"]["value"] == "86400"
     assert env["LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON"]["valueFrom"] == {
         "secretKeyRef": {"name": "loom-image-admission", "key": "keyring-json"}
     }
@@ -443,7 +455,9 @@ def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> Non
     assert actual == expected
 
 
-def test_platform_network_policies_admit_only_execution_units_from_nebius_namespace() -> None:
+def test_platform_network_policies_admit_only_execution_units_from_known_nebius_namespaces() -> (
+    None
+):
     documents = list(
         yaml.safe_load_all((_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8"))
     )
@@ -460,15 +474,23 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
         nebius_peers = [
             peer
             for peer in ingress["from"]
-            if peer.get("namespaceSelector", {})
-            .get("matchLabels", {})
-            .get("kubernetes.io/metadata.name")
-            == "loom-nebius-development"
+            if peer.get("namespaceSelector", {}).get("matchExpressions", [{}])[0].get("key")
+            == "kubernetes.io/metadata.name"
         ]
         assert nebius_peers == [
             {
                 "namespaceSelector": {
-                    "matchLabels": {"kubernetes.io/metadata.name": "loom-nebius-development"}
+                    "matchExpressions": [
+                        {
+                            "key": "kubernetes.io/metadata.name",
+                            "operator": "In",
+                            "values": [
+                                "loom-nebius-development",
+                                "loom-nebius-staging",
+                                "loom-nebius-production",
+                            ],
+                        }
+                    ]
                 },
                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "execution-unit"}},
             }
