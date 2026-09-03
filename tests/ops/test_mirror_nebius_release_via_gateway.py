@@ -14,12 +14,14 @@ DIGESTS = {
     "gateway": "1" * 64,
     "control_plane": "2" * 64,
     "service": "3" * 64,
-    "execution_runtime": "4" * 64,
+    "execution_actuator": "4" * 64,
+    "execution_runtime": "5" * 64,
 }
 COMPONENTS = {
     "gateway": "loom-llm-gateway",
     "control_plane": "loom-control-plane",
     "service": "loom-service",
+    "execution_actuator": "loom-execution-actuator",
     "execution_runtime": "loom-execution-runtime",
 }
 TARGET = "cr.eu-north1.nebius.cloud/e00example"

@@ -216,7 +216,8 @@ development execution runtime once:
 scripts/ops/apply_nebius_development_runtime.sh \
   --kubeconfig /secure/path/development-eu-north1.kubeconfig \
   --nebius-credentials /secure/path/capacity-observer-credentials.json \
-  --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
+  --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json \
+  --execution-actuator-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-actuator@sha256:DIGEST
 ```
 
 From outside the Nebius VPC, run the same convergence through the managed
@@ -234,6 +235,7 @@ scripts/ops/mirror_nebius_release_via_gateway.py \
   --gateway-image ghcr.io/qianyi-sun/loom-llm-gateway@sha256:DIGEST \
   --control-plane-image ghcr.io/qianyi-sun/loom-control-plane@sha256:DIGEST \
   --service-image ghcr.io/qianyi-sun/loom-service@sha256:DIGEST \
+  --execution-actuator-image ghcr.io/qianyi-sun/loom-execution-actuator@sha256:DIGEST \
   --execution-runtime-image ghcr.io/qianyi-sun/loom-execution-runtime@sha256:DIGEST \
   --output /secure/path/nebius-release-mirror.json
 
@@ -267,11 +269,12 @@ scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
   --gateway-image cr.eu-north1.nebius.cloud/REGISTRY/loom-llm-gateway@sha256:DIGEST \
   --control-plane-image cr.eu-north1.nebius.cloud/REGISTRY/loom-control-plane@sha256:DIGEST \
   --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST \
+  --execution-actuator-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-actuator@sha256:DIGEST \
   --execution-runtime-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-runtime@sha256:DIGEST \
   --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
 ```
 
-The mirror helper accepts only the four expected digest-pinned amd64 release
+The mirror helper accepts only the five expected digest-pinned amd64 release
 images. It downloads a checksum-pinned `crane` binary into a mode-0700 remote
 temporary directory, obtains destination credentials from the gateway VM's
 attached Nebius service account, copies each image under a release-specific
@@ -279,6 +282,12 @@ tag, verifies that the destination digest is unchanged, and writes an
 owner-only local result. It needs no human Nebius session, registry password,
 sudo access, or persistent credential-helper installation. Repeating it for
 the same merged candidate is idempotent.
+
+Every runtime apply also converges the repository-owned execution-capacity and
+execution-admission policies. For the current provider quota, both the global
+and `nebius-cpu` admission ceilings are 80 leases; this must match the 80-job
+pending/create limits and the four-node execution envelope rather than retain a
+bootstrap single-trial ceiling.
 
 The evidence collector uses checksum-pinned Trivy and `crane` binaries on the
 gateway, authenticates to Nebius Registry with the VM service account, rejects

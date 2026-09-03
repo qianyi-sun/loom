@@ -187,6 +187,34 @@ def check_nebius_iac(
         and int(capacity.get("task_cpu_millis", 0)) == 2_000,
         f"{capacity_path}: current-quota acceptance must cover 80 concurrent 2-vCPU tasks",
     )
+    admission_policies = capacity.get("admission_policies")
+    if not isinstance(admission_policies, list):
+        raise ContractError(f"{capacity_path}: admission_policies must be a list")
+    _require(
+        admission_policies
+        == [
+            {
+                "scope_kind": "global",
+                "scope_key": "*",
+                "max_concurrent": 80,
+                "enabled": True,
+                "reason": (
+                    "Current-quota Nebius acceptance permits 80 concurrent "
+                    "service-execution leases."
+                ),
+            },
+            {
+                "scope_kind": "pool",
+                "scope_key": "nebius-cpu",
+                "max_concurrent": 80,
+                "enabled": True,
+                "reason": (
+                    "Current-quota Nebius CPU pool permits 80 concurrent 2-vCPU tasks."
+                ),
+            },
+        ],
+        f"{capacity_path}: admission policies must permit exactly 80 Nebius leases",
+    )
     policy = capacity.get("policy")
     if not isinstance(policy, dict):
         raise ContractError(f"{capacity_path}: policy must be an object")
