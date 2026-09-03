@@ -1,0 +1,125 @@
+# syntax=docker/dockerfile:1.20@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine3.23@sha256:b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57 AS patched-runtime
+
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOTOOLCHAIN=local \
+    GOPROXY=https://proxy.golang.org,direct \
+    GOSUMDB=sum.golang.org
+RUN case "$(go version)" in "go version go1.26.7 linux/"*) ;; *) exit 1 ;; esac \
+    && apk add --no-cache ca-certificates git
+
+# moby/buildkit v0.32.2, signed tag commit 991535e0973488b6a429096d21fa13f81f2d89d8.
+ADD --checksum=sha256:ebc242057b1eee67eb14ead8def52c3770c6793c8c8ac0c53d41983b085360f4 \
+    https://github.com/moby/buildkit/archive/991535e0973488b6a429096d21fa13f81f2d89d8.tar.gz \
+    /tmp/buildkit.tar.gz
+RUN mkdir -p /out /src/buildkit \
+    && tar -xzf /tmp/buildkit.tar.gz --strip-components=1 -C /src/buildkit
+WORKDIR /src/buildkit
+RUN go get golang.org/x/crypto@v0.55.0
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -mod=mod -trimpath -buildvcs=false \
+      -ldflags "-X github.com/moby/buildkit/version.Version=v0.32.2-loom.1 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
+      -o /out/buildctl ./cmd/buildctl
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -mod=mod -trimpath -buildvcs=false \
+      -ldflags "-extldflags '-static' -X github.com/moby/buildkit/version.Version=v0.32.2-loom.1 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
+      -tags "osusergo netgo static_build seccomp" \
+      -o /out/buildkitd ./cmd/buildkitd
+
+# rootless-containers/rootlesskit v3.1.0, signed tag commit
+# 62d2101fbbe4f79bc845a337c4e868d27ff602c9.
+ADD --checksum=sha256:51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8da9340a \
+    https://github.com/rootless-containers/rootlesskit/archive/62d2101fbbe4f79bc845a337c4e868d27ff602c9.tar.gz \
+    /tmp/rootlesskit.tar.gz
+RUN mkdir -p /src/rootlesskit \
+    && tar -xzf /tmp/rootlesskit.tar.gz --strip-components=1 -C /src/rootlesskit
+WORKDIR /src/rootlesskit
+RUN go get golang.org/x/crypto@v0.55.0
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -mod=mod -trimpath -buildvcs=false \
+      -o /out/rootlesskit ./cmd/rootlesskit
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -mod=mod -trimpath -buildvcs=false \
+      -o /out/rootlessctl ./cmd/rootlessctl
+
+RUN required_version="v0.55.0" \
+    && for binary in /out/buildctl /out/buildkitd /out/rootlesskit; do \
+        test "$(go version -m "$binary" | sed -n '1s/.*: //p')" = "go1.26.7"; \
+        go version -m "$binary" \
+            | awk -v required="$required_version" \
+                '$1 == "dep" && $2 == "golang.org/x/crypto" && $3 == required { found=1 } END { exit !found }'; \
+    done
+
+ADD --checksum=sha256:e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2 \
+    https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.4/slirp4netns-x86_64 \
+    /downloads/slirp4netns-x86_64
+ADD --checksum=sha256:fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0 \
+    https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.4/slirp4netns-aarch64 \
+    /downloads/slirp4netns-aarch64
+ADD --checksum=sha256:1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 \
+    https://github.com/containers/fuse-overlayfs/releases/download/v1.17/fuse-overlayfs-x86_64 \
+    /downloads/fuse-overlayfs-x86_64
+ADD --checksum=sha256:34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 \
+    https://github.com/containers/fuse-overlayfs/releases/download/v1.17/fuse-overlayfs-aarch64 \
+    /downloads/fuse-overlayfs-aarch64
+
+FROM moby/buildkit:rootless@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b AS upstream-runtime
+
+FROM upstream-runtime AS verified-runtime
+ARG TARGETARCH
+USER root
+RUN mkdir -p /out /runtime
+COPY --from=patched-runtime --chown=0:0 --chmod=0555 /out/buildctl /out/buildctl
+COPY --from=patched-runtime --chown=0:0 --chmod=0555 /out/buildkitd /out/buildkitd
+COPY --from=patched-runtime --chown=0:0 --chmod=0555 /out/rootlesskit /out/rootlesskit
+COPY --from=patched-runtime --chown=0:0 --chmod=0555 /out/rootlessctl /out/rootlessctl
+COPY --from=patched-runtime --chown=0:0 --chmod=0555 /downloads /downloads
+RUN cp /usr/bin/buildkit-runc /out/buildkit-runc \
+    && case "$TARGETARCH" in \
+        amd64) cp /downloads/slirp4netns-x86_64 /out/slirp4netns; cp /downloads/fuse-overlayfs-x86_64 /out/fuse-overlayfs ;; \
+        arm64) cp /downloads/slirp4netns-aarch64 /out/slirp4netns; cp /downloads/fuse-overlayfs-aarch64 /out/fuse-overlayfs ;; \
+        *) exit 1 ;; \
+    esac \
+    && chmod 0555 /out/buildkit-runc /out/slirp4netns /out/fuse-overlayfs \
+    && cp /out/buildctl /runtime/buildctl \
+    && cp /out/buildkitd /runtime/buildkitd \
+    && cp /out/buildkit-runc /runtime/buildkit-runc \
+    && cp /out/rootlesskit /runtime/rootlesskit \
+    && cp /out/rootlessctl /runtime/rootlessctl \
+    && cp /out/slirp4netns /runtime/slirp4netns \
+    && cp /out/fuse-overlayfs /runtime/fuse-overlayfs \
+    && test "$(/runtime/buildctl --version)" = "buildctl github.com/moby/buildkit v0.32.2-loom.1 991535e0973488b6a429096d21fa13f81f2d89d8" \
+    && test "$(/runtime/buildkitd --version)" = "buildkitd github.com/moby/buildkit v0.32.2-loom.1 991535e0973488b6a429096d21fa13f81f2d89d8" \
+    && test "$(/runtime/rootlesskit --version)" = "rootlesskit version 3.1.0" \
+    && case "$TARGETARCH" in \
+        amd64) buildctl_sha256=5c594a04284993e440e7d6fa8f007e15351df0118b3ee2f29e1a1baaf5a23a83; buildkitd_sha256=85a89191d7dc2ee53a06f54aaf7969df62092602e31b7dfbc008e1b67e6908c4; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=ab942b0add070aa7ff4be0f366b5fd20c6c99a485f071556a59d5564c5d8841b; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
+        arm64) buildctl_sha256=c2e0830c20f1122e671d24a5a4fe91b5ab71e8bae80fc650ebbffec3168e155b; buildkitd_sha256=6c117ff680f6b94f28cca78961c6bee3ff7b49fa1e159c2db63322e7f2ecd549; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=3871394a3917b1c9d12f04f2d2296b9a870fb94be5d3ff812410777a77e922cd; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
+        *) exit 1 ;; \
+    esac \
+    && printf '%s  %s\n' \
+        "$buildctl_sha256" /runtime/buildctl \
+        "$buildkitd_sha256" /runtime/buildkitd \
+        "$buildkit_runc_sha256" /runtime/buildkit-runc \
+        "$rootlesskit_sha256" /runtime/rootlesskit \
+        "$rootlessctl_sha256" /runtime/rootlessctl \
+        "$slirp4netns_sha256" /runtime/slirp4netns \
+        "$fuse_overlayfs_sha256" /runtime/fuse-overlayfs | sha256sum -c -
+
+FROM scratch
+COPY --from=verified-runtime /runtime/buildctl /runtime/buildctl
+COPY --from=verified-runtime /runtime/buildkitd /runtime/buildkitd
+COPY --from=verified-runtime /runtime/buildkit-runc /runtime/buildkit-runc
+COPY --from=verified-runtime /runtime/rootlesskit /runtime/rootlesskit
+COPY --from=verified-runtime /runtime/rootlessctl /runtime/rootlessctl
+COPY --from=verified-runtime /runtime/slirp4netns /runtime/slirp4netns
+COPY --from=verified-runtime /runtime/fuse-overlayfs /runtime/fuse-overlayfs

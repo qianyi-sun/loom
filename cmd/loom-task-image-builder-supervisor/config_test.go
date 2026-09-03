@@ -140,6 +140,9 @@ func TestConfigLoadAcceptsExactVerifiedRelease(t *testing.T) {
 	if cfg.Runtime.RootlessKit.Path != paths.rootlesskit {
 		t.Fatalf("Runtime.RootlessKit.Path = %q, want %q", cfg.Runtime.RootlessKit.Path, paths.rootlesskit)
 	}
+	if cfg.Runtime.FuseOverlayFS.Path != paths.fuseOverlayFS {
+		t.Fatalf("Runtime.FuseOverlayFS.Path = %q, want %q", cfg.Runtime.FuseOverlayFS.Path, paths.fuseOverlayFS)
+	}
 }
 
 func TestConfigRejectsUnknownAndDuplicateFields(t *testing.T) {
@@ -153,7 +156,7 @@ func TestConfigRejectsUnknownAndDuplicateFields(t *testing.T) {
   "release_sha256":"`+release+`",
   "cpu_arch":"`+runtime.GOARCH+`",
   "guard":{"socket_path":"`+paths.guardSocket+`","max_packet_bytes":4096,"ack_timeout_seconds":5,"unknown":1},
-  "runtime":{"rootlesskit":{"path":"`+paths.rootlesskit+`","sha256":"`+sha256FileHex(t, paths.rootlesskit)+`"},"buildctl":{"path":"`+paths.buildctl+`","sha256":"`+sha256FileHex(t, paths.buildctl)+`"},"buildkitd":{"path":"`+paths.buildkitd+`","sha256":"`+sha256FileHex(t, paths.buildkitd)+`"}}
+  "runtime":{"rootlesskit":{"path":"`+paths.rootlesskit+`","sha256":"`+sha256FileHex(t, paths.rootlesskit)+`"},"buildctl":{"path":"`+paths.buildctl+`","sha256":"`+sha256FileHex(t, paths.buildctl)+`"},"buildkitd":{"path":"`+paths.buildkitd+`","sha256":"`+sha256FileHex(t, paths.buildkitd)+`"},"buildkit-runc":{"path":"`+paths.buildkitRunc+`","sha256":"`+sha256FileHex(t, paths.buildkitRunc)+`"},"rootlessctl":{"path":"`+paths.rootlessctl+`","sha256":"`+sha256FileHex(t, paths.rootlessctl)+`"},"slirp4netns":{"path":"`+paths.slirp4netns+`","sha256":"`+sha256FileHex(t, paths.slirp4netns)+`"},"fuse-overlayfs":{"path":"`+paths.fuseOverlayFS+`","sha256":"`+sha256FileHex(t, paths.fuseOverlayFS)+`"}}
 }`))
 
 	if _, err := LoadConfig(configPath, release); err == nil {
@@ -339,6 +342,9 @@ func TestConfigRejectsExecutableMemberWithIntermediateSymlink(t *testing.T) {
 	}
 	outsideRootlesskit := filepath.Join(outsideBin, "rootlesskit")
 	writeExecutableFixture(t, outsideRootlesskit, "#!/bin/sh\necho outside\n")
+	writeExecutableFixture(t, filepath.Join(outsideBin, "rootlessctl"), "outside rootlessctl\n")
+	writeExecutableFixture(t, filepath.Join(outsideBin, "slirp4netns"), "outside slirp4netns\n")
+	writeExecutableFixture(t, filepath.Join(outsideBin, "fuse-overlayfs"), "outside fuse-overlayfs\n")
 	if err := os.Chmod(releaseRoot, 0o755); err != nil {
 		t.Fatalf("Chmod(%q) error = %v", releaseRoot, err)
 	}
@@ -366,10 +372,14 @@ func TestConfigRejectsExecutableMemberWithIntermediateSymlink(t *testing.T) {
 }
 
 type releasePaths struct {
-	guardSocket string
-	rootlesskit string
-	buildctl    string
-	buildkitd   string
+	guardSocket   string
+	buildctl      string
+	buildkitd     string
+	buildkitRunc  string
+	rootlesskit   string
+	rootlessctl   string
+	slirp4netns   string
+	fuseOverlayFS string
 }
 
 func makeReleaseTree(t *testing.T, root string, release string) releasePaths {
@@ -389,9 +399,13 @@ func makeReleaseTree(t *testing.T, root string, release string) releasePaths {
 		}
 	}
 
-	writeExecutableFixture(t, filepath.Join(binDir, "rootlesskit"), "#!/bin/sh\nexit 0\n")
 	writeExecutableFixture(t, filepath.Join(runtimeDir, "buildctl"), "buildctl\n")
 	writeExecutableFixture(t, filepath.Join(runtimeDir, "buildkitd"), "buildkitd\n")
+	writeExecutableFixture(t, filepath.Join(runtimeDir, "buildkit-runc"), "buildkit-runc\n")
+	writeExecutableFixture(t, filepath.Join(binDir, "rootlesskit"), "#!/bin/sh\nexit 0\n")
+	writeExecutableFixture(t, filepath.Join(binDir, "rootlessctl"), "rootlessctl\n")
+	writeExecutableFixture(t, filepath.Join(binDir, "slirp4netns"), "slirp4netns\n")
+	writeExecutableFixture(t, filepath.Join(binDir, "fuse-overlayfs"), "fuse-overlayfs\n")
 	for _, dir := range []string{binDir, runtimeDir, releaseRoot} {
 		if err := os.Chmod(dir, 0o555); err != nil {
 			t.Fatalf("Chmod(%q) error = %v", dir, err)
@@ -399,15 +413,22 @@ func makeReleaseTree(t *testing.T, root string, release string) releasePaths {
 	}
 
 	return releasePaths{
-		guardSocket: filepath.Join(root, "run", "loom-task-image-builder-guard", "guard.sock"),
-		rootlesskit: filepath.Join(binDir, "rootlesskit"),
-		buildctl:    filepath.Join(runtimeDir, "buildctl"),
-		buildkitd:   filepath.Join(runtimeDir, "buildkitd"),
+		guardSocket:   filepath.Join(root, "run", "loom-task-image-builder-guard", "guard.sock"),
+		buildctl:      filepath.Join(runtimeDir, "buildctl"),
+		buildkitd:     filepath.Join(runtimeDir, "buildkitd"),
+		buildkitRunc:  filepath.Join(runtimeDir, "buildkit-runc"),
+		rootlesskit:   filepath.Join(binDir, "rootlesskit"),
+		rootlessctl:   filepath.Join(binDir, "rootlessctl"),
+		slirp4netns:   filepath.Join(binDir, "slirp4netns"),
+		fuseOverlayFS: filepath.Join(binDir, "fuse-overlayfs"),
 	}
 }
 
 func writeExecutableFixture(t *testing.T, path string, body string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, []byte(body), 0o555); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
@@ -417,7 +438,7 @@ func writeConfigFixture(t *testing.T, root string, release string, arch string, 
 	t.Helper()
 	configPath := filepath.Join(root, "supervisor-config.json")
 	if raw == nil {
-		raw = []byte(`{"schema":"loom.task-image-builder-supervisor-config/v1","release_sha256":"` + release + `","cpu_arch":"` + arch + `","guard":{"socket_path":"` + paths.guardSocket + `","max_packet_bytes":4096,"ack_timeout_seconds":5},"runtime":{"rootlesskit":{"path":"` + paths.rootlesskit + `","sha256":"` + sha256FileHex(t, paths.rootlesskit) + `"},"buildctl":{"path":"` + paths.buildctl + `","sha256":"` + sha256FileHex(t, paths.buildctl) + `"},"buildkitd":{"path":"` + paths.buildkitd + `","sha256":"` + sha256FileHex(t, paths.buildkitd) + `"}}}`)
+		raw = []byte(`{"schema":"loom.task-image-builder-supervisor-config/v1","release_sha256":"` + release + `","cpu_arch":"` + arch + `","guard":{"socket_path":"` + paths.guardSocket + `","max_packet_bytes":4096,"ack_timeout_seconds":5},"runtime":{"rootlesskit":{"path":"` + paths.rootlesskit + `","sha256":"` + sha256FileHex(t, paths.rootlesskit) + `"},"buildctl":{"path":"` + paths.buildctl + `","sha256":"` + sha256FileHex(t, paths.buildctl) + `"},"buildkitd":{"path":"` + paths.buildkitd + `","sha256":"` + sha256FileHex(t, paths.buildkitd) + `"},"buildkit-runc":{"path":"` + paths.buildkitRunc + `","sha256":"` + sha256FileHex(t, paths.buildkitRunc) + `"},"rootlessctl":{"path":"` + paths.rootlessctl + `","sha256":"` + sha256FileHex(t, paths.rootlessctl) + `"},"slirp4netns":{"path":"` + paths.slirp4netns + `","sha256":"` + sha256FileHex(t, paths.slirp4netns) + `"},"fuse-overlayfs":{"path":"` + paths.fuseOverlayFS + `","sha256":"` + sha256FileHex(t, paths.fuseOverlayFS) + `"}}}`)
 	}
 	if err := os.WriteFile(configPath, raw, 0o444); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", configPath, err)

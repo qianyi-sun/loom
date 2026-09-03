@@ -42,9 +42,13 @@ type GuardConfig struct {
 }
 
 type RuntimeConfig struct {
-	RootlessKit ExecutableMember
-	Buildctl    ExecutableMember
-	Buildkitd   ExecutableMember
+	Buildctl      ExecutableMember
+	Buildkitd     ExecutableMember
+	BuildkitRunc  ExecutableMember
+	RootlessKit   ExecutableMember
+	RootlessCtl   ExecutableMember
+	Slirp4netns   ExecutableMember
+	FuseOverlayFS ExecutableMember
 }
 
 type ExecutableMember struct {
@@ -67,9 +71,13 @@ type guardDiskConfig struct {
 }
 
 type runtimeDiskConfig struct {
-	RootlessKit executableDiskConfig `json:"rootlesskit"`
-	Buildctl    executableDiskConfig `json:"buildctl"`
-	Buildkitd   executableDiskConfig `json:"buildkitd"`
+	Buildctl      executableDiskConfig `json:"buildctl"`
+	Buildkitd     executableDiskConfig `json:"buildkitd"`
+	BuildkitRunc  executableDiskConfig `json:"buildkit-runc"`
+	RootlessKit   executableDiskConfig `json:"rootlesskit"`
+	RootlessCtl   executableDiskConfig `json:"rootlessctl"`
+	Slirp4netns   executableDiskConfig `json:"slirp4netns"`
+	FuseOverlayFS executableDiskConfig `json:"fuse-overlayfs"`
 }
 
 type executableDiskConfig struct {
@@ -186,10 +194,6 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 			AckTimeoutSeconds: disk.Guard.AckTimeoutSeconds,
 		},
 		Runtime: RuntimeConfig{
-			RootlessKit: ExecutableMember{
-				Path:   disk.Runtime.RootlessKit.Path,
-				SHA256: disk.Runtime.RootlessKit.SHA256,
-			},
 			Buildctl: ExecutableMember{
 				Path:   disk.Runtime.Buildctl.Path,
 				SHA256: disk.Runtime.Buildctl.SHA256,
@@ -198,15 +202,39 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 				Path:   disk.Runtime.Buildkitd.Path,
 				SHA256: disk.Runtime.Buildkitd.SHA256,
 			},
+			BuildkitRunc: ExecutableMember{
+				Path:   disk.Runtime.BuildkitRunc.Path,
+				SHA256: disk.Runtime.BuildkitRunc.SHA256,
+			},
+			RootlessKit: ExecutableMember{
+				Path:   disk.Runtime.RootlessKit.Path,
+				SHA256: disk.Runtime.RootlessKit.SHA256,
+			},
+			RootlessCtl: ExecutableMember{
+				Path:   disk.Runtime.RootlessCtl.Path,
+				SHA256: disk.Runtime.RootlessCtl.SHA256,
+			},
+			Slirp4netns: ExecutableMember{
+				Path:   disk.Runtime.Slirp4netns.Path,
+				SHA256: disk.Runtime.Slirp4netns.SHA256,
+			},
+			FuseOverlayFS: ExecutableMember{
+				Path:   disk.Runtime.FuseOverlayFS.Path,
+				SHA256: disk.Runtime.FuseOverlayFS.SHA256,
+			},
 		},
 	}
 	if err := verifyGuardSocketPath(cfg.Guard.SocketPath); err != nil {
 		return Config{}, err
 	}
 	for _, member := range []ExecutableMember{
-		cfg.Runtime.RootlessKit,
 		cfg.Runtime.Buildctl,
 		cfg.Runtime.Buildkitd,
+		cfg.Runtime.BuildkitRunc,
+		cfg.Runtime.RootlessKit,
+		cfg.Runtime.RootlessCtl,
+		cfg.Runtime.Slirp4netns,
+		cfg.Runtime.FuseOverlayFS,
 	} {
 		if err := verifyExecutableMember(member, releaseRoot); err != nil {
 			return Config{}, err
