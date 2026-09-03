@@ -2740,6 +2740,20 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 )
                 == 1
             )
+
+        # A completed Job remains observable between durable finalization and
+        # deletion. Replaying that Kubernetes state must not regress the lease
+        # from ``finalized`` or erase its terminal timestamp.
+        kubernetes.jobs[lease.job_name] = terminal_observation.model_copy(
+            update={"resource_version": "9", "terminated_at": None}
+        )
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 0
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            assert persisted.observed_state == "finalized"
+            assert persisted.pod_terminated_at == now + timedelta(seconds=3)
+
         assert await actuator.run_commands_once(now=now + timedelta(seconds=5)) == 1
         assert kubernetes.delete_count == 1
         assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 1

@@ -87,6 +87,16 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         if getattr(scheduled, "status", None) == "True":
             scheduled_at = getattr(scheduled, "last_transition_time", None)
         started_at = getattr(pod.status, "start_time", None) or started_at
+        # kubelet can publish ``status.startTime`` before the PodScheduled
+        # condition controller publishes its transition timestamp. The latter
+        # is therefore only an upper-bound observation, not proof that the Pod
+        # started before it was scheduled.
+        if (
+            scheduled_at is not None
+            and started_at is not None
+            and scheduled_at > started_at
+        ):
+            scheduled_at = started_at
         if pod.metadata.deletion_timestamp is not None:
             state = NormalizedJobState.TERMINATING
         pod_reason = getattr(pod.status, "reason", None)
