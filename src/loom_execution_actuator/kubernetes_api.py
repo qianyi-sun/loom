@@ -84,7 +84,8 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         pod_ip = getattr(pod.status, "pod_ip", None)
         node_name = getattr(pod.spec, "node_name", None)
         scheduled = _condition(getattr(pod.status, "conditions", None), "PodScheduled")
-        scheduled_at = getattr(scheduled, "last_transition_time", None)
+        if getattr(scheduled, "status", None) == "True":
+            scheduled_at = getattr(scheduled, "last_transition_time", None)
         started_at = getattr(pod.status, "start_time", None) or started_at
         if pod.metadata.deletion_timestamp is not None:
             state = NormalizedJobState.TERMINATING
