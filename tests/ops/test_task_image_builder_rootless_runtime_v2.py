@@ -38,19 +38,19 @@ RUNTIME_MEMBERS = (
 
 EXPECTED_BINARY_SHA256 = {
     "amd64": {
-        "buildctl": "5c594a04284993e440e7d6fa8f007e15351df0118b3ee2f29e1a1baaf5a23a83",
-        "buildkitd": "85a89191d7dc2ee53a06f54aaf7969df62092602e31b7dfbc008e1b67e6908c4",
+        "buildctl": "850722004a245c2599c9472a85863fb4ce4e44deb3e4e8eacb705dc59552b147",
+        "buildkitd": "0fcdc1aa3454419a72615fe2e306d4bcf47ac7c61430e78b36fdad2ebea59dc5",
         "buildkit-runc": "b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c",
-        "rootlesskit": "ab942b0add070aa7ff4be0f366b5fd20c6c99a485f071556a59d5564c5d8841b",
+        "rootlesskit": "b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db",
         "rootlessctl": "5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96",
         "slirp4netns": "e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2",
         "fuse-overlayfs": "1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90",
     },
     "arm64": {
-        "buildctl": "c2e0830c20f1122e671d24a5a4fe91b5ab71e8bae80fc650ebbffec3168e155b",
-        "buildkitd": "6c117ff680f6b94f28cca78961c6bee3ff7b49fa1e159c2db63322e7f2ecd549",
+        "buildctl": "38ec6be685e56e42ca836a527f54757f493a945f8da84113b1c91772de3ba055",
+        "buildkitd": "93783b021da7c1e337b5940f05fc2924871916083171f1fe1c1fe973ac744d81",
         "buildkit-runc": "1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441",
-        "rootlesskit": "3871394a3917b1c9d12f04f2d2296b9a870fb94be5d3ff812410777a77e922cd",
+        "rootlesskit": "5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2",
         "rootlessctl": "d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94",
         "slirp4netns": "fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0",
         "fuse-overlayfs": "34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23",
@@ -108,6 +108,25 @@ def test_runtime_v2_emits_only_the_seven_host_runtime_members() -> None:
     assert "CMD " not in dockerfile
     assert "docker.sock" not in dockerfile
     assert "containerd.sock" not in dockerfile
+
+
+def test_runtime_v2_patches_transitive_helper_paths_without_path_authority() -> None:
+    dockerfile = _dockerfile()
+
+    assert 'exec.Command("/usr/bin/newuidmap"' in dockerfile
+    assert 'exec.Command("/usr/bin/newgidmap"' in dockerfile
+    assert '"/usr/bin/nsenter"' in dockerfile
+    assert '"/usr/bin/ip", "tuntap"' in dockerfile
+    assert '"/usr/bin/ip", "link"' in dockerfile
+    assert "BUILDKIT_FUSE_OVERLAYFS_BINARY" in dockerfile
+    assert "mountWithDirectFUSE" in dockerfile
+    assert "direct FUSE helper path" in dockerfile
+    assert "must be absolute clean path" in dockerfile
+    assert "Preserve explicit cgroup paths supplied by the allocation supervisor" in dockerfile
+    assert '-\tspec.Linux.CgroupsPath = ""' in dockerfile
+    assert "patch -p1 <<'PATCH'" in dockerfile
+    assert "go mod vendor" in dockerfile
+    assert dockerfile.count("go build -mod=vendor") == 2
 
 
 def test_runtime_v2_manifest_records_exact_amd64_and_arm64_member_hashes() -> None:

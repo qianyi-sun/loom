@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,9 +48,20 @@ type Executor struct {
 	started         bool
 }
 
+const (
+	buildkitFuseOverlayFSBinaryEnv = "BUILDKIT_FUSE_OVERLAYFS_BINARY"
+	hostNewuidmapPath              = "/usr/bin/newuidmap"
+	hostNewgidmapPath              = "/usr/bin/newgidmap"
+	hostNsenterPath                = "/usr/bin/nsenter"
+	hostIPPath                     = "/usr/bin/ip"
+	cgroup2SuperMagic              = 0x63677270
+)
+
 var (
-	executorLaunchInCgroup = LaunchInCgroup
-	executorRunBuildctl    = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) error {
+	executorVerifyHostIDMapHelpers = verifyHostIDMapHelpers
+	executorBuildkitCgroupParent   = buildkitCgroupParent
+	executorLaunchInCgroup         = LaunchInCgroup
+	executorRunBuildctl            = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) error {
 		process, err := LaunchInCgroup(ctx, executable, argv, env, cgroupFD)
 		if err != nil {
 			return err
@@ -56,6 +73,12 @@ var (
 	executorSignalProcess     = func(process *Process, signal os.Signal) error { return process.Signal(signal) }
 	executorWaitProcess       = func(process *Process) error { return process.Wait() }
 	executorCgroupEmpty       = cgroupEmpty
+	executorCleanupCgroup     = cleanupCgroupChildren
+	executorProcessAlive      = processAlive
+	executorReadinessTimeout  = 30 * time.Second
+	executorReadinessPoll     = 100 * time.Millisecond
+	executorShutdownTimeout   = 5 * time.Second
+	executorShutdownPoll      = 50 * time.Millisecond
 )
 
 func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Executor, error) {
@@ -114,11 +137,26 @@ func (e *Executor) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := executorVerifyHostIDMapHelpers(); err != nil {
+		return err
+	}
+	if err := verifyExecutableFile(e.config.Runtime.FuseOverlayFS); err != nil {
+		return fmt.Errorf("fuse-overlayfs runtime member invalid: %w", err)
+	}
+	cgroupParent, err := executorBuildkitCgroupParent(e.capabilities.BuildEgressFD)
+	if err != nil {
+		return err
+	}
+	buildkitConfigPath, err := e.writeBuildkitConfig(cgroupParent)
+	if err != nil {
+		return err
+	}
 	env := []string{
 		"LANG=C.UTF-8",
 		"TZ=UTC",
 		"XDG_RUNTIME_DIR=" + filepath.Join(e.jobRoot, "rootlesskit"),
 		"BUILDKIT_HOST=" + e.buildkitAddress,
+		buildkitFuseOverlayFSBinaryEnv + "=" + e.config.Runtime.FuseOverlayFS.Path,
 	}
 	argv := []string{
 		"--net=slirp4netns",
@@ -132,10 +170,13 @@ func (e *Executor) Start(ctx context.Context) error {
 		"--propagation=rslave",
 		"--",
 		e.config.Runtime.Buildkitd.Path,
+		"--config",
+		buildkitConfigPath,
 		"--rootless",
 		"--oci-worker=true",
 		"--oci-worker-rootless",
 		"--containerd-worker=false",
+		"--cdi-disabled",
 		"--oci-worker-snapshotter=fuse-overlayfs",
 		"--oci-worker-binary=" + e.config.Runtime.BuildkitRunc.Path,
 		"--oci-worker-no-process-sandbox=false",
@@ -149,6 +190,15 @@ func (e *Executor) Start(ctx context.Context) error {
 		return err
 	}
 	e.daemon = process
+	if err := e.waitForBuildkitReady(ctx); err != nil {
+		stopErr := e.stopDaemon(ctx)
+		e.daemon = nil
+		e.started = false
+		if stopErr != nil {
+			return fmt.Errorf("buildkit daemon readiness failed: %w; cleanup failed: %v", err, stopErr)
+		}
+		return fmt.Errorf("buildkit daemon readiness failed: %w", err)
+	}
 	e.started = true
 	return nil
 }
@@ -191,25 +241,73 @@ func (e *Executor) Close(ctx context.Context) error {
 	if e == nil || e.daemon == nil {
 		return nil
 	}
+	return e.stopDaemon(ctx)
+}
+
+func (e *Executor) waitForBuildkitReady(ctx context.Context) error {
+	deadline := time.Now().Add(executorReadinessTimeout)
+	var lastErr error
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, executorReadinessPoll)
+		err := executorRunBuildctl(probeCtx, e.config.Runtime.Buildctl, []string{"--addr", e.buildkitAddress, "debug", "workers"}, []string{
+			"LANG=C.UTF-8",
+			"TZ=UTC",
+			"BUILDKIT_HOST=" + e.buildkitAddress,
+		}, e.capabilities.BuildEgressFD)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !executorProcessAlive(e.daemon) {
+			return fmt.Errorf("daemon exited before readiness: %w", lastErr)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("daemon did not become ready before deadline: %w", lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(executorReadinessPoll):
+		}
+	}
+}
+
+func (e *Executor) stopDaemon(ctx context.Context) error {
 	if err := executorSignalProcess(e.daemon, syscall.SIGTERM); err != nil {
 		return err
 	}
+	waitErr := e.waitForDaemonExit(ctx)
+	if !daemonExitAllowedAfterStop(waitErr) {
+		return waitErr
+	}
+	if err := e.waitForCgroupEmpty(ctx); err != nil {
+		return err
+	}
+	if err := executorCleanupCgroup(e.capabilities.BuildEgressFD); err != nil {
+		return err
+	}
+	if err := e.cleanupState(); err != nil {
+		return err
+	}
+	e.daemon = nil
+	e.started = false
+	return nil
+}
+
+func (e *Executor) waitForDaemonExit(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() {
 		done <- executorWaitProcess(e.daemon)
 	}()
 	select {
 	case err := <-done:
-		if err != nil {
-			return err
-		}
-	case <-time.After(5 * time.Second):
+		return err
+	case <-time.After(executorShutdownTimeout):
 		_ = e.daemon.Kill()
 		select {
 		case err := <-done:
-			if err != nil {
-				return err
-			}
+			return err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -217,15 +315,275 @@ func (e *Executor) Close(ctx context.Context) error {
 		_ = e.daemon.Kill()
 		return ctx.Err()
 	}
-	empty, err := executorCgroupEmpty(e.capabilities.BuildEgressFD)
+}
+
+func daemonExitAllowed(err error) bool {
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
+}
+
+func daemonExitAllowedAfterStop(err error) bool {
+	if daemonExitAllowed(err) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Exited() && status.ExitStatus() == 1
+}
+
+func processAlive(process *Process) bool {
+	if process == nil || process.PID <= 0 {
+		return false
+	}
+	err := executorSignalProcess(process, syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func (e *Executor) waitForCgroupEmpty(ctx context.Context) error {
+	deadline := time.Now().Add(executorShutdownTimeout)
+	for {
+		empty, err := executorCgroupEmpty(e.capabilities.BuildEgressFD)
+		if err != nil {
+			return err
+		}
+		if empty {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("build egress cgroup not empty after cleanup")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(executorShutdownPoll):
+		}
+	}
+}
+
+func cleanupCgroupChildren(fd int) error {
+	root, err := pathFromDirectoryFD(fd)
 	if err != nil {
 		return err
 	}
-	if !empty {
-		return errors.New("build egress cgroup not empty after cleanup")
+	var children []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != root && entry.IsDir() {
+			children = append(children, path)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	e.daemon = nil
-	e.started = false
+	sort.Slice(children, func(i, j int) bool {
+		if len(children[i]) != len(children[j]) {
+			return len(children[i]) > len(children[j])
+		}
+		return children[i] > children[j]
+	})
+	for _, child := range children {
+		if err := os.Remove(child); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Executor) cleanupState() error {
+	for _, dir := range executorStateDirs(e.jobRoot) {
+		mounts, err := mountPointsBelow(dir)
+		if err != nil {
+			return err
+		}
+		if len(mounts) != 0 {
+			return fmt.Errorf("mounts survived below executor state %q: %s", dir, strings.Join(mounts, ", "))
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			if err == nil {
+				return fmt.Errorf("executor state path %q survived cleanup", dir)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func executorStateDirs(jobRoot string) []string {
+	return []string{
+		filepath.Join(jobRoot, "buildkit"),
+		filepath.Join(jobRoot, "buildkit-root"),
+		filepath.Join(jobRoot, "rootlesskit"),
+		filepath.Join(jobRoot, "tmp"),
+		filepath.Join(jobRoot, "home"),
+	}
+}
+
+func mountPointsBelow(root string) ([]string, error) {
+	payload, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	var matches []string
+	for _, line := range strings.Split(string(payload), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		mountPoint := decodeMountInfoField(fields[4])
+		if mountPoint == root || strings.HasPrefix(mountPoint, root+string(os.PathSeparator)) {
+			matches = append(matches, mountPoint)
+		}
+	}
+	return matches, nil
+}
+
+func decodeMountInfoField(path string) string {
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(path)
+}
+
+func (e *Executor) writeBuildkitConfig(cgroupParent string) (string, error) {
+	if err := validateBuildkitCgroupParent(cgroupParent); err != nil {
+		return "", err
+	}
+	configPath := filepath.Join(e.jobRoot, "buildkit", "buildkitd.toml")
+	payload := []byte("[worker.oci]\ndefaultCgroupParent = " + strconv.Quote(cgroupParent) + "\n")
+	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+func buildkitCgroupParent(cgroupFD int) (string, error) {
+	cgroupPath, err := pathFromDirectoryFD(cgroupFD)
+	if err != nil {
+		return "", err
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(cgroupPath, &stat); err != nil {
+		return "", err
+	}
+	if stat.Type != cgroup2SuperMagic {
+		return "", errors.New("build egress descriptor is not cgroup v2")
+	}
+	relative, err := filepath.Rel("/sys/fs/cgroup", cgroupPath)
+	if err != nil {
+		return "", err
+	}
+	relative = filepath.ToSlash(relative)
+	if err := validateBuildkitCgroupParent(relative); err != nil {
+		return "", err
+	}
+	return relative, nil
+}
+
+func validateBuildkitCgroupParent(cgroupParent string) error {
+	if cgroupParent == "" || filepath.IsAbs(cgroupParent) || filepath.Clean(cgroupParent) != cgroupParent || cgroupParent == "." {
+		return errors.New("buildkit cgroup parent invalid")
+	}
+	for _, segment := range strings.Split(cgroupParent, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return errors.New("buildkit cgroup parent invalid")
+		}
+	}
+	for _, r := range cgroupParent {
+		if r == '/' || r == ':' || r == '_' || r == '-' || r == '.' || r == '@' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' {
+			continue
+		}
+		return errors.New("buildkit cgroup parent contains invalid character")
+	}
+	return nil
+}
+
+func verifyHostIDMapHelpers() error {
+	if err := verifyHostIDMapHelper(hostNewuidmapPath, syscall.S_ISUID); err != nil {
+		return fmt.Errorf("%s invalid: %w", hostNewuidmapPath, err)
+	}
+	if err := verifyHostIDMapHelper(hostNewgidmapPath, syscall.S_ISUID); err != nil {
+		return fmt.Errorf("%s invalid: %w", hostNewgidmapPath, err)
+	}
+	if err := verifyHostIDMapHelper(hostNsenterPath, 0); err != nil {
+		return fmt.Errorf("%s invalid: %w", hostNsenterPath, err)
+	}
+	if err := verifyHostIDMapHelper(hostIPPath, 0); err != nil {
+		return fmt.Errorf("%s invalid: %w", hostIPPath, err)
+	}
+	return nil
+}
+
+func verifyHostIDMapHelper(path string, requiredSetID uint32) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("host helper path invalid")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("host helper must be a regular non-symlink file")
+	}
+	statValue, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("host helper stat identity unavailable")
+	}
+	if statValue.Uid != 0 {
+		return errors.New("host helper must be root-owned")
+	}
+	if requiredSetID != 0 && statValue.Mode&requiredSetID == 0 {
+		return errors.New("host helper missing required setid bit")
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return errors.New("host helper must be executable")
+	}
+	if os.FileMode(statValue.Mode).Perm()&0o022 != 0 {
+		return errors.New("host helper must not be group or world writable")
+	}
+	return nil
+}
+
+func verifyExecutableFile(member ExecutableMember) error {
+	if !filepath.IsAbs(member.Path) || filepath.Clean(member.Path) != member.Path {
+		return errors.New("executable path invalid")
+	}
+	if !isDigest(member.SHA256) {
+		return errors.New("executable digest invalid")
+	}
+	info, err := os.Lstat(member.Path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("executable must be a regular non-symlink file")
+	}
+	if info.Mode().Perm() != memberExecutableMode {
+		return errors.New("executable mode invalid")
+	}
+	file, err := os.Open(member.Path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != member.SHA256 {
+		return errors.New("executable digest mismatch")
+	}
 	return nil
 }
 
@@ -313,12 +671,30 @@ func cgroupEmpty(fd int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	payload, err := os.ReadFile(filepath.Join(root, "cgroup.procs"))
-	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(string(payload)) == "", nil
+	return cgroupTreeEmpty(root)
+}
+
+func cgroupTreeEmpty(root string) (bool, error) {
+	empty := true
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || entry.Name() != "cgroup.procs" {
+			return nil
+		}
+		payload, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(payload)) != "" {
+			empty = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return empty, err
 }

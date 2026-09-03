@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,10 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 var ErrCloneIntoCgroupUnsupported = errors.New("clone3 into cgroup unsupported")
+
+const maxProcessLogTailBytes = 32 * 1024
 
 type Process struct {
 	cmd              *exec.Cmd
@@ -24,6 +28,7 @@ type Process struct {
 	ExecutableSHA256 string
 	CgroupDevice     uint64
 	CgroupInode      uint64
+	logTail          *boundedLogBuffer
 }
 
 var (
@@ -57,6 +62,9 @@ func LaunchInCgroup(ctx context.Context, executable ExecutableMember, argv []str
 	cmd.Args[0] = executable.Path
 	cmd.Env = append([]string{}, env...)
 	cmd.ExtraFiles = nil
+	logTail := newBoundedLogBuffer(maxProcessLogTailBytes)
+	cmd.Stdout = logTail
+	cmd.Stderr = logTail
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		UseCgroupFD: true,
 		CgroupFD:    cgroupDirFD,
@@ -85,6 +93,7 @@ func LaunchInCgroup(ctx context.Context, executable ExecutableMember, argv []str
 		ExecutableSHA256: digest,
 		CgroupDevice:     cgroupIdentity.dev,
 		CgroupInode:      cgroupIdentity.ino,
+		logTail:          logTail,
 	}, nil
 }
 
@@ -92,7 +101,13 @@ func (p *Process) Wait() error {
 	if p == nil || p.cmd == nil {
 		return nil
 	}
-	return processCommandWaiter(p.cmd)
+	err := processCommandWaiter(p.cmd)
+	if err != nil && p.logTail != nil {
+		if tail := strings.TrimSpace(p.logTail.String()); tail != "" {
+			return fmt.Errorf("%w; process log tail: %s", err, tail)
+		}
+	}
+	return err
 }
 
 func (p *Process) Signal(signal os.Signal) error {
@@ -207,4 +222,33 @@ func identityFromStatValue(statValue *syscall.Stat_t) fileIdentity {
 		uid:  statValue.Uid,
 		mode: os.FileMode(statValue.Mode),
 	}
+}
+
+type boundedLogBuffer struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func newBoundedLogBuffer(limit int) *boundedLogBuffer {
+	return &boundedLogBuffer{limit: limit}
+}
+
+func (b *boundedLogBuffer) Write(payload []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.limit <= 0 || len(payload) == 0 {
+		return len(payload), nil
+	}
+	b.data = append(b.data, payload...)
+	if overflow := len(b.data) - b.limit; overflow > 0 {
+		b.data = append([]byte(nil), b.data[overflow:]...)
+	}
+	return len(payload), nil
+}
+
+func (b *boundedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(bytes.Clone(b.data))
 }

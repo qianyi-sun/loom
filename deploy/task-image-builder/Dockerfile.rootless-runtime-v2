@@ -8,7 +8,7 @@ ENV GOTOOLCHAIN=local \
     GOPROXY=https://proxy.golang.org,direct \
     GOSUMDB=sum.golang.org
 RUN case "$(go version)" in "go version go1.26.7 linux/"*) ;; *) exit 1 ;; esac \
-    && apk add --no-cache ca-certificates git
+    && apk add --no-cache ca-certificates git patch
 
 # moby/buildkit v0.32.2, signed tag commit 991535e0973488b6a429096d21fa13f81f2d89d8.
 ADD --checksum=sha256:ebc242057b1eee67eb14ead8def52c3770c6793c8c8ac0c53d41983b085360f4 \
@@ -18,16 +18,129 @@ RUN mkdir -p /out /src/buildkit \
     && tar -xzf /tmp/buildkit.tar.gz --strip-components=1 -C /src/buildkit
 WORKDIR /src/buildkit
 RUN go get golang.org/x/crypto@v0.55.0
+RUN go mod vendor
+RUN <<'EOF'
+set -eu
+patch -p1 <<'PATCH'
+diff --git a/util/rootless/specconv/specconv_linux.go b/util/rootless/specconv/specconv_linux.go
+index 7118f8d6d..68d6ad6fc 100644
+--- a/util/rootless/specconv/specconv_linux.go
++++ b/util/rootless/specconv/specconv_linux.go
+@@ -36,0 +37 @@ func ToRootless(spec *specs.Spec) error {
++	// Preserve explicit cgroup paths supplied by the allocation supervisor so RUN containers remain under the guard-transferred cgroup.
+@@ -38 +38,0 @@ func ToRootless(spec *specs.Spec) error {
+-	spec.Linux.CgroupsPath = ""
+diff --git a/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go b/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go
+index d38a2c7c1..43d895e7e 100644
+--- a/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go
++++ b/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go
+@@ -84,0 +85,4 @@ func (m *Mount) mount(target string) (err error) {
++			fuseBinary := strings.TrimPrefix(m.Type, typePrefix)
++			if filepath.IsAbs(fuseBinary) {
++				return m.mountWithDirectFUSE(fuseBinary, target)
++			}
+@@ -590,0 +595,39 @@ func (m *Mount) mountWithHelper(helperBinary, typePrefix, target string) error {
++
++func (m *Mount) mountWithDirectFUSE(helperBinary, target string) error {
++	if !filepath.IsAbs(helperBinary) || filepath.Clean(helperBinary) != helperBinary {
++		return fmt.Errorf("direct FUSE helper path %q is not absolute and clean", helperBinary)
++	}
++	args := []string{}
++	for _, o := range m.Options {
++		args = append(args, "-o", o)
++	}
++	args = append(args, m.Source, target)
++
++	infoBeforeMount, err := Lookup(target)
++	if err != nil {
++		return err
++	}
++
++	const retriesOnECHILD = 10
++	for range retriesOnECHILD {
++		cmd := exec.Command(helperBinary, args...)
++		out, err := cmd.CombinedOutput()
++		if err == nil {
++			return nil
++		}
++		if !errors.Is(err, unix.ECHILD) {
++			return fmt.Errorf("direct FUSE helper [%s %v] failed: %q: %w", helperBinary, args, string(out), err)
++		}
++		infoAfterMount, err := Lookup(target)
++		if err != nil {
++			return err
++		}
++		if infoAfterMount.ID != infoBeforeMount.ID {
++			if err := Unmount(target, 0); err != nil {
++				log.L.WithError(err).Warnf("failed to unmount after ECHILD: %s", target)
++			}
++		}
++	}
++
++	return fmt.Errorf("direct FUSE helper [%s %v] failed with ECHILD (retried %d times)", helperBinary, args, retriesOnECHILD)
++}
+diff --git a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go
+index 8528fda9d..0711c1964 100644
+--- a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go
++++ b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go
+@@ -50,0 +51,4 @@ func supportsReadonlyMultipleLowerDir(d string) error {
++	binary, err := fuseOverlayFSBinary()
++	if err != nil {
++		return err
++	}
+@@ -52 +56 @@ func supportsReadonlyMultipleLowerDir(d string) error {
+-		Type:    "fuse3." + fuseoverlayfsBinary,
++		Type:    "fuse3." + binary,
+@@ -70,2 +74,6 @@ func Supported(root string) error {
+-	if _, err := exec.LookPath(fuseoverlayfsBinary); err != nil {
+-		return fmt.Errorf("%s not installed: %w", fuseoverlayfsBinary, err)
++	binary, err := fuseOverlayFSBinary()
++	if err != nil {
++		return err
++	}
++	if _, err := exec.LookPath(binary); err != nil {
++		return fmt.Errorf("%s not installed: %w", binary, err)
+diff --git a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go
+index 4830ad107..fc569fdef 100644
+--- a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go
++++ b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go
+@@ -36,3 +36,9 @@ import (
+-const (
+-	fuseoverlayfsBinary = "fuse-overlayfs"
+-)
++const fuseOverlayFSBinaryEnv = "BUILDKIT_FUSE_OVERLAYFS_BINARY"
++
++func fuseOverlayFSBinary() (string, error) {
++	path := os.Getenv(fuseOverlayFSBinaryEnv)
++	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
++		return "", fmt.Errorf("%s must be absolute clean path", fuseOverlayFSBinaryEnv)
++	}
++	return path, nil
++}
+@@ -60,0 +67 @@ type snapshotter struct {
++	binary      string
+@@ -68,0 +76,4 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
++	binary, err := fuseOverlayFSBinary()
++	if err != nil {
++		return nil, err
++	}
+@@ -89,0 +101 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
++		binary:      binary,
+@@ -490 +502 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
+-			Type:    "fuse3." + fuseoverlayfsBinary,
++			Type:    "fuse3." + o.binary,
+PATCH
+EOF
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
-    go build -mod=mod -trimpath -buildvcs=false \
+    go build -mod=vendor -trimpath -buildvcs=false \
       -ldflags "-X github.com/moby/buildkit/version.Version=v0.32.2-loom.1 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
       -o /out/buildctl ./cmd/buildctl
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
-    go build -mod=mod -trimpath -buildvcs=false \
+    go build -mod=vendor -trimpath -buildvcs=false \
       -ldflags "-extldflags '-static' -X github.com/moby/buildkit/version.Version=v0.32.2-loom.1 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
       -tags "osusergo netgo static_build seccomp" \
       -o /out/buildkitd ./cmd/buildkitd
@@ -40,6 +153,49 @@ ADD --checksum=sha256:51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8d
 RUN mkdir -p /src/rootlesskit \
     && tar -xzf /tmp/rootlesskit.tar.gz --strip-components=1 -C /src/rootlesskit
 WORKDIR /src/rootlesskit
+RUN <<'EOF'
+set -eu
+patch -p1 <<'PATCH'
+diff --git a/pkg/child/child.go b/pkg/child/child.go
+index c72b90444..e10d95a05 100644
+--- a/pkg/child/child.go
++++ b/pkg/child/child.go
+@@ -147 +147 @@ func activateLoopback() error {
+-		{"ip", "link", "set", "lo", "up"},
++		{"/usr/bin/ip", "link", "set", "lo", "up"},
+@@ -157,4 +157,4 @@ func activateDev(dev, ip string, netmask int, gateway string, mtu int) error {
+-		{"ip", "link", "set", dev, "up"},
+-		{"ip", "link", "set", "dev", dev, "mtu", strconv.Itoa(mtu)},
+-		{"ip", "addr", "add", ip + "/" + strconv.Itoa(netmask), "dev", dev},
+-		{"ip", "route", "add", "default", "via", gateway, "dev", dev},
++		{"/usr/bin/ip", "link", "set", dev, "up"},
++		{"/usr/bin/ip", "link", "set", "dev", dev, "mtu", strconv.Itoa(mtu)},
++		{"/usr/bin/ip", "addr", "add", ip + "/" + strconv.Itoa(netmask), "dev", dev},
++		{"/usr/bin/ip", "route", "add", "default", "via", gateway, "dev", dev},
+diff --git a/pkg/network/parentutils/parentutils.go b/pkg/network/parentutils/parentutils.go
+index 181ca0417..39ae63c7d 100644
+--- a/pkg/network/parentutils/parentutils.go
++++ b/pkg/network/parentutils/parentutils.go
+@@ -13,2 +13,2 @@ func PrepareTap(childPID int, childNetNsPath string, tap string) error {
+-		nsenter(childPID, childNetNsPath, []string{"ip", "tuntap", "add", "name", tap, "mode", "tap"}),
+-		nsenter(childPID, childNetNsPath, []string{"ip", "link", "set", tap, "up"}),
++		nsenter(childPID, childNetNsPath, []string{"/usr/bin/ip", "tuntap", "add", "name", tap, "mode", "tap"}),
++		nsenter(childPID, childNetNsPath, []string{"/usr/bin/ip", "link", "set", tap, "up"}),
+@@ -23 +23 @@ func nsenter(childPID int, childNetNsPath string, cmd []string) []string {
+-	fullCmd := []string{"nsenter", "-t", strconv.Itoa(childPID)}
++	fullCmd := []string{"/usr/bin/nsenter", "-t", strconv.Itoa(childPID)}
+diff --git a/pkg/parent/parent.go b/pkg/parent/parent.go
+index 2fbed7898..d76d0f0aa 100644
+--- a/pkg/parent/parent.go
++++ b/pkg/parent/parent.go
+@@ -441 +441 @@ func setupUIDGIDMap(pid int, subidSource SubidSource) error {
+-	cmd := exec.Command("newuidmap", append([]string{pidS}, uArgs...)...)
++	cmd := exec.Command("/usr/bin/newuidmap", append([]string{pidS}, uArgs...)...)
+@@ -446 +446 @@ func setupUIDGIDMap(pid int, subidSource SubidSource) error {
+-	cmd = exec.Command("newgidmap", append([]string{pidS}, gArgs...)...)
++	cmd = exec.Command("/usr/bin/newgidmap", append([]string{pidS}, gArgs...)...)
+PATCH
+EOF
 RUN go get golang.org/x/crypto@v0.55.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
@@ -102,8 +258,8 @@ RUN cp /usr/bin/buildkit-runc /out/buildkit-runc \
     && test "$(/runtime/buildkitd --version)" = "buildkitd github.com/moby/buildkit v0.32.2-loom.1 991535e0973488b6a429096d21fa13f81f2d89d8" \
     && test "$(/runtime/rootlesskit --version)" = "rootlesskit version 3.1.0" \
     && case "$TARGETARCH" in \
-        amd64) buildctl_sha256=5c594a04284993e440e7d6fa8f007e15351df0118b3ee2f29e1a1baaf5a23a83; buildkitd_sha256=85a89191d7dc2ee53a06f54aaf7969df62092602e31b7dfbc008e1b67e6908c4; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=ab942b0add070aa7ff4be0f366b5fd20c6c99a485f071556a59d5564c5d8841b; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
-        arm64) buildctl_sha256=c2e0830c20f1122e671d24a5a4fe91b5ab71e8bae80fc650ebbffec3168e155b; buildkitd_sha256=6c117ff680f6b94f28cca78961c6bee3ff7b49fa1e159c2db63322e7f2ecd549; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=3871394a3917b1c9d12f04f2d2296b9a870fb94be5d3ff812410777a77e922cd; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
+        amd64) buildctl_sha256=850722004a245c2599c9472a85863fb4ce4e44deb3e4e8eacb705dc59552b147; buildkitd_sha256=0fcdc1aa3454419a72615fe2e306d4bcf47ac7c61430e78b36fdad2ebea59dc5; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
+        arm64) buildctl_sha256=38ec6be685e56e42ca836a527f54757f493a945f8da84113b1c91772de3ba055; buildkitd_sha256=93783b021da7c1e337b5940f05fc2924871916083171f1fe1c1fe973ac744d81; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
         *) exit 1 ;; \
     esac \
     && printf '%s  %s\n' \

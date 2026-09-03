@@ -31,6 +31,50 @@ func TestOCIValidateAcceptsMinimalLayoutAndReturnsImmutableDigestAndTarSHA(t *te
 	}
 }
 
+func TestOCIValidateAcceptsBuildKitDirectoryHeaders(t *testing.T) {
+	tarPath, _ := writeOCILayoutTar(t, "amd64", func(f *ociLayoutFixture) {
+		f.extraEntries = append(f.extraEntries,
+			tarEntry{name: "./", entryType: tar.TypeDir},
+			tarEntry{name: "blobs/", entryType: tar.TypeDir},
+			tarEntry{name: "blobs/sha256/", entryType: tar.TypeDir},
+		)
+	})
+
+	if _, err := ValidateOCIOutput(tarPath, "linux/amd64"); err != nil {
+		t.Fatalf("ValidateOCIOutput() error = %v", err)
+	}
+}
+
+func TestOCIValidateHashesCompleteTarFile(t *testing.T) {
+	tarPath, _ := writeOCILayoutTar(t, "amd64", nil)
+	file, err := os.OpenFile(tarPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("OpenFile(%q) error = %v", tarPath, err)
+	}
+	if _, err := file.Write([]byte("trailing-audit-bytes")); err != nil {
+		file.Close()
+		t.Fatalf("append tar trailer error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close(%q) error = %v", tarPath, err)
+	}
+	completePayload, err := os.ReadFile(tarPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", tarPath, err)
+	}
+
+	output, err := ValidateOCIOutput(tarPath, "linux/amd64")
+	if err != nil {
+		t.Fatalf("ValidateOCIOutput() error = %v", err)
+	}
+	if output.FileSHA256 != sha256Hex(completePayload) {
+		t.Fatalf("FileSHA256 = %q, want complete tar file digest", output.FileSHA256)
+	}
+	if output.SizeBytes != int64(len(completePayload)) {
+		t.Fatalf("SizeBytes = %d, want complete tar file size %d", output.SizeBytes, len(completePayload))
+	}
+}
+
 func TestOCIValidateRejectsUnsafeTarEntriesAndDescriptorMutations(t *testing.T) {
 	tests := []struct {
 		name   string

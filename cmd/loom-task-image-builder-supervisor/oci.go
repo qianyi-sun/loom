@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -23,29 +24,39 @@ type OCIOutput struct {
 }
 
 type ociIndex struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	Manifests     []ociDescriptor `json:"manifests"`
+	SchemaVersion int               `json:"schemaVersion"`
+	MediaType     string            `json:"mediaType,omitempty"`
+	Manifests     []ociDescriptor   `json:"manifests"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
 }
 
 type ociManifest struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	MediaType     string          `json:"mediaType"`
-	Config        ociDescriptor   `json:"config"`
-	Layers        []ociDescriptor `json:"layers"`
+	SchemaVersion int               `json:"schemaVersion"`
+	MediaType     string            `json:"mediaType"`
+	Config        ociDescriptor     `json:"config"`
+	Layers        []ociDescriptor   `json:"layers"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
 }
 
 type ociConfig struct {
-	Architecture string         `json:"architecture"`
-	OS           string         `json:"os"`
-	RootFS       map[string]any `json:"rootfs"`
-	Config       map[string]any `json:"config"`
+	Created      string           `json:"created,omitempty"`
+	Author       string           `json:"author,omitempty"`
+	Architecture string           `json:"architecture"`
+	OS           string           `json:"os"`
+	OSVersion    string           `json:"os.version,omitempty"`
+	OSFeatures   []string         `json:"os.features,omitempty"`
+	Variant      string           `json:"variant,omitempty"`
+	RootFS       map[string]any   `json:"rootfs"`
+	Config       map[string]any   `json:"config"`
+	History      []map[string]any `json:"history,omitempty"`
 }
 
 type ociDescriptor struct {
-	MediaType string       `json:"mediaType"`
-	Digest    string       `json:"digest"`
-	Size      int64        `json:"size"`
-	Platform  *ociPlatform `json:"platform,omitempty"`
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int64             `json:"size"`
+	Platform    *ociPlatform      `json:"platform,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type ociPlatform struct {
@@ -78,13 +89,14 @@ func ValidateOCIOutput(path string, platform string) (OCIOutput, error) {
 		if err != nil {
 			return OCIOutput{}, err
 		}
-		if err := validateTarEntry(header); err != nil {
+		canonicalName, err := validateTarEntry(header)
+		if err != nil {
 			return OCIOutput{}, err
 		}
 		if header.Typeflag == tar.TypeDir {
 			continue
 		}
-		if _, ok := entries[header.Name]; ok {
+		if _, ok := entries[canonicalName]; ok {
 			return OCIOutput{}, errors.New("OCI tar contains duplicate path")
 		}
 		payload, err := io.ReadAll(reader)
@@ -94,7 +106,10 @@ func ValidateOCIOutput(path string, platform string) (OCIOutput, error) {
 		if int64(len(payload)) != header.Size {
 			return OCIOutput{}, errors.New("OCI tar entry size mismatch")
 		}
-		entries[header.Name] = payload
+		entries[canonicalName] = payload
+	}
+	if _, err := io.Copy(hash, file); err != nil {
+		return OCIOutput{}, err
 	}
 	indexPayload, ok := entries["index.json"]
 	if !ok {
@@ -107,7 +122,7 @@ func ValidateOCIOutput(path string, platform string) (OCIOutput, error) {
 	if err := decodeStrictJSON(indexPayload, &index); err != nil {
 		return OCIOutput{}, err
 	}
-	if index.SchemaVersion != 2 || len(index.Manifests) != 1 {
+	if index.SchemaVersion != 2 || index.MediaType != "" && index.MediaType != "application/vnd.oci.image.index.v1+json" || len(index.Manifests) != 1 {
 		return OCIOutput{}, errors.New("OCI index must contain exactly one manifest")
 	}
 	manifestDescriptor := index.Manifests[0]
@@ -181,19 +196,44 @@ func parseSHA256Descriptor(value string) (string, error) {
 	return digest, nil
 }
 
-func validateTarEntry(header *tar.Header) error {
+func validateTarEntry(header *tar.Header) (string, error) {
 	if header == nil {
-		return errors.New("OCI tar header missing")
+		return "", errors.New("OCI tar header missing")
 	}
-	if header.Name == "" || filepath.IsAbs(header.Name) || filepath.Clean(header.Name) != header.Name || header.Name == "." || strings.HasPrefix(header.Name, "../") || strings.Contains(header.Name, "/../") {
-		return errors.New("OCI tar path invalid")
+	canonicalName, err := canonicalOCITarPath(header.Name, header.Typeflag == tar.TypeDir)
+	if err != nil {
+		return "", err
 	}
 	switch header.Typeflag {
 	case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
-		return nil
+		return canonicalName, nil
 	default:
-		return fmt.Errorf("OCI tar entry type forbidden: %d", header.Typeflag)
+		return "", fmt.Errorf("OCI tar entry type forbidden: %d", header.Typeflag)
 	}
+}
+
+func canonicalOCITarPath(raw string, directory bool) (string, error) {
+	if directory && (raw == "." || raw == "./") {
+		return ".", nil
+	}
+	name := strings.TrimPrefix(raw, "./")
+	if raw == "" || name == "" || path.IsAbs(name) || filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+		return "", errors.New("OCI tar path invalid")
+	}
+	cleaned := path.Clean(name)
+	if cleaned == "." {
+		if directory {
+			return cleaned, nil
+		}
+		return "", errors.New("OCI tar path invalid")
+	}
+	if !directory && cleaned != name {
+		return "", errors.New("OCI tar path invalid")
+	}
+	if strings.HasPrefix(cleaned, "../") || cleaned == ".." {
+		return "", errors.New("OCI tar path invalid")
+	}
+	return cleaned, nil
 }
 
 func parsePlatform(platform string) (string, string, error) {
