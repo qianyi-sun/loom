@@ -22,6 +22,7 @@ _COMPONENTS = (
     ("gateway", "loom-llm-gateway"),
     ("control_plane", "loom-control-plane"),
     ("service", "loom-service"),
+    ("execution_actuator", "loom-execution-actuator"),
     ("execution_runtime", "loom-execution-runtime"),
 )
 
@@ -57,7 +58,7 @@ chmod 600 "$work_dir/docker/config.json"
 export PATH="$work_dir/bin:$PATH"
 export DOCKER_CONFIG="$work_dir/docker"
 
-for component in loom-llm-gateway loom-control-plane loom-service loom-execution-runtime; do
+for component in loom-llm-gateway loom-control-plane loom-service loom-execution-actuator loom-execution-runtime; do
   source_ref=$1
   shift
   source_digest=${source_ref##*@}
