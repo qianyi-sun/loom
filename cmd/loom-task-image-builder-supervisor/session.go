@@ -216,6 +216,9 @@ type sessionEnvelopeFields struct {
 }
 
 func parseSessionEnvelopeFields(payload []byte) (sessionEnvelopeFields, error) {
+	if !json.Valid(payload) {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
 	values, err := scanJSONObjectFields(payload)
 	if err != nil {
 		return sessionEnvelopeFields{}, err

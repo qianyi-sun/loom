@@ -123,6 +123,39 @@ func TestSessionEnvelopeRejectsTrailingJSONGarbage(t *testing.T) {
 	}
 }
 
+func TestSessionEnvelopeRejectsMalformedJSONTokenLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "invalid escape",
+			payload: sessionEnvelopePayloadWithToken([]byte(`"sentinel-\q-secret"`)),
+		},
+		{
+			name:    "raw control byte",
+			payload: sessionEnvelopePayloadWithToken([]byte{'"', 's', 'e', 'n', 't', 'i', 'n', 'e', 'l', '-', 0x01, '"'}),
+		},
+		{
+			name:    "invalid unicode escape",
+			payload: sessionEnvelopePayloadWithToken([]byte(`"sentinel-\u12X4-secret"`)),
+		},
+		{
+			name:    "trailing object comma",
+			payload: sessionEnvelopePayloadWithTrailingComma([]byte(`"sentinel-secret-text"`)),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := mustSecretBuffer(t, tc.payload)
+			defer buffer.Close()
+
+			if _, err := parseSessionEnvelope(buffer); err == nil {
+				t.Fatalf("parseSessionEnvelope(%q) succeeded, want error", tc.payload)
+			}
+		})
+	}
+}
+
 func TestSessionEnvelopeScannerKeepsTokenSliceInsideLockedBuffer(t *testing.T) {
 	buffer := mustSecretBuffer(t, []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"`+runtimeSessionArch()+`","session_token":"sentinel-secret-text","generation":1,"attestation_generation":1,"attestation_sha256":"`+strings.Repeat("a", 64)+`","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`))
 	defer buffer.Close()
@@ -177,6 +210,21 @@ func mustSecretBuffer(t *testing.T, payload []byte) *SecretBuffer {
 		t.Fatalf("NewSecretBuffer() error = %v", err)
 	}
 	return buffer
+}
+
+func sessionEnvelopePayloadWithToken(token []byte) []byte {
+	prefix := []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"` + runtimeSessionArch() + `","session_token":`)
+	suffix := []byte(`,"generation":1,"attestation_generation":1,"attestation_sha256":"` + strings.Repeat("a", 64) + `","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`)
+	payload := make([]byte, 0, len(prefix)+len(token)+len(suffix))
+	payload = append(payload, prefix...)
+	payload = append(payload, token...)
+	payload = append(payload, suffix...)
+	return payload
+}
+
+func sessionEnvelopePayloadWithTrailingComma(token []byte) []byte {
+	payload := sessionEnvelopePayloadWithToken(token)
+	return append(payload[:len(payload)-1:len(payload)-1], []byte(",}")...)
 }
 
 type stubSessionClient struct {
