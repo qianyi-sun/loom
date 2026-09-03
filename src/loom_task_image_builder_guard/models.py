@@ -11,6 +11,7 @@ class IdentityConfig:
     uid: int
     gid: int
     forbidden_supplementary_gids: tuple[int, ...]
+    supervisor_path: Path
     supervisor_sha256: str
 
 
@@ -51,6 +52,7 @@ class CommandConfig:
 
 @dataclass(frozen=True, slots=True)
 class SlurmConfig:
+    cluster_name: str
     request_sha256: str
     account: str
     partition: str

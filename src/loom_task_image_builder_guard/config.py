@@ -129,18 +129,36 @@ class GuardConfig(GuardConfigValue):
         architecture = raw["cpu_arch"]
         node_name = _string(raw["node_name"])
         native = {
-            "oldlab": ("x86_64", "trt-eai-oldlab-", "loom-task-image-builder-rootless-oldlab"),
-            "gb10": ("arm64", "trt-gb10-", "loom-task-image-builder-rootless-gb10"),
+            "oldlab": (
+                "x86_64",
+                "trt-eai-oldlab-",
+                "trt-oldlab",
+                "loom-task-image-builder-rootless-oldlab",
+            ),
+            "gb10": (
+                "arm64",
+                "trt-gb10-",
+                "trt-gb10",
+                "loom-task-image-builder-rootless-gb10",
+            ),
         }
         if not isinstance(cluster, str) or cluster not in native:
             raise GuardError("config_native_pair_invalid")
-        expected_arch, node_prefix, expected_qos = native[cluster]
+        expected_arch, node_prefix, expected_cluster_name, expected_qos = native[cluster]
         if architecture != expected_arch or not node_name.startswith(node_prefix):
             raise GuardError("config_native_pair_invalid")
 
         identity_raw = _object(
             raw["identity"],
-            keys=frozenset({"uid", "gid", "forbidden_supplementary_gids", "supervisor_sha256"}),
+            keys=frozenset(
+                {
+                    "uid",
+                    "gid",
+                    "forbidden_supplementary_gids",
+                    "supervisor_path",
+                    "supervisor_sha256",
+                }
+            ),
         )
         uid = _integer(identity_raw["uid"], minimum=1)
         gid = _integer(identity_raw["gid"], minimum=1)
@@ -150,7 +168,13 @@ class GuardConfig(GuardConfigValue):
         forbidden = tuple(_integer(item, minimum=0) for item in forbidden_raw)
         if forbidden != tuple(sorted(set(forbidden))) or gid in forbidden:
             raise GuardError("config_identity_invalid")
-        identity = IdentityConfig(uid, gid, forbidden, _digest(identity_raw["supervisor_sha256"]))
+        identity = IdentityConfig(
+            uid,
+            gid,
+            forbidden,
+            _path(identity_raw["supervisor_path"]),
+            _digest(identity_raw["supervisor_sha256"]),
+        )
 
         protocol_raw = _object(
             raw["protocol"],
@@ -237,6 +261,7 @@ class GuardConfig(GuardConfigValue):
             raw["slurm"],
             keys=frozenset(
                 {
+                    "cluster_name",
                     "request_sha256",
                     "account",
                     "partition",
@@ -250,7 +275,8 @@ class GuardConfig(GuardConfigValue):
         )
         qos = _string(slurm_raw["qos"])
         if (
-            slurm_raw["account"] != "loom-task-builder"
+            slurm_raw["cluster_name"] != expected_cluster_name
+            or slurm_raw["account"] != "loom-task-builder"
             or slurm_raw["partition"] != "loom-task-builder"
             or slurm_raw["feature"] != "loom_rootless_buildkit"
             or qos != expected_qos
@@ -260,6 +286,7 @@ class GuardConfig(GuardConfigValue):
         if not isinstance(wall_time, str) or _WALL_TIME.fullmatch(wall_time) is None:
             raise GuardError("config_slurm_invalid")
         slurm = SlurmConfig(
+            cluster_name=expected_cluster_name,
             request_sha256=_digest(slurm_raw["request_sha256"]),
             account="loom-task-builder",
             partition="loom-task-builder",

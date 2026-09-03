@@ -28,6 +28,7 @@ def _document() -> dict[str, object]:
             "uid": 993,
             "gid": 980,
             "forbidden_supplementary_gids": [0, 27, 128],
+            "supervisor_path": "/usr/local/libexec/loom-task-builder-supervisor",
             "supervisor_sha256": SHA_A,
         },
         "protocol": {
@@ -57,6 +58,7 @@ def _document() -> dict[str, object]:
             },
         },
         "slurm": {
+            "cluster_name": "trt-oldlab",
             "request_sha256": SHA_D,
             "account": "loom-task-builder",
             "partition": "loom-task-builder",
@@ -113,6 +115,10 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
         "trt-eai-oldlab-3",
     )
     assert config.identity.forbidden_supplementary_gids == (0, 27, 128)
+    assert config.identity.supervisor_path == Path(
+        "/usr/local/libexec/loom-task-builder-supervisor"
+    )
+    assert config.slurm.cluster_name == "trt-oldlab"
     assert config.commands.bpftool.sha256 == SHA_C
     assert config.containment.io_limits[0].device == "8:1"
     assert config.service.attestation_interval_seconds == 15
@@ -143,6 +149,12 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
                 {"path": "sacct"}
             ),
             "config_path_invalid",
+        ),
+        (
+            lambda value: value["slurm"].update(  # type: ignore[union-attr]
+                {"cluster_name": "foreign-cluster"}
+            ),
+            "config_slurm_invalid",
         ),
         (
             lambda value: value["protocol"].update(  # type: ignore[union-attr]
