@@ -290,31 +290,36 @@ func (b *workloadBroker) outputRequestID() string {
 }
 
 func inventoryOutputs(outputRoot string) ([]outputFile, error) {
-	entries, err := os.ReadDir(outputRoot)
-	if err != nil {
-		return nil, err
-	}
-	files := make([]outputFile, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == "termination-message" || strings.HasSuffix(entry.Name(), ".tmp") {
-			continue
+	files := []outputFile{}
+	err := filepath.WalkDir(outputRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		path := filepath.Join(outputRoot, entry.Name())
-		payload, err := readRegularOutputFile(path)
+		if path == outputRoot || entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(outputRoot, path)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		digest := sha256.Sum256(payload)
-		media := "application/octet-stream"
-		if strings.HasSuffix(entry.Name(), ".json") {
-			media = "application/json"
-		} else if strings.HasSuffix(entry.Name(), ".stdout") || strings.HasSuffix(entry.Name(), ".stderr") {
-			media = "text/plain; charset=utf-8"
+		relative = filepath.ToSlash(relative)
+		if relative == "termination-message" || strings.HasSuffix(relative, ".tmp") {
+			return nil
+		}
+		size, digest, err := digestRegularOutputFile(path)
+		if err != nil {
+			return err
 		}
 		files = append(files, outputFile{
-			RelativePath: entry.Name(), MediaType: media, SizeBytes: int64(len(payload)),
-			SHA256: "sha256:" + hex.EncodeToString(digest[:]),
+			RelativePath: relative,
+			MediaType:    outputMediaType(relative),
+			SizeBytes:    size,
+			SHA256:       digest,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(files, func(i, j int) bool {
 		if files[i].RelativePath == "result.json" {
@@ -329,6 +334,38 @@ func inventoryOutputs(outputRoot string) ([]outputFile, error) {
 		return nil, fmt.Errorf("runtime result is missing from output inventory")
 	}
 	return files, nil
+}
+
+func digestRegularOutputFile(path string) (int64, string, error) {
+	file, info, err := openRegularOutputFile(path)
+	if err != nil {
+		return 0, "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	written, err := io.Copy(hash, file)
+	if err != nil {
+		return 0, "", err
+	}
+	if written != info.Size() {
+		return 0, "", fmt.Errorf("runtime output size changed during inventory")
+	}
+	return written, "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func outputMediaType(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".json"):
+		return "application/json"
+	case strings.HasSuffix(path, ".jsonl"):
+		return "application/x-ndjson"
+	case strings.HasSuffix(path, ".stdout"), strings.HasSuffix(path, ".stderr"),
+		strings.HasSuffix(path, ".txt"), strings.HasSuffix(path, ".md"),
+		strings.HasSuffix(path, ".log"), strings.HasSuffix(path, ".cast"):
+		return "text/plain; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileIndex, partNumber int, payload []byte) (partReceipt, error) {
@@ -421,17 +458,29 @@ func (b *workloadBroker) commitOutputs(ctx context.Context, outputRoot, requestI
 		if grant.Files[index].FileIndex != index || grant.Files[index].RelativePath != file.RelativePath {
 			return outputCommitEvidence{}, fmt.Errorf("output upload plan identity drift")
 		}
-		payload, err := readRegularOutputFile(filepath.Join(outputRoot, file.RelativePath))
+		input, info, err := openRegularOutputFile(filepath.Join(outputRoot, filepath.FromSlash(file.RelativePath)))
 		if err != nil {
 			return outputCommitEvidence{}, err
 		}
+		if info.Size() != file.SizeBytes {
+			_ = input.Close()
+			return outputCommitEvidence{}, fmt.Errorf("output changed after upload inventory")
+		}
 		receipts := []partReceipt{}
-		for offset, partNumber := int64(0), 1; offset < int64(len(payload)) || (len(payload) == 0 && partNumber == 1); partNumber++ {
-			end := offset + uploadPartBytes
-			if end > int64(len(payload)) {
-				end = int64(len(payload))
+		for offset, partNumber := int64(0), 1; offset < file.SizeBytes || (file.SizeBytes == 0 && partNumber == 1); partNumber++ {
+			remaining := file.SizeBytes - offset
+			partSize := uploadPartBytes
+			if remaining < partSize {
+				partSize = remaining
 			}
-			chunk := payload[offset:end]
+			chunk, readErr := io.ReadAll(io.LimitReader(input, partSize))
+			if readErr != nil || int64(len(chunk)) != partSize {
+				_ = input.Close()
+				if readErr != nil {
+					return outputCommitEvidence{}, readErr
+				}
+				return outputCommitEvidence{}, fmt.Errorf("output changed during upload")
+			}
 			var receipt partReceipt
 			if err := retryOperation(ctx, func() error {
 				var uploadErr error
@@ -441,10 +490,13 @@ func (b *workloadBroker) commitOutputs(ctx context.Context, outputRoot, requestI
 				return outputCommitEvidence{}, fmt.Errorf("upload output part: %w", err)
 			}
 			receipts = append(receipts, receipt)
-			if len(payload) == 0 {
+			if file.SizeBytes == 0 {
 				break
 			}
-			offset = end
+			offset += int64(len(chunk))
+		}
+		if err := input.Close(); err != nil {
+			return outputCommitEvidence{}, err
 		}
 		complete := struct {
 			workloadIdentity

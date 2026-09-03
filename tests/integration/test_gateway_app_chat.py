@@ -194,6 +194,7 @@ def test_chat_returns_loom_event_payload(  # type: ignore[no-untyped-def]
         assert body["loom"]["cost_usd"] > 0
         assert "rate_card_hash" in body["loom"]
         assert "gateway_request_id" in body["loom"]
+        assert body["loom"]["attempt"] == 1
 
 
 def test_chat_rejects_missing_loom_block(app, seed_data):  # type: ignore[no-untyped-def]
@@ -208,9 +209,7 @@ def test_chat_rejects_missing_loom_block(app, seed_data):  # type: ignore[no-unt
             },
         )
         assert r.status_code == 400
-        assert r.json()["detail"] == (
-            "loom attribution is required without a step-scoped token"
-        )
+        assert r.json()["detail"] == ("loom attribution is required without a step-scoped token")
 
 
 def test_chat_step_token_supplies_loom_attribution(
@@ -1258,9 +1257,7 @@ def test_chat_rejects_execution_attempt_token_before_dispatch(
         )
 
     assert response.status_code == 403
-    assert response.json() == {
-        "detail": "execution-attempt tokens are not supported by this route"
-    }
+    assert response.json() == {"detail": "execution-attempt tokens are not supported by this route"}
     assert pool.connection_ids == []
 
 

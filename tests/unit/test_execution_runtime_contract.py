@@ -8,6 +8,7 @@ from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     ProbeV1,
     ProcessPhaseV1,
+    RuntimeOutputDeclarationV1,
     SidecarContainerV1,
     VerifierExecution,
 )
@@ -131,4 +132,30 @@ def test_verifier_topology_is_fail_closed() -> None:
             execution_role="verifier",
             verifier_execution="skipped",
             verifier=None,
+        )
+
+
+def test_complete_output_declarations_are_confined_and_unique() -> None:
+    declaration = RuntimeOutputDeclarationV1(
+        source_path="answer.txt",
+        relative_path="artifacts/answer.txt",
+        kind="task_artifact",
+        required=True,
+    )
+    assert _plan(output_declarations=(declaration,)).output_declarations == (declaration,)
+    with pytest.raises(ValidationError, match="must be unique"):
+        _plan(output_declarations=(declaration, declaration))
+    with pytest.raises(ValidationError, match="confined relative"):
+        RuntimeOutputDeclarationV1(
+            source_path="../answer.txt",
+            relative_path="artifacts/answer.txt",
+            kind="task_artifact",
+            required=True,
+        )
+    with pytest.raises(ValidationError, match="unknown bundle namespace"):
+        RuntimeOutputDeclarationV1(
+            source_path="answer.txt",
+            relative_path="unscoped/answer.txt",
+            kind="task_artifact",
+            required=True,
         )

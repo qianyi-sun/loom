@@ -529,14 +529,35 @@ Declared sidecars render as ordered Kubernetes native sidecar init containers
 startup/readiness probes, dropped capabilities, and no service-account token.
 Unsupported compositions fail closed.
 
-The static runtime emits bounded per-phase stdout/stderr evidence and an
-atomically renamed `loom.execution-runtime-result.v1` manifest. It distinguishes
-setup, task, verifier, timeout, cancellation, and runtime failures, preserves
-signal/exit/timestamp/truncation evidence, and repeats the exact lease-bound
-runtime identity. The control plane validates `result_reported` against the
-frozen contract, expected phase order, container roles, and log bounds before
-accepting the idempotent event. A changed candidate, command, image, role,
-phase, or digest is rejected.
+The frozen plan also declares every workspace output that belongs in the
+complete Trial bundle, including its source path, package path, semantic kind,
+and whether it is required. For the automatic direct-completion profile this
+means all declared/required task artifacts, the lossless per-call prompt and
+response trajectory, the Gateway usage/accounting snapshot, and the structured
+verifier result. Runtime phase logs and immutable execution provenance are
+always part of the same package. Future agent profiles must explicitly add
+their native trajectory, terminal transcript, model-input trace, recording, or
+checkpoint paths; the runtime never guesses them from a workspace glob.
+
+The static runtime copies those files only after verifier execution, emits
+bounded per-phase stdout/stderr evidence, and writes an atomically renamed
+`loom.execution-runtime-result.v1` semantic manifest. The manifest records each
+declared output as captured or missing with its exact size and SHA-256 and
+projects verifier rewards from the committed scoring document. It distinguishes
+setup, task, verifier, timeout, cancellation, missing-artifact, trajectory,
+upload, and runtime failures, preserves signal/exit/timestamp/truncation
+evidence, and repeats the exact lease-bound runtime identity. A required output
+or valid reward missing from an otherwise successful execution changes the
+runtime result to failure before upload.
+
+The Gateway accepts the files as one `loom.trial-artifact-bundle.v1` Artifact,
+checks the result declarations against the frozen plan and the uploaded file
+inventory, streams large payloads in bounded multipart chunks, and commits the
+item manifest, root manifest, and marker before projecting reward and trajectory
+index metadata. A changed candidate, command, image, role, phase, path, size,
+or digest is rejected. This source bundle is the atomic input to canonical
+materialization and delivery export; `answer.txt`, `result.json`, or a log file
+alone is never completion evidence.
 
 After the full result file is committed, the runtime writes a separate bounded
 termination summary to kubelet's termination-message file. The actuator reads

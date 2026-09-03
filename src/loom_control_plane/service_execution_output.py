@@ -33,6 +33,7 @@ from loom.pipeline.artifact_commit import (
     ServiceExecutionOutputProducerV1,
     UploadAuthV1,
     UploadFilePlanV1,
+    confined_relative_path,
 )
 from loom.pipeline.keys import canonical_digest
 from loom.service_execution_materialization import (
@@ -43,7 +44,7 @@ from loom.service_execution_materialization import (
 from loom.trajectory.storage import ObjectStore
 from loom_control_plane.service_execution import record_committed_runtime_result
 
-_MAX_FILES = 133
+_MAX_FILES = 10_133
 _MAX_TOKEN_TTL_SECONDS = 600
 _RESULT_MAX_BYTES = 1024 * 1024
 
@@ -69,12 +70,15 @@ class ServiceExecutionTokenRequestV1(ServiceExecutionPeerV1):
 
 
 class ServiceExecutionOutputFileV1(_Strict):
-    relative_path: str = Field(
-        pattern=r"^(?:result\.json|[0-9]{2}-(?:setup|agent|verifier)\.(?:stdout|stderr)|trajectory\.json|usage\.json|diagnostics\.json)$"
-    )
+    relative_path: str = Field(min_length=1, max_length=4096)
     media_type: str = Field(min_length=1, max_length=255)
     size_bytes: int = Field(ge=0)
     sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @field_validator("relative_path")
+    @classmethod
+    def confined_path(cls, value: str) -> str:
+        return confined_relative_path(value)
 
 
 class ServiceExecutionOutputPrepareV1(ServiceExecutionPeerV1):
@@ -137,9 +141,7 @@ async def resolve_service_execution_input(
         raise ServiceExecutionBrokerError("task_input_unavailable")
     row = (
         await session.execute(
-            select(Task)
-            .join(Trial, Trial.task_id == Task.id)
-            .where(Trial.id == lease.trial_id)
+            select(Task).join(Trial, Trial.task_id == Task.id).where(Trial.id == lease.trial_id)
         )
     ).scalar_one_or_none()
     if row is None or row.source is None:
@@ -214,6 +216,13 @@ def _validate_runtime_result(
         expected_phases.append(plan.verifier.role)
     actual_phases = [item.role for item in result.phases]
     phases_match = actual_phases == expected_phases[: len(actual_phases)]
+    declared_outputs = [
+        (item.source_path, item.relative_path, item.kind, item.required)
+        for item in plan.output_declarations
+    ]
+    reported_outputs = [
+        (item.source_path, item.relative_path, item.kind, item.required) for item in result.outputs
+    ]
     if result.status == "succeeded":
         phases_match = phases_match and len(actual_phases) == len(expected_phases)
     if (
@@ -228,6 +237,12 @@ def _validate_runtime_result(
         or result.runtime_binary_sha256 != plan.runtime_binary_sha256
         or list(result.container_roles) != expected_roles
         or not phases_match
+        or reported_outputs != declared_outputs
+        or (
+            result.status == "succeeded"
+            and any(item.kind == "verifier" for item in plan.output_declarations)
+            and result.verifier_rewards is None
+        )
         or any(
             stream.bytes_saved > plan.max_log_bytes_per_stream
             for phase in result.phases
@@ -420,8 +435,8 @@ class ServiceExecutionOutputRouteService:
                     file_index=index,
                     preallocated_artifact_id=artifact_id,
                     relative_path=item.relative_path,
-                    artifact_name="runtime_evidence",
-                    artifact_type="loom.execution-runtime-evidence.v1",
+                    artifact_name="trial_bundle",
+                    artifact_type="loom.trial-artifact-bundle.v1",
                     producer="service",
                     media_type=item.media_type,
                     role="semantic_document" if item.relative_path == "result.json" else "payload",
@@ -488,18 +503,23 @@ class ServiceExecutionOutputRouteService:
             session.expunge(upload)
             return upload
 
-    async def session_paths(self, *, lease: ServiceExecutionLease, session_id: UUID) -> list[str]:
+    async def session_files(
+        self, *, lease: ServiceExecutionLease, session_id: UUID
+    ) -> list[ArtifactUploadFile]:
         await self.assert_session(lease=lease, session_id=session_id)
         async with self._session_factory() as session:
-            return list(
+            rows = list(
                 (
                     await session.execute(
-                        select(ArtifactUploadFile.relative_path)
+                        select(ArtifactUploadFile)
                         .where(ArtifactUploadFile.session_id == session_id)
                         .order_by(ArtifactUploadFile.file_index)
                     )
                 ).scalars()
             )
+            for row in rows:
+                session.expunge(row)
+            return rows
 
     async def put_part(
         self,
@@ -559,7 +579,8 @@ class ServiceExecutionOutputRouteService:
             max_bytes=_RESULT_MAX_BYTES,
         )
         runtime_result = _validate_runtime_result(lease, _runtime_plan(lease), result_payload)
-        paths = await self.session_paths(lease=lease, session_id=session_id)
+        upload_files = await self.session_files(lease=lease, session_id=session_id)
+        paths = [item.relative_path for item in upload_files]
         required_paths = {
             "result.json",
             *(
@@ -567,10 +588,24 @@ class ServiceExecutionOutputRouteService:
                 for phase in runtime_result.phases
                 for stream in (phase.stdout, phase.stderr)
             ),
+            *(
+                output.relative_path
+                for output in runtime_result.outputs
+                if output.state == "captured"
+            ),
         }
-        optional_paths = {"trajectory.json", "usage.json", "diagnostics.json"}
-        if not required_paths <= set(paths) or set(paths) - required_paths - optional_paths:
+        if set(paths) != required_paths:
             raise ServiceExecutionBrokerError("runtime_output_inventory_drift")
+        uploaded_by_path = {item.relative_path: item for item in upload_files}
+        if any(
+            output.state == "captured"
+            and (
+                uploaded_by_path[output.relative_path].expected_size != output.size_bytes
+                or uploaded_by_path[output.relative_path].expected_sha256 != output.sha256
+            )
+            for output in runtime_result.outputs
+        ):
+            raise ServiceExecutionBrokerError("runtime_output_evidence_drift")
         result = await self._service.commit_session(
             session_id=session_id,
             auth=auth,
@@ -622,10 +657,13 @@ class ServiceExecutionOutputRouteService:
                         unpacked_size_bytes=sum(item.size_bytes for item in record.stored_files),
                         file_count=max(1, len(record.stored_files)),
                         provenance={
-                            "schema_version": "loom.service-execution-output-provenance.v1",
+                            "schema_version": "loom.service-execution-trial-bundle-provenance.v1",
                             "lease_id": str(current.id),
                             "generation": current.resource_generation,
                             "runtime_contract_sha256": current.runtime_contract_sha256,
+                            "candidate_sha": runtime_result.candidate_sha,
+                            "task_revision_sha256": runtime_result.task_revision_sha256,
+                            "command_identity_sha256": runtime_result.command_identity_sha256,
                         },
                     )
                 )
@@ -639,6 +677,20 @@ class ServiceExecutionOutputRouteService:
             current.output_marker_sha256 = marker_sha256
             current.output_committed_at = datetime.now(UTC)
             current.updated_at = current.output_committed_at
+            trial = await session.get(Trial, current.trial_id, with_for_update=True)
+            if trial is None:
+                raise ServiceExecutionBrokerError("trial_identity_drift")
+            trajectory_index = {
+                "schema_version": "loom.service-execution-trajectory-index.v1",
+                "artifact_bundle_id": str(record.artifact_id),
+                "upload_session_id": str(session_id),
+                "manifest_sha256": manifest_sha256,
+                "outputs": [item.model_dump(mode="json") for item in runtime_result.outputs],
+                "verifier_rewards": runtime_result.verifier_rewards,
+            }
+            if trial.trajectory_index is not None and trial.trajectory_index != trajectory_index:
+                raise ServiceExecutionBrokerError("trajectory_index_identity_drift")
+            trial.trajectory_index = trajectory_index
             await record_committed_runtime_result(
                 session,
                 lease_id=current.id,

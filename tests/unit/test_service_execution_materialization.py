@@ -129,6 +129,32 @@ def test_ordinary_task_compiles_to_profile_owned_nebius_plan() -> None:
     assert plan.verifier.argv == ("/bin/sh", "verifier/check.sh")
     assert plan.task_resources.cpu_millis == 1000
     assert plan.workspace_mib == 2048
+    assert [item.model_dump(mode="json") for item in plan.output_declarations] == [
+        {
+            "source_path": "answer.txt",
+            "relative_path": "artifacts/answer.txt",
+            "kind": "task_artifact",
+            "required": True,
+        },
+        {
+            "source_path": ".loom/agent/trajectory.jsonl",
+            "relative_path": "trajectory/events.jsonl",
+            "kind": "trajectory",
+            "required": True,
+        },
+        {
+            "source_path": ".loom/agent/usage.json",
+            "relative_path": "accounting/usage.json",
+            "kind": "usage",
+            "required": True,
+        },
+        {
+            "source_path": ".loom/verifier/output.json",
+            "relative_path": "verifier/output.json",
+            "kind": "verifier",
+            "required": True,
+        },
+    ]
 
 
 def test_automatic_compiler_rejects_unimplemented_task_semantics() -> None:

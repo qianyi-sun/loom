@@ -1593,6 +1593,7 @@ async def finalize_committed_service_execution(
         result: dict[str, Any] | None = {
             "schema_version": "loom.service-execution-trial-result.v1",
             "runtime_result": runtime_result.model_dump(mode="json"),
+            "reward": runtime_result.verifier_rewards,
             "output_manifest_sha256": lease.output_manifest_sha256,
             "output_marker_sha256": lease.output_marker_sha256,
         }
