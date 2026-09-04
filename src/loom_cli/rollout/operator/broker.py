@@ -25,6 +25,7 @@ from loom_cli.rollout.gb10_slurm_acceptance import GB10_SLURM_WORKER_HOSTS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.preflight_contract import DependencyExpiredError
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
 from .backup import (
@@ -484,6 +485,42 @@ def _staged_preflight_request(
     )
 
 
+def _assess_preflight(
+    dependencies: BrokerDependencies,
+    candidate: CandidateBinding,
+    mutation_epoch: int,
+) -> PreflightAssessment | None:
+    """Render only typed, bounded assessment interruptions for public callers."""
+    assert dependencies.assess_preflight is not None
+    try:
+        return dependencies.assess_preflight(candidate, mutation_epoch)
+    except DependencyExpiredError as exc:
+        # Use the installer's existing failed-check report contract. This is an
+        # incomplete diagnostic, never a passing or persisted assessment.
+        _write_json(
+            dependencies.stderr,
+            {
+                "assessment_complete": False,
+                "candidate_sha": candidate.resolved_sha,
+                "mutation_epoch": mutation_epoch,
+                "passed": False,
+                "checks": [
+                    {
+                        "name": "preflight-dependency-expired",
+                        "passed": False,
+                        "check_id": exc.check_id,
+                        "dependency_ids": list(exc.dependency_ids),
+                        "stage": exc.stage.value,
+                        "remediation": (
+                            "obtain fresh dependency evidence through protected preflight"
+                        ),
+                    }
+                ],
+            },
+        )
+        return None
+
+
 def _preflight_only(
     dependencies: BrokerDependencies,
     caller: CallerIdentity,
@@ -506,7 +543,9 @@ def _preflight_only(
     mutation_epoch = dependencies.read_mutation_epoch()
     if type(mutation_epoch) is not int or mutation_epoch < 0:
         raise ValueError("staging mutation epoch is invalid")
-    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    assessment = _assess_preflight(dependencies, candidate, mutation_epoch)
+    if assessment is None:
+        return 1
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1
@@ -747,7 +786,9 @@ def _start_staged(
     mutation_epoch = dependencies.read_mutation_epoch()
     if type(mutation_epoch) is not int or mutation_epoch < 0:
         raise ValueError("staging mutation epoch is invalid")
-    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    assessment = _assess_preflight(dependencies, candidate, mutation_epoch)
+    if assessment is None:
+        return 1
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1

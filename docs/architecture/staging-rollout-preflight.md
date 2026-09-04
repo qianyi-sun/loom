@@ -53,6 +53,19 @@ includes that same typed evidence rather than only its digest; it therefore
 remains actionable without exposing a credential value or unbounded child
 output.
 
+If a dependency expires before a consumer starts, the DAG refuses the consumer.
+Broker `preflight`, `start`, and `start --dry-run` report
+`preflight-dependency-expired` with the validated consumer `check_id`, expired
+`dependency_ids`, declared `stage`, candidate SHA and mutation epoch. Their JSON
+failed-check report has `assessment_complete=false`:
+it is an incomplete diagnostic, not a full assessment or admission authority.
+The formal installer's existing failed-check normalizer accepts this report and
+returns `status=blocked`; its normalized digest identifies the diagnostic only.
+No request or backup is created. This includes a cold image build outlasting an
+earlier credential or candidate check's TTL. The diagnostic does not extend TTLs,
+refresh evidence automatically, or expose arbitrary exception messages; those
+remain separate concerns.
+
 Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
 digest-addressed `PreflightAssessment`; no preliminary request or backup job may
 be published if it contains a blocker. The same registered check plan and
