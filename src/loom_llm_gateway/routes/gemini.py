@@ -15,6 +15,13 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from loom.models.types import ModelSpec
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    enforce_request_attempt_deadline,
+    raise_deadline_http_exception,
+    request_attempt_deadline,
+    upstream_timeout,
+)
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
@@ -52,6 +59,7 @@ async def gemini_generate_content(
             session,
             authorization,
             signing_key=signing_key,
+            request=request,
         )
         await authorize_trial_execution_dispatch(session, ctx)
     if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:
@@ -91,11 +99,14 @@ async def gemini_generate_content(
                 json=payload,
                 params={"key": settings.google_api_key.get_secret_value()},
                 headers={"content-type": "application/json"},
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
             ),
             settings=settings,
             dialect="gemini",
+            deadline=request_attempt_deadline(request),
         )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as exc:
         await _record_failed_gemini_call(
             request=request,
@@ -123,6 +134,7 @@ async def gemini_generate_content(
             detail=f"gemini upstream request error: {type(exc).__name__}: {exc}",
         ) from exc
     upstream_response = outcome.response
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
         await _record_failed_gemini_call(
             request=request,

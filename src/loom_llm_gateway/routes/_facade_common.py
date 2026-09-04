@@ -21,7 +21,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import select
 
 from loom.auth import AuthContext
@@ -75,6 +75,7 @@ async def verify_facade_auth(
     signing_key: str,
     *,
     allow_execution_attempt: bool = False,
+    request: Request | None = None,
 ) -> AuthContext:
     """Step-scoped JWT auth path shared by all facade routes.
 
@@ -85,6 +86,7 @@ async def verify_facade_auth(
         session,
         authorization,
         signing_key=signing_key,
+        request=request,
     )
     if ctx.token_subject is None or ctx.step_id is None or ctx.team_id is None:
         raise HTTPException(

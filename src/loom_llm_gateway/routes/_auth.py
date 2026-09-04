@@ -5,9 +5,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from loom.auth import AuthContext, validate_bearer_token
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    AttemptDeadlineRequiredError,
+    bind_request_attempt_deadline,
+    raise_deadline_http_exception,
+)
+from loom_llm_gateway.metrics import AUTH_REJECTIONS_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +30,7 @@ async def require_llm_call_bearer(
     authorization: str | None,
     *,
     signing_key: str,
+    request: Request | None = None,
 ) -> AuthContext:
     """Authenticate a Gateway LLM call with one dialect-neutral contract.
 
@@ -37,6 +45,7 @@ async def require_llm_call_bearer(
         signing_key=signing_key,
     )
     if result.context is None:
+        AUTH_REJECTIONS_TOTAL.labels(reason=result.reason).inc()
         logger.info(
             "gateway bearer authentication rejected",
             extra={"bearer_validation_reason": result.reason},
@@ -47,6 +56,7 @@ async def require_llm_call_bearer(
             headers=_INVALID_BEARER_HEADERS,
         )
     if _LLM_CALL_SCOPE not in result.context.scopes:
+        AUTH_REJECTIONS_TOTAL.labels(reason="missing_scope").inc()
         logger.info(
             "gateway bearer authorization rejected",
             extra={"bearer_validation_reason": "missing_scope"},
@@ -58,4 +68,15 @@ async def require_llm_call_bearer(
                 "required_scope": _LLM_CALL_SCOPE,
             },
         )
+    if request is not None:
+        try:
+            bind_request_attempt_deadline(request, result.context)
+        except AttemptDeadlineRequiredError:
+            raise HTTPException(
+                status_code=401,
+                detail=_INVALID_BEARER_DETAIL,
+                headers=_INVALID_BEARER_HEADERS,
+            ) from None
+        except AttemptDeadlineReachedError as exc:
+            raise_deadline_http_exception(exc)
     return result.context

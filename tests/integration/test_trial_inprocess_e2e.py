@@ -6,6 +6,7 @@ Exercises the entire Plan 3 stack end-to-end against fakes.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -554,6 +555,80 @@ async def test_trial_run_watchdog_hard_deadline_records_agent_timeout(
     assert "watchdog hard deadline" in result.failure_message
     assert "elapsed_sec=41" in result.failure_message
     assert "hard_deadline_sec=40" in result.failure_message
+
+
+async def test_scored_verifier_cannot_override_attempt_timeout_evidence(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="slow", timeout_sec=0.01),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+
+    class _SlowAgent:
+        mode = "out-of-box"
+        name = "slow"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(60)
+
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    state_patches: list[tuple[str, str | None, str | None]] = []
+
+    async def _record_state(
+        state: str,
+        reason: str | None,
+        message: str | None,
+    ) -> None:
+        state_patches.append((state, reason, message))
+
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(override_agent_timeout_sec=0.01),
+        driver=FakeDriver(),
+        agent=_SlowAgent(),  # type: ignore[arg-type]
+        verifier=_AlwaysPassVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "deadline-events.jsonl",
+    )
+
+    result = await Trial(ctx=ctx, state_patch=_record_state).run()
+
+    events = [
+        json.loads(line)
+        for line in ctx.local_trajectory_path.read_text().splitlines()
+    ]
+    atif = json.loads(
+        store.objects[
+            (
+                ctx.trajectory_bucket,
+                f"{ctx.team_id}/{ctx.trial_id}/atif.json",
+            )
+        ]
+    )
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.AGENT_TIMEOUT
+    assert result.steps[0].verifier_result is not None
+    assert result.steps[0].verifier_result.rewards == {"passed": 1.0}
+    assert events[-1]["kind"] == "trial_end"
+    assert events[-1]["final_state"] == "failed"
+    assert events[-1]["failure_reason"] == "agent_timeout"
+    assert atif["metadata"]["final_state"] == "failed"
+    assert atif["metadata"]["error"] == {"failure_reason": "agent_timeout"}
+    assert state_patches[-1][:2] == ("failed", "agent_timeout")
 
 
 async def test_trial_run_unscored_agent_error_marks_failed(

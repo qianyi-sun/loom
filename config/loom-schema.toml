@@ -49,6 +49,13 @@ required    = true
 secret      = { key = "step-jwt-signing-key", generate = "openssl rand -hex 64" }
 description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 on every facade call."
 
+[service_config.legacy_attempt_deadline_compat_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 86400.0
+constraints = { ge = 0.0 }
+description = "Bounded process-lifetime compatibility window for pre-deadline step JWTs during rollout. Set LOOM_GW_LEGACY_ATTEMPT_DEADLINE_COMPAT_SEC=0 to fail closed immediately."
+
 [service_config.execution_image_admission_public_keys_json]
 used_by     = ["control-plane"]
 python_type = "str"
