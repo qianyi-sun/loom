@@ -131,18 +131,18 @@ func TestProtocolProjectRejectsDescriptorMutationsAndClosesPartialRights(t *test
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			socketPath := testSocketPath(t)
+			before := countOpenFileDescriptors(t)
 			server := startSeqpacketServer(t, socketPath, func(connFD int) {
 				_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
 				tt.response(t, connFD)
 			})
-			before := countOpenFileDescriptors(t)
 			client := NewGuardClient(socketPath, 4096, 2*time.Second)
 			_, err := client.Project(context.Background(), "11111111-1111-4111-8111-111111111111")
 			if err == nil {
 				t.Fatal("Project() succeeded, want error")
 			}
-			after := countOpenFileDescriptors(t)
 			server.Close()
+			after := countOpenFileDescriptors(t)
 			if after != before {
 				t.Fatalf("fd leak detected: before=%d after=%d", before, after)
 			}
@@ -850,16 +850,16 @@ func TestProtocolClosesSocketOnInvalidResponses(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			socketPath := testSocketPath(t)
+			before := countOpenFileDescriptors(t)
 			server := startSeqpacketServer(t, socketPath, func(connFD int) {
 				tt.respond(t, connFD)
 			})
-			before := countOpenFileDescriptors(t)
 			client := NewGuardClient(socketPath, 4096, 2*time.Second)
 			if err := tt.run(t, client); err == nil {
 				t.Fatal("operation succeeded, want error")
 			}
-			after := countOpenFileDescriptors(t)
 			server.Close()
+			after := countOpenFileDescriptors(t)
 			if after != before {
 				t.Fatalf("fd leak detected: before=%d after=%d", before, after)
 			}

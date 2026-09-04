@@ -104,7 +104,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/protocol_test.go",
-        "sha256": "677369949039fda5e9d420a2ea8f513e940b24f33d2058713734b3d7ab348737"
+        "sha256": "b82acc3977ccdf396e828dadd171c482beb31046e09555a69ea94825812ab5a4"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/secret.go",
