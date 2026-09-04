@@ -15,17 +15,14 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "docs/runbooks/personal-dev-native-builder-runtime.md"
 ACCEPTANCE = ROOT / "docs/runbooks/personal-dev-native-builder-acceptance.md"
 GB10_README = ROOT / "deploy/worker-pools/gb10/README.md"
-OPERATOR_MATERIAL_POLICY = (
-    "/etc/loom/personal-dev-native-builder-operator-material-authority.json"
-)
+OPERATOR_MATERIAL_POLICY = "/etc/loom/personal-dev-native-builder-operator-material-authority.json"
 OPERATOR_MATERIAL_BOOTSTRAP = (
     "/opt/loom-personal-dev-native-builder-runtime-authority/source/"
     "scripts/ops/install_personal_dev_native_builder_runtime_authority.py"
 )
 OPERATOR_MATERIAL_ASSETS = (
     "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
-    "/usr/local/libexec/"
-    "loom-personal-dev-native-builder-runtime-authority-material-client",
+    "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority-material-client",
     "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
     "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
     "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
@@ -256,6 +253,60 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
     )
 
 
+@pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
+def test_native_authority_request_rejects_invalid_request_id_before_transport(
+    tmp_path: Path,
+    runbook: Path,
+) -> None:
+    """Catches Bash conditional-call semantics bypassing request validation."""
+    request = _native_authority_request(_read(runbook))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    client_invoked = tmp_path / "client-invoked"
+    ssh_invoked = tmp_path / "ssh-invoked"
+    fake_client = fake_bin / "client"
+    fake_client.write_text(
+        '#!/bin/sh\ntouch "$AUTHORITY_CLIENT_INVOKED"\nprintf frame\n',
+        encoding="utf-8",
+    )
+    fake_client.chmod(0o700)
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        '#!/bin/sh\ntouch "$AUTHORITY_SSH_INVOKED"\ncat >/dev/null\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o700)
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--"],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'AUTHORITY_CLIENT_INVOKED="{client_invoked}"\n'
+            f'AUTHORITY_SSH_INVOKED="{ssh_invoked}"\n'
+            "export AUTHORITY_CLIENT_INVOKED AUTHORITY_SSH_INVOKED\n"
+            f'native_authority_client=("{fake_client}")\n'
+            'authority_source_sha="' + "a" * 40 + '"\n'
+            'authority_source_tree="' + "b" * 40 + '"\n'
+            'runtime_profile_sha256="'
+            + "c" * 64
+            + '"\n'
+            + request
+            + "\nstatus=0\n"
+            + "if native_authority_request status invalid-request-id /dev/null; then\n"
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert not client_invoked.exists()
+    assert not ssh_invoked.exists()
+
 
 def test_privileged_material_flow_uses_installed_no_path_client(
     tmp_path: Path,
@@ -269,10 +320,7 @@ def test_privileged_material_flow_uses_installed_no_path_client(
     argument_log = tmp_path / "arguments"
     fake_sudo = fake_bin / "sudo"
     fake_sudo.write_text(
-        "#!/bin/sh\n"
-        'test "$1" = -n && shift\n'
-        'test "$1" = -- && shift\n'
-        'exec "$@"\n',
+        '#!/bin/sh\ntest "$1" = -n && shift\ntest "$1" = -- && shift\nexec "$@"\n',
         encoding="utf-8",
     )
     fake_sudo.chmod(0o755)
@@ -281,10 +329,10 @@ def test_privileged_material_flow_uses_installed_no_path_client(
         "#!/bin/sh\n"
         'printf "%s\\n" "$@" >> "$MATERIAL_ARGUMENT_LOG"\n'
         'case "$1" in\n'
-        '  stage-agent) printf frame ;;\n'
-        '  emit-public-key) printf public ;;\n'
-        '  *) exit 2 ;;\n'
-        'esac\n',
+        "  stage-agent) printf frame ;;\n"
+        "  emit-public-key) printf public ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n",
         encoding="utf-8",
     )
     fake_client.chmod(0o755)
@@ -308,7 +356,7 @@ def test_privileged_material_flow_uses_installed_no_path_client(
             + '--expected-state-sha256 "'
             + "e" * 64
             + '" --agent-image ignored --builder-image ignored '
-            + '--service-origin ignored --agent-instance-id ignored '
+            + "--service-origin ignored --agent-instance-id ignored "
             + '--agent-key-id ignored --expected-public-key-sha256 "'
             + "d" * 64
             + '" >/dev/null\n'
@@ -326,15 +374,20 @@ def test_privileged_material_flow_uses_installed_no_path_client(
     assert "/caller-selected-key" not in arguments
     assert "/caller-selected-ca" not in arguments
     assert (
-        "/usr/local/libexec/"
-        "loom-personal-dev-native-builder-runtime-authority-material-client"
+        "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority-material-client"
     ) in runbook
     assert "install_native_authority_client_snapshot" not in runbook
     assert "sudo /bin/sh" not in runbook
 
 
+@pytest.mark.parametrize(
+    ("parent_exists", "request_exists"),
+    ((False, False), (True, False), (True, True)),
+)
 def test_archive_upload_uses_root_private_copy_before_source_substitution(
     tmp_path: Path,
+    parent_exists: bool,
+    request_exists: bool,
 ) -> None:
     """Catches root SFTP reopening an operator pathname after its metadata check."""
     stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
@@ -362,12 +415,38 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
     fake_sftp = fake_bin / "sftp"
     fake_sftp.write_text(
         "#!/bin/sh\n"
-        'printf "%s\\n" "$@" > "$SFTP_ARGS"\n'
-        'batch="$(mktemp)"\n'
+        'count=$(($(cat "$SFTP_COUNT" 2>/dev/null || echo 0) + 1))\n'
+        'printf "%s\\n" "$count" > "$SFTP_COUNT"\n'
+        'printf "%s\\n" "$@" > "$SFTP_ARGS.$count"\n'
+        'batch="$SFTP_ARGS.batch.$count"\n'
         'cat > "$batch"\n'
-        'mv -- "$ATTACK_REPLACEMENT" "$ATTACK_SOURCE"\n'
-        'upload_source="$(awk \'$1 == "put" { print $2; exit }\' "$batch")"\n'
-        'cat -- "$upload_source" > "$UPLOADED_ARCHIVE"\n',
+        'if test "$count" = 2; then\n'
+        '  mv -- "$ATTACK_REPLACEMENT" "$ATTACK_SOURCE"\n'
+        '  upload_source="$(awk \'$1 == "put" { print ($2 == "-f" ? $3 : $2); exit }\' "$batch")"\n'
+        '  cat -- "$upload_source" > "$UPLOADED_ARCHIVE"\n'
+        "fi\n"
+        "while IFS= read -r command; do\n"
+        "  printf 'sftp> %s\\n' \"$command\"\n"
+        '  if test "$count" = 1 && test "$PARENT_EXISTS" = 1 '
+        '&& test "$command" = "-mkdir /var/tmp/loom-personal-dev-native-builder"; then\n'
+        "    printf 'remote mkdir \"/var/tmp/loom-personal-dev-native-builder\": Failure\\n'\n"
+        '  elif test "$count" = 2 && test "$REQUEST_EXISTS" = 1 '
+        '&& test "$command" = "-mkdir /var/tmp/loom-personal-dev-native-builder/$REQUEST_ID"; then\n'
+        '    printf \'remote mkdir "/var/tmp/loom-personal-dev-native-builder/%s": Failure\\n\' "$REQUEST_ID"\n'
+        "  fi\n"
+        '  if test "$command" = pwd; then\n'
+        '    if test "$count" = 1; then\n'
+        "      printf 'Remote working directory: /var/tmp/loom-personal-dev-native-builder\\n'\n"
+        "    else\n"
+        "      printf 'Remote working directory: /var/tmp/loom-personal-dev-native-builder/%s\\n' \"$REQUEST_ID\"\n"
+        "    fi\n"
+        '  elif test "$command" = "ls -lan ."; then\n'
+        "    printf 'drwx------ ? qianyi qianyi 4096 Sep 4 04:00 ./.\\n'\n"
+        "    printf 'drwx------ ? qianyi qianyi 4096 Sep 4 04:00 ./..\\n'\n"
+        '    archive_size="$(wc -c < "$UPLOADED_ARCHIVE")"\n'
+        "    printf '%s\\n' \"-rw------- ? qianyi qianyi $archive_size Sep 4 04:00 ./gvisor-release-20260810.0-aarch64.tar.bz2\"\n"
+        "  fi\n"
+        'done < "$batch"\n',
         encoding="utf-8",
     )
     fake_sftp.chmod(0o755)
@@ -381,10 +460,14 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
             f'ATTACK_REPLACEMENT="{replacement}"\n'
             f'UPLOADED_ARCHIVE="{uploaded}"\n'
             f'SFTP_ARGS="{sftp_args}"\n'
+            f'SFTP_COUNT="{tmp_path / "sftp-count"}"\n'
+            f'REQUEST_ID="{request_id}"\n'
+            f'PARENT_EXISTS="{int(parent_exists)}"\n'
+            f'REQUEST_EXISTS="{int(request_exists)}"\n'
             f'native_authority_local_archive_root="{tmp_path / "root-archive"}"\n'
             f'archive_sha512="{__import__("hashlib").sha512(b"reviewed archive").hexdigest()}"\n'
             "export FAKE_SFTP ATTACK_SOURCE ATTACK_REPLACEMENT UPLOADED_ARCHIVE "
-            "SFTP_ARGS\n"
+            "SFTP_ARGS SFTP_COUNT REQUEST_ID PARENT_EXISTS REQUEST_EXISTS\n"
             + stage_archive
             + '\nnative_authority_stage_archive "$1" "$2"\n'
         ),
@@ -395,11 +478,12 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
 
     assert behavior.returncode == 0, behavior.stderr
     assert uploaded.read_bytes() == b"reviewed archive"
-    assert sftp_args.read_text(encoding="utf-8").splitlines() == [
-        "-b",
-        "-",
-        *DIRECT_GB10_TRANSPORT_ARGS,
-    ]
+    for index in (1, 2):
+        assert (tmp_path / f"sftp.args.{index}").read_text(encoding="utf-8").splitlines() == [
+            "-b",
+            "-",
+            *DIRECT_GB10_TRANSPORT_ARGS,
+        ]
 
 
 def test_archive_upload_failure_removes_the_root_private_copy(
@@ -443,6 +527,271 @@ def test_archive_upload_failure_removes_the_root_private_copy(
     assert not (local_root / request_id).exists()
 
 
+def test_archive_upload_validates_stable_remote_parent_before_request_staging(
+    tmp_path: Path,
+) -> None:
+    """Catches request staging under an absent or unvalidated shared parent."""
+    stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"reviewed archive")
+    source.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/sftp; then shift; exec "$FAKE_SFTP" "$@"; fi\n'
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_sftp = fake_bin / "sftp"
+    fake_sftp.write_text(
+        "#!/bin/sh\n"
+        'batch="$SFTP_BATCH_ROOT.$(($(cat "$SFTP_COUNT" 2>/dev/null || echo 0) + 1))"\n'
+        'count="${batch##*.}"\n'
+        'printf "%s\\n" "$count" > "$SFTP_COUNT"\n'
+        'cat > "$batch"\n'
+        "printf '%s\\n' "
+        "'sftp> -mkdir /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> chmod 700 /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> cd /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> pwd' "
+        "'Remote working directory: /var/tmp/loom-personal-dev-native-builder' "
+        "'unexpected extra line'\n",
+        encoding="utf-8",
+    )
+    fake_sftp.chmod(0o755)
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    local_root = tmp_path / "root-archive"
+    count = tmp_path / "sftp-count"
+    batch_root = tmp_path / "sftp-batch"
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id, str(source)],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'FAKE_SFTP="{fake_sftp}"\n'
+            f'SFTP_COUNT="{count}"\n'
+            f'SFTP_BATCH_ROOT="{batch_root}"\n'
+            f'native_authority_local_archive_root="{local_root}"\n'
+            f'archive_sha512="{hashlib.sha512(b"reviewed archive").hexdigest()}"\n'
+            "export FAKE_SFTP SFTP_COUNT SFTP_BATCH_ROOT\n"
+            + stage_archive
+            + "\nstatus=0\n"
+            + 'if native_authority_stage_archive "$1" "$2"; then\n'
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert count.read_text(encoding="utf-8") == "1\n"
+    assert (tmp_path / "sftp-batch.1").read_text(encoding="utf-8") == (
+        "-mkdir /var/tmp/loom-personal-dev-native-builder\n"
+        "chmod 700 /var/tmp/loom-personal-dev-native-builder\n"
+        "cd /var/tmp/loom-personal-dev-native-builder\n"
+        "pwd\n"
+    )
+    assert not (local_root / request_id).exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("wrong-pwd", "request-mode", "parent-owner", "archive-size", "extra-line"),
+)
+def test_archive_upload_validates_request_directory_and_parent_metadata(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Catches an upload accepted without canonical request-directory evidence."""
+    stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"reviewed archive")
+    source.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/sftp; then shift; exec "$FAKE_SFTP" "$@"; fi\n'
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_sftp = fake_bin / "sftp"
+    fake_sftp.write_text(
+        "#!/bin/sh\n"
+        'count=$(($(cat "$SFTP_COUNT" 2>/dev/null || echo 0) + 1))\n'
+        'printf "%s\\n" "$count" > "$SFTP_COUNT"\n'
+        'cat > "$SFTP_BATCH_ROOT.$count"\n'
+        'if test "$count" = 1; then\n'
+        "  printf '%s\\n' "
+        "'sftp> -mkdir /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> chmod 700 /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> cd /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> pwd' "
+        "'Remote working directory: /var/tmp/loom-personal-dev-native-builder'\n"
+        "else\n"
+        '  cat "$REQUEST_TRANSCRIPT"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_sftp.chmod(0o755)
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    local_root = tmp_path / "root-archive"
+    count = tmp_path / "sftp-count"
+    batch_root = tmp_path / "sftp-batch"
+    remote_dir = f"/var/tmp/loom-personal-dev-native-builder/{request_id}"
+    local_archive = local_root / request_id / "gvisor-release-20260810.0-aarch64.tar.bz2"
+    archive_name = "gvisor-release-20260810.0-aarch64.tar.bz2"
+    transcript = [
+        f"sftp> -mkdir {remote_dir}",
+        f"sftp> chmod 700 {remote_dir}",
+        f"sftp> put -f {local_archive} {remote_dir}/{archive_name}",
+        f"sftp> chmod 600 {remote_dir}/{archive_name}",
+        f"sftp> cd {remote_dir}",
+        "sftp> pwd",
+        f"Remote working directory: {remote_dir}",
+        "sftp> ls -lan .",
+        "drwx------ ? qianyi qianyi 4096 Sep 4 04:00 ./.",
+        "drwx------ ? qianyi qianyi 4096 Sep 4 04:00 ./..",
+        f"-rw------- ? qianyi qianyi 16 Sep 4 04:00 ./{archive_name}",
+    ]
+    if mutation == "wrong-pwd":
+        transcript[6] = "Remote working directory: /var/tmp"
+    elif mutation == "request-mode":
+        transcript[8] = "drwxr-x--- ? qianyi qianyi 4096 Sep 4 04:00 ./."
+    elif mutation == "parent-owner":
+        transcript[9] = "drwx------ ? root root 4096 Sep 4 04:00 ./.."
+    elif mutation == "archive-size":
+        transcript[10] = f"-rw------- ? qianyi qianyi 17 Sep 4 04:00 ./{archive_name}"
+    elif mutation == "extra-line":
+        transcript.append("unexpected extra line")
+    request_transcript = tmp_path / "request-transcript"
+    request_transcript.write_text("\n".join(transcript) + "\n", encoding="ascii")
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id, str(source)],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'FAKE_SFTP="{fake_sftp}"\n'
+            f'SFTP_COUNT="{count}"\n'
+            f'SFTP_BATCH_ROOT="{batch_root}"\n'
+            f'REQUEST_TRANSCRIPT="{request_transcript}"\n'
+            f'native_authority_local_archive_root="{local_root}"\n'
+            f'archive_sha512="{hashlib.sha512(b"reviewed archive").hexdigest()}"\n'
+            "export FAKE_SFTP SFTP_COUNT SFTP_BATCH_ROOT REQUEST_TRANSCRIPT\n"
+            + stage_archive
+            + "\nstatus=0\n"
+            + 'if native_authority_stage_archive "$1" "$2"; then\n'
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert count.read_text(encoding="utf-8") == "2\n"
+    assert (tmp_path / "sftp-batch.2").read_text(encoding="utf-8") == (
+        f"-mkdir {remote_dir}\n"
+        f"chmod 700 {remote_dir}\n"
+        f"put -f {local_archive} {remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2\n"
+        f"chmod 600 {remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2\n"
+        f"cd {remote_dir}\n"
+        "pwd\n"
+        "ls -lan .\n"
+    )
+    assert not (local_root / request_id).exists()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ("invalid-request-id", "source-symlink", "source-mode", "digest-mismatch"),
+)
+def test_archive_stage_rejects_invalid_inputs_before_sftp_in_conditional_context(
+    tmp_path: Path,
+    scenario: str,
+) -> None:
+    """Catches Bash conditional-call semantics bypassing an input validation."""
+    stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"reviewed archive")
+    source.chmod(0o600)
+    if scenario == "source-symlink":
+        target = tmp_path / "archive-target.tar.bz2"
+        source.rename(target)
+        source.symlink_to(target)
+    elif scenario == "source-mode":
+        source.chmod(0o644)
+    request_id = (
+        "not-a-request-id"
+        if scenario == "invalid-request-id"
+        else "123e4567-e89b-42d3-a456-426614174000"
+    )
+    digest = (
+        "0" * 128
+        if scenario == "digest-mismatch"
+        else hashlib.sha512(b"reviewed archive").hexdigest()
+    )
+    sftp_invoked = tmp_path / "sftp-invoked"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/sftp; then\n'
+        '  touch "$SFTP_INVOKED"\n'
+        "  cat >/dev/null\n"
+        "  exit 0\n"
+        "fi\n"
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    local_root = tmp_path / "root-archive"
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id, str(source)],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'SFTP_INVOKED="{sftp_invoked}"\n'
+            f'native_authority_local_archive_root="{local_root}"\n'
+            f'archive_sha512="{digest}"\n'
+            "export SFTP_INVOKED\n"
+            + stage_archive
+            + "\nstatus=0\n"
+            + 'if native_authority_stage_archive "$1" "$2"; then\n'
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert not sftp_invoked.exists()
+    assert not (local_root / request_id).exists()
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_status"),
     [
@@ -474,23 +823,46 @@ def test_archive_stage_always_removes_exact_root_private_copy(
         'test "$1" = -- && shift\n'
         'if test "$1" = /usr/bin/install && test "$2" = -d; then\n'
         '  "$@"\n'
-        '  status=$?\n'
+        "  status=$?\n"
         '  if test "$ARCHIVE_FAILURE" = cat-failure; then rm -f -- "$ARCHIVE_SOURCE"; fi\n'
         '  exit "$status"\n'
         "fi\n"
         'if test "$1" = /usr/bin/install && test "$ARCHIVE_FAILURE" = copy-failure; then\n'
-        '  destination=\n'
+        "  destination=\n"
         '  for argument in "$@"; do destination="$argument"; done\n'
         '  head -c 1 > "$destination"\n'
         "  exit 23\n"
         "fi\n"
         'if test "$1" = /usr/bin/sftp; then\n'
-        '  cat >/dev/null\n'
+        '  count=$(($(cat "$SFTP_COUNT" 2>/dev/null || echo 0) + 1))\n'
+        '  printf "%s\\n" "$count" > "$SFTP_COUNT"\n'
+        '  batch="$SFTP_COUNT.batch.$count"\n'
+        '  cat > "$batch"\n'
+        '  if test "$count" = 1; then\n'
+        "    printf '%s\\n' "
+        "'sftp> -mkdir /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> chmod 700 /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> cd /var/tmp/loom-personal-dev-native-builder' "
+        "'sftp> pwd' "
+        "'Remote working directory: /var/tmp/loom-personal-dev-native-builder'\n"
+        "    exit 0\n"
+        "  fi\n"
         '  case "$ARCHIVE_FAILURE" in\n'
-        '    signal-*) kill -s "${ARCHIVE_FAILURE#signal-}" "$PPID"; sleep 0.1; exit 99 ;;\n'
-        '    sftp-failure) exit 19 ;;\n'
-        '    *) exit 0 ;;\n'
+        '    signal-*) kill -s "${ARCHIVE_FAILURE#signal-}" "$$"; sleep 0.1; exit 99 ;;\n'
+        "    sftp-failure) exit 19 ;;\n"
+        "    success) : ;;\n"
         "  esac\n"
+        "  while IFS= read -r command; do\n"
+        "    printf 'sftp> %s\\n' \"$command\"\n"
+        '    if test "$command" = pwd; then\n'
+        "      printf 'Remote working directory: /var/tmp/loom-personal-dev-native-builder/%s\\n' \"$REQUEST_ID\"\n"
+        '    elif test "$command" = "ls -lan ."; then\n'
+        "      printf 'drwx------ ? qianyi qianyi 4096 Sep 4 04:00 ./.\\n'\n"
+        "      printf 'drwx------ ? qianyi qianyi 4096 Sep 4 04:00 ./..\\n'\n"
+        "      printf '%s\\n' '-rw------- ? qianyi qianyi 16 Sep 4 04:00 ./gvisor-release-20260810.0-aarch64.tar.bz2'\n"
+        "    fi\n"
+        '  done < "$batch"\n'
+        "  exit 0\n"
         "fi\n"
         'exec "$@"\n',
         encoding="utf-8",
@@ -505,11 +877,19 @@ def test_archive_stage_always_removes_exact_root_private_copy(
             f'PATH="{fake_bin}:$PATH"\n'
             f'ARCHIVE_FAILURE="{failure}"\n'
             f'ARCHIVE_SOURCE="{source}"\n'
+            f'SFTP_COUNT="{tmp_path / "sftp-count"}"\n'
+            f'REQUEST_ID="{request_id}"\n'
             f'native_authority_local_archive_root="{local_root}"\n'
             f'archive_sha512="{__import__("hashlib").sha512(b"reviewed archive").hexdigest()}"\n'
-            "export ARCHIVE_FAILURE ARCHIVE_SOURCE\n"
+            "export ARCHIVE_FAILURE ARCHIVE_SOURCE SFTP_COUNT REQUEST_ID\n"
             + stage_archive
-            + '\nnative_authority_stage_archive "$1" "$2"\n'
+            + "\nstatus=0\n"
+            + 'if native_authority_stage_archive "$1" "$2"; then\n'
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
         ),
         text=True,
         capture_output=True,
@@ -553,16 +933,16 @@ def test_prepare_transaction_always_removes_exact_remote_archive(
             "export PREPARE_SCENARIO PREPARE_CLEANUP_STATUS PREPARE_CLEANUP_LOG\n"
             "native_authority_stage_archive() { return 0; }\n"
             "native_authority_request() {\n"
-            "  case \"$PREPARE_SCENARIO\" in\n"
+            '  case "$PREPARE_SCENARIO" in\n'
             "    prepare-failure) return 23 ;;\n"
-            "    signal-*) kill -s \"${PREPARE_SCENARIO#signal-}\" \"$BASHPID\"; "
+            '    signal-*) kill -s "${PREPARE_SCENARIO#signal-}" "$BASHPID"; '
             "sleep 0.1; return 99 ;;\n"
             "    success) return 0 ;;\n"
             "  esac\n"
             "}\n"
             "native_authority_remove_staged_archive() {\n"
-            "  printf '%s\\n' \"$1\" >> \"$PREPARE_CLEANUP_LOG\"\n"
-            "  return \"$PREPARE_CLEANUP_STATUS\"\n"
+            '  printf \'%s\\n\' "$1" >> "$PREPARE_CLEANUP_LOG"\n'
+            '  return "$PREPARE_CLEANUP_STATUS"\n'
             "}\n"
             + prepare
             + '\nnative_authority_prepare "$1" /reviewed/archive /evidence/prepare.json '
@@ -574,6 +954,43 @@ def test_prepare_transaction_always_removes_exact_remote_archive(
     )
 
     assert behavior.returncode == expected_status, behavior.stderr
+    assert cleanup_log.read_text(encoding="utf-8").splitlines() == [request_id]
+
+
+def test_prepare_stage_failure_never_dispatches_authority_request(tmp_path: Path) -> None:
+    """Catches Bash errexit suppression allowing prepare after a failed upload."""
+    prepare = _shell_function(_read(RUNTIME), "native_authority_prepare")
+    authority_log = tmp_path / "authority-request"
+    cleanup_log = tmp_path / "cleanup"
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id],
+        input=(
+            f'AUTHORITY_REQUEST_LOG="{authority_log}"\n'
+            f'PREPARE_CLEANUP_LOG="{cleanup_log}"\n'
+            "export AUTHORITY_REQUEST_LOG PREPARE_CLEANUP_LOG\n"
+            "native_authority_stage_archive() { return 19; }\n"
+            'native_authority_request() { touch "$AUTHORITY_REQUEST_LOG"; return 0; }\n'
+            "native_authority_remove_staged_archive() {\n"
+            '  printf \'%s\\n\' "$1" >> "$PREPARE_CLEANUP_LOG"\n'
+            "}\n"
+            + prepare
+            + "\nstatus=0\n"
+            + 'if native_authority_prepare "$1" /reviewed/archive '
+            + "/evidence/prepare.json --archive-path ignored; then\n"
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 19, behavior.stderr
+    assert not authority_log.exists()
     assert cleanup_log.read_text(encoding="utf-8").splitlines() == [request_id]
 
 
@@ -592,7 +1009,9 @@ def test_remote_archive_remover_targets_only_the_request_archive(
         'test "$1" = -- && shift\n'
         'test "$1" = /usr/bin/sftp && shift\n'
         'printf "%s\\n" "$@" > "$REMOTE_SFTP_ARGS"\n'
-        'cat > "$REMOTE_BATCH_LOG"\n',
+        'cat > "$REMOTE_BATCH_LOG"\n'
+        'while IFS= read -r command; do printf "sftp> %s\\n" "$command"; '
+        'done < "$REMOTE_BATCH_LOG"\n',
         encoding="utf-8",
     )
     fake_sudo.chmod(0o755)
@@ -616,14 +1035,118 @@ def test_remote_archive_remover_targets_only_the_request_archive(
     remote_dir = f"/var/tmp/loom-personal-dev-native-builder/{request_id}"
     assert behavior.returncode == 0, behavior.stderr
     assert batch_log.read_text(encoding="utf-8") == (
-        f"rm {remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2\n"
-        f"rmdir {remote_dir}\n"
+        f"-rm {remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2\n-rmdir {remote_dir}\n"
     )
     assert sftp_args.read_text(encoding="utf-8").splitlines() == [
         "-b",
         "-",
         *DIRECT_GB10_TRANSPORT_ARGS,
     ]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "accepted"),
+    (
+        ("success", True),
+        ("file-absent", True),
+        ("directory-absent", True),
+        ("both-absent", True),
+        ("permission-denied", False),
+        ("extra-output", False),
+    ),
+)
+def test_remote_archive_remover_validates_exact_idempotent_cleanup_transcript(
+    tmp_path: Path,
+    scenario: str,
+    accepted: bool,
+) -> None:
+    """Catches partial-upload cleanup stopping early or hiding remote drift."""
+    remover = _shell_function(_read(RUNTIME), "native_authority_remove_staged_archive")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    remote_dir = f"/var/tmp/loom-personal-dev-native-builder/{request_id}"
+    remote_archive = f"{remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2"
+    lines = [f"sftp> -rm {remote_archive}"]
+    if scenario in {"file-absent", "both-absent"}:
+        lines.append(f"remote delete {remote_archive}: No such file or directory")
+    elif scenario == "permission-denied":
+        lines.append(f"remote delete {remote_archive}: Permission denied")
+    lines.append(f"sftp> -rmdir {remote_dir}")
+    if scenario in {"directory-absent", "both-absent"}:
+        lines.append(f'remote rmdir "{remote_dir}": No such file or directory')
+    if scenario == "extra-output":
+        lines.append("unexpected extra line")
+    transcript = tmp_path / "cleanup-transcript"
+    transcript.write_text("\n".join(lines) + "\n", encoding="ascii")
+    batch_log = tmp_path / "batch"
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        '#!/bin/sh\ncat > "$CLEANUP_BATCH"\ncat "$CLEANUP_TRANSCRIPT"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o700)
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'CLEANUP_BATCH="{batch_log}"\n'
+            f'CLEANUP_TRANSCRIPT="{transcript}"\n'
+            "export CLEANUP_BATCH CLEANUP_TRANSCRIPT\n"
+            + remover
+            + "\nstatus=0\n"
+            + 'if native_authority_remove_staged_archive "$1"; then\n'
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert (behavior.returncode == 0) is accepted, behavior.stderr
+    assert batch_log.read_text(encoding="utf-8") == (f"-rm {remote_archive}\n-rmdir {remote_dir}\n")
+
+
+def test_remote_archive_remover_rejects_invalid_request_id_before_sftp(
+    tmp_path: Path,
+) -> None:
+    """Catches cleanup reaching SFTP after a failed conditional validation."""
+    remover = _shell_function(_read(RUNTIME), "native_authority_remove_staged_archive")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sftp_invoked = tmp_path / "sftp-invoked"
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        '#!/bin/sh\ntouch "$SFTP_INVOKED"\ncat >/dev/null\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o700)
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--"],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'SFTP_INVOKED="{sftp_invoked}"\n'
+            "export SFTP_INVOKED\n"
+            + remover
+            + "\nstatus=0\n"
+            + "if native_authority_remove_staged_archive invalid-request-id; then\n"
+            + "  status=0\n"
+            + "else\n"
+            + "  status=$?\n"
+            + "fi\n"
+            + 'exit "$status"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert not sftp_invoked.exists()
 
 
 def test_native_builder_acceptance_rejects_lifecycle_requests_before_transport(
@@ -912,9 +1435,7 @@ def test_native_builder_runbooks_leave_no_direct_gb10_privilege_or_scp_path() ->
 
 def test_gb10_handoff_documents_direct_native_authority_controller() -> None:
     """Catches describing the sealed controller transport as a worker jump route."""
-    native_handoff = _read(GB10_README).split(
-        "## Native-runtime authority\n", maxsplit=1
-    )[1]
+    native_handoff = _read(GB10_README).split("## Native-runtime authority\n", maxsplit=1)[1]
     native_handoff = native_handoff.split("\n## ", maxsplit=1)[0]
     normalized = _normalized(native_handoff)
 
@@ -1054,8 +1575,7 @@ def test_every_runbook_source_identity_ignores_git_replacement_objects(
     )
 
     arrays = [
-        _shell_array(_read(runbook), "native_authority_git")
-        for runbook in (RUNTIME, ACCEPTANCE)
+        _shell_array(_read(runbook), "native_authority_git") for runbook in (RUNTIME, ACCEPTANCE)
     ]
     assert arrays[0] == arrays[1]
     for assignment in arrays:
@@ -1075,7 +1595,7 @@ def test_every_runbook_source_identity_ignores_git_replacement_objects(
 
     runtime = _read(RUNTIME)
     combined_shell = _shell(runtime + "\n" + _read(ACCEPTANCE))
-    assert '$(git ' not in combined_shell
+    assert "$(git " not in combined_shell
     assert '--arg tree "$authority_source_tree"' in runtime
 
 
@@ -1095,12 +1615,11 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
         "dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292"
         "d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7"
     ) in runbook
-    assert "/usr/bin/git --no-replace-objects -C \"$repository_root\"" in runbook
+    assert '/usr/bin/git --no-replace-objects -C "$repository_root"' in runbook
     assert "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null" in runbook
     assert 'rev-parse --verify HEAD^{commit})" = \\' in runbook
     assert (
-        'test -z "$("${native_authority_git[@]}" status '
-        '--porcelain=v1 --untracked-files=all)"'
+        'test -z "$("${native_authority_git[@]}" status --porcelain=v1 --untracked-files=all)"'
     ) in runbook
     assert 'sha256sum "$trusted_release"' in runbook
     assert 'sha256sum "$previous_trusted_release"' in runbook
@@ -1145,14 +1664,8 @@ def test_native_builder_runbooks_require_operator_only_material_bootstrap(
     assert "exactly five operator code assets" in runbook
     assert "must not install the GB10 broker, runtime assets, tmpfiles, or sudoers" in normalized
     assert "separately provision" in normalized
-    assert (
-        "/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519"
-        in runbook
-    )
-    assert (
-        "/etc/loom/personal-dev-native-builder-authority-material/service-ca.pem"
-        in runbook
-    )
+    assert "/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519" in runbook
+    assert "/etc/loom/personal-dev-native-builder-authority-material/service-ca.pem" in runbook
 
 
 def test_native_builder_runtime_orders_receipt_bound_inert_stage_before_activation() -> None:
