@@ -1500,7 +1500,9 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "SCANNER_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "SCANNER_BUILD_RESULT": "skipped"
+            if protected_publish or required == "false"
+            else "success",
             "PUBLISH_RESULT": "success" if protected_publish else "skipped",
             "MANIFEST_RESULT": "success" if protected_publish else "skipped",
             "PERSONAL_DEV_RELEASE_RESULT": release_result,
@@ -1904,9 +1906,7 @@ def test_nebius_iac_validates_aliased_provider_through_module_tests() -> None:
         if step.get("name") == "Validate pinned Nebius module and stack"
     )
 
-    module_command = (
-        "terraform -chdir=deploy/terraform/nebius/modules/execution-target"
-    )
+    module_command = "terraform -chdir=deploy/terraform/nebius/modules/execution-target"
     assert f"{module_command} test" in script
     assert f"{module_command} validate" not in script
     assert "terraform -chdir=deploy/terraform/nebius/stack validate" in script
