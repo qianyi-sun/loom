@@ -1,13 +1,13 @@
 """Allow student_to_teacher_turns mix plans (turn-grain rising beta + latch).
 
-Revision ID: 0125
-Revises: 0124
+Revision ID: 0130
+Revises: 0129
 """
 
 from alembic import op
 
-revision = "0125"
-down_revision = "0124"
+revision = "0130"
+down_revision = "0129"
 branch_labels = None
 depends_on = None
 

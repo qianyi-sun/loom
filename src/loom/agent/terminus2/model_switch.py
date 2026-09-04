@@ -155,8 +155,9 @@ def turn_beta(
     denom = step_end - step_start
     if denom <= 0:
         return 1.0
-    progress = (turn - step_start) / denom
-    return float(progress) ** float(power)
+    progress = float(turn - step_start) / float(denom)
+    beta = progress ** float(power)
+    return float(beta)
 
 
 def role_at_turn(
