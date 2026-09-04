@@ -16,6 +16,7 @@ _EXAMPLE_PRINCIPALS = Path(
 )
 _PROVIDER_POLICY = Path("deploy/task-image-builder/rootless-provider-v1.toml")
 _PREREQUISITES = Path("deploy/task-image-builder/prerequisites-v1.toml")
+_INERT_RELEASE_SPEC = Path("deploy/task-image-builder/provider-release-v1.json")
 
 
 def _objects() -> dict[tuple[str, str], dict[str, Any]]:
@@ -174,7 +175,11 @@ def test_no_live_composition_references_the_inert_authority_artifact() -> None:
     referenced_by: list[Path] = []
     for root in (Path("deploy"), Path("src")):
         for path in root.rglob("*"):
-            if not path.is_file() or path in {_MANIFEST, _EXAMPLE_PRINCIPALS}:
+            if not path.is_file() or path in {
+                _MANIFEST,
+                _EXAMPLE_PRINCIPALS,
+                _INERT_RELEASE_SPEC,
+            }:
                 continue
             if path.suffix not in {".json", ".py", ".sh", ".toml", ".yaml", ".yml"}:
                 continue
