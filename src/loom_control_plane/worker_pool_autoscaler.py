@@ -1730,6 +1730,7 @@ def _slurm_config_from_policy(
         slurm_qos=str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or ""),
         slurm_reservation=str(actor_config.get("slurm_reservation") or ""),
         sinfo_path=str(actor_config.get("sinfo_path") or "sinfo"),
+        scontrol_path=str(actor_config.get("scontrol_path") or "scontrol"),
         srun_path=str(actor_config.get("srun_path") or "srun"),
         resource_aware=resource_aware,
         probe_mem_available=_optional_bool(
