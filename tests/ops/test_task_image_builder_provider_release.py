@@ -177,6 +177,44 @@ def _runtime_tree_for(root: Path, *, machine: int) -> Path:
     return runtime.parent
 
 
+def _set_reviewed_runtime_member(
+    source: Path,
+    runtime_root: Path,
+    name: str,
+    *,
+    payload: bytes | None = None,
+    digest: str | None = None,
+    size: int | None = None,
+) -> Path:
+    if payload is None and (digest is None or size is None):
+        raise AssertionError("sparse runtime member fixtures need digest and size")
+    runtime_dir = runtime_root / "runtime"
+    runtime_dir.chmod(0o755)
+    target = runtime_dir / name
+    target.chmod(0o755)
+    if payload is not None:
+        target.write_bytes(payload)
+        digest = _digest(payload)
+    else:
+        with target.open("wb") as stream:
+            stream.truncate(size)
+    target.chmod(0o555)
+    runtime_dir.chmod(0o555)
+    runtime_manifest_path = source / "deploy/task-image-builder/rootless-runtime-v2.json"
+    runtime_manifest = json.loads(runtime_manifest_path.read_bytes())
+    runtime_manifest["architectures"]["amd64"]["members"][name] = digest
+    runtime_manifest_path.chmod(0o644)
+    runtime_manifest_path.write_bytes(_canonical(runtime_manifest))
+    runtime_manifest_path.chmod(0o444)
+    spec_path = source / "deploy/task-image-builder/provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["runtime_manifest"]["sha256"] = _digest(runtime_manifest_path.read_bytes())
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+    return target
+
+
 def _source_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     source = tmp_path / "source"
     deploy = source / "deploy/task-image-builder"
@@ -477,6 +515,117 @@ def test_release_rejects_guard_bundle_not_bound_to_reviewed_guard_spec(
             guard_release_directory=mismatched_guard_release,
             runtime_root=runtime_root,
             build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+
+def test_release_accepts_reviewed_runtime_member_larger_than_generic_cap(
+    tmp_path: Path,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    generic_cap = 16 * 1024 * 1024
+    large_runtime_payload = _elf_payload(62, "large-buildkitd") + b"x" * generic_cap
+    runtime_member = _set_reviewed_runtime_member(
+        source,
+        runtime_root,
+        "buildkitd",
+        payload=large_runtime_payload,
+    )
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    verified = verify_release_directory(
+        result.directory,
+        expected_release_sha256=result.release_sha256,
+        expected_architecture="x86_64",
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+
+    assert runtime_member.stat().st_size > generic_cap
+    assert dict(
+        (name, payload)
+        for name, _mode, payload in verified.members
+    )["runtime/buildkitd"] == large_runtime_payload
+
+
+def test_release_rejects_runtime_member_larger_than_runtime_bound_without_reading(
+    tmp_path: Path,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    runtime_bound = 1024 * 1024 * 1024
+    sparse_member = _set_reviewed_runtime_member(
+        source,
+        runtime_root,
+        "buildkitd",
+        digest="4" * 64,
+        size=runtime_bound + 1,
+    )
+
+    with pytest.raises(ProviderReleaseError, match="empty or too large"):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+    assert sparse_member.stat().st_size == runtime_bound + 1
+
+
+def test_verify_release_directory_keeps_non_runtime_members_on_generic_cap(
+    tmp_path: Path,
+) -> None:
+    generic_cap = 16 * 1024 * 1024
+    payload_digest = "5" * 64
+    identity = {
+        "architecture": "x86_64",
+        "authority_contract_version": 2,
+        "files": [
+            {
+                "path": "bin/not-a-runtime-member",
+                "mode": "0555",
+                "sha256": payload_digest,
+            }
+        ],
+        "guard_release_sha256": "6" * 64,
+        "provider_install_root": "/opt/loom-task-image-builder-provider/releases",
+        "release_spec_sha256": "7" * 64,
+        "runtime_release": "rootless-runtime-v2",
+        "runtime_x_crypto": "v0.55.0",
+        "schema": "loom.task-image-builder-provider-bundle/v1",
+        "supervisor_relative_path": "bin/loom-task-builder-supervisor",
+    }
+    release_sha256 = _digest(_canonical(identity))
+    release = tmp_path / release_sha256
+    release.mkdir()
+    _write(
+        release / "release-manifest.json",
+        _canonical({**identity, "release_sha256": release_sha256}),
+        0o444,
+    )
+    oversized = release / "bin/not-a-runtime-member"
+    oversized.parent.mkdir()
+    with oversized.open("wb") as stream:
+        stream.truncate(generic_cap + 1)
+    oversized.chmod(0o555)
+    oversized.parent.chmod(0o555)
+    release.chmod(0o555)
+
+    with pytest.raises(ProviderReleaseError, match="empty or too large"):
+        verify_release_directory(
+            release,
+            expected_release_sha256=release_sha256,
+            expected_architecture="x86_64",
+            expected_uid=os.geteuid(),
+            expected_gid=os.getegid(),
         )
 
 

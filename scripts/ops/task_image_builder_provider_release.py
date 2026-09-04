@@ -43,6 +43,7 @@ _MANIFEST = "release-manifest.json"
 _SET_MANIFEST = "provider-release-set-manifest.json"
 _SET_SCHEMA = "loom.task-image-builder-provider-release-set/v1"
 _MAX_BYTES = 16 * 1024 * 1024
+_MAX_RUNTIME_MEMBER_BYTES = 1024 * 1024 * 1024
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 _MACHINES: dict[Architecture, int] = {"x86_64": 62, "aarch64": 183}
@@ -512,6 +513,18 @@ def _runtime_member_destination(name: str) -> str:
     return f"bin/{name}"
 
 
+_RUNTIME_MEMBER_DESTINATIONS = frozenset(
+    _runtime_member_destination(name)
+    for name in _RUNTIME_MEMBERS
+)
+
+
+def _release_member_maximum(path: str) -> int:
+    if path in _RUNTIME_MEMBER_DESTINATIONS:
+        return _MAX_RUNTIME_MEMBER_BYTES
+    return _MAX_BYTES
+
+
 def _runtime_manifest_binding(
     manifest_path: Path,
     *,
@@ -596,7 +609,7 @@ def _load_runtime(
         raise ProviderReleaseError("runtime member inventory is invalid")
     payloads: dict[str, bytes] = {}
     for item in entries:
-        payload = _read_regular(item, maximum=_MAX_BYTES, executable=True)
+        payload = _read_regular(item, maximum=_MAX_RUNTIME_MEMBER_BYTES, executable=True)
         if _digest(payload) != expected.get(item.name):
             raise ProviderReleaseError("runtime member digest differs from manifest")
         payloads[item.name] = payload
@@ -1218,7 +1231,11 @@ def verify_release_directory(
             raise ProviderReleaseError("release manifest is invalid") from exc
         if record["mode"] != f"{mode:04o}" or mode not in {0o444, 0o555}:
             raise ProviderReleaseError("release manifest is invalid")
-        payload = _read_regular(member_path, maximum=_MAX_BYTES, executable=mode == 0o555)
+        payload = _read_regular(
+            member_path,
+            maximum=_release_member_maximum(relative.as_posix()),
+            executable=mode == 0o555,
+        )
         if (
             stat.S_IMODE(metadata.st_mode) != mode
             or metadata.st_uid != expected_uid

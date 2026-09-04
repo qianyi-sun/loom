@@ -124,8 +124,8 @@
       }
     ],
     "sha256": {
-      "x86_64": "929c1f2aa63c27f29dfbe787e6e61bd2685dd1ce7405977103f841aec4a6bff1",
-      "aarch64": "f3ff1b7ec42ab1f6d3fcd82c6fb3bf32096e0d64ce3a6603ef7551745ee7d56d"
+      "x86_64": "ade6a2d7af3a11e462527cabea32afdfd883200e3f3e38eae6dc01a2cbe70c59",
+      "aarch64": "c8ca433e0d80a0862a3b71b9fb1fd52fbfd40f20e53fb71f0a837969977e0ef7"
     }
   },
   "configs": [
