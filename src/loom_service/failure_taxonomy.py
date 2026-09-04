@@ -52,6 +52,13 @@ _AGENT_FAILURE_REASONS: frozenset[str] = frozenset(
     {"agent_error", "agent_timeout"}
 )
 
+_STEP_CREDENTIAL_REASONS: frozenset[str] = frozenset(
+    {
+        "step_credential_invalid_or_expired",
+        "step_credential_scope_invalid",
+    }
+)
+
 _PLATFORM_SETUP_REASONS: frozenset[str] = frozenset(
     {
         "env_start_failure",
@@ -288,6 +295,22 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             message=message,
             category="agent",
             attribution="model",
+            rerunnable=True,
+            requires_operator_approval=True,
+        )
+
+    if reason in _STEP_CREDENTIAL_REASONS:
+        return _common(
+            reason_code=f"trial.{reason}",
+            reason=reason,
+            failure_class="platform_failure",
+            root_cause="step_credential",
+            platform_outcome="failed",
+            score_outcome="unscored",
+            rerun_recommendation="operator_approval",
+            message=message,
+            category="gateway",
+            attribution="platform",
             rerunnable=True,
             requires_operator_approval=True,
         )

@@ -706,6 +706,10 @@ def _retry_reason_for_failure(reason: FailureReason) -> RetryReason | None:
         return RetryReason.GATEWAY_ERROR
     if reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT:
         return RetryReason.PROVIDER_TRANSPORT_DISCONNECT
+    if reason == FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED:
+        return RetryReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED
+    if reason == FailureReason.STEP_CREDENTIAL_SCOPE_INVALID:
+        return RetryReason.STEP_CREDENTIAL_SCOPE_INVALID
     if reason == FailureReason.ENV_START_FAILURE:
         return RetryReason.ENV_START_FAILURE
     if reason == FailureReason.AGENT_TIMEOUT:

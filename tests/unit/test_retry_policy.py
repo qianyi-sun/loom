@@ -41,6 +41,14 @@ def test_retry_reason_values():
         "trajectory_flush_failed",
         "gateway_error",
         "provider_transport_disconnect",
+        "step_credential_invalid_or_expired",
+        "step_credential_scope_invalid",
         "node_setup_health",
     ):
         assert RetryReason(v).value == v
+
+
+def test_step_credential_failures_are_not_retried_by_default() -> None:
+    policy = RetryPolicy()
+    assert RetryReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED not in policy.retry_on
+    assert RetryReason.STEP_CREDENTIAL_SCOPE_INVALID not in policy.retry_on

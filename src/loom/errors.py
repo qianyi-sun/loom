@@ -102,6 +102,7 @@ class CapabilityMismatchError(ConfigError):
 # Failure classification ──────────────────────────────────────────────────────
 
 import re  # noqa: E402
+from collections.abc import Mapping  # noqa: E402
 
 from loom.driver.build_containment import ImageBuildForbiddenError  # noqa: E402
 from loom.models.result import FailureReason  # noqa: E402
@@ -124,18 +125,20 @@ _TEXTUAL_PROVIDER_TRANSPORT_RE = re.compile(
 _PROVIDER_TRANSPORT_DISCONNECT_MESSAGE = (
     "Provider transport disconnected before returning a response."
 )
-_TEXTUAL_CREDENTIAL_SCOPE_RE = re.compile(
-    r"""["']detail["']\s*:\s*["']not authorized["']""",
+_STRUCTURED_CREDENTIAL_SCOPE_RE = re.compile(
+    r"""["']code["']\s*:\s*["']missing_scope["']""",
     re.IGNORECASE,
 )
-_TEXTUAL_INVALID_BEARER_RE = re.compile(
-    r"""["']detail["']\s*:\s*["']invalid bearer token["']"""
-    r"|step token (?:is )?(?:invalid|expired)"
-    r"|token has expired",
+_STRUCTURED_INVALID_BEARER_RE = re.compile(
+    r"""["']code["']\s*:\s*["']invalid_or_expired_bearer["']""",
     re.IGNORECASE,
 )
-_CREDENTIAL_SCOPE_MESSAGE = "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
-_STEP_JWT_INVALID_MESSAGE = "Loom gateway rejected an invalid or expired step token (HTTP 401)."
+_CREDENTIAL_SCOPE_MESSAGE = (
+    "Loom gateway rejected a step credential without llm:call scope (HTTP 403)."
+)
+_STEP_JWT_INVALID_MESSAGE = (
+    "Loom gateway rejected an invalid or expired step credential (HTTP 401)."
+)
 
 # Terminus2 / Harbor tmux lifecycle (#1068): mid-run server loss vs setup duplicate.
 _TMUX_NO_SERVER_RE = re.compile(
@@ -209,10 +212,16 @@ def classify_failure_message(message: str) -> tuple[FailureReason, str | None] |
     compatibility failures, not model/agent logic errors.
     """
 
-    if "401" in message and _TEXTUAL_CREDENTIAL_SCOPE_RE.search(message):
-        return FailureReason.GATEWAY_ERROR, _CREDENTIAL_SCOPE_MESSAGE
-    if "401" in message and _TEXTUAL_INVALID_BEARER_RE.search(message):
-        return FailureReason.GATEWAY_ERROR, _STEP_JWT_INVALID_MESSAGE
+    # Some agent adapters flatten an HTTP response into exception text. Only
+    # consume Loom's stable protocol codes here; never infer an auth cause from
+    # a free-form detail string.
+    if _STRUCTURED_CREDENTIAL_SCOPE_RE.search(message):
+        return FailureReason.STEP_CREDENTIAL_SCOPE_INVALID, _CREDENTIAL_SCOPE_MESSAGE
+    if _STRUCTURED_INVALID_BEARER_RE.search(message):
+        return (
+            FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED,
+            _STEP_JWT_INVALID_MESSAGE,
+        )
 
     if is_platform_setup_agent_failure(message):
         return FailureReason.TASK_COMPATIBILITY, _HARBOR_WORKER_IMAGE_MESSAGE
@@ -252,15 +261,19 @@ def _classify_http_status_error(exc: BaseException) -> tuple[FailureReason, str 
         return None
 
     status = exc.response.status_code
-    if status == 401:
-        try:
-            body_text = exc.response.text
-        except Exception:
-            body_text = ""
-        if _TEXTUAL_CREDENTIAL_SCOPE_RE.search(body_text):
-            return FailureReason.GATEWAY_ERROR, _CREDENTIAL_SCOPE_MESSAGE
-        if _TEXTUAL_INVALID_BEARER_RE.search(body_text):
-            return FailureReason.GATEWAY_ERROR, _STEP_JWT_INVALID_MESSAGE
+    try:
+        payload = exc.response.json()
+    except Exception:
+        payload = None
+    detail = payload.get("detail") if isinstance(payload, Mapping) else None
+    code = detail.get("code") if isinstance(detail, Mapping) else None
+    if status == 401 and code == "invalid_or_expired_bearer":
+        return (
+            FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED,
+            _STEP_JWT_INVALID_MESSAGE,
+        )
+    if status == 403 and code == "missing_scope":
+        return FailureReason.STEP_CREDENTIAL_SCOPE_INVALID, _CREDENTIAL_SCOPE_MESSAGE
     if 400 <= status <= 499:
         try:
             body_text = exc.response.text
