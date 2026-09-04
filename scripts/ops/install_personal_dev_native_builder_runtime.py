@@ -1354,6 +1354,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             "/usr/bin/systemd-sysusers",
             str(self._path(self.profile.sysusers_path)),
             check=False,
+            env={**_ROOT_ENV, "SYSTEMD_LOG_LEVEL": "warning"},
         )
         if sysusers.returncode != 0 or sysusers.stderr:
             raise PersonalDevNativeBuilderRuntimeInstallError("identity_install_invalid")
