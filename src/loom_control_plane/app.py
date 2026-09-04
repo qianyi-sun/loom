@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -87,6 +86,27 @@ def _load_admin_secret_verifier(
 
 async def _assert_schema_startup(engine: AsyncEngine) -> int:
     return await assert_schema_at_head(engine, db_url_env_var="LOOM_CP_DB_URL")
+
+
+async def _cancel_and_drain_tasks(
+    tasks: Sequence[asyncio.Task[None] | None],
+    *,
+    grace_seconds: float = 5.0,
+) -> None:
+    active_tasks = tuple(task for task in tasks if task is not None)
+    if not active_tasks:
+        return
+    for task in active_tasks:
+        task.cancel()
+    _done, pending = await asyncio.wait(active_tasks, timeout=grace_seconds)
+    for task in pending:
+        task.cancel()
+    results = await asyncio.gather(*active_tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(
+            result, asyncio.CancelledError
+        ):
+            raise result
 
 
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
@@ -312,40 +332,25 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         try:
             yield
         finally:
-            crash_detector_task.cancel()
-            metrics_refresher_task.cancel()
-            retry_exhausted_task.cancel()
-            worker_pool_autoscaler_task.cancel()
-            live_preview_reconciler_task.cancel()
-            if slurm_controller_task is not None:
-                slurm_controller_task.cancel()
-            if service_execution_scheduler_task is not None:
-                service_execution_scheduler_task.cancel()
             if service_execution_materializer_task is not None:
                 assert service_execution_materializer_stop_event is not None
                 service_execution_materializer_stop_event.set()
-                service_execution_materializer_task.cancel()
-            # Give slow top-level cleanup five seconds before sending a
-            # follow-up cancellation.  On Python 3.11, wait_for still waits
-            # for cancellation cleanup to finish; loops must therefore own
-            # and drain every nested task rather than abandon it here.
-            for t in (
-                crash_detector_task,
-                metrics_refresher_task,
-                retry_exhausted_task,
-                worker_pool_autoscaler_task,
-                live_preview_reconciler_task,
-                slurm_controller_task,
-                service_execution_scheduler_task,
-                service_execution_materializer_task,
-            ):
-                if t is None:
-                    continue
-                with contextlib.suppress(
-                    asyncio.CancelledError,
-                    asyncio.TimeoutError,
-                ):
-                    await asyncio.wait_for(t, timeout=5.0)
+            # All tasks share one grace window. A driver may defer or consume
+            # the first cancellation while unwinding a database operation, so
+            # any survivors receive a concurrent follow-up cancellation. Every
+            # task is still drained before either database engine is disposed.
+            await _cancel_and_drain_tasks(
+                (
+                    crash_detector_task,
+                    metrics_refresher_task,
+                    retry_exhausted_task,
+                    worker_pool_autoscaler_task,
+                    live_preview_reconciler_task,
+                    slurm_controller_task,
+                    service_execution_scheduler_task,
+                    service_execution_materializer_task,
+                )
+            )
             await engine.dispose()
             if protected_worker_runtime_engine is not None:
                 await protected_worker_runtime_engine.dispose()

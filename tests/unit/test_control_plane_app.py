@@ -12,6 +12,45 @@ class _FakeEngine:
         pass
 
 
+@pytest.mark.asyncio
+async def test_background_task_drain_follow_up_cancels_all_pending_tasks_together() -> None:
+    from loom_control_plane import app as control_plane_app
+
+    drain_tasks = control_plane_app._cancel_and_drain_tasks
+    second_cancellations: set[int] = set()
+    all_second_cancellations = asyncio.Event()
+
+    async def cancellation_resistant_task(index: int) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                second_cancellations.add(index)
+                if len(second_cancellations) == 3:
+                    all_second_cancellations.set()
+                await all_second_cancellations.wait()
+                raise
+
+    tasks = tuple(
+        asyncio.create_task(cancellation_resistant_task(index)) for index in range(3)
+    )
+    await asyncio.sleep(0)
+    try:
+        await asyncio.wait_for(
+            drain_tasks(tasks, grace_seconds=0.01),
+            timeout=0.5,
+        )
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert second_cancellations == {0, 1, 2}
+    assert all(task.done() for task in tasks)
+
+
 def test_control_plane_lifespan_configures_db_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
