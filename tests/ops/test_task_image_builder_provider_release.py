@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import struct
 import subprocess
 from pathlib import Path
@@ -941,6 +942,48 @@ def test_certified_release_success_removes_hidden_staging_directory(
     assert release_set.is_dir()
     assert not release_set.name.startswith(".")
     assert (release_set / "provider-release-set-manifest.json").is_file()
+
+
+def test_certified_release_staging_cleanup_rejects_directory_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: cleanup validates a staging child with lstat(), then
+    # chmods the path after an attacker swaps it to a symlink to the final set.
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    final_set = output_root / ("8" * 64)
+    final_set.mkdir()
+    final_set.chmod(0o555)
+    staging = output_root / ".provider-release-set.fixture"
+    child = staging / "sealed-child"
+    child.mkdir(parents=True)
+    child.chmod(0o555)
+    staging.chmod(0o755)
+    expected_identity = release_module._directory_identity(staging.lstat())
+    original_lstat = Path.lstat
+    swapped = False
+
+    def swap_after_child_lstat(path: Path) -> os.stat_result:
+        nonlocal swapped
+        metadata = original_lstat(path)
+        if path == child and not swapped:
+            swapped = True
+            child.rmdir()
+            child.symlink_to(final_set, target_is_directory=True)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", swap_after_child_lstat)
+
+    with pytest.raises(ProviderReleaseError, match="staging cleanup"):
+        release_module._remove_temp_staging_tree(
+            staging,
+            output_root=output_root,
+            expected_identity=expected_identity,
+        )
+
+    assert swapped
+    assert stat.S_IMODE(final_set.lstat().st_mode) == 0o555
 
 
 def test_certified_release_refuses_whole_publication_when_any_architecture_drifts(

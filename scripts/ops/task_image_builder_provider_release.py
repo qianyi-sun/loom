@@ -916,7 +916,19 @@ def _remove_temp_staging_tree(
             root_metadata = root.lstat()
             if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
                 raise ProviderReleaseError("release set staging cleanup target is invalid")
-            root.chmod(0o755)
+            descriptor = os.open(
+                root,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                if _directory_identity(os.fstat(descriptor)) != _directory_identity(root_metadata):
+                    raise ProviderReleaseError("release set staging cleanup target is invalid")
+                os.fchmod(descriptor, 0o755)
+            finally:
+                os.close(descriptor)
         shutil.rmtree(staging)
     except ProviderReleaseError:
         raise
