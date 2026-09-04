@@ -121,6 +121,7 @@ from loom_worker.trial_cancellation_watchdog import (
 )
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
+from loom_worker.worker_health import WorkerUnhealthyError
 
 _DOCKER_HOST_GATEWAY_EXTRA_HOSTS: tuple[tuple[str, str], ...] = (
     ("host.docker.internal", "host-gateway"),
@@ -660,6 +661,7 @@ async def run_worker(
                     sandbox_singleton = None
 
             while not state.shutting_down:
+                pool.raise_if_unhealthy()
                 claimed = await _claim_available_work(
                     pool=pool,
                     settings=settings,
@@ -699,6 +701,7 @@ async def run_worker(
                     break
                 if claimed == 0 or pool.in_flight >= settings.max_concurrent:
                     await asyncio.sleep(settings.claim_poll_interval_sec)
+                pool.raise_if_unhealthy()
 
             logger.info(
                 "drain_started timeout=%ss in_flight=%d",
@@ -1572,6 +1575,13 @@ async def _spawn_trial(
             # Watchdog fired (cp_cancelled or hard_deadline). Trial.run's
             # own CancelledError handler already recorded the terminal
             # state; propagate so the outer task cleanup fires.
+            raise
+        except WorkerUnhealthyError:
+            logger.critical(
+                "worker_unhealthy_after_agent_timeout trial_id=%s worker_id=%s",
+                trial_id,
+                worker_id,
+            )
             raise
         except Exception as exc:
             logger.exception(

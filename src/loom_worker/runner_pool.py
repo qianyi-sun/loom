@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import Coroutine
 from typing import Any
 
+from loom_worker.worker_health import WorkerUnhealthyError
+
 
 class RunnerPool:
     """`max_concurrent` Trial or ExecutionAttempt work items may execute.
@@ -19,6 +21,7 @@ class RunnerPool:
     def __init__(self, max_concurrent: int) -> None:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._fatal_error: WorkerUnhealthyError | None = None
 
     @property
     def in_flight(self) -> int:
@@ -30,7 +33,21 @@ class RunnerPool:
                 await coro
         task: asyncio.Task[None] = asyncio.create_task(_wrapped())
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if isinstance(error, WorkerUnhealthyError) and self._fatal_error is None:
+            self._fatal_error = error
+
+    def raise_if_unhealthy(self) -> None:
+        """Stop claim admission after a fatal attempt-supervision failure."""
+
+        if self._fatal_error is not None:
+            raise self._fatal_error
 
     async def wait_all(self, timeout: float | None = None) -> None:
         if not self._tasks:

@@ -40,6 +40,7 @@ from loom_worker.sandbox_network import (
 from loom_worker.sandbox_singleton import SandboxSingletonManager
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.vllm_registry import WorkerVLLMRegistry
+from loom_worker.worker_health import WorkerUnhealthyError
 
 logger = logging.getLogger(__name__)
 
@@ -387,11 +388,17 @@ class LocalTrialRunner:
             result = await trial.run()
             if result.state in _TERMINAL_TRIAL_STATES:
                 await _project_then_report_terminal(result)
+            if getattr(agent, "_loom_worker_unhealthy", False):
+                raise WorkerUnhealthyError(
+                    "agent attempt ignored cancellation beyond the bounded drain",
+                )
             return result
         except asyncio.CancelledError:
             cancelled_result = trial.result
             if cancelled_result is not None and cancelled_result.state == TrialState.CANCELLED:
                 await asyncio.shield(_project_then_report_terminal(cancelled_result))
+            raise
+        except WorkerUnhealthyError:
             raise
         except Exception:
             logger.exception("trial_runner_uncaught_exception trial=%s", self.trial_id)

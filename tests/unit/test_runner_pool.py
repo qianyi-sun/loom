@@ -1,6 +1,9 @@
 import asyncio
 
+import pytest
+
 from loom_worker.runner_pool import RunnerPool
+from loom_worker.worker_health import WorkerUnhealthyError
 
 
 async def test_pool_respects_max_concurrent() -> None:
@@ -51,3 +54,16 @@ async def test_cancel_all() -> None:
     pool.cancel_all()
     await pool.wait_all(timeout=1.0)
     assert pool.in_flight == 0
+
+
+async def test_fatal_worker_health_error_stops_future_claim_admission() -> None:
+    pool = RunnerPool(max_concurrent=1)
+
+    async def fatal() -> None:
+        raise WorkerUnhealthyError("attempt did not stop")
+
+    await pool.spawn(fatal())
+    await pool.wait_all()
+
+    with pytest.raises(WorkerUnhealthyError, match="attempt did not stop"):
+        pool.raise_if_unhealthy()
