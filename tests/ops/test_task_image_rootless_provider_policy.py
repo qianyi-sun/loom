@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tomllib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -9,9 +11,16 @@ from loom_cli.task_image_rootless_provider_policy import (
     TaskImageRootlessProviderPolicyError,
     load_task_image_rootless_provider_policy,
 )
+from loom_control_plane.task_image_build_environment import (
+    SlurmBuildRequestIdentityV1,
+    canonical_request_sha256,
+    issue_slurm_build_grant,
+)
+from loom_task_image_authority.contracts import TaskImageBuildGrantAuthorityV2
 
 _POLICY_PATH = Path("deploy/task-image-builder/rootless-provider-v1.toml")
 _PREREQUISITES_PATH = Path("deploy/task-image-builder/prerequisites-v1.toml")
+_NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 
 
 def test_checked_in_policy_loads_exactly_two_disabled_native_providers() -> None:
@@ -66,6 +75,51 @@ def test_provider_resources_match_the_rootless_prerequisite_profile() -> None:
     }
 
     assert all(policy.resources.model_dump() == expected for policy in policies)
+
+
+def test_loaded_policy_derives_content_addressed_supervisor_path_from_grant_release() -> None:
+    policies = load_task_image_rootless_provider_policy(_POLICY_PATH)
+    policy = next(item for item in policies if item.slurm_cluster_id == "oldlab")
+    release_sha256 = "a" * 64
+    expected_request = SlurmBuildRequestIdentityV1(
+        slurm_cluster_id=policy.slurm_cluster_id,
+        cpu_arch=policy.cpu_arch,
+        submitting_identity=policy.submitting_identity,
+        partition=policy.partition,
+        account=policy.account,
+        qos=policy.qos,
+        feature_constraint=policy.feature_constraint,
+        supervisor_path=(
+            f"/opt/loom-task-image-builder-provider/releases/{release_sha256}/"
+            "bin/loom-task-builder-supervisor"
+        ),
+        resources=policy.resources,
+    )
+    authority = TaskImageBuildGrantAuthorityV2(
+        schema_version=2,
+        purpose="production",
+        shadow_campaign_id=None,
+        environment="staging",
+        pool_id="staging-oldlab-task-image",
+        slurm_cluster_id=policy.slurm_cluster_id,
+        cpu_arch=policy.cpu_arch,
+        slurm_request_sha256=canonical_request_sha256(expected_request),
+        builder_release_sha256=release_sha256,
+        supervisor_executable_sha256="6" * 64,
+        build_policy_sha256="3" * 64,
+        containment_policy_sha256="4" * 64,
+        resource_profile_sha256="5" * 64,
+        issued_at=_NOW,
+        expires_at=_NOW + timedelta(hours=2),
+    )
+
+    grant = issue_slurm_build_grant(
+        policy,
+        grant_id=UUID("11111111-1111-1111-1111-111111111111"),
+        authority=authority,
+    )
+
+    assert grant.request.supervisor_path == expected_request.supervisor_path
 
 
 def _write_mutated_policy(tmp_path: Path, old: str, new: str) -> Path:

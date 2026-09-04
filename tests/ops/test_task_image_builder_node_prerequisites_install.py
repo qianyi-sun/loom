@@ -6,24 +6,27 @@ import json
 import os
 import pwd
 import shutil
+import stat
+import struct
 import subprocess
-import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from scripts.ops.task_image_builder_provider_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "deploy/slurm/install-loom-task-image-builder-node-prerequisites.sh"
+_ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 
 
 @dataclass(frozen=True)
 class Fixture:
     root: Path
     policy: Path
-    manifest: Path
-    artifacts: Path
-    install_base: Path
+    host_release: Path
+    bundle: Path
+    stage_root: Path
     passwd_file: Path
     group_file: Path
     subuid_file: Path
@@ -31,19 +34,273 @@ class Fixture:
     fake_bin: Path
 
 
+def _canonical(value: object) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("ascii")
+
+
 def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _archive(path: Path, files: dict[str, bytes]) -> None:
-    source_root = path.parent.parent / f".{path.name}.source"
-    for relative, payload in files.items():
-        target = source_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
-    with tarfile.open(path, "w:gz") as archive:
-        for relative in sorted(files):
-            archive.add(source_root / relative, arcname=relative, recursive=False)
+def _elf_payload(machine: int, label: str) -> bytes:
+    ident = b"\x7fELF" + bytes((2, 1, 1, 0)) + bytes(8)
+    return (
+        _ELF_HEADER.pack(
+            ident,
+            3,
+            machine,
+            1,
+            0,
+            0,
+            0,
+            0,
+            64,
+            0,
+            0,
+            64,
+            0,
+            0,
+        )
+        + label.encode("ascii")
+        + b"\n"
+    )
+
+
+def _write(path: Path, payload: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    path.chmod(mode)
+
+
+def _guard_release(root: Path) -> tuple[Path, str]:
+    release = root / "guard-release" / ("7" * 64)
+    files = {
+        "loom-task-image-builder-guard.pyz": (_elf_payload(62, "guard"), 0o555),
+        "guard-network-v1.bpf.o": (_elf_payload(247, "bpf"), 0o444),
+        "guard-network-v1.bpf.build.json": (
+            _canonical(
+                {
+                    "schema": "loom.task-image-builder-guard-bpf-build/v1",
+                    "builder_image": "docker.io/example/bpf@sha256:" + "1" * 64,
+                    "builder_platform": "linux/amd64",
+                    "clang_version": "clang version fixture",
+                    "target": "bpfel",
+                    "source_sha256": "2" * 64,
+                    "object_sha256": _sha(_elf_payload(247, "bpf")),
+                    "object_size": len(_elf_payload(247, "bpf")),
+                    "map_schema_sha256": _sha(
+                        _canonical(
+                            {
+                                "schema": "loom.task-image-builder-guard-bpf-maps/v1",
+                                "maps": [],
+                            }
+                        )
+                    ),
+                    "program_sections": [],
+                    "program_symbols": [],
+                    "map_symbols": [],
+                }
+            ),
+            0o444,
+        ),
+        "guard-network-map-schema-v1.json": (
+            _canonical(
+                {
+                    "schema": "loom.task-image-builder-guard-bpf-maps/v1",
+                    "maps": [],
+                }
+            ),
+            0o444,
+        ),
+        "loom-task-image-builder-node-guard.service": (b"[Unit]\n[Service]\n", 0o444),
+    }
+    for name, (payload, mode) in files.items():
+        _write(release / name, payload, mode)
+    manifest = {
+        "schema": "loom.task-image-builder-guard-bundle/v1",
+        "architecture": "x86_64",
+        "release_sha256": release.name,
+        "files": [
+            {"path": name, "mode": f"{mode:04o}", "sha256": _sha(payload)}
+            for name, (payload, mode) in sorted(files.items())
+        ],
+    }
+    _write(release / "release-manifest.json", _canonical(manifest), 0o444)
+    return release, release.name
+
+
+def _runtime_tree(root: Path) -> Path:
+    runtime = root / "runtime-root" / "runtime"
+    members = {
+        "buildctl": _elf_payload(62, "buildctl"),
+        "buildkitd": _elf_payload(62, "buildkitd"),
+        "buildkit-runc": _elf_payload(62, "buildkit-runc"),
+        "rootlesskit": _elf_payload(62, "rootlesskit"),
+        "rootlessctl": _elf_payload(62, "rootlessctl"),
+        "slirp4netns": _elf_payload(62, "slirp4netns"),
+        "fuse-overlayfs": _elf_payload(62, "fuse-overlayfs"),
+    }
+    for name, payload in members.items():
+        _write(runtime / name, payload, 0o555)
+    return runtime.parent
+
+
+def _provider_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "source"
+    deploy = source / "deploy/task-image-builder"
+    scripts = source / "scripts/ops"
+    cmd = source / "cmd/loom-task-image-builder-supervisor"
+    deploy.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    cmd.mkdir(parents=True)
+
+    guard_release, guard_digest = _guard_release(tmp_path)
+    runtime_root = _runtime_tree(tmp_path)
+    runtime_members = {
+        name: _sha((runtime_root / "runtime" / name).read_bytes())
+        for name in (
+            "buildctl",
+            "buildkitd",
+            "buildkit-runc",
+            "rootlesskit",
+            "rootlessctl",
+            "slirp4netns",
+            "fuse-overlayfs",
+        )
+    }
+    host_release = {
+        "schema": "loom.task-image-builder-host-release/v2",
+        "release": "host-release-v2",
+        "runtime_manifest": "rootless-runtime-v2.json",
+    }
+    runtime_manifest = {
+        "schema": "loom.task-image-builder-rootless-runtime/v2",
+        "release": "rootless-runtime-v2",
+        "toolchain": {
+            "go": "go1.26.7",
+            "image": "golang:1.26-alpine3.23",
+            "image_sha256": "3" * 64,
+            "x_crypto": "v0.55.0",
+            "reproducible_flags": ["-trimpath", "-buildvcs=false"],
+        },
+        "architectures": {
+            "amd64": {
+                "platform": "linux/amd64",
+                "members": runtime_members,
+            }
+        },
+    }
+    authority = b"apiVersion: v1\nkind: Service\n"
+    oldlab = _canonical(
+        {
+            "schema": "loom.task-image-builder-supervisor-config/v1",
+            "release_sha256": "1" * 64,
+            "cpu_arch": "x86_64",
+        }
+    )
+    gb10 = _canonical(
+        {
+            "schema": "loom.task-image-builder-supervisor-config/v1",
+            "release_sha256": "a" * 64,
+            "cpu_arch": "arm64",
+        }
+    )
+    installer = b"#!/usr/bin/env python3\nprint('install fixture')\n"
+    conformance = b"#!/usr/bin/env python3\nprint('conformance fixture')\n"
+    supervisor_main = b"package main\nfunc main() {}\n"
+
+    _write(
+        deploy / "guard-release-v1.json",
+        _canonical({"guard_release_sha256": guard_digest}),
+        0o444,
+    )
+    _write(deploy / "host-release-v2.json", _canonical(host_release), 0o444)
+    _write(deploy / "rootless-runtime-v2.json", _canonical(runtime_manifest), 0o444)
+    _write(deploy / "authority-service-v1.yaml", authority, 0o444)
+    _write(deploy / "supervisor-config-oldlab-v1.example.json", oldlab, 0o444)
+    _write(deploy / "supervisor-config-gb10-v1.example.json", gb10, 0o444)
+    _write(scripts / "install_task_image_builder_provider_release.py", installer, 0o555)
+    _write(scripts / "task_image_builder_provider_conformance.py", conformance, 0o555)
+    _write(cmd / "main.go", supervisor_main, 0o444)
+
+    spec = {
+        "schema": "loom.task-image-builder-provider-release-spec/v1",
+        "version": 1,
+        "authority_contract_version": 2,
+        "provider_install_root": "/opt/loom-task-image-builder-provider/releases",
+        "supervisor_relative_path": "bin/loom-task-builder-supervisor",
+        "guard_release": {
+            "path": "deploy/task-image-builder/guard-release-v1.json",
+            "sha256": _sha((deploy / "guard-release-v1.json").read_bytes()),
+            "bundle_sha256": {"x86_64": guard_digest, "aarch64": "6" * 64},
+        },
+        "host_release": {
+            "path": "deploy/task-image-builder/host-release-v2.json",
+            "sha256": _sha((deploy / "host-release-v2.json").read_bytes()),
+        },
+        "runtime_manifest": {
+            "path": "deploy/task-image-builder/rootless-runtime-v2.json",
+            "sha256": _sha((deploy / "rootless-runtime-v2.json").read_bytes()),
+        },
+        "supervisor": {
+            "sources": [
+                {
+                    "path": "cmd/loom-task-image-builder-supervisor/main.go",
+                    "sha256": _sha(supervisor_main),
+                }
+            ],
+            "sha256": {
+                "x86_64": _sha(_elf_payload(62, "supervisor")),
+                "aarch64": "5" * 64,
+            },
+        },
+        "configs": [
+            {
+                "path": "deploy/task-image-builder/authority-service-v1.yaml",
+                "sha256": _sha(authority),
+                "destination": "configs/authority-service-v1.yaml",
+                "mode": "0444",
+            },
+            {
+                "path": "deploy/task-image-builder/supervisor-config-gb10-v1.example.json",
+                "sha256": _sha(gb10),
+                "destination": "configs/supervisor-config-gb10-v1.example.json",
+                "mode": "0444",
+            },
+            {
+                "path": "deploy/task-image-builder/supervisor-config-oldlab-v1.example.json",
+                "sha256": _sha(oldlab),
+                "destination": "configs/supervisor-config-oldlab-v1.example.json",
+                "mode": "0444",
+            },
+        ],
+        "scripts": [
+            {
+                "path": "scripts/ops/install_task_image_builder_provider_release.py",
+                "sha256": _sha(installer),
+                "destination": "ops/install_task_image_builder_provider_release.py",
+                "mode": "0555",
+            },
+            {
+                "path": "scripts/ops/task_image_builder_provider_conformance.py",
+                "sha256": _sha(conformance),
+                "destination": "ops/task_image_builder_provider_conformance.py",
+                "mode": "0555",
+            },
+        ],
+    }
+    _write(deploy / "provider-release-v1.json", _canonical(spec), 0o444)
+    release = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    return source / "deploy/task-image-builder/host-release-v2.json", release.directory
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -52,92 +309,18 @@ def _write_executable(path: Path, source: str) -> None:
 
 
 def _fixture(tmp_path: Path) -> Fixture:
-    artifacts = tmp_path / "artifacts"
-    artifacts.mkdir()
-    buildkit_files = {
-        "bin/buildctl": b"buildctl-fixture\n",
-        "bin/buildkit-runc": b"buildkit-runc-fixture\n",
-        "bin/buildkitd": b"buildkitd-fixture\n",
-        "bin/buildkit-qemu-aarch64": b"must-not-install\n",
-        "bin/buildkit-cni-loopback": b"must-not-install\n",
-    }
-    rootlesskit_files = {
-        "rootlessctl": b"rootlessctl-fixture\n",
-        "rootlesskit": b"rootlesskit-fixture\n",
-        "rootlesskit-docker-proxy": b"must-not-install\n",
-    }
-    buildkit = artifacts / "buildkit-fixture.tar.gz"
-    rootlesskit = artifacts / "rootlesskit-fixture.tar.gz"
-    _archive(buildkit, buildkit_files)
-    _archive(rootlesskit, rootlesskit_files)
-    slirp = artifacts / "slirp4netns-fixture"
-    fuse = artifacts / "fuse-overlayfs-fixture"
-    slirp.write_bytes(b"slirp-fixture\n")
-    fuse.write_bytes(b"fuse-fixture\n")
-    for artifact in (buildkit, rootlesskit, slirp, fuse):
-        artifact.chmod(0o644)
-
-    manifest = tmp_path / "rootless-runtime-v1.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema": "loom.task-image-builder-rootless-runtime/v1",
-                "release": "rootless-runtime-v1",
-                "versions": {
-                    "buildkit": "test",
-                    "rootlesskit": "test",
-                    "slirp4netns": "test",
-                    "fuse-overlayfs": "test",
-                },
-                "architectures": {
-                    "x86_64": {
-                        "platform": "linux-amd64",
-                        "artifacts": [
-                            {
-                                "name": buildkit.name,
-                                "url": "https://example.invalid/buildkit",
-                                "sha256": _sha(buildkit.read_bytes()),
-                            },
-                            {
-                                "name": rootlesskit.name,
-                                "url": "https://example.invalid/rootlesskit",
-                                "sha256": _sha(rootlesskit.read_bytes()),
-                            },
-                            {
-                                "name": slirp.name,
-                                "url": "https://example.invalid/slirp",
-                                "sha256": _sha(slirp.read_bytes()),
-                            },
-                            {
-                                "name": fuse.name,
-                                "url": "https://example.invalid/fuse",
-                                "sha256": _sha(fuse.read_bytes()),
-                            },
-                        ],
-                        "binaries": {
-                            "buildctl": _sha(buildkit_files["bin/buildctl"]),
-                            "buildkit-runc": _sha(buildkit_files["bin/buildkit-runc"]),
-                            "buildkitd": _sha(buildkit_files["bin/buildkitd"]),
-                            "fuse-overlayfs": _sha(fuse.read_bytes()),
-                            "rootlessctl": _sha(rootlesskit_files["rootlessctl"]),
-                            "rootlesskit": _sha(rootlesskit_files["rootlesskit"]),
-                            "slirp4netns": _sha(slirp.read_bytes()),
-                        },
-                    }
-                },
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    host_release, bundle = _provider_bundle(tmp_path)
+    stage_root = tmp_path / "stage-root"
+    stage_root.mkdir()
     policy = tmp_path / "prerequisites-v1.toml"
     policy.write_text(
-        f"""
+        """
 schema = "loom.task-image-builder-prerequisites/v1"
 policy_version = "task-image-builder-prerequisites-v1"
 production_certification_allowed = false
 certified_nodes = []
 unconditional_blockers = ["phase2_guard_provider_release_missing"]
+host_release_manifest = "host-release-v2.json"
 
 [identity]
 user = "loom-builder"
@@ -149,9 +332,6 @@ subid_count = 65536
 home = "/nonexistent"
 shell = "/usr/sbin/nologin"
 forbidden_supplementary_groups = ["docker", "root", "sudo"]
-
-[runtime]
-manifest = "{manifest.name}"
 
 [[clusters]]
 id = "oldlab"
@@ -243,9 +423,9 @@ printf '2: eth0 inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n'
     return Fixture(
         root=tmp_path,
         policy=policy,
-        manifest=manifest,
-        artifacts=artifacts,
-        install_base=tmp_path / "install",
+        host_release=host_release,
+        bundle=bundle,
+        stage_root=stage_root,
         passwd_file=passwd_file,
         group_file=group_file,
         subuid_file=subuid_file,
@@ -268,8 +448,8 @@ def _run(
         **os.environ,
         "PATH": f"{fixture.fake_bin}:{os.environ['PATH']}",
         "LOOM_POLICY_PATH": str(fixture.policy),
-        "LOOM_RUNTIME_MANIFEST": str(fixture.manifest),
-        "LOOM_INSTALL_BASE": str(fixture.install_base),
+        "LOOM_HOST_RELEASE_MANIFEST": str(fixture.host_release),
+        "LOOM_STAGE_ROOT": str(fixture.stage_root),
         "LOOM_PASSWD_FILE": str(fixture.passwd_file),
         "LOOM_GROUP_FILE": str(fixture.group_file),
         "LOOM_SUBUID_FILE": str(fixture.subuid_file),
@@ -293,7 +473,7 @@ def _run(
             str(INSTALLER),
             action,
             slurm_node,
-            str(fixture.artifacts),
+            str(fixture.bundle),
         ],
         cwd=ROOT,
         env=environment,
@@ -301,6 +481,14 @@ def _run(
         capture_output=True,
         text=True,
     )
+
+
+def _staged_release_root(fixture: Fixture) -> Path:
+    return fixture.stage_root / "opt/loom-task-image-builder-provider/releases"
+
+
+def _staged_receipt_root(fixture: Fixture) -> Path:
+    return fixture.stage_root / "var/lib/loom-task-image-builder-provider/staged"
 
 
 def test_installer_parses_and_check_mode_never_mutates(tmp_path: Path) -> None:
@@ -326,21 +514,26 @@ def test_installer_parses_and_check_mode_never_mutates(tmp_path: Path) -> None:
 
     assert checked.returncode == 1
     assert "identity" in checked.stderr
-    assert not fixture.install_base.exists()
+    assert not _staged_release_root(fixture).exists()
+    assert not _staged_receipt_root(fixture).exists()
     assert {path: path.read_bytes() for path in before} == before
 
 
-def test_invalid_artifact_fails_before_identity_or_release_mutation(tmp_path: Path) -> None:
+def test_invalid_release_fails_before_identity_or_stage_mutation(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
-    (fixture.artifacts / "slirp4netns-fixture").write_bytes(b"tampered\n")
+    member = fixture.bundle / "bin" / "slirp4netns"
+    member.chmod(0o755)
+    member.write_bytes(b"tampered\n")
+    member.chmod(0o555)
 
     result = _run(fixture, "apply")
 
     assert result.returncode == 1
-    assert "artifact digest" in result.stderr
+    assert "release" in result.stderr
     assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
     assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
-    assert not fixture.install_base.exists()
+    assert not _staged_release_root(fixture).exists()
+    assert not _staged_receipt_root(fixture).exists()
 
 
 def test_host_prerequisite_failure_precedes_every_mutation(tmp_path: Path) -> None:
@@ -360,7 +553,8 @@ def test_host_prerequisite_failure_precedes_every_mutation(tmp_path: Path) -> No
     assert result.returncode == 1
     assert "host prerequisite failure" in result.stderr
     assert {path: path.read_bytes() for path in before} == before
-    assert not fixture.install_base.exists()
+    assert not _staged_release_root(fixture).exists()
+    assert not _staged_receipt_root(fixture).exists()
 
 
 @pytest.mark.parametrize(
@@ -393,7 +587,8 @@ def test_slurm_alias_binding_failure_precedes_host_mutation(
         assert "Slurm node identity does not match the local host" in result.stderr
     assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
     assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
-    assert not fixture.install_base.exists()
+    assert not _staged_release_root(fixture).exists()
+    assert not _staged_receipt_root(fixture).exists()
 
 
 def test_comma_joined_node_names_are_not_one_inventory_member(tmp_path: Path) -> None:
@@ -444,34 +639,43 @@ def test_identity_and_subid_conflicts_fail_closed(tmp_path: Path, conflict: str)
 
     assert result.returncode == 1
     assert "conflict" in result.stderr or "supplementary" in result.stderr
-    assert not fixture.install_base.exists()
+    assert not _staged_release_root(fixture).exists()
+    assert not _staged_receipt_root(fixture).exists()
 
 
-def test_apply_installs_exact_release_and_is_idempotent(tmp_path: Path) -> None:
+def test_apply_stages_exact_release_and_is_idempotent(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
 
     first = _run(fixture, "apply")
 
     assert first.returncode == 0, first.stderr
-    release = fixture.install_base / "releases/rootless-runtime-v1/bin"
-    assert {path.name for path in release.iterdir()} == {
-        "buildctl",
-        "buildkit-runc",
-        "buildkitd",
-        "fuse-overlayfs",
-        "rootlessctl",
-        "rootlesskit",
-        "slirp4netns",
-    }
-    assert not any("qemu" in path.name or "cni" in path.name for path in release.iterdir())
-    assert (fixture.install_base / "current").resolve() == release.parent.resolve()
-    assert release.parent.stat().st_mode & 0o777 == 0o755
+    release = (
+        fixture.stage_root
+        / "opt/loom-task-image-builder-provider/releases"
+        / fixture.bundle.name
+    )
+    assert release.is_dir()
+    assert release.name == fixture.bundle.name
+    assert not (fixture.stage_root / "opt/loom-task-image-builder-provider/current").exists()
+    assert not (release / "current").exists()
+    assert stat.S_IMODE(release.stat().st_mode) == 0o555
     assert fixture.subuid_file.read_text(encoding="utf-8") == "loom-builder:3000000:65536\n"
     assert fixture.subgid_file.read_text(encoding="utf-8") == "loom-builder:3000000:65536\n"
+    receipt = (
+        fixture.stage_root
+        / "var/lib/loom-task-image-builder-provider/staged"
+        / f"{fixture.bundle.name}.json"
+    )
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+    assert json.loads(receipt.read_bytes())["installed_path"] == (
+        f"/opt/loom-task-image-builder-provider/releases/{fixture.bundle.name}"
+    )
     before = {
         path: (path.stat().st_mtime_ns, path.read_bytes())
-        for path in (*release.iterdir(), release.parent / "receipt.json")
+        for path in sorted(release.rglob("*"))
+        if path.is_file()
     }
+    before[receipt] = (receipt.stat().st_mtime_ns, receipt.read_bytes())
 
     second = _run(fixture, "apply")
 
@@ -479,124 +683,65 @@ def test_apply_installs_exact_release_and_is_idempotent(tmp_path: Path) -> None:
     assert {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in before} == before
 
 
-def test_extra_or_symlinked_artifact_is_rejected(tmp_path: Path) -> None:
+def test_extra_or_symlinked_member_is_rejected(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
-    (fixture.artifacts / "unexpected").write_text("extra", encoding="utf-8")
+    fixture.bundle.chmod(0o755)
+    (fixture.bundle / "unexpected").write_text("extra", encoding="utf-8")
 
     extra = _run(fixture, "apply")
 
     assert extra.returncode == 1
-    assert "artifact set" in extra.stderr
-    (fixture.artifacts / "unexpected").unlink()
-    slirp = fixture.artifacts / "slirp4netns-fixture"
-    slirp.unlink()
-    slirp.symlink_to(fixture.manifest)
+    assert "inventory" in extra.stderr or "release" in extra.stderr
+    (fixture.bundle / "unexpected").unlink()
+    member = fixture.bundle / "bin" / "slirp4netns"
+    (fixture.bundle / "bin").chmod(0o755)
+    payload = member.read_bytes()
+    member.unlink()
+    shadow = fixture.bundle / "bin" / "shadow"
+    shadow.write_bytes(payload)
+    shadow.chmod(0o555)
+    member.symlink_to(shadow.name)
 
     linked = _run(fixture, "apply")
 
     assert linked.returncode == 1
-    assert "symlink" in linked.stderr
+    assert "release" in linked.stderr
 
 
-def test_group_or_world_writable_artifact_is_rejected(tmp_path: Path) -> None:
+def test_group_or_world_writable_member_is_rejected(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
-    artifact = fixture.artifacts / "slirp4netns-fixture"
-    artifact.chmod(0o666)
+    member = fixture.bundle / "bin" / "slirp4netns"
+    member.chmod(0o775)
 
     result = _run(fixture, "apply")
 
     assert result.returncode == 1
-    assert "unsafe mode" in result.stderr
-    assert not fixture.install_base.exists()
+    assert "release" in result.stderr
+    assert not _staged_release_root(fixture).exists()
+    assert not _staged_receipt_root(fixture).exists()
 
 
-def test_installed_release_drift_is_not_silently_repaired(tmp_path: Path) -> None:
+def test_staged_release_drift_is_not_silently_repaired(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     assert _run(fixture, "apply").returncode == 0
-    binary = fixture.install_base / "releases/rootless-runtime-v1/bin/buildkitd"
-    binary.write_bytes(b"drift\n")
+    member = (
+        fixture.stage_root
+        / "opt/loom-task-image-builder-provider/releases"
+        / fixture.bundle.name
+        / "runtime"
+        / "buildkitd"
+    )
+    member.chmod(0o755)
+    member.write_bytes(b"drift\n")
+    member.chmod(0o555)
 
     repeated = _run(fixture, "apply")
 
     assert repeated.returncode == 1
-    assert "installed release drift" in repeated.stderr
-    assert binary.read_bytes() == b"drift\n"
-
-
-def test_dangling_release_marker_fails_before_identity_mutation(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
-    releases = fixture.install_base / "releases"
-    releases.mkdir(parents=True)
-    (releases / "rootless-runtime-v1").symlink_to("missing-release")
-
-    result = _run(fixture, "apply")
-
-    assert result.returncode == 1
-    assert "installed release drift" in result.stderr
-    assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
-    assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
-
-
-def test_wrong_cluster_architecture_is_rejected(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
-    environment_arch = fixture.policy.read_text(encoding="utf-8").replace(
-        'architecture = "x86_64"', 'architecture = "aarch64"'
+    assert "collision" in repeated.stderr or "release" in repeated.stderr
+    conflicts = list(
+        (
+            fixture.stage_root / "opt/loom-task-image-builder-provider/releases"
+        ).glob(f".{fixture.bundle.name}.conflict.*")
     )
-    fixture.policy.write_text(environment_arch, encoding="utf-8")
-
-    result = _run(fixture, "apply")
-
-    assert result.returncode == 1
-    assert "architecture" in result.stderr
-    assert not fixture.install_base.exists()
-
-
-def test_direct_cli_rejects_test_path_and_host_check_overrides(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
-    environment = {
-        **os.environ,
-        "LOOM_POLICY_PATH": str(fixture.policy),
-        "LOOM_RUNTIME_MANIFEST": str(fixture.manifest),
-        "LOOM_INSTALL_BASE": str(fixture.install_base),
-        "LOOM_SKIP_HOST_CHECKS": "1",
-    }
-
-    result = subprocess.run(
-        [
-            shutil.which("bash") or "bash",
-            str(INSTALLER),
-            "check",
-            "oldlab",
-            "node-1",
-            str(fixture.artifacts),
-        ],
-        cwd=ROOT,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 1
-    assert "test overrides" in result.stderr
-
-
-def test_direct_cli_rejects_old_three_argument_grammar(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
-
-    result = subprocess.run(
-        [
-            shutil.which("bash") or "bash",
-            str(INSTALLER),
-            "check",
-            "oldlab",
-            str(fixture.artifacts),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 2
-    assert "<slurm-node-name>" in result.stderr
+    assert len(conflicts) == 1

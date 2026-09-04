@@ -36,7 +36,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/ledger.py",
-      "sha256": "be20322d4c245017be62118e8ec1b0d5bcd74bc1c242f562b0e201b3473fc0c6"
+      "sha256": "26f1e6117c8ced0b9f2324c7d49a440e7397c5a57135f8d1321d8249f0ab8cd6"
     },
     {
       "path": "src/loom_task_image_builder_guard/models.py",
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/service.py",
-      "sha256": "73638656f7ce843496ad66528977817101d39e4473a06f61560f252726ce84a9"
+      "sha256": "9d138e247cbb1dc42dea5f9ce58d593216d47162e014579a35fa47d61fc3dac5"
     },
     {
       "path": "src/loom_task_image_builder_guard/slurm.py",

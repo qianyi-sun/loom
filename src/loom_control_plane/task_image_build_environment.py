@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -118,7 +119,9 @@ class SlurmBuildEnvironmentPolicyV1(_StrictFrozenModel):
     account: str
     qos: str
     feature_constraint: str
-    supervisor_path: str
+    provider_install_root: str | None = None
+    supervisor_relative_path: str | None = None
+    supervisor_path: str | None = None
     sbatch_path: str
     resources: RootlessBuildResourceRequestV1
 
@@ -130,6 +133,24 @@ class SlurmBuildEnvironmentPolicyV1(_StrictFrozenModel):
         if len(value) != len(set(value)):
             raise ValueError("rootless builder activation blockers must be unique")
         return tuple(sorted(value))
+
+    @field_validator("provider_install_root")
+    @classmethod
+    def _provider_install_root(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if _SAFE_ABSOLUTE_PATH_RE.fullmatch(value) is None:
+            raise ValueError("rootless builder provider install root is invalid")
+        return value
+
+    @field_validator("supervisor_relative_path")
+    @classmethod
+    def _supervisor_relative_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if _SAFE_NAME_RE.fullmatch(Path(value).name) is None or value != "bin/loom-task-builder-supervisor":
+            raise ValueError("rootless builder supervisor relative path is invalid")
+        return value
 
     @field_validator("sbatch_path")
     @classmethod
@@ -145,7 +166,27 @@ class SlurmBuildEnvironmentPolicyV1(_StrictFrozenModel):
             raise ValueError("rootless builder cannot be enabled while activation blockers remain")
         return self
 
-    def request_identity(self) -> SlurmBuildRequestIdentityV1:
+    def _resolved_supervisor_path(self, builder_release_sha256: str | None) -> str:
+        if self.provider_install_root is None and self.supervisor_relative_path is None:
+            if self.supervisor_path is None:
+                raise ValueError("rootless builder supervisor path is invalid")
+            return self.supervisor_path
+        if (
+            self.provider_install_root is None
+            or self.supervisor_relative_path is None
+            or self.supervisor_path is not None
+        ):
+            raise ValueError("rootless builder provider release path binding is invalid")
+        if builder_release_sha256 is None:
+            return f"{self.provider_install_root}/0000000000000000000000000000000000000000000000000000000000000000/{self.supervisor_relative_path}"
+        if _DIGEST_RE.fullmatch(builder_release_sha256) is None:
+            raise ValueError("rootless builder release digest is invalid")
+        return f"{self.provider_install_root}/{builder_release_sha256}/{self.supervisor_relative_path}"
+
+    def request_identity(
+        self,
+        builder_release_sha256: str | None = None,
+    ) -> SlurmBuildRequestIdentityV1:
         return SlurmBuildRequestIdentityV1(
             slurm_cluster_id=self.slurm_cluster_id,
             cpu_arch=self.cpu_arch,
@@ -154,7 +195,7 @@ class SlurmBuildEnvironmentPolicyV1(_StrictFrozenModel):
             account=self.account,
             qos=self.qos,
             feature_constraint=self.feature_constraint,
-            supervisor_path=self.supervisor_path,
+            supervisor_path=self._resolved_supervisor_path(builder_release_sha256),
             resources=self.resources,
         )
 
@@ -214,7 +255,7 @@ def issue_slurm_build_grant(
 ) -> SlurmBuildGrantV2:
     if not isinstance(authority, TaskImageBuildGrantAuthorityV2):
         raise ValueError("rootless builder issuance requires V2 release authority")
-    request = policy.request_identity()
+    request = policy.request_identity(authority.builder_release_sha256)
     return SlurmBuildGrantV2(
         schema_version="loom.task-image-build-grant/v2",
         grant_id=grant_id,

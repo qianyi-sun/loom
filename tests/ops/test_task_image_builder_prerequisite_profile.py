@@ -8,7 +8,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
-RUNTIME_PATH = ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
+RUNTIME_PATH = ROOT / "deploy/task-image-builder/rootless-runtime-v2.json"
 HOST_RELEASE_PATH = ROOT / "deploy/task-image-builder/host-release-v2.json"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -76,7 +76,7 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     }
 
     runtime = policy["runtime"]
-    assert runtime["manifest"] == "rootless-runtime-v1.json"
+    assert runtime["manifest"] == "rootless-runtime-v2.json"
     assert runtime["snapshotter"] == "fuse-overlayfs"
     assert runtime["network_driver"] == "slirp4netns"
     assert runtime["rootlesskit_flags"] == [
@@ -194,17 +194,18 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
 def test_runtime_manifest_pins_only_native_rootless_binaries() -> None:
     manifest = _runtime()
 
-    assert manifest["schema"] == "loom.task-image-builder-rootless-runtime/v1"
-    assert manifest["release"] == "rootless-runtime-v1"
-    assert manifest["versions"] == {
-        "buildkit": "v0.32.2",
-        "rootlesskit": "v3.1.0",
-        "slirp4netns": "v1.3.4",
-        "fuse-overlayfs": "v1.17",
+    assert manifest["schema"] == "loom.task-image-builder-rootless-runtime/v2"
+    assert manifest["release"] == "rootless-runtime-v2"
+    assert manifest["toolchain"] == {
+        "go": "go1.26.7",
+        "image": "golang:1.26-alpine3.23",
+        "image_sha256": "b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57",
+        "x_crypto": "v0.55.0",
+        "reproducible_flags": ["-trimpath", "-buildvcs=false"],
     }
     architectures = manifest["architectures"]
-    assert set(architectures) == {"x86_64", "aarch64"}
-    expected_binaries = {
+    assert set(architectures) == {"amd64", "arm64"}
+    expected_members = {
         "buildctl",
         "buildkit-runc",
         "buildkitd",
@@ -213,16 +214,10 @@ def test_runtime_manifest_pins_only_native_rootless_binaries() -> None:
         "rootlesskit",
         "slirp4netns",
     }
-    expected_platforms = {"x86_64": "linux-amd64", "aarch64": "linux-arm64"}
     for architecture, release in architectures.items():
-        assert release["platform"] == expected_platforms[architecture]
-        assert len(release["artifacts"]) == 4
-        assert set(release["binaries"]) == expected_binaries
-        for artifact in release["artifacts"]:
-            assert artifact["name"]
-            assert artifact["url"].startswith("https://github.com/")
-            assert SHA256_RE.fullmatch(artifact["sha256"])
-        for name, digest in release["binaries"].items():
+        assert release["platform"] == f"linux/{architecture}"
+        assert set(release["members"]) == expected_members
+        for name, digest in release["members"].items():
             assert name == Path(name).name
             assert SHA256_RE.fullmatch(digest)
             assert "qemu" not in name
@@ -235,7 +230,7 @@ def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
 
     assert release["schema"] == "loom.task-image-builder-host-release/v2"
     assert release["release"] == "host-release-v2"
-    assert release["runtime_manifest"] == "rootless-runtime-v1.json"
+    assert release["runtime_manifest"] == "rootless-runtime-v2.json"
     assert release["ubuntu"] == {
         "os_id": "ubuntu",
         "version_id": "24.04",
