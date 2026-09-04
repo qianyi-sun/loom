@@ -262,16 +262,19 @@ def _discard_tree(path: Path) -> None:
 def _copy_candidate(release: VerifiedProviderRelease, releases: Path) -> Path:
     candidate = Path(tempfile.mkdtemp(prefix=".stage-", dir=releases))
     try:
-        for name, mode, payload in release.members:
-            target = candidate / name
+        for member in release.members:
+            target = candidate / member.path
             if target.parent != candidate:
                 _ensure_candidate_parent(candidate, target.relative_to(candidate).parent)
-            _write_file(target, payload, mode)
+            member.copy_to(target)
             _fsync_directory(target.parent)
         _write_file(candidate / "release-manifest.json", release.manifest_payload, 0o444)
         _fsync_directory(candidate)
         _seal_candidate_tree(candidate)
         return candidate
+    except ProviderReleaseError as exc:
+        _discard_tree(candidate)
+        raise ProviderInstallError("staged release copy failed") from exc
     except BaseException:
         _discard_tree(candidate)
         raise

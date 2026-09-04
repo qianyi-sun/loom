@@ -43,6 +43,7 @@ _MANIFEST = "release-manifest.json"
 _SET_MANIFEST = "provider-release-set-manifest.json"
 _SET_SCHEMA = "loom.task-image-builder-provider-release-set/v1"
 _MAX_BYTES = 16 * 1024 * 1024
+_MAX_BPFTOOL_BYTES = 64 * 1024 * 1024
 _MAX_RUNTIME_MEMBER_BYTES = 1024 * 1024 * 1024
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -113,7 +114,53 @@ class VerifiedProviderRelease:
     directory: Path
     manifest_payload: bytes
     manifest: dict[str, object]
-    members: tuple[tuple[str, int, bytes], ...]
+    members: tuple[VerifiedProviderMember, ...]
+
+
+_FileIdentity = tuple[int, int, int, int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedProviderMember:
+    path: str
+    mode: int
+    sha256: str
+    size: int
+    source_path: Path
+    _source_identity: _FileIdentity
+
+    def copy_to(self, destination: Path) -> None:
+        """Copy this exact verified inode without buffering it in memory."""
+
+        _copy_verified_member(self, destination)
+
+    def read_bytes(self, *, maximum: int) -> bytes:
+        """Read a small verified member while preserving its inode binding."""
+
+        if self.size > maximum:
+            raise ProviderReleaseError("release input is empty or too large")
+        payload = _read_regular(self.source_path, maximum=maximum, executable=self.mode == 0o555)
+        try:
+            identity = _file_identity(self.source_path.lstat())
+        except OSError as exc:
+            raise ProviderReleaseError("release input is unavailable") from exc
+        if (
+            identity != self._source_identity
+            or len(payload) != self.size
+            or _digest(payload) != self.sha256
+        ):
+            raise ProviderReleaseError("release input changed while being read")
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class _ReleaseMemberInput:
+    path: str
+    mode: int
+    sha256: str
+    size: int
+    payload: bytes | None = None
+    source: VerifiedProviderMember | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +206,161 @@ def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _file_identity(metadata: os.stat_result) -> _FileIdentity:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
+def _inspect_regular(
+    path: Path,
+    *,
+    maximum: int,
+    executable: bool = False,
+) -> tuple[str, bytes, _FileIdentity, int]:
+    """Hash one stable regular file with fixed memory and retain its identity."""
+
+    descriptor = -1
+    try:
+        initial = path.lstat()
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or stat.S_ISLNK(initial.st_mode)
+            or initial.st_nlink != 1
+        ):
+            raise ProviderReleaseError("release input must be a single-link regular file")
+        if initial.st_mode & 0o022:
+            raise ProviderReleaseError("release input is group/world writable")
+        if executable and initial.st_mode & 0o111 == 0:
+            raise ProviderReleaseError("release executable is not executable")
+        if initial.st_size <= 0 or initial.st_size > maximum:
+            raise ProviderReleaseError("release input is empty or too large")
+        identity = _file_identity(initial)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        if _file_identity(os.fstat(descriptor)) != identity:
+            raise ProviderReleaseError("release input changed while opening")
+        digest = hashlib.sha256()
+        header = bytearray()
+        total = 0
+        while total <= maximum:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            if len(header) < _ELF_HEADER.size:
+                header.extend(chunk[: _ELF_HEADER.size - len(header)])
+            digest.update(chunk)
+            total += len(chunk)
+        if total != initial.st_size or total > maximum:
+            raise ProviderReleaseError("release input is empty or too large")
+        if (
+            _file_identity(os.fstat(descriptor)) != identity
+            or _file_identity(path.lstat()) != identity
+        ):
+            raise ProviderReleaseError("release input changed while being read")
+        return digest.hexdigest(), bytes(header), identity, total
+    except ProviderReleaseError:
+        raise
+    except OSError as exc:
+        raise ProviderReleaseError("release input is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _copy_verified_member(member: VerifiedProviderMember, destination: Path) -> None:
+    source_descriptor = -1
+    destination_descriptor = -1
+    published = False
+    try:
+        if _file_identity(member.source_path.lstat()) != member._source_identity:
+            raise ProviderReleaseError("release input changed before copying")
+        source_descriptor = os.open(
+            member.source_path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        if _file_identity(os.fstat(source_descriptor)) != member._source_identity:
+            raise ProviderReleaseError("release input changed while opening")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            member.mode,
+        )
+        digest = hashlib.sha256()
+        total = 0
+        while total <= member.size:
+            chunk = os.read(
+                source_descriptor,
+                min(1024 * 1024, member.size + 1 - total),
+            )
+            if not chunk:
+                break
+            digest.update(chunk)
+            position = 0
+            while position < len(chunk):
+                written = os.write(destination_descriptor, chunk[position:])
+                if written <= 0:
+                    raise ProviderReleaseError("release output could not be written")
+                position += written
+            total += len(chunk)
+        if (
+            total != member.size
+            or digest.hexdigest() != member.sha256
+            or _file_identity(os.fstat(source_descriptor)) != member._source_identity
+            or _file_identity(member.source_path.lstat()) != member._source_identity
+        ):
+            raise ProviderReleaseError("release input changed while being copied")
+        os.fsync(destination_descriptor)
+        os.fchmod(destination_descriptor, member.mode)
+        os.fsync(destination_descriptor)
+        published = True
+    except ProviderReleaseError:
+        raise
+    except OSError as exc:
+        raise ProviderReleaseError("release output could not be written") from exc
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+        if not published:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _buffered_member(path: str, mode: int, payload: bytes) -> _ReleaseMemberInput:
+    return _ReleaseMemberInput(
+        path=path,
+        mode=mode,
+        sha256=_digest(payload),
+        size=len(payload),
+        payload=payload,
+    )
 
 
 def _is_sha256(value: object) -> bool:
@@ -522,6 +724,8 @@ _RUNTIME_MEMBER_DESTINATIONS = frozenset(
 def _release_member_maximum(path: str) -> int:
     if path in _RUNTIME_MEMBER_DESTINATIONS:
         return _MAX_RUNTIME_MEMBER_BYTES
+    if path == "bpftool":
+        return _MAX_BPFTOOL_BYTES
     return _MAX_BYTES
 
 
@@ -594,7 +798,7 @@ def _load_runtime(
     runtime_root: Path,
     *,
     architecture: Architecture,
-) -> tuple[dict[str, bytes], str, str, str]:
+) -> tuple[dict[str, VerifiedProviderMember], str, str, str]:
     expected, runtime_release, runtime_x_crypto, toolchain_image = _runtime_manifest_binding(
         manifest_path,
         architecture=architecture,
@@ -607,13 +811,25 @@ def _load_runtime(
         raise ProviderReleaseError("runtime member directory is unavailable") from exc
     if {item.name for item in entries} != set(_RUNTIME_MEMBERS):
         raise ProviderReleaseError("runtime member inventory is invalid")
-    payloads: dict[str, bytes] = {}
+    members: dict[str, VerifiedProviderMember] = {}
     for item in entries:
-        payload = _read_regular(item, maximum=_MAX_RUNTIME_MEMBER_BYTES, executable=True)
-        if _digest(payload) != expected.get(item.name):
+        digest, header, identity, size = _inspect_regular(
+            item,
+            maximum=_MAX_RUNTIME_MEMBER_BYTES,
+            executable=True,
+        )
+        if digest != expected.get(item.name):
             raise ProviderReleaseError("runtime member digest differs from manifest")
-        payloads[item.name] = payload
-    return payloads, runtime_release, runtime_x_crypto, toolchain_image
+        _validate_elf(header, architecture)
+        members[item.name] = VerifiedProviderMember(
+            path=_runtime_member_destination(item.name),
+            mode=0o555,
+            sha256=digest,
+            size=size,
+            source_path=item,
+            _source_identity=identity,
+        )
+    return members, runtime_release, runtime_x_crypto, toolchain_image
 
 
 def _write_payload(descriptor: int, payload: bytes, mode: int) -> None:
@@ -886,10 +1102,10 @@ def build_release(
         expected_sha256=spec.supervisor_sha256[architecture],
         builder=builder,
     )
-    members: list[tuple[str, int, bytes]] = []
+    members: list[_ReleaseMemberInput] = []
     for item in spec.configs:
         members.append(
-            (
+            _buffered_member(
                 cast(str, item.destination),
                 cast(int, item.mode),
                 _checked_payload(source_root, item, maximum=_MAX_JSON_BYTES),
@@ -897,7 +1113,7 @@ def build_release(
         )
     for item in spec.scripts:
         members.append(
-            (
+            _buffered_member(
                 cast(str, item.destination),
                 cast(int, item.mode),
                 _checked_payload(source_root, item, maximum=_MAX_JSON_BYTES, executable=True),
@@ -905,21 +1121,28 @@ def build_release(
         )
     for name in _GUARD_MEMBERS:
         mode, payload = guard_members[name]
-        members.append((name, mode, payload))
+        members.append(_buffered_member(name, mode, payload))
     members.extend(
         [
-            ("bin/loom-task-builder-supervisor", 0o555, supervisor_payload),
-            ("runtime/buildctl", 0o555, runtime_payloads["buildctl"]),
-            ("runtime/buildkit-runc", 0o555, runtime_payloads["buildkit-runc"]),
-            ("runtime/buildkitd", 0o555, runtime_payloads["buildkitd"]),
-            ("bin/rootlessctl", 0o555, runtime_payloads["rootlessctl"]),
-            ("bin/rootlesskit", 0o555, runtime_payloads["rootlesskit"]),
-            ("bin/slirp4netns", 0o555, runtime_payloads["slirp4netns"]),
-            ("bin/fuse-overlayfs", 0o555, runtime_payloads["fuse-overlayfs"]),
+            _buffered_member(
+                "bin/loom-task-builder-supervisor",
+                0o555,
+                supervisor_payload,
+            ),
+            *(
+                _ReleaseMemberInput(
+                    path=runtime_member.path,
+                    mode=runtime_member.mode,
+                    sha256=runtime_member.sha256,
+                    size=runtime_member.size,
+                    source=runtime_member,
+                )
+                for runtime_member in runtime_payloads.values()
+            ),
         ]
     )
-    members.sort(key=lambda item: item[0])
-    if len({name for name, _, _ in members}) != len(members):
+    members.sort(key=lambda item: item.path)
+    if len({member.path for member in members}) != len(members):
         raise ProviderReleaseError("release member inventory is invalid")
     identity: dict[str, object] = {
         "schema": _BUNDLE_SCHEMA,
@@ -932,8 +1155,12 @@ def build_release(
         "runtime_x_crypto": runtime_x_crypto,
         "supervisor_relative_path": spec.supervisor_relative_path,
         "files": [
-            {"path": name, "mode": f"{mode:04o}", "sha256": _digest(payload)}
-            for name, mode, payload in members
+            {
+                "path": member.path,
+                "mode": f"{member.mode:04o}",
+                "sha256": member.sha256,
+            }
+            for member in members
         ],
     }
     release_sha256 = _digest(_canonical(identity))
@@ -945,8 +1172,14 @@ def build_release(
         raise ProviderReleaseError("release destination collision")
     candidate = Path(tempfile.mkdtemp(prefix=".provider-release.", dir=output_root))
     try:
-        for name, mode, payload in members:
-            _write_file(candidate / name, payload, mode)
+        for member in members:
+            target = candidate / member.path
+            if member.payload is not None and member.source is None:
+                _write_file(target, member.payload, member.mode)
+            elif member.payload is None and member.source is not None:
+                member.source.copy_to(target)
+            else:
+                raise ProviderReleaseError("release member source is invalid")
         _write_file(candidate / _MANIFEST, manifest_payload, 0o444)
         _seal_release_tree(candidate)
         _rename_noreplace(candidate, directory)
@@ -1080,8 +1313,8 @@ def _verified_member_records(
     release: VerifiedProviderRelease,
 ) -> tuple[tuple[str, int, str], ...]:
     return tuple(
-        (name, mode, _digest(payload))
-        for name, mode, payload in release.members
+        (member.path, member.mode, member.sha256)
+        for member in release.members
     )
 
 
@@ -1096,12 +1329,12 @@ def _guard_member_records(
 
 
 def _guard_member_payload_records(
-    members: tuple[tuple[str, int, bytes], ...],
+    members: tuple[VerifiedProviderMember, ...],
 ) -> tuple[tuple[str, int, str, int], ...]:
     records = {
-        name: (name, mode, _digest(payload), len(payload))
-        for name, mode, payload in members
-        if name in _GUARD_MEMBERS
+        member.path: (member.path, member.mode, member.sha256, member.size)
+        for member in members
+        if member.path in _GUARD_MEMBERS
     }
     return tuple(records[name] for name in _GUARD_MEMBERS if name in records)
 
@@ -1199,11 +1432,11 @@ def verify_release_directory(
         or not isinstance(manifest.get("files"), list)
     ):
         raise ProviderReleaseError("release manifest is invalid")
-    identity = dict(manifest)
-    identity.pop("release_sha256", None)
-    if _digest(_canonical(identity)) != expected_release_sha256:
+    manifest_identity = dict(manifest)
+    manifest_identity.pop("release_sha256", None)
+    if _digest(_canonical(manifest_identity)) != expected_release_sha256:
         raise ProviderReleaseError("release manifest digest is invalid")
-    members: list[tuple[str, int, bytes]] = []
+    members: list[VerifiedProviderMember] = []
     seen = {_MANIFEST}
     expected_directories: set[str] = set()
     for record in cast(list[object], manifest["files"]):
@@ -1224,27 +1457,40 @@ def verify_release_directory(
             expected_directories.add(parent.as_posix())
             parent = parent.parent
         member_path = _assert_safe_parents(path, relative)
-        metadata = member_path.lstat()
         try:
             mode = int(record["mode"], 8)
         except ValueError as exc:
             raise ProviderReleaseError("release manifest is invalid") from exc
         if record["mode"] != f"{mode:04o}" or mode not in {0o444, 0o555}:
             raise ProviderReleaseError("release manifest is invalid")
-        payload = _read_regular(
+        digest, header, source_identity, size = _inspect_regular(
             member_path,
             maximum=_release_member_maximum(relative.as_posix()),
             executable=mode == 0o555,
         )
         if (
-            stat.S_IMODE(metadata.st_mode) != mode
-            or metadata.st_uid != expected_uid
-            or metadata.st_gid != expected_gid
+            stat.S_IMODE(source_identity[2]) != mode
+            or source_identity[7] != expected_uid
+            or source_identity[8] != expected_gid
         ):
             raise ProviderReleaseError("release member metadata is invalid")
-        if _digest(payload) != record["sha256"]:
+        if digest != record["sha256"]:
             raise ProviderReleaseError("release member digest is invalid")
-        members.append((relative.as_posix(), mode, payload))
+        if relative.as_posix() in (
+            _RUNTIME_MEMBER_DESTINATIONS
+            | {"bpftool", "bin/loom-task-builder-supervisor"}
+        ):
+            _validate_elf(header, expected_architecture)
+        members.append(
+            VerifiedProviderMember(
+                path=relative.as_posix(),
+                mode=mode,
+                sha256=digest,
+                size=size,
+                source_path=member_path,
+                _source_identity=source_identity,
+            )
+        )
     actual_files: set[str] = set()
     actual_directories: set[str] = set()
     for item in path.rglob("*"):
@@ -1264,7 +1510,7 @@ def verify_release_directory(
             actual_files.add(actual_relative)
         else:
             raise ProviderReleaseError("release member inventory is invalid")
-    expected_files = {name for name, _, _ in members} | {_MANIFEST}
+    expected_files = {member.path for member in members} | {_MANIFEST}
     if actual_files != expected_files or actual_directories != expected_directories:
         raise ProviderReleaseError("release member inventory is invalid")
     return VerifiedProviderRelease(

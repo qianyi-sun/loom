@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from scripts.ops import task_image_builder_provider_release as release_module
 from scripts.ops.task_image_builder_provider_release import (
     Architecture,
     ProviderReleaseError,
@@ -77,6 +78,7 @@ def _guard_release_for(
     architecture: str,
     machine: int,
     release_spec_sha256: str,
+    bpftool_payload: bytes | None = None,
 ) -> tuple[Path, str]:
     release_root = root / "guard-release"
     map_schema = _canonical(
@@ -87,7 +89,15 @@ def _guard_release_for(
     )
     bpf_object = _elf_payload(247, "bpf", elf_type=1)
     files = (
-        ("bpftool", _elf_payload(machine, f"bpftool-{architecture}"), 0o555),
+        (
+            "bpftool",
+            (
+                _elf_payload(machine, f"bpftool-{architecture}")
+                if bpftool_payload is None
+                else bpftool_payload
+            ),
+            0o555,
+        ),
         (
             "guard-network-map-schema-v1.json",
             map_schema,
@@ -487,6 +497,46 @@ def test_release_accepts_current_guard_bundle_and_embeds_native_bpftool(
     ).read_bytes()
 
 
+def test_release_verifier_accepts_reviewed_bpftool_above_generic_member_cap(
+    tmp_path: Path,
+) -> None:
+    source, _guard_release, runtime_root = _source_tree(tmp_path)
+    guard_spec_sha256 = _digest(
+        (source / "deploy/task-image-builder/guard-release-v1.json").read_bytes()
+    )
+    bpftool_payload = _elf_payload(62, "large-bpftool") + b"x" * (16 * 1024 * 1024)
+    guard_release, guard_digest = _guard_release_for(
+        tmp_path / "large-guard",
+        architecture="x86_64",
+        machine=62,
+        release_spec_sha256=guard_spec_sha256,
+        bpftool_payload=bpftool_payload,
+    )
+    spec_path = source / "deploy/task-image-builder/provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["guard_release"]["bundle_sha256"]["x86_64"] = guard_digest
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+
+    verify_release_directory(
+        result.directory,
+        expected_release_sha256=result.release_sha256,
+        expected_architecture="x86_64",
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+
+
 def test_release_rejects_guard_bundle_not_bound_to_reviewed_guard_spec(
     tmp_path: Path,
 ) -> None:
@@ -518,8 +568,9 @@ def test_release_rejects_guard_bundle_not_bound_to_reviewed_guard_spec(
         )
 
 
-def test_release_accepts_reviewed_runtime_member_larger_than_generic_cap(
+def test_release_streams_reviewed_runtime_members_instead_of_buffering_payloads(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source, guard_release, runtime_root = _source_tree(tmp_path)
     generic_cap = 16 * 1024 * 1024
@@ -530,6 +581,30 @@ def test_release_accepts_reviewed_runtime_member_larger_than_generic_cap(
         "buildkitd",
         payload=large_runtime_payload,
     )
+    regular_reader = release_module._read_regular
+    runtime_names = {
+        "buildctl",
+        "buildkit-runc",
+        "buildkitd",
+        "fuse-overlayfs",
+        "rootlessctl",
+        "rootlesskit",
+        "slirp4netns",
+    }
+
+    def reject_buffered_runtime_read(
+        path: Path,
+        *,
+        maximum: int,
+        executable: bool = False,
+    ) -> bytes:
+        if path.name in runtime_names and (
+            path.parent.name == "runtime" or path.parent.name == "bin"
+        ):
+            raise AssertionError(f"runtime member was buffered: {path.name}")
+        return regular_reader(path, maximum=maximum, executable=executable)
+
+    monkeypatch.setattr(release_module, "_read_regular", reject_buffered_runtime_read)
 
     result = build_release(
         source,
@@ -548,10 +623,33 @@ def test_release_accepts_reviewed_runtime_member_larger_than_generic_cap(
     )
 
     assert runtime_member.stat().st_size > generic_cap
-    assert dict(
-        (name, payload)
-        for name, _mode, payload in verified.members
-    )["runtime/buildkitd"] == large_runtime_payload
+    buildkitd = next(
+        member for member in verified.members if member.path == "runtime/buildkitd"
+    )
+    assert buildkitd.sha256 == _digest(large_runtime_payload)
+    assert buildkitd.size == len(large_runtime_payload)
+
+
+def test_release_rejects_reviewed_runtime_member_for_wrong_architecture(
+    tmp_path: Path,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    _set_reviewed_runtime_member(
+        source,
+        runtime_root,
+        "buildkitd",
+        payload=_elf_payload(183, "wrong-architecture-buildkitd"),
+    )
+
+    with pytest.raises(ProviderReleaseError, match="architecture"):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
 
 
 def test_release_rejects_runtime_member_larger_than_runtime_bound_without_reading(
@@ -623,6 +721,51 @@ def test_verify_release_directory_keeps_non_runtime_members_on_generic_cap(
         verify_release_directory(
             release,
             expected_release_sha256=release_sha256,
+            expected_architecture="x86_64",
+            expected_uid=os.geteuid(),
+            expected_gid=os.getegid(),
+        )
+
+
+def test_verify_release_directory_binds_metadata_to_the_hashed_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    target = result.directory / "runtime/buildkitd"
+    inspect_regular = release_module._inspect_regular
+    swapped = False
+
+    def swap_before_open(
+        path: Path,
+        *,
+        maximum: int,
+        executable: bool = False,
+    ) -> tuple[str, bytes, tuple[int, int, int, int, int, int, int, int, int], int]:
+        nonlocal swapped
+        if path == target and not swapped:
+            swapped = True
+            payload = path.read_bytes()
+            path.parent.chmod(0o755)
+            path.unlink()
+            _write(path, payload, 0o755)
+            path.parent.chmod(0o555)
+        return inspect_regular(path, maximum=maximum, executable=executable)
+
+    monkeypatch.setattr(release_module, "_inspect_regular", swap_before_open)
+
+    with pytest.raises(ProviderReleaseError, match="metadata"):
+        verify_release_directory(
+            result.directory,
+            expected_release_sha256=result.release_sha256,
             expected_architecture="x86_64",
             expected_uid=os.geteuid(),
             expected_gid=os.getegid(),

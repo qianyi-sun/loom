@@ -432,12 +432,15 @@ def _verify_receipt(root: Path, release: VerifiedProviderRelease) -> str:
 
 
 def _verify_supervisor(release: VerifiedProviderRelease) -> str:
-    members = {name: (mode, payload) for name, mode, payload in release.members}
+    members = {member.path: member for member in release.members}
     entry = members.get("bin/loom-task-builder-supervisor")
     if entry is None:
         raise ProviderConformanceError("supervisor binary is unavailable")
-    mode, payload = entry
-    if mode != 0o555 or len(payload) < _ELF_HEADER.size:
+    try:
+        payload = entry.read_bytes(maximum=16 * 1024 * 1024)
+    except ProviderReleaseError as exc:
+        raise ProviderConformanceError("supervisor binary is unavailable") from exc
+    if entry.mode != 0o555 or len(payload) < _ELF_HEADER.size:
         raise ProviderConformanceError("supervisor binary is invalid")
     header = _ELF_HEADER.unpack_from(payload)
     ident = header[0]

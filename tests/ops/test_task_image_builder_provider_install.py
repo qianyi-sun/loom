@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from scripts.ops import install_task_image_builder_provider_release as installer_module
 from scripts.ops.install_task_image_builder_provider_release import (
     InstallContext,
     ProviderInstallError,
@@ -424,6 +425,37 @@ def test_staging_installs_only_an_immutable_release_and_durable_receipt(
         "var/lib/loom-task-image-builder-provider/current",
     ):
         assert not (context.root / forbidden).exists()
+
+
+def test_staging_streams_verified_members_instead_of_rebuffering_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    context = _context(tmp_path, bundle)
+    buffered_writer = installer_module._write_file
+
+    def reject_buffered_release_member(
+        path: Path,
+        payload: bytes,
+        mode: int,
+    ) -> None:
+        if path.name != "release-manifest.json" and any(
+            part.startswith(".stage-") for part in path.parts
+        ):
+            raise AssertionError(f"release member was buffered: {path.name}")
+        buffered_writer(path, payload, mode)
+
+    monkeypatch.setattr(installer_module, "_write_file", reject_buffered_release_member)
+
+    receipt = stage_provider_release(bundle, context)
+
+    installed = (
+        context.root
+        / "opt/loom-task-image-builder-provider/releases"
+        / receipt.release_sha256
+    )
+    assert _file_digest_tree(installed) == _file_digest_tree(bundle)
 
 
 def test_repeated_byte_identical_staging_is_exactly_idempotent(tmp_path: Path) -> None:
