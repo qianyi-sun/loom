@@ -19,23 +19,33 @@ func hardenRuntimeIdentity() error {
 	return nil
 }
 
-func readRegularOutputFile(path string) ([]byte, error) {
+func openRegularOutputFile(path string) (*os.File, os.FileInfo, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
 	if file == nil {
 		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("open output file")
+		return nil, nil, fmt.Errorf("open output file")
 	}
-	defer file.Close()
 	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("output is not a regular file")
+	}
+	return file, info, nil
+}
+
+func readRegularOutputFile(path string) ([]byte, error) {
+	file, _, err := openRegularOutputFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("output is not a regular file")
-	}
+	defer file.Close()
 	return io.ReadAll(file)
 }

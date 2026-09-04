@@ -213,6 +213,26 @@ defense in depth, not an admission requirement for this project.
 
 ## Persistent development runtime
 
+Runtime YAML is generated from the checked execution topology and physical
+binding rather than copied and edited per environment. Render into a new or
+empty directory and retain `render-manifest.json` with release evidence:
+
+```bash
+uv run --no-sync python scripts/ops/render_nebius_runtime.py \
+  --environment development \
+  --image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-actuator@sha256:DIGEST \
+  --capacity-policy deploy/k8s/nebius-development-capacity-policy.json \
+  --output /secure/path/nebius-development-render
+```
+
+The renderer resolves the target and namespace from
+`config/service-execution-topology.json`, resolves the shared provider IDs from
+`config/nebius-runtime-physical-binding.json`, injects only a digest-pinned
+image, rejects a cross-environment capacity policy, and writes a checksum
+ledger. Staging and production use the same command with their environment and
+their separately reviewed target-bound capacity policy. Rendering does not
+deploy or enable traffic.
+
 After the platform Deployment and its database/admin Secrets exist, attach the
 development execution runtime once:
 
@@ -292,6 +312,10 @@ execution-admission policies. For the current provider quota, both the global
 and `nebius-cpu` admission ceilings are 56 leases; this must match the 56-job
 pending/create limits and the eight-node execution envelope rather than retain a
 bootstrap single-trial ceiling.
+It also explicitly enables the control-plane canonical materializer with its
+checked polling, claim TTL, concurrency, and source-retention settings. A
+restart reclaims expired materialization leases from PostgreSQL; no operator
+must reconnect a completed Batch or copy artifacts manually.
 
 The evidence collector uses checksum-pinned Trivy and `crane` binaries on the
 gateway, authenticates to Nebius Registry with the VM service account, rejects
@@ -313,6 +337,49 @@ mode-0700 temporary directory, obtains an internal kubeconfig with the VM's
 attached identity, rolls out Control Plane then Service, applies the idempotent
 runtime, and deletes the remote and local staging directories. No human Nebius
 token is copied to the gateway.
+
+## Automated staged acceptance
+
+After the exact protected candidate is deployed and the execution pool has
+returned to zero nodes, build its one-task acceptance TaskSet directly from the
+deployed runtime profile. This keeps task image and candidate identity coupled
+and declares two required task artifacts plus trajectory, usage, and verifier
+output:
+
+```bash
+uv run --no-sync python scripts/ops/build_nebius_acceptance_taskset.py \
+  --runtime-profile /secure/path/service-execution-runtime-profile.json \
+  --output /secure/path/nebius-acceptance-taskset
+
+loom eval nebius-acceptance \
+  --taskset-dir /secure/path/nebius-acceptance-taskset \
+  --provider MODEL_PROVIDER_CONNECTION \
+  --model MODEL_ID \
+  --candidate-sha MERGED_DEV_SHA \
+  --capacity-policy deploy/k8s/nebius-development-capacity-policy.json \
+  --output /secure/path/nebius-acceptance-MERGED_DEV_SHA
+```
+
+The command uses the persisted `loom auth login` session and only normal user
+APIs. It uploads and waits for the ordinary TaskSet, runs stages
+`1,20,40,accepted_concurrency` for the current envelope (deduplicated), or
+`1,20,50,100,150,200` after the checked policy reaches 200. Stages above 100
+use multiple legal sampling combinations; queued or merely claimed Trials do
+not count as overlap. Each stage must observe the requested number of
+simultaneously running execution units, at least one real execution node, all
+canonical successes, source cleanup, and a return to zero nodes and zero slots
+before the next stage. The acceptance verifier intentionally holds each Pod for
+three minutes so scale-from-zero timing cannot make a fast model response hide
+the real-overlap measurement.
+
+Every Trial's complete authenticated archive is retained under the evidence
+directory. The runner verifies the response digest, safe archive inventory,
+`bundle.json`, `checksums/SHA256SUMS`, every declared file size and SHA-256,
+and the candidate frozen on the Batch. A timeout cancels the acceptance Batch
+best-effort so failed validation does not intentionally leave paid work
+running. The final `acceptance.json` and checksum sidecar contain sanitized
+Batch, lifecycle, node, overlap, and bundle evidence; no database, MinIO,
+kubectl, Nebius CLI, or hand-connected transfer is part of the test path.
 
 Normal convergence preserves the existing `loom-nebius-model-provider`
 Secret and hashes its current value into the Gateway rollout annotation
@@ -336,16 +403,24 @@ accepted Batch rather than from mutable deployment configuration.
 
 The operation is idempotent. It applies the development-only Control Plane
 patch that enables the `nebius-cpu` scheduler and loads its image-admission
-keyring from the existing Secret, converges the repository-owned 200-concurrency
+keyring from the existing Secret, converges the repository-owned current-56 / target-200
 capacity policy through the authenticated admin API, reuses the existing
 single-scope Loom collector token, applies the active actuator and one-minute
 collector, and waits for both rollouts plus a scheduled collector Job. The
 admin token never leaves the Control Plane Pod. The provider-neutral base
 manifest stays disabled. The operation does not create a user Job or change the
 node-group target count. Subsequent users only upload/submit through Loom; the
-persisted scheduler, lease/outbox, actuator, and managed `0..10` autoscaler
-complete the connection automatically and return execution nodes to zero after
-demand drains.
+persisted scheduler, lease/outbox, actuator, and managed autoscaler complete the
+connection automatically and return execution nodes to zero after demand
+drains. The applied bound is currently `0..8`; `0..10` is the checked target
+only after the 512-vCPU quota and 48-vCPU regional stock are confirmed.
+
+The recurring capacity observation publishes desired, creating, ready, failed,
+and deleting execution-node counts together with its source timestamp. The Loom
+Monitor shows those values, current executable slots separately from configured
+headroom, canonical transfer backlog/age/retries, last acknowledgement, and
+source-cleanup debt. A stale observation blocks new admission rather than
+reusing the last displayed node count as executable capacity.
 
 Kubernetes rotates the actuator's projected ServiceAccount token. Nebius
 refreshes access tokens from the non-expiring authorized key. Node-group image

@@ -16,6 +16,7 @@ from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
+    RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
 )
 from loom.models.task import TaskConfig, normalize_steps
@@ -246,11 +247,12 @@ def automatic_service_execution_rejections(
             or _GLOB_MAGIC.search(str(instruction_path))
         ):
             reasons.append("exact_instruction_path_required")
-        artifacts = step.artifacts
+        artifacts = [*step.artifacts, *step.required_artifacts]
         if any(
             PurePosixPath(item).is_absolute()
             or ".." in PurePosixPath(item).parts
             or _GLOB_MAGIC.search(item)
+            or PurePosixPath(item).parts[:1] == (".loom",)
             for item in artifacts
         ):
             reasons.append("exact_artifact_paths_required")
@@ -282,6 +284,7 @@ def compile_service_execution_plan(
     assert task.environment.storage_mb is not None
     step = task.steps[0]
     assert trial.agent_model is not None
+    output_paths = list(dict.fromkeys((*step.artifacts, *step.required_artifacts)))
     # The in-Pod runner targets Loom's attributed chat route.  It revalidates
     # the service-execution lease and supports both a JWT-bound provider
     # connection and the platform route, whose model identity is provider/name.
@@ -289,7 +292,7 @@ def compile_service_execution_plan(
     main_environment = {
         "LOOM_TASK_MODEL": model,
         "LOOM_TASK_INSTRUCTION_FILE": str(step.instruction_file),
-        "LOOM_TASK_ARTIFACTS_JSON": json.dumps(step.artifacts, separators=(",", ":")),
+        "LOOM_TASK_ARTIFACTS_JSON": json.dumps(output_paths, separators=(",", ":")),
         "LOOM_TASK_REQUEST_PARAMS_JSON": json.dumps(
             trial.request_params, sort_keys=True, separators=(",", ":")
         ),
@@ -322,8 +325,38 @@ def compile_service_execution_plan(
             "request_params": trial.request_params,
             "instruction_file": str(step.instruction_file),
             "artifacts": step.artifacts,
+            "required_artifacts": step.required_artifacts,
             "verifier": task.verifier.model_dump(mode="json"),
         }
+    )
+    output_declarations = (
+        *(
+            RuntimeOutputDeclarationV1(
+                source_path=path,
+                relative_path=f"artifacts/{path}",
+                kind="task_artifact",
+                required=True,
+            )
+            for path in output_paths
+        ),
+        RuntimeOutputDeclarationV1(
+            source_path=".loom/agent/trajectory.jsonl",
+            relative_path="trajectory/events.jsonl",
+            kind="trajectory",
+            required=True,
+        ),
+        RuntimeOutputDeclarationV1(
+            source_path=".loom/agent/usage.json",
+            relative_path="accounting/usage.json",
+            kind="usage",
+            required=True,
+        ),
+        RuntimeOutputDeclarationV1(
+            source_path=".loom/verifier/output.json",
+            relative_path="verifier/output.json",
+            kind="verifier",
+            required=True,
+        ),
     )
     return ExecutionRuntimePlanV1(
         candidate_sha=profile.candidate_sha,
@@ -351,6 +384,7 @@ def compile_service_execution_plan(
             file_count=binding.file_count,
             total_bytes=binding.total_bytes,
         ),
+        output_declarations=output_declarations,
         main=ProcessPhaseV1(
             role="agent",
             argv=("python", "-m", "loom.service_execution_task", "direct-completion"),

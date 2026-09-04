@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -69,6 +70,13 @@ type taskInput struct {
 	TotalBytes     int64  `json:"total_bytes"`
 }
 
+type outputDeclaration struct {
+	SourcePath   string `json:"source_path"`
+	RelativePath string `json:"relative_path"`
+	Kind         string `json:"kind"`
+	Required     bool   `json:"required"`
+}
+
 type imageAdmissionStatement struct {
 	SchemaVersion                string    `json:"schema_version"`
 	ImageRef                     string    `json:"image_ref"`
@@ -120,6 +128,7 @@ type plan struct {
 	MaxLogBytesPerStream  int64                   `json:"max_log_bytes_per_stream"`
 	MaxArtifactBytes      int64                   `json:"max_artifact_bytes"`
 	TaskInput             *taskInput              `json:"task_input"`
+	OutputDeclarations    []outputDeclaration     `json:"output_declarations"`
 	RuntimeContractSHA256 string                  `json:"-"`
 }
 
@@ -197,6 +206,21 @@ func (p plan) validate() error {
 	if len(p.Setup) > 32 || len(p.Sidecars) > 32 {
 		return fmt.Errorf("runtime plan exceeds phase or sidecar bounds")
 	}
+	if len(p.OutputDeclarations) > 10_000 {
+		return fmt.Errorf("runtime plan exceeds output declaration bounds")
+	}
+	sourcePaths := map[string]bool{}
+	bundlePaths := map[string]bool{}
+	for _, item := range p.OutputDeclarations {
+		if !validRelativeOutputPath(item.SourcePath) ||
+			!validRelativeOutputPath(item.RelativePath) ||
+			sourcePaths[item.SourcePath] || bundlePaths[item.RelativePath] ||
+			!validOutputKind(item.Kind) || !validBundleNamespace(item.RelativePath) {
+			return fmt.Errorf("invalid runtime output declaration")
+		}
+		sourcePaths[item.SourcePath] = true
+		bundlePaths[item.RelativePath] = true
+	}
 	for _, item := range append(append([]phase{}, p.Setup...), p.Main) {
 		if err := item.validate(); err != nil {
 			return err
@@ -241,6 +265,34 @@ func (p plan) validate() error {
 		return err
 	}
 	return nil
+}
+
+func validRelativeOutputPath(value string) bool {
+	if value == "" || len(value) > 4096 || strings.Contains(value, "\\") || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(value))
+	return clean == value && clean != "." && !strings.HasPrefix(clean, "/") &&
+		!strings.HasPrefix(clean, "../") && !strings.Contains(clean, "/../")
+}
+
+func validOutputKind(value string) bool {
+	switch value {
+	case "task_artifact", "trajectory", "agent_native", "verifier", "usage", "diagnostic", "checkpoint":
+		return true
+	default:
+		return false
+	}
+}
+
+func validBundleNamespace(value string) bool {
+	namespace := strings.SplitN(value, "/", 2)[0]
+	switch namespace {
+	case "artifacts", "trajectory", "agent", "verifier", "accounting", "diagnostics", "checkpoints":
+		return true
+	default:
+		return false
+	}
 }
 
 func (bundle executionImageAdmission) validate(requiredImages []string, now time.Time) error {

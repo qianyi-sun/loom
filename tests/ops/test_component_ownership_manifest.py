@@ -986,6 +986,21 @@ def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> No
     )
 
 
+def test_execution_actuator_image_owns_capacity_collector_source() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    owners = manifest.component_owners_for_path(
+        "src/loom_execution_capacity_collector/nebius.py"
+    )
+    assert "execution-actuator" in {component.id for component in owners}
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("src/loom_execution_capacity_collector/nebius.py",),
+        force_all=False,
+    )
+    assert any(item["image"] == "execution-actuator" for item in selected)
+
+
 def test_native_builder_agent_image_has_authority_minimal_release_ownership() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     component = next(

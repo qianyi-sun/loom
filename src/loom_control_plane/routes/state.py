@@ -41,8 +41,17 @@ router = APIRouter()
 # (e.g., queued, claimed) cannot be reached via PATCH /state.
 _ALLOWED_FROM: dict[TrialState, set[TrialState]] = {
     TrialState.RUNNING: {TrialState.CLAIMED, TrialState.RUNNING},
-    TrialState.SUCCEEDED: {TrialState.CLAIMED, TrialState.RUNNING},
-    TrialState.FAILED: {TrialState.CLAIMED, TrialState.RUNNING},
+    TrialState.MATERIALIZING: {TrialState.CLAIMED, TrialState.RUNNING},
+    TrialState.SUCCEEDED: {
+        TrialState.CLAIMED,
+        TrialState.RUNNING,
+        TrialState.MATERIALIZING,
+    },
+    TrialState.FAILED: {
+        TrialState.CLAIMED,
+        TrialState.RUNNING,
+        TrialState.MATERIALIZING,
+    },
     TrialState.CANCELLED: {
         TrialState.QUEUED,
         TrialState.CLAIMED,

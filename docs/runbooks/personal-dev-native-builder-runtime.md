@@ -1081,9 +1081,18 @@ removes only the exact nft table, and removes only byte-identical managed
 runtime files. The dedicated image cache and system identities are retained as
 inert state: removal never recursively deletes Docker data or accounts. Its
 canonical receipt reports the resulting inert public state and never restarts
-or alters the primary Docker daemon.
+or alters the primary Docker daemon. Validate the restored shadow against the
+previous trusted release when one exists; a first installation with no
+predecessor validates against the current trusted release.
 
 ```bash
+rollback_trusted_release="$trusted_release"
+rollback_trusted_release_sha256="$trusted_release_sha256"
+if test -n "$previous_trusted_release"; then
+  rollback_trusted_release="$previous_trusted_release"
+  rollback_trusted_release_sha256="$previous_trusted_release_sha256"
+fi
+
 rollback_shadow_recheck="$evidence_dir/rollback-shadow.recheck.yaml"
 install -m 0600 "$rollback_shadow_manifest" "$rollback_shadow_recheck"
 cmp -s "$rollback_shadow_recheck" "$rollback_shadow_manifest"
@@ -1121,8 +1130,8 @@ jq -e '.phase == "inert" and .agent_service == "inactive" and
 loom_cli admin personal-dev-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig" \
   --file deploy/dev-fleet/personal-dev-control-plane.toml \
-  --trusted-release-file "$trusted_release" \
-  --trusted-release-sha256 "$trusted_release_sha256" \
+  --trusted-release-file "$rollback_trusted_release" \
+  --trusted-release-sha256 "$rollback_trusted_release_sha256" \
   > "$evidence_dir/rollback-shadow.status.json"
 chmod 0600 "$evidence_dir"/rollback-*
 ```

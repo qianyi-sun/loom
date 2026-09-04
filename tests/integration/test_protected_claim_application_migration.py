@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.exc import IntegrityError
 
@@ -18,6 +19,12 @@ def _config(database_url: str) -> AlembicConfig:
     config.set_main_option("script_location", str(root / "migrations"))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
+
+
+def _head_revision(config: AlembicConfig) -> str:
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert head is not None
+    return head
 
 
 def _seed_trial(connection: Connection, *, team_id: UUID, state: str) -> UUID:
@@ -145,10 +152,9 @@ def test_0128_requeue_trampoline_is_private_and_reversible(
 
         command.upgrade(config, "head")
         with engine.connect() as connection:
-            assert (
-                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0128"
-            )
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == _head_revision(config)
             assert (
                 connection.execute(
                     text("SELECT to_regprocedure(:signature)"),
@@ -189,10 +195,9 @@ def test_0128_refuses_downgrade_while_protected_claim_can_be_requeued(
             command.downgrade(config, "0127")
 
         with engine.connect() as connection:
-            assert (
-                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0128"
-            )
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == _head_revision(config)
             assert (
                 connection.execute(
                     text(
@@ -352,10 +357,9 @@ def test_0127_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
 
         command.upgrade(config, "head")
         with engine.connect() as connection:
-            assert (
-                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0128"
-            )
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == _head_revision(config)
             assert (
                 connection.execute(
                     text("SELECT to_regprocedure(:function)"),

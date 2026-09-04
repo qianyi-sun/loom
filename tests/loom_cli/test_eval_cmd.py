@@ -2545,6 +2545,7 @@ def test_trial_show_renders_public_download_commands_when_ready(
             "trajectory_url": (f"https://loom.test/api/v1/trials/{_TRIAL_ID}/trajectory/download"),
             "atif_ready": True,
             "trajectory_ready": True,
+            "materialization": {"canonical_ready": True},
             "artifacts": [
                 {
                     "path": "result.txt",
@@ -2565,6 +2566,7 @@ def test_trial_show_renders_public_download_commands_when_ready(
     assert "downloads:" in out
     assert f"loom eval trial download {_TRIAL_ID} --kind atif" in out
     assert f"loom eval trial download {_TRIAL_ID} --kind trajectory" in out
+    assert f"loom eval trial download {_TRIAL_ID} --kind bundle" in out
     assert "--kind artifact" in out
     assert "--artifact-key" in out
 
@@ -2756,6 +2758,33 @@ def test_trial_download_atif_writes_public_route_response(
     out = capsys.readouterr().out
     assert "Downloaded atif" in out
     assert "minio" not in out
+
+
+def test_trial_download_bundle_writes_complete_canonical_archive(
+    mock_server: MockServer,
+    tmp_path: Path,
+) -> None:
+    mock_server.canned[
+        ("GET", f"/api/v1/trials/{_TRIAL_ID}/bundle/download")
+    ] = httpx.Response(200, content=b"complete-bundle")
+    output = tmp_path / "bundle.tar.gz"
+
+    rc = main(
+        [
+            "eval",
+            "trial",
+            "download",
+            _TRIAL_ID,
+            "--kind",
+            "bundle",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    assert output.read_bytes() == b"complete-bundle"
+    assert mock_server[0].url.path == f"/api/v1/trials/{_TRIAL_ID}/bundle/download"
 
 
 def test_trial_download_artifact_requires_key_and_uses_proxy_route(

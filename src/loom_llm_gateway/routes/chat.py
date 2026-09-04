@@ -197,9 +197,7 @@ async def chat_completions(
         conn_uuid = resolve_optional_provider_connection_id(
             ctx,
             header_value=x_loom_provider_connection_id,
-            body_value=(
-                req.loom.provider_connection_id if req.loom is not None else None
-            ),
+            body_value=(req.loom.provider_connection_id if req.loom is not None else None),
         )
 
         # BYO routing (#178): resolve + decrypt now while the session is
@@ -219,9 +217,7 @@ async def chat_completions(
             )
             byo_api_key = await decrypt_facade_api_key(session, byo_row)
 
-    if req.loom is None and (
-        ctx.team_id is None or ctx.trial_id is None or ctx.step_id is None
-    ):
+    if req.loom is None and (ctx.team_id is None or ctx.trial_id is None or ctx.step_id is None):
         raise HTTPException(
             status_code=400,
             detail="loom attribution is required without a step-scoped token",
@@ -251,9 +247,7 @@ async def chat_completions(
     # so llm_calls audit rows attribute the spend correctly (e.g. the
     # family-run skill_patcher_llm adapter sends ``family_evolver``).
     # None → keep the historical ``openai_chat`` label.
-    audit_dialect = (
-        req.loom.dialect if req.loom is not None else None
-    ) or "openai_chat"
+    audit_dialect = (req.loom.dialect if req.loom is not None else None) or "openai_chat"
     requested_tier = req.loom.tier if req.loom is not None else None
     requested_region = req.loom.region if req.loom is not None else None
 
@@ -515,6 +509,7 @@ async def chat_completions(
         "streamed": False,
         "time_to_first_token_sec": None,
         "gateway_request_id": str(uuid_lib.uuid4()),
+        "attempt": attempt,
     }
     async with request.app.state.session_factory() as audit_session:
         await record_call(

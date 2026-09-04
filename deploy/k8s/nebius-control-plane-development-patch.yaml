@@ -17,3 +17,13 @@ spec:
               value: development
             - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID
               value: nebius-cpu
+            - name: LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED
+              value: 'True'
+            - name: LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_INTERVAL_SEC
+              value: '2.0'
+            - name: LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_CLAIM_TTL_SEC
+              value: '300.0'
+            - name: LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_CONCURRENCY
+              value: '8'
+            - name: LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC
+              value: '86400'

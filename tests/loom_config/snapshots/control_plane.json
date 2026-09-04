@@ -119,6 +119,26 @@
     "default": "None",
     "required": false
   },
+  "service_execution_materializer_claim_ttl_sec": {
+    "annotation": "<class 'float'>",
+    "default": "300.0",
+    "required": false
+  },
+  "service_execution_materializer_concurrency": {
+    "annotation": "<class 'int'>",
+    "default": "8",
+    "required": false
+  },
+  "service_execution_materializer_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "True",
+    "required": false
+  },
+  "service_execution_materializer_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "2.0",
+    "required": false
+  },
   "service_execution_scheduler_enabled": {
     "annotation": "<class 'bool'>",
     "default": "False",
@@ -142,6 +162,11 @@
   "service_execution_scheduler_pool_id": {
     "annotation": "<class 'str'>",
     "default": "'nebius-cpu'",
+    "required": false
+  },
+  "service_execution_source_retention_sec": {
+    "annotation": "<class 'int'>",
+    "default": "86400",
     "required": false
   },
   "signed_url_expiry_sec": {

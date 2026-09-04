@@ -494,6 +494,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
         "queued": 1,
         "claimed": 1,
         "running": 1,
+        "materializing": 0,
         "succeeded": 1,
         "failed": 0,
         "cancelled": 0,
@@ -596,6 +597,48 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "last_autoscaler_error": None,
         },
     ]
+    assert body["service_execution"] == {
+        "targets": [],
+        "activity": {
+            "lease_count": 0,
+            "execution_states": {},
+            "lifecycle_stages": {
+                "queued": 0,
+                "admission_blocked": 0,
+                "provisioning": 0,
+                "running": 0,
+                "verifying": 0,
+                "materializing": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "output_unavailable": 0,
+            },
+            "materialization": {
+                "states": {
+                    "not_started": 0,
+                    "pending": 0,
+                    "running": 0,
+                    "committed": 0,
+                    "unavailable": 0,
+                },
+                "backlog": 0,
+                "retry_attempts": 0,
+                "oldest_next_attempt_at": None,
+                "oldest_pending_at": None,
+                "oldest_pending_age_seconds": None,
+                "last_committed_at": None,
+                "pending_bytes": 0,
+                "source_retained_bytes": 0,
+            },
+            "source_cleanup_states": {
+                "not_ready": 0,
+                "retained": 0,
+                "running": 0,
+                "complete": 0,
+            },
+        },
+    }
 
 
 async def test_monitor_summary_search_scopes_batch_identity_counts(
@@ -630,6 +673,7 @@ async def test_monitor_summary_search_scopes_batch_identity_counts(
         "queued": 0,
         "claimed": 1,
         "running": 1,
+        "materializing": 0,
         "succeeded": 1,
         "failed": 0,
         "cancelled": 0,

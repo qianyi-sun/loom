@@ -1,0 +1,8 @@
+{
+  "schema_version": "loom.nebius-runtime-physical-binding.v1",
+  "cluster_scope_id": "nebius-eu-north1-shared",
+  "project_id": "project-e00ksehzpr00ftw5pe61gt",
+  "quota_parent_id": "tenant-e00zcze7mmwb61vk7e",
+  "execution_node_group_id": "mk8snodegroup-e00n6mbxcz8jgp8bat",
+  "region": "eu-north1"
+}

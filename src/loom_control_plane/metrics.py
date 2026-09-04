@@ -137,6 +137,55 @@ SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL = Counter(
     "Idempotently converged command or event redeliveries",
     labelnames=("command_type",),
 )
+SERVICE_EXECUTION_MATERIALIZATION_BACKLOG = Gauge(
+    "loom_service_execution_materialization_backlog",
+    "Committed service execution bundles awaiting canonical materialization",
+)
+SERVICE_EXECUTION_MATERIALIZATION_PENDING_BYTES = Gauge(
+    "loom_service_execution_materialization_pending_bytes",
+    "Source bundle bytes awaiting canonical materialization",
+)
+SERVICE_EXECUTION_MATERIALIZATION_OLDEST_AGE_SECONDS = Gauge(
+    "loom_service_execution_materialization_oldest_age_seconds",
+    "Age of the oldest committed bundle awaiting canonical materialization",
+)
+SERVICE_EXECUTION_MATERIALIZATION_RETRIES_TOTAL = Counter(
+    "loom_service_execution_materialization_retries_total",
+    "Transient canonical materialization attempts returned to the durable queue",
+)
+SERVICE_EXECUTION_MATERIALIZATION_FAILURES_TOTAL = Counter(
+    "loom_service_execution_materialization_failures_total",
+    "Permanent canonical materialization failures",
+    labelnames=("reason",),
+)
+SERVICE_EXECUTION_MATERIALIZATION_UNAVAILABLE = Gauge(
+    "loom_service_execution_materialization_unavailable",
+    "Persisted service execution bundles that cannot be materialized",
+)
+SERVICE_EXECUTION_MATERIALIZATION_UNAVAILABLE_BYTES = Gauge(
+    "loom_service_execution_materialization_unavailable_bytes",
+    "Source bytes retained for unavailable service execution bundles",
+)
+SERVICE_EXECUTION_MATERIALIZATION_COMPLETED_TOTAL = Counter(
+    "loom_service_execution_materialization_completed_total",
+    "Service execution bundles committed to canonical Loom storage",
+)
+SERVICE_EXECUTION_SOURCE_SPOOL_RETAINED = Gauge(
+    "loom_service_execution_source_spool_retained",
+    "Canonical-acknowledged source bundles retained for recovery or cleanup retry",
+)
+SERVICE_EXECUTION_SOURCE_SPOOL_BYTES = Gauge(
+    "loom_service_execution_source_spool_bytes",
+    "Bytes in canonical-acknowledged source bundles retained for recovery",
+)
+SERVICE_EXECUTION_SOURCE_CLEANUP_RETRIES_TOTAL = Counter(
+    "loom_service_execution_source_cleanup_retries_total",
+    "Source spool cleanup attempts returned to the durable retention queue",
+)
+SERVICE_EXECUTION_SOURCE_CLEANUP_COMPLETED_TOTAL = Counter(
+    "loom_service_execution_source_cleanup_completed_total",
+    "Source spool bundles removed after their recovery window",
+)
 
 RETRY_EXHAUSTED_TOTAL = Counter(
     "loom_retry_exhausted_total",

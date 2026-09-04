@@ -144,11 +144,17 @@ func TestWorkloadBrokerRefreshProxyAndDurableOutputCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(output, "01-agent.stdout"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(output, "artifacts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(output, "artifacts", "answer.txt"), []byte("42\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	evidence, err := broker.commitOutputs(ctx, output, broker.outputRequestID())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.UploadSessionID != sessionID || len(parts) != 2 {
+	if evidence.UploadSessionID != sessionID || len(parts) != 3 {
 		t.Fatalf("output was not completely committed: evidence=%#v parts=%d", evidence, len(parts))
 	}
 	if broker.outputRequestID() != broker.outputRequestID() {

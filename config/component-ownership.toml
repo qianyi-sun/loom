@@ -368,6 +368,7 @@ source_paths = [
   "src/loom_control_plane/metrics.py",
   "src/loom_control_plane/service_execution.py",
   "src/loom_execution_actuator/**",
+  "src/loom_execution_capacity_collector/**",
 ]
 smoke_owner = "staging-smoke"
 scan_owner = "images"

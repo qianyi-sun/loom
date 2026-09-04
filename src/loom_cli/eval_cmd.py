@@ -37,6 +37,7 @@ import httpx
 
 from loom.security.redaction import redact_mapping
 from loom_cli.minio_storage_preflight import validate_minio_storage_preflight_artifact
+from loom_cli.nebius_acceptance import configure_parser as configure_nebius_acceptance_parser
 from loom_cli.providers_cmd import (
     _resolve_by_name,
     _run_with_error_handling,
@@ -1153,6 +1154,14 @@ def _print_trial_download_commands(
     trial_id: str,
 ) -> None:
     commands: list[tuple[str, str]] = []
+    materialization = body.get("materialization")
+    if isinstance(materialization, dict) and materialization.get("canonical_ready") is True:
+        commands.append(
+            (
+                "complete bundle",
+                f"loom eval trial download {shlex.quote(trial_id)} --kind bundle",
+            )
+        )
     if body.get("atif_ready"):
         commands.append(
             (
@@ -1211,6 +1220,9 @@ def _trial_download(args: argparse.Namespace) -> int:
         elif args.kind == "trajectory":
             path = f"/api/v1/trials/{args.trial_id}/trajectory/download"
             default_name = f"{args.trial_id}-events.jsonl"
+        elif args.kind == "bundle":
+            path = f"/api/v1/trials/{args.trial_id}/bundle/download"
+            default_name = f"{args.trial_id}-complete-trial-bundle.tar.gz"
         else:
             path = f"/api/v1/trials/{args.trial_id}/artifacts/download"
             params = {"key": args.artifact_key}
@@ -1368,6 +1380,8 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     sub = parser.add_subparsers(dest="eval_cmd", required=True)
+
+    configure_nebius_acceptance_parser(sub)
 
     # --- run (single trial) ---
     p_run = sub.add_parser(
@@ -1789,12 +1803,12 @@ def dispatch(argv: list[str]) -> int:
 
     p_td = trial_sub.add_parser(
         "download",
-        help="Download a trial ATIF, trajectory, or artifact through the public API.",
+        help="Download a complete Trial bundle, ATIF, trajectory, or artifact through the public API.",
     )
     p_td.add_argument("trial_id", help="Trial UUID.")
     p_td.add_argument(
         "--kind",
-        choices=["atif", "trajectory", "artifact"],
+        choices=["bundle", "atif", "trajectory", "artifact"],
         required=True,
         help="Object to download.",
     )

@@ -150,43 +150,6 @@ fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
-
-render_execution_actuator_manifest() {
-  python3 - "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" \
-    "$execution_actuator_image" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-image = sys.argv[2]
-lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-matches = [index for index, line in enumerate(lines) if line.startswith("          image: ")]
-if len(matches) != 1:
-    raise SystemExit("execution actuator manifest must contain exactly one image field")
-ending = "\n" if lines[matches[0]].endswith("\n") else ""
-lines[matches[0]] = f"          image: {image}{ending}"
-sys.stdout.write("".join(lines))
-PY
-}
-
-render_capacity_collector_manifest() {
-  python3 - "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" \
-    "$execution_actuator_image" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-image = sys.argv[2]
-lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-matches = [index for index, line in enumerate(lines) if line.startswith("              image: ")]
-if len(matches) != 2:
-    raise SystemExit("capacity collector manifest must contain exactly two image fields")
-for index in matches:
-    ending = "\n" if lines[index].endswith("\n") else ""
-    lines[index] = f"              image: {image}{ending}"
-sys.stdout.write("".join(lines))
-PY
-}
 capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
 [[ -s $capacity_policy ]] || {
   echo "Nebius development capacity policy is missing" >&2
@@ -265,12 +228,25 @@ fi
 
 normalized_provider_key=
 token_file=
+rendered_runtime_dir=
 # shellcheck disable=SC2329  # invoked by the EXIT trap below
 cleanup() {
   [[ -z $normalized_provider_key ]] || rm -f "$normalized_provider_key"
   [[ -z "$token_file" ]] || rm -f "$token_file"
+  [[ -z "$rendered_runtime_dir" ]] || rm -rf -- "$rendered_runtime_dir"
 }
 trap cleanup EXIT
+rendered_runtime_dir=$(mktemp -d)
+PYTHONPATH="$repo_root/src" python3 "$repo_root/scripts/ops/render_nebius_runtime.py" \
+  --environment development \
+  --image "$execution_actuator_image" \
+  --capacity-policy "$capacity_policy" \
+  --output "$rendered_runtime_dir" >/dev/null
+execution_actuator_manifest="$rendered_runtime_dir/nebius-execution-actuator.yaml"
+capacity_collector_manifest="$rendered_runtime_dir/nebius-capacity-collector.yaml"
+control_plane_patch="$rendered_runtime_dir/nebius-control-plane-development-patch.yaml"
+service_patch="$rendered_runtime_dir/nebius-service-development-patch.yaml"
+gateway_patch="$rendered_runtime_dir/nebius-gateway-development-patch.yaml"
 if [[ -n $model_provider_api_key_file ]]; then
   normalized_provider_key=$(mktemp)
   chmod 600 "$normalized_provider_key"
@@ -371,14 +347,14 @@ kubectl create secret generic loom-service-execution-runtime-profile \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 kubectl patch deployment -n loom loom-llm-gateway --type=strategic \
-  --patch-file "$repo_root/deploy/k8s/nebius-gateway-development-patch.yaml" >/dev/null
+  --patch-file "$gateway_patch" >/dev/null
 kubectl patch deployment -n loom loom-llm-gateway --type=merge \
   --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/model-provider-secret-sha256\":\"$provider_key_sha256\"}}}}}" \
   >/dev/null
 kubectl rollout status -n loom deployment/loom-llm-gateway --timeout=180s
 
 kubectl patch deployment -n loom loom-control-plane --type=strategic \
-  --patch-file "$repo_root/deploy/k8s/nebius-control-plane-development-patch.yaml" >/dev/null
+  --patch-file "$control_plane_patch" >/dev/null
 kubectl patch deployment -n loom loom-control-plane --type=merge \
   --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/image-admission-keyring-sha256\":\"$image_admission_keyring_sha256\"}}}}}" \
   >/dev/null
@@ -469,14 +445,14 @@ print(
 ' "$capacity_policy_target" "$capacity_policy_request" "$admission_policies_request"
 
 kubectl patch deployment -n loom loom-service --type=strategic \
-  --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null
+  --patch-file "$service_patch" >/dev/null
 kubectl patch deployment -n loom loom-service --type=merge \
   --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/service-execution-runtime-profile-sha256\":\"$runtime_profile_sha256\"}}}}}" \
   >/dev/null
 kubectl rollout status -n loom deployment/loom-service --timeout=180s
 
-render_execution_actuator_manifest | kubectl apply --dry-run=server -f - >/dev/null
-render_capacity_collector_manifest | kubectl apply --dry-run=server -f - >/dev/null
+kubectl apply --dry-run=server -f "$execution_actuator_manifest" >/dev/null
+kubectl apply --dry-run=server -f "$capacity_collector_manifest" >/dev/null
 
 kubectl create secret generic loom-execution-capacity-collector-nebius \
   -n loom-nebius-development \
@@ -517,8 +493,8 @@ print(token, end="")
 fi
 
 kubectl apply -f "$repo_root/deploy/k8s/network-policies.yaml" >/dev/null
-render_execution_actuator_manifest | kubectl apply -f - >/dev/null
-render_capacity_collector_manifest | kubectl apply -f - >/dev/null
+kubectl apply -f "$execution_actuator_manifest" >/dev/null
+kubectl apply -f "$capacity_collector_manifest" >/dev/null
 kubectl rollout status -n loom-nebius-development deployment/loom-execution-actuator --timeout=180s
 
 deadline=$((SECONDS + 180))

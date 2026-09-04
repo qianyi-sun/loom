@@ -9,6 +9,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NEBIUS_ROOT = REPO_ROOT / "deploy" / "terraform" / "nebius"
 TOPOLOGY_PATH = REPO_ROOT / "config" / "service-execution-topology.json"
+PHYSICAL_BINDING_PATH = REPO_ROOT / "config" / "nebius-runtime-physical-binding.json"
 CAPACITY_POLICY_PATH = REPO_ROOT / "deploy" / "k8s" / "nebius-development-capacity-policy.json"
 
 
@@ -85,6 +86,37 @@ def check_nebius_iac(
         target.get("cluster_scope_id") == cluster_scope_id,
         f"{path}: cluster_scope_id must match topology",
     )
+    physical_binding_path = repo_root / "config" / PHYSICAL_BINDING_PATH.name
+    physical_binding = _load_json(physical_binding_path)
+    _require(
+        physical_binding.get("schema_version") == "loom.nebius-runtime-physical-binding.v1",
+        f"{physical_binding_path}: unsupported physical binding schema",
+    )
+    _require(
+        physical_binding.get("cluster_scope_id") == cluster_scope_id,
+        f"{physical_binding_path}: cluster_scope_id must match topology",
+    )
+    _require(
+        physical_binding.get("region") == target.get("region"),
+        f"{physical_binding_path}: region must match Terraform",
+    )
+    for name, prefix in (
+        ("project_id", "project-"),
+        ("quota_parent_id", "tenant-"),
+        ("execution_node_group_id", "mk8snodegroup-"),
+    ):
+        value = str(physical_binding.get(name, ""))
+        _require(
+            value.startswith(prefix) and re.fullmatch(r"[a-z][a-z0-9-]{2,159}", value) is not None,
+            f"{physical_binding_path}: {name} must be a concrete Nebius resource id",
+        )
+    collector_path = repo_root / "deploy" / "k8s" / "nebius-capacity-collector.yaml"
+    collector_text = collector_path.read_text(encoding="utf-8")
+    for name in ("project_id", "quota_parent_id", "execution_node_group_id", "region"):
+        _require(
+            str(physical_binding[name]) in collector_text,
+            f"{collector_path}: source runtime binding must contain {name}",
+        )
     regions = {str(item.get("region", "")) for item in topology_targets.values()}
     failure_domains = {str(item.get("failure_domain", "")) for item in topology_targets.values()}
     _require(
@@ -212,12 +244,10 @@ def check_nebius_iac(
                 "scope_key": "nebius-cpu",
                 "max_concurrent": 56,
                 "enabled": True,
-                "reason": (
-                    "Current-inventory Nebius CPU pool permits 56 concurrent 2-vCPU tasks."
-                ),
+                "reason": ("Current-inventory Nebius CPU pool permits 56 concurrent 2-vCPU tasks."),
             },
         ],
-        f"{capacity_path}: admission policies must permit exactly 80 Nebius leases",
+        f"{capacity_path}: admission policies must permit exactly 56 Nebius leases",
     )
     policy = capacity.get("policy")
     if not isinstance(policy, dict):
@@ -266,12 +296,9 @@ def check_nebius_iac(
     _require(target_preset_match is not None, f"{capacity_path}: target preset must be explicit")
     assert target_preset_match is not None
     target_node_cpu_millis = int(target_preset_match.group("cpu")) * 1_000
-    target_pool_vcpu_millis = (
-        int(capacity["target_execution_max_nodes"]) * target_node_cpu_millis
-    )
+    target_pool_vcpu_millis = int(capacity["target_execution_max_nodes"]) * target_node_cpu_millis
     _require(
-        int(capacity["provider_required_quota_vcpu_millis"]) - target_pool_vcpu_millis
-        >= 32_000,
+        int(capacity["provider_required_quota_vcpu_millis"]) - target_pool_vcpu_millis >= 32_000,
         f"{capacity_path}: requested provider quota must preserve target infrastructure headroom",
     )
     _require(
