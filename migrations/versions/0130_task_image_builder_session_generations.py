@@ -1,7 +1,7 @@
 """Persist immutable task-image build-session generations.
 
-Revision ID: 0129
-Revises: 0128
+Revision ID: 0130
+Revises: 0129
 Create Date: 2026-09-03
 """
 
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0129"
-down_revision: str | None = "0128"
+revision: str = "0130"
+down_revision: str | None = "0129"
 branch_labels: str | None = None
 depends_on: str | None = None
 

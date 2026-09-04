@@ -201,7 +201,7 @@ def _insert_exchanged_projection(
 
 
 @pytest.mark.parametrize("authority_version", [1, 2])
-def test_0129_backfills_one_exact_immutable_session_generation(
+def test_0130_backfills_one_exact_immutable_session_generation(
     isolated_migration_postgres_url: str,
     authority_version: int,
 ) -> None:
@@ -215,7 +215,7 @@ def test_0129_backfills_one_exact_immutable_session_generation(
                 authority_version=authority_version,
             )
 
-        command.upgrade(config, "0129")
+        command.upgrade(config, "0130")
         inspector = inspect(engine)
         assert schema.TaskImageBuildSessionGeneration.__tablename__ in set(
             inspector.get_table_names()
@@ -324,7 +324,7 @@ def test_0129_backfills_one_exact_immutable_session_generation(
         "attestation_sha256",
     ],
 )
-def test_0129_aborts_incomplete_legacy_session_before_backfill(
+def test_0130_aborts_incomplete_legacy_session_before_backfill(
     isolated_migration_postgres_url: str,
     missing_column: str,
 ) -> None:
@@ -361,7 +361,7 @@ def test_0129_aborts_incomplete_legacy_session_before_backfill(
             )
 
         with pytest.raises(DBAPIError, match="contradictory legacy task-image session"):
-            command.upgrade(config, "0129")
+            command.upgrade(config, "0130")
     finally:
         engine.dispose()
 
@@ -375,7 +375,7 @@ def test_0129_aborts_incomplete_legacy_session_before_backfill(
         ("expires_at", _timestamp(NOW + timedelta(seconds=37))),
     ],
 )
-def test_0129_aborts_instead_of_inventing_a_contradictory_legacy_session(
+def test_0130_aborts_instead_of_inventing_a_contradictory_legacy_session(
     isolated_migration_postgres_url: str,
     json_path: str,
     changed_value: str,
@@ -401,12 +401,12 @@ def test_0129_aborts_instead_of_inventing_a_contradictory_legacy_session(
             )
 
         with pytest.raises(DBAPIError, match="contradictory legacy task-image session"):
-            command.upgrade(config, "0129")
+            command.upgrade(config, "0130")
     finally:
         engine.dispose()
 
 
-def test_0129_adds_legacy_compatible_session_attempt_and_operation_authority(
+def test_0130_adds_legacy_compatible_session_attempt_and_operation_authority(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _config(isolated_migration_postgres_url)
@@ -451,7 +451,7 @@ def test_0129_adds_legacy_compatible_session_attempt_and_operation_authority(
                 },
             )
 
-        command.upgrade(config, "0129")
+        command.upgrade(config, "0130")
 
         with engine.begin() as connection:
             connection.execute(
