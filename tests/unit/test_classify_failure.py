@@ -205,6 +205,19 @@ def test_textual_expired_step_jwt_401_is_distinct_and_redacted() -> None:
     assert "secret-token" not in msg
 
 
+def test_textual_signed_deadline_code_is_agent_timeout() -> None:
+    result = classify_failure_message(
+        "litellm.APIError: Error code: 504 - "
+        "{'detail': {'code': 'agent_timeout', "
+        "'reason': 'attempt_deadline_reached'}}"
+    )
+
+    assert result == (
+        FailureReason.AGENT_TIMEOUT,
+        "Agent attempt reached its signed deadline.",
+    )
+
+
 def test_legacy_ambiguous_auth_text_does_not_infer_scope_cause() -> None:
     assert (
         classify_failure_message(
@@ -267,6 +280,18 @@ def test_http_401_expired_step_jwt_is_distinct_and_redacted():
         "Loom gateway rejected an invalid or expired step credential (HTTP 401)."
     )
     assert "supersecret" not in msg
+
+
+def test_http_signed_deadline_code_is_agent_timeout():
+    reason, msg = classify_failure(
+        _http_status_error(
+            504,
+            '{"detail":{"code":"agent_timeout",'
+            '"reason":"attempt_deadline_reached"}}',
+        ),
+    )
+    assert reason == FailureReason.AGENT_TIMEOUT
+    assert msg == "Agent attempt reached its signed deadline."
 
 
 def test_http_429_is_provider_error():

@@ -133,12 +133,17 @@ _STRUCTURED_INVALID_BEARER_RE = re.compile(
     r"""["']code["']\s*:\s*["']invalid_or_expired_bearer["']""",
     re.IGNORECASE,
 )
+_STRUCTURED_AGENT_TIMEOUT_RE = re.compile(
+    r"""["']code["']\s*:\s*["']agent_timeout["']""",
+    re.IGNORECASE,
+)
 _CREDENTIAL_SCOPE_MESSAGE = (
     "Loom gateway rejected a step credential without llm:call scope (HTTP 403)."
 )
 _STEP_JWT_INVALID_MESSAGE = (
     "Loom gateway rejected an invalid or expired step credential (HTTP 401)."
 )
+_AGENT_DEADLINE_MESSAGE = "Agent attempt reached its signed deadline."
 
 # Terminus2 / Harbor tmux lifecycle (#1068): mid-run server loss vs setup duplicate.
 _TMUX_NO_SERVER_RE = re.compile(
@@ -215,6 +220,8 @@ def classify_failure_message(message: str) -> tuple[FailureReason, str | None] |
     # Some agent adapters flatten an HTTP response into exception text. Only
     # consume Loom's stable protocol codes here; never infer an auth cause from
     # a free-form detail string.
+    if _STRUCTURED_AGENT_TIMEOUT_RE.search(message):
+        return FailureReason.AGENT_TIMEOUT, _AGENT_DEADLINE_MESSAGE
     if _STRUCTURED_CREDENTIAL_SCOPE_RE.search(message):
         return FailureReason.STEP_CREDENTIAL_SCOPE_INVALID, _CREDENTIAL_SCOPE_MESSAGE
     if _STRUCTURED_INVALID_BEARER_RE.search(message):
@@ -267,6 +274,8 @@ def _classify_http_status_error(exc: BaseException) -> tuple[FailureReason, str 
         payload = None
     detail = payload.get("detail") if isinstance(payload, Mapping) else None
     code = detail.get("code") if isinstance(detail, Mapping) else None
+    if code == "agent_timeout":
+        return FailureReason.AGENT_TIMEOUT, _AGENT_DEADLINE_MESSAGE
     if status == 401 and code == "invalid_or_expired_bearer":
         return (
             FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED,
