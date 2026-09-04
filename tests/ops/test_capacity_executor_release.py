@@ -24,8 +24,7 @@ def test_offline_release_wheels_and_hash_pins_neutral_checksum_dependency() -> N
     assert "COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum" in text
     assert "--no-emit-workspace" in text
     checksum_wheel_command = (
-        "--wheel-dir /release-inputs/wheelhouse \\\n"
-        "      ./packages/loom-bundle-checksum"
+        "--wheel-dir /release-inputs/wheelhouse \\\n      ./packages/loom-bundle-checksum"
     )
     assert checksum_wheel_command in text
     assert 'f"loom-bundle-checksum=={version} --hash=sha256:{digest}\\n"' in text
@@ -143,8 +142,8 @@ def test_component_authority_publishes_the_executor_installation_artifact() -> N
     assert component.dockerfile == "deploy/Dockerfile.capacity-executor"
     assert component.build_context == "."
     assert component.release_digest == "loom-capacity-executor"
-    assert component.runtime_policy == "conformance"
-    assert component.rollout_role == "none"
+    assert component.runtime_policy == "start"
+    assert component.rollout_role == "primary"
     for path in (
         "deploy/dev-fleet/loom-capacity-executor.tmpfiles",
         "scripts/ops/install_capacity_executor.py",

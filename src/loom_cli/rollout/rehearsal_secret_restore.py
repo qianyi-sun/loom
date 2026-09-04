@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
@@ -23,20 +24,27 @@ from loom_cli.cluster_backup_guard import (
     validate_backup_manifest,
 )
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.operator.protected_secret_inventory import (
+    PROTECTED_SECRET_SPECS,
+    inspect_secret_inventory,
+)
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _NAMESPACE_RE = re.compile(r"loom-rehearsal-[0-9a-f]{24}\Z")
 _DATABASE_RE = re.compile(r"loom_rehearsal_[0-9a-f]{24}\Z")
 _SECRET_NAMES = ("loom-admin-secret", "loom-secrets", "loom-staging-tls")
+_ALL_SECRET_NAMES = _SECRET_NAMES + tuple(spec.name for spec in PROTECTED_SECRET_SPECS)
+_EXECUTION_CREDENTIAL_SECRET_NAMES = frozenset(
+    {
+        "loom-capacity-execution-operator",
+        "loom-capacity-executor-gb10",
+        "loom-capacity-executor-oldlab",
+    }
+)
 _DIRECT_DATABASE_URL_KEYS = (
     "cp-db-url",
     "gw-db-url",
     "svc-db-url",
-)
-_OPTIONAL_POOL_DATABASE_URL_KEYS = (
-    "cp-db-url-pool",
-    "gw-db-url-pool",
-    "svc-db-url-pool",
 )
 _REQUIRED_DATABASE_KEYS = (
     "postgres-password",
@@ -45,6 +53,20 @@ _REQUIRED_DATABASE_KEYS = (
 )
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_SECRET_BYTES = 1024 * 1024
+_DATABASE_SCHEMES = frozenset({"postgres", "postgresql", "mysql", "mariadb"})
+_DATABASE_URL_PREFIX_RE = re.compile(
+    rb"(?i:(?:postgres(?:ql)?|mysql|mariadb)(?:\+[a-z0-9_.-]+)?://)"
+)
+_DATABASE_FIELDS_BY_SECRET = {
+    "loom-secrets": frozenset(
+        (*_REQUIRED_DATABASE_KEYS, "cp-db-url-pool", "gw-db-url-pool", "svc-db-url-pool")
+    ),
+    "loom-capacity-manager": frozenset(
+        {"database-url", "postgres-database", "postgres-password", "postgres-user"}
+    ),
+    "loom-capacity-agent": frozenset({"database-url"}),
+    "loom-protected-worker-runtime": frozenset({"database-url"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +81,9 @@ class RehearsalSecretArtifact:
     def __post_init__(self) -> None:
         if (
             not self.payload
-            or self.secret_names != _SECRET_NAMES
+            or self.secret_names[: len(_SECRET_NAMES)] != _SECRET_NAMES
+            or len(set(self.secret_names)) != len(self.secret_names)
+            or any(name not in _ALL_SECRET_NAMES for name in self.secret_names)
             or _SHA256_RE.fullmatch(self.source_component_sha256) is None
             or _SHA256_RE.fullmatch(self.artifact_sha256) is None
             or hashlib.sha256(self.payload).hexdigest() != self.artifact_sha256
@@ -76,7 +100,7 @@ def build_rehearsal_secret_artifact(
     plan_digest: str,
     service_uid: int | None = None,
 ) -> RehearsalSecretArtifact:
-    """Revalidate and clone only the three allowlisted checkpoint Secrets."""
+    """Revalidate and clone the exact allowlisted checkpoint Secret inventory."""
     uid = os.geteuid() if service_uid is None else service_uid
     if (
         uid < 0
@@ -124,6 +148,7 @@ def build_rehearsal_secret_artifact(
         raise ValueError("rehearsal checkpoint manifest is invalid") from exc
     secrets_path, component_sha256 = _secret_component(manifest, manifest_path=manifest_path)
     _require_private_directory(secrets_path, service_uid=uid)
+    inventory = inspect_secret_inventory(secrets_path, expected_owner_uid=uid)
     documents = [
         _read_secret(
             secrets_path / f"{name}.yaml",
@@ -135,10 +160,26 @@ def build_rehearsal_secret_artifact(
         )
         for name in _SECRET_NAMES
     ]
+    protected_names: list[str] = []
+    for spec in PROTECTED_SECRET_SPECS:
+        payload = inventory.exported_objects.get(spec.filename)
+        if payload is None:
+            continue
+        protected_names.append(spec.name)
+        documents.append(
+            _read_secret(
+                secrets_path / spec.filename,
+                name=spec.name,
+                namespace=namespace,
+                database=database,
+                plan_digest=plan_digest,
+                service_uid=uid,
+            )
+        )
     payload = yaml.safe_dump_all(documents, sort_keys=True).encode()
     return RehearsalSecretArtifact(
         payload=payload,
-        secret_names=_SECRET_NAMES,
+        secret_names=_SECRET_NAMES + tuple(protected_names),
         source_component_sha256=component_sha256,
         artifact_sha256=hashlib.sha256(payload).hexdigest(),
     )
@@ -209,6 +250,7 @@ def _read_secret(
         )
         or not isinstance(secret_type, str)
         or not secret_type
+        or (name in _EXECUTION_CREDENTIAL_SECRET_NAMES and source.get("immutable") is not True)
     ):
         raise ValueError("rehearsal checkpoint Secret identity is invalid")
     try:
@@ -217,6 +259,7 @@ def _read_secret(
     except (binascii.Error, ValueError) as exc:
         raise ValueError("rehearsal checkpoint Secret data encoding is invalid") from exc
     cloned_data = dict(data)
+    _validate_database_fields(name, cloned_data)
     if name == "loom-admin-secret":
         source_toml = cloned_data.get("secrets.toml")
         if source_toml is None:
@@ -234,20 +277,50 @@ def _read_secret(
         except AdminSecretConfigError as exc:
             raise ValueError("rehearsal admin Secret token contract is invalid") from exc
         cloned_data["admin-token"] = base64.b64encode(token.encode()).decode()
+    isolated_url = f"postgresql+psycopg://loom_rehearsal@loom-postgres:5432/{database}"
+    database_url_keys = {
+        key
+        for key in cloned_data
+        if key == "database-url" or key.endswith("-db-url") or key.endswith("-db-url-pool")
+    }
+    if database_url_keys:
+        cloned_data.update(
+            {key: base64.b64encode(isolated_url.encode()).decode() for key in database_url_keys}
+        )
     if name == "loom-secrets":
         if any(key not in cloned_data for key in _REQUIRED_DATABASE_KEYS):
             raise ValueError("rehearsal checkpoint database Secret authority is incomplete")
-        direct_url = f"postgresql+psycopg://loom_rehearsal@loom-postgres:5432/{database}"
         replacements = {
             "postgres-password": "rehearsal-trust-only",
             "postgres-user": "loom_rehearsal",
-            **{key: direct_url for key in _DIRECT_DATABASE_URL_KEYS},
-            **{key: direct_url for key in _OPTIONAL_POOL_DATABASE_URL_KEYS if key in cloned_data},
         }
         cloned_data.update(
             {key: base64.b64encode(value.encode()).decode() for key, value in replacements.items()}
         )
-    return {
+    if name == "loom-capacity-manager":
+        required = {"database-url", "postgres-database", "postgres-password", "postgres-user"}
+        if not required <= cloned_data.keys():
+            raise ValueError("rehearsal manager database Secret authority is incomplete")
+        cloned_data.update(
+            {
+                "postgres-database": base64.b64encode(database.encode()).decode(),
+                "postgres-password": base64.b64encode(b"rehearsal-trust-only").decode(),
+                "postgres-user": base64.b64encode(b"loom_rehearsal").decode(),
+            }
+        )
+    if name in {"loom-capacity-agent", "loom-protected-worker-runtime"} and not database_url_keys:
+        raise ValueError("rehearsal protected database Secret authority is incomplete")
+    if name in _EXECUTION_CREDENTIAL_SECRET_NAMES:
+        cloned_data = {
+            key: base64.b64encode(
+                (f"rehearsal-inert-execution-credential-v1:{name}:{key}:{plan_digest}").encode(
+                    "ascii"
+                )
+            ).decode("ascii")
+            for key in cloned_data
+        }
+    _validate_isolated_database_urls(cloned_data, database=database)
+    result: dict[str, object] = {
         "apiVersion": "v1",
         "data": cloned_data,
         "kind": "Secret",
@@ -258,6 +331,9 @@ def _read_secret(
         },
         "type": secret_type,
     }
+    if name in _EXECUTION_CREDENTIAL_SECRET_NAMES:
+        result["immutable"] = True
+    return result
 
 
 def _require_private_directory(path: Path, *, service_uid: int) -> None:
@@ -272,6 +348,35 @@ def _require_private_directory(path: Path, *, service_uid: int) -> None:
         or metadata.st_nlink < 2
     ):
         raise ValueError("rehearsal checkpoint Secret directory authority is invalid")
+
+
+def _decoded_database_url(encoded: str) -> str | None:
+    raw = base64.b64decode(encoded, validate=True)
+    if _DATABASE_URL_PREFIX_RE.search(raw) is None:
+        return None
+    try:
+        value = raw.decode("utf-8", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("rehearsal Secret database value is invalid") from exc
+    parsed = urlsplit(value)
+    if parsed.scheme.lower().partition("+")[0] not in _DATABASE_SCHEMES or parsed.hostname is None:
+        raise ValueError("rehearsal Secret database value is invalid")
+    return value
+
+
+def _validate_database_fields(name: str, values: Mapping[str, str]) -> None:
+    allowed = _DATABASE_FIELDS_BY_SECRET.get(name, frozenset())
+    for key, encoded in values.items():
+        if _decoded_database_url(encoded) is not None and key not in allowed:
+            raise ValueError("rehearsal Secret contains an unknown database field")
+
+
+def _validate_isolated_database_urls(data: Mapping[str, str], *, database: str) -> None:
+    expected = f"postgresql+psycopg://loom_rehearsal@loom-postgres:5432/{database}"
+    for encoded in data.values():
+        value = _decoded_database_url(encoded)
+        if value is not None and value != expected:
+            raise ValueError("rehearsal Secret contains a non-rehearsal database endpoint")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> Mapping[str, object]:

@@ -7,6 +7,13 @@ from pathlib import Path
 from .final_gate_plan import FinalGatePlanStore
 from .model import validate_safe_identifier
 from .protected_apply_journal import ProtectedApplyJournal
+from .protected_capacity_manager_configuration_compensation import (
+    CapacityManagerConfigurationCompensationStore,
+)
+from .protected_execution_preparation_journal import (
+    ExecutionPreparationOperationJournal,
+    ExecutionPreparationRecoveryState,
+)
 
 
 def find_advanced_epoch_attempt(
@@ -58,6 +65,38 @@ def find_advanced_epoch_attempt(
             or plan.starting_mutation_epoch != starting_mutation_epoch
         ):
             raise ValueError("protected apply recovery plan binding drifted")
+        if (
+            plan.manager_configuration_epoch is not None
+            and plan.manager_configuration_digest is not None
+            and CapacityManagerConfigurationCompensationStore(
+                state_root / "protected-capacity" / "capacity-manager-configuration-compensations",
+                service_uid=service_uid,
+            ).find_record_for_plan(
+                request_id=request_id,
+                attempt_number=attempt_number,
+                plan_digest=plan.plan_digest,
+                predecessor_configuration_epoch=plan.manager_configuration_epoch,
+                predecessor_configuration_digest=plan.manager_configuration_digest,
+                backup_lease_digest=plan.backup_lease_digest,
+            )
+            is not None
+        ):
+            return None
+        if plan.schema_version == 7:
+            artifact_sha256 = plan.execution_prerequisite_artifact_sha256
+            if not isinstance(artifact_sha256, str):
+                raise ValueError("protected apply recovery execution binding is unavailable")
+            preparation_state = ExecutionPreparationOperationJournal(
+                state_root,
+                request_id=request_id,
+                attempt_number=attempt_number,
+                service_uid=service_uid,
+            ).recovery_state(
+                plan,
+                artifact_sha256=artifact_sha256,
+            )
+            if preparation_state is ExecutionPreparationRecoveryState.COMPENSATED:
+                return None
         return attempt_number
     return None
 

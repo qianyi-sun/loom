@@ -40,6 +40,22 @@ def _import_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _capacity_agent_references(tree: ast.AST) -> set[str]:
+    references = {
+        imported
+        for imported in _import_names(tree)
+        if imported == "loom_capacity_agent" or imported.startswith("loom_capacity_agent.")
+    }
+    references.update(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and (node.value == "loom_capacity_agent" or node.value.startswith("loom_capacity_agent."))
+    )
+    return references
+
+
 def test_capacity_guard_package_has_no_executable_admission_boundary() -> None:
     sources = sorted(GUARD_ROOT.rglob("*.py"))
     assert sources
@@ -101,7 +117,7 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         Path("src/loom_control_plane"),
         Path("src/loom_service"),
     )
-    expected_imports = {
+    expected_references = {
         Path("src/loom/personal_dev_capacity.py"): {
             "loom_capacity_agent.client",
         },
@@ -109,7 +125,22 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
             "loom_capacity_agent.admission",
             "loom_capacity_agent.client",
             "loom_capacity_agent.contracts",
+            "loom_capacity_agent.runtime",
+            "loom_capacity_agent.secret_init",
             "loom_capacity_agent.store",
+        },
+        Path("src/loom/staging_capacity_database_bootstrap.py"): {
+            "loom_capacity_agent.contracts",
+        },
+        Path("src/loom_cli/rollout/operator/installed_execution_authority.py"): {
+            "loom_capacity_agent.legacy_fence",
+        },
+        Path("src/loom_cli/rollout/operator/protected_staging_capacity_agent_component.py"): {
+            "loom_capacity_agent.runtime",
+            "loom_capacity_agent.secret_init",
+        },
+        Path("src/loom_cli/rollout/operator/protected_staging_capacity_database_component.py"): {
+            "loom_capacity_agent.contracts",
         },
         Path("src/loom_control_plane/protected_worker_session.py"): {
             "loom_capacity_agent.contracts",
@@ -128,17 +159,12 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         for path in root.rglob("*.py")
         if "loom_capacity_agent" in path.read_text(encoding="utf-8")
     }
-    assert set(wired_sources) == set(expected_imports)
-    actual_imports = {
-        path: {
-            imported
-            for imported in _import_names(ast.parse(source, filename=str(path)))
-            if imported == "loom_capacity_agent"
-            or imported.startswith("loom_capacity_agent.")
-        }
+    assert set(wired_sources) == set(expected_references)
+    actual_references = {
+        path: _capacity_agent_references(ast.parse(source, filename=str(path)))
         for path, source in wired_sources.items()
     }
-    assert actual_imports == expected_imports
+    assert actual_references == expected_references
 
 
 def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None:

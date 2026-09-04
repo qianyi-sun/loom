@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -17,6 +18,7 @@ from loom_cli.rollout.operator.checkpoint_coordinator import (
     CheckpointCoordinatorError,
     DetachedCheckpointCoordinator,
 )
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.checkpoint_lease import (
     CriticalCheckpointEvidence,
     RestoreVerificationEvidence,
@@ -97,6 +99,19 @@ def _job(bundle_name: str) -> PreflightBackupJobEnvelope:
 
 
 def _checkpoint(path: Path) -> CriticalCheckpointEvidence:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0067",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
     return CriticalCheckpointEvidence(
         request_id="req-checkpoint1",
         manifest_path=path,
@@ -105,6 +120,7 @@ def _checkpoint(path: Path) -> CriticalCheckpointEvidence:
             "k8s_secrets": "5" * 64,
             "object_inventory": "6" * 64,
             "postgres": "7" * 64,
+            "database_authority": authority.digest,
         },
         environment="staging",
         namespace="loom-staging",
@@ -112,6 +128,18 @@ def _checkpoint(path: Path) -> CriticalCheckpointEvidence:
         db_snapshot_identity="pgdump-sha256:" + "7" * 64,
         schema_revision="0067",
         object_inventory_root="8" * 64,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
         created_at=NOW,
     )
 
@@ -130,6 +158,20 @@ def _restore(checkpoint: CriticalCheckpointEvidence) -> RestoreVerificationEvide
         namespace=checkpoint.namespace,
         report_sha256="9" * 64,
         verified_at=NOW + timedelta(minutes=3),
+        checkpoint_schema_version=3,
+        component_sha256=checkpoint.component_sha256,
+        database_authority_digest=checkpoint.database_authority_digest,
+        public_schema_revision=checkpoint.public_schema_revision,
+        capacity_guard_schema_revision=checkpoint.capacity_guard_schema_revision,
+        manager_configuration_epoch=checkpoint.manager_configuration_epoch,
+        manager_configuration_digest=checkpoint.manager_configuration_digest,
+        manager_authority_incarnation=checkpoint.manager_authority_incarnation,
+        manager_writer_epoch=checkpoint.manager_writer_epoch,
+        manager_execution_state=checkpoint.manager_execution_state,
+        manager_execution_epoch=checkpoint.manager_execution_epoch,
+        manager_execution_manifest_sha256=checkpoint.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=checkpoint.manager_executable_new_capacity_ceiling,
+        manager_increase_freeze=checkpoint.manager_increase_freeze,
     )
 
 

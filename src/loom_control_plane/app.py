@@ -128,9 +128,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         protected_worker_session_store: ProtectedWorkerSessionStore | None = None
         if settings.protected_worker_runtime_db_url_file is not None:
             protected_worker_runtime_engine = create_async_engine(
-                load_protected_worker_runtime_db_url(
-                    settings.protected_worker_runtime_db_url_file
-                ),
+                load_protected_worker_runtime_db_url(settings.protected_worker_runtime_db_url_file),
                 isolation_level="SERIALIZABLE",
                 pool_pre_ping=True,
                 pool_size=5,
@@ -143,6 +141,12 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                     expire_on_commit=False,
                 )
             )
+            try:
+                await protected_worker_session_store.assert_ready()
+            except BaseException:
+                await protected_worker_runtime_engine.dispose()
+                await engine.dispose()
+                raise
 
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,

@@ -44,10 +44,11 @@ def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
 
 def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     script = _script("capacity_guard_migrations")
-    assert tuple(script.get_heads()) == ("guard_0026",)
+    assert tuple(script.get_heads()) == ("guard_0027",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0026")
+        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0027")
     ) == (
+        "guard_0027",
         "guard_0026",
         "guard_0025",
         "guard_0024",
@@ -73,6 +74,7 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     protected_trial_terminal_closure = script.get_revision("guard_0024")
     protected_trial_retry = script.get_revision("guard_0025")
     protected_trial_requeue = script.get_revision("guard_0026")
+    runtime_self_validation = script.get_revision("guard_0027")
     assert handshake is not None
     assert admission is not None
     assert exact_assignment is not None
@@ -82,6 +84,7 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     assert protected_trial_terminal_closure is not None
     assert protected_trial_retry is not None
     assert protected_trial_requeue is not None
+    assert runtime_self_validation is not None
     assert handshake.path.endswith("guard_0012_protected_bootstrap_handshake.py")
     assert admission.path.endswith("guard_0013_executable_admission.py")
     assert exact_assignment.path.endswith("guard_0020_exact_claim_assignment.py")
@@ -92,6 +95,5 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
         "guard_0024_protected_trial_terminal_closure.py"
     )
     assert protected_trial_retry.path.endswith("guard_0025_protected_trial_retry.py")
-    assert protected_trial_requeue.path.endswith(
-        "guard_0026_protected_trial_requeue.py"
-    )
+    assert protected_trial_requeue.path.endswith("guard_0026_protected_trial_requeue.py")
+    assert runtime_self_validation.path.endswith("guard_0027_runtime_self_validation.py")

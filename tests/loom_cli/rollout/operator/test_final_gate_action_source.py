@@ -27,6 +27,9 @@ from loom_cli.rollout.operator.protected_apply_journal import (
     ProtectedApplyComponent,
     ProtectedApplyJournal,
 )
+from loom_cli.rollout.operator.protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisiteStore,
+)
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -42,6 +45,9 @@ from loom_cli.rollout.preflight_contract import (
     StageCapability,
 )
 from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
+from tests.loom_cli.rollout.operator.protected_execution_prerequisite_fixtures import (
+    execution_prerequisite_artifact,
+)
 from tests.loom_cli.rollout.operator.test_final_gate_plan import (
     _attestation as binding_attestation,
 )
@@ -213,7 +219,12 @@ def _predecessor_execution():
     )[0]
 
 
-def _authority(tmp_path: Path, *, tamper: bool = False):
+def _authority(
+    tmp_path: Path,
+    *,
+    tamper: bool = False,
+    execution_prerequisites: bool = False,
+):
     state = tmp_path / "state"
     artifact_store = PreflightArtifactStore(state)
     images = _images()
@@ -237,7 +248,29 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
     systemd_execution = _systemd_execution()
     predecessor_execution = _predecessor_execution()
     baseline_executions = _baseline_executions()
-    base = binding_attestation()
+    prerequisite_store = ProtectedExecutionPrerequisiteStore(
+        state,
+        service_uid=os.geteuid(),
+    )
+    prerequisite_publication = None
+    prerequisite = None
+    if execution_prerequisites:
+        lease = _lease()
+        prerequisite = replace(
+            execution_prerequisite_artifact(
+                core_bundle_sha256=publication.bundle_digest,
+                backup_lease_sha256=lease.evidence_digest,
+            ),
+            source_configuration_epoch=lease.manager_configuration_epoch,
+            source_configuration_sha256=lease.manager_configuration_digest,
+        )
+        prerequisite_publication = prerequisite_store.publish(prerequisite)
+    base = binding_attestation(
+        prerequisite,
+        execution_prerequisite_path=(
+            None if prerequisite_publication is None else prerequisite_publication.path
+        ),
+    )
     attestation = PreflightAttestation.issue(
         bindings=base.bindings,
         executions=(execution, systemd_execution, predecessor_execution, *baseline_executions),
@@ -292,6 +325,7 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         post_apply_plan_factory=lambda candidate, epoch: SimpleNamespace(
             candidate=(candidate, epoch)
         ),  # type: ignore[arg-type]
+        execution_prerequisite_store=prerequisite_store,
         executable=executable,
         executable_owner_uid=os.geteuid(),
     )
@@ -312,6 +346,28 @@ def test_final_gate_action_source_uses_attested_bundle_and_fixed_helper(tmp_path
     assert plan.artifact_bundle_digest == Path(plan.artifact_descriptor_path).parent.name
     assert plan.supervisor_artifact_digest == "4" * 64
     assert calls[0][calls[0].index("--plan-sha256") + 1] == plan.plan_digest
+
+
+def test_final_gate_action_source_reads_attested_execution_prerequisite(
+    tmp_path: Path,
+) -> None:
+    source, attestation, _calls = _authority(
+        tmp_path,
+        execution_prerequisites=True,
+    )
+
+    source(_envelope(attestation), attestation, 7, _admission(attestation))
+
+    plan = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    ).read()
+    assert plan.schema_version == 7
+    assert (
+        plan.execution_prerequisite_artifact_sha256
+        == attestation.bindings.execution_prerequisite_artifact_sha256
+    )
 
 
 def test_final_gate_action_source_rejects_attested_publication_mismatch(tmp_path: Path) -> None:

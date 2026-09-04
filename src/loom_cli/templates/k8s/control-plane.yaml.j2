@@ -11,20 +11,72 @@ spec:
     metadata:
       labels: { app: loom-control-plane }
     spec:
+{% if runtime_environment == "staging" %}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: protected-worker-runtime-init
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
+          command:
+            - /bin/sh
+            - -euc
+            - >-
+              install -d -m 0700 /run/loom/protected-worker-runtime;
+              chmod 0700 /run/loom/protected-worker-runtime;
+              chmod g-s /run/loom/protected-worker-runtime;
+              exec python -m loom.personal_dev_secret_init
+              --profile staging-protected-worker-runtime
+              --source /var/run/loom/protected-worker-runtime-projected
+              --destination /run/loom/protected-worker-runtime/files
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          volumeMounts:
+            - name: protected-worker-runtime-projected
+              mountPath: /var/run/loom/protected-worker-runtime-projected
+              readOnly: true
+            - name: protected-worker-runtime
+              mountPath: /run/loom/protected-worker-runtime
+{% endif %}
       containers:
         - name: control-plane
           image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
           {{ env_macros.env_block("control-plane", schema, override_values={"slurm_worker_controller_environment": runtime_environment, "artifacts_bucket": artifacts_bucket, "trajectories_bucket": trajectories_bucket}) | indent(10) }}
             - name: LOOM_CP_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"
+{% if runtime_environment == "staging" %}
+            - name: LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE
+              value: "/run/loom/protected-worker-runtime/files/database-url"
+{% endif %}
             - name: LOOM_ENV
               value: "{{ runtime_environment }}"
             - name: LOOM_NAMESPACE
               value: "{{ namespace }}"
+{% if runtime_environment == "staging" %}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+{% endif %}
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin
               readOnly: true
+{% if runtime_environment == "staging" %}
+            - name: protected-worker-runtime
+              mountPath: /run/loom/protected-worker-runtime
+              readOnly: true
+{% endif %}
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -38,6 +90,21 @@ spec:
           secret:
             secretName: loom-admin-secret
             defaultMode: 0400
+{% if runtime_environment == "staging" %}
+        - name: protected-worker-runtime-projected
+          secret:
+            secretName: loom-protected-worker-runtime
+            defaultMode: 0440
+            items:
+              - key: ca.crt
+                path: ca.crt
+              - key: database-url
+                path: database-url
+        - name: protected-worker-runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+{% endif %}
 ---
 apiVersion: v1
 kind: Service

@@ -11,6 +11,7 @@ import pytest
 
 from loom_cli.__main__ import main
 from loom_cli.cluster_backup_guard import (
+    CRITICAL_ROLLOUT_CHECKPOINT_COMPONENTS,
     REQUIRED_BACKUP_COMPONENTS,
     ROLLOUT_CHECKPOINT_COMPONENTS,
     BackupTraversalLimits,
@@ -224,6 +225,83 @@ def test_rollout_checkpoint_manifest_replaces_minio_payload_with_inventory(tmp_p
         )
         == []
     )
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_historical_schema_writer_and_reader_preserve_extension_components(
+    tmp_path: Path,
+    schema_version: int,
+) -> None:
+    components = _write_bounded_components(tmp_path / "components")
+    if schema_version == 2:
+        components.pop("minio")
+        inventory = tmp_path / "components" / "object-inventory.json"
+        inventory.write_bytes(b"inventory")
+        components["object_inventory"] = inventory
+    extension = tmp_path / "components" / "historical-extension.json"
+    extension.write_bytes(b"extension")
+    components["historical_extension"] = extension
+    manifest_path = tmp_path / "backup-manifest.json"
+
+    manifest = write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+        schema_version=schema_version,
+    )
+
+    assert "historical_extension" in manifest["components"]
+    assert (
+        validate_backup_manifest(
+            manifest_path,
+            environment="staging",
+            namespace="loom-staging",
+        )
+        == []
+    )
+
+
+def test_schema_three_checkpoint_requires_exact_database_authority_component(
+    tmp_path: Path,
+) -> None:
+    components = _write_bounded_components(tmp_path / "components")
+    inventory = tmp_path / "components" / "object-inventory.json"
+    inventory.write_bytes(b"inventory")
+    authority = tmp_path / "components" / "database-authority.json"
+    authority.write_bytes(b"authority")
+    components.pop("minio")
+    components["object_inventory"] = inventory
+    components["database_authority"] = authority
+    manifest_path = tmp_path / "backup-manifest.json"
+
+    manifest = write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components=components,
+        schema_version=3,
+    )
+
+    assert set(manifest["components"]) == set(CRITICAL_ROLLOUT_CHECKPOINT_COMPONENTS)
+    assert (
+        validate_backup_manifest(
+            manifest_path,
+            environment="staging",
+            namespace="loom-staging",
+        )
+        == []
+    )
+
+    components["undeclared"] = authority
+    with pytest.raises(ValueError, match="exactly match schema"):
+        write_backup_manifest(
+            environment="staging",
+            namespace="loom-staging",
+            output_path=tmp_path / "extra-manifest.json",
+            components=components,
+            schema_version=3,
+        )
 
 
 def test_manifest_schema_required_components_cannot_be_substituted(tmp_path):

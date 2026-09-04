@@ -305,9 +305,7 @@ def test_gateway_local_providers_render_env() -> None:
     """A configured local provider renders LOOM_GW_LOCAL_<NAME>_* env: a
     literal base URL + an optional secret-backed API key, so agents can
     route `local/<name>/<model>` through an operator relay (#1141)."""
-    cfg = ClusterConfig(
-        gateway_local_providers=("yibu|https://yibuapi.com/v1|qa-relay-api-key",)
-    )
+    cfg = ClusterConfig(gateway_local_providers=("yibu|https://yibuapi.com/v1|qa-relay-api-key",))
     env = _gateway_env(cfg)
     assert env["LOOM_GW_LOCAL_YIBU_BASE_URL"]["value"] == "https://yibuapi.com/v1"
     key_ref = env["LOOM_GW_LOCAL_YIBU_API_KEY"]["valueFrom"]["secretKeyRef"]
@@ -322,9 +320,7 @@ def test_gateway_local_providers_absent_by_default() -> None:
 
 
 def test_gateway_local_providers_name_is_uppercased_and_dash_normalized() -> None:
-    cfg = ClusterConfig(
-        gateway_local_providers=("qa-relay|https://relay.example/v1|relay-key",)
-    )
+    cfg = ClusterConfig(gateway_local_providers=("qa-relay|https://relay.example/v1|relay-key",))
     env = _gateway_env(cfg)
     assert "LOOM_GW_LOCAL_QA_RELAY_BASE_URL" in env
 
@@ -1135,6 +1131,96 @@ def test_render_profiles_set_backend_runtime_environment(
 
 
 @pytest.mark.parametrize(
+    "filename",
+    ["staging.cluster.toml", "staging.multinode.cluster.toml"],
+)
+def test_staging_control_plane_projects_protected_worker_runtime_credential(
+    filename: str,
+) -> None:
+    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    docs = _load_docs(render_manifests(cfg))
+    deployment = next(
+        document
+        for document in docs
+        if document.get("kind") == "Deployment"
+        and document["metadata"]["name"] == "loom-control-plane"
+    )
+    pod = deployment["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    protected_url = next(
+        item
+        for item in container["env"]
+        if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
+    )
+
+    assert protected_url == {
+        "name": "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
+        "value": "/run/loom/protected-worker-runtime/files/database-url",
+    }
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "runAsGroup": 65532,
+        "fsGroup": 65532,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+    assert container["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    assert {
+        "name": "protected-worker-runtime",
+        "mountPath": "/run/loom/protected-worker-runtime",
+        "readOnly": True,
+    } in container["volumeMounts"]
+
+    init = pod["initContainers"]
+    assert len(init) == 1
+    assert init[0]["name"] == "protected-worker-runtime-init"
+    assert init[0]["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+    }
+    assert init[0]["command"][:2] == ["/bin/sh", "-euc"]
+    assert (
+        "loom.personal_dev_secret_init --profile staging-protected-worker-runtime"
+        in init[0]["command"][2]
+    )
+    assert init[0]["volumeMounts"] == [
+        {
+            "name": "protected-worker-runtime-projected",
+            "mountPath": "/var/run/loom/protected-worker-runtime-projected",
+            "readOnly": True,
+        },
+        {
+            "name": "protected-worker-runtime",
+            "mountPath": "/run/loom/protected-worker-runtime",
+        },
+    ]
+
+    volumes = {volume["name"]: volume for volume in pod["volumes"]}
+    assert volumes["protected-worker-runtime-projected"] == {
+        "name": "protected-worker-runtime-projected",
+        "secret": {
+            "secretName": "loom-protected-worker-runtime",
+            "defaultMode": 0o440,
+            "items": [
+                {"key": "ca.crt", "path": "ca.crt"},
+                {"key": "database-url", "path": "database-url"},
+            ],
+        },
+    }
+    assert volumes["protected-worker-runtime"] == {
+        "name": "protected-worker-runtime",
+        "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"},
+    }
+
+
+@pytest.mark.parametrize(
     ("filename", "host_root"),
     [
         ("production.cluster.toml", "/data/loom-prod"),
@@ -1177,9 +1263,7 @@ def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     assert "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519" in ssh_config
     assert "IdentitiesOnly yes" in ssh_config
     expected_private_hosts = {
-        f"trt-gb10-{index}": (
-            "192.168.20.77" if index == 7 else f"192.168.20.{index + 10}"
-        )
+        f"trt-gb10-{index}": ("192.168.20.77" if index == 7 else f"192.168.20.{index + 10}")
         for index in range(2, 16)
     }
     assert "Host trt-gb10-1\n  HostName 207.35.188.227\n  Port 2221\n" in ssh_config
@@ -1366,9 +1450,7 @@ def test_render_can_override_service_object_buckets() -> None:
     }
     for name, (traj_env, art_env) in expected.items():
         workload = next(
-            d
-            for d in docs
-            if d["kind"] == "Deployment" and d["metadata"]["name"] == name
+            d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == name
         )
         env = workload["spec"]["template"]["spec"]["containers"][0]["env"]
         by_name = {entry["name"]: entry["value"] for entry in env if "value" in entry}
@@ -1378,13 +1460,10 @@ def test_render_can_override_service_object_buckets() -> None:
     worker = next(
         d
         for d in docs
-        if d["metadata"]["name"] == "loom-worker"
-        and d["kind"] in {"Deployment", "StatefulSet"}
+        if d["metadata"]["name"] == "loom-worker" and d["kind"] in {"Deployment", "StatefulSet"}
     )
     worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
-    worker_by_name = {
-        entry["name"]: entry["value"] for entry in worker_env if "value" in entry
-    }
+    worker_by_name = {entry["name"]: entry["value"] for entry in worker_env if "value" in entry}
     assert worker_by_name["LOOM_WORKER_TRAJECTORIES_BUCKET"] == "loom-prod-trajectories"
     assert worker_by_name["LOOM_WORKER_ARTIFACTS_BUCKET"] == "loom-prod-artifacts"
 
@@ -1742,8 +1821,7 @@ def test_render_mounts_pipeline_stage1_public_key_only_when_enabled() -> None:
         for item in disabled_container["env"]
     )
     assert not any(
-        item["name"] == "pipeline-stage1-smoke-authority"
-        for item in disabled_pod["volumes"]
+        item["name"] == "pipeline-stage1-smoke-authority" for item in disabled_pod["volumes"]
     )
 
     authority_cls = type(ClusterConfig().pipeline_stage1_smoke_authority)
@@ -1963,8 +2041,7 @@ def test_container_registry_load_from_toml(tmp_path: Path) -> None:
 
     cfg_path = tmp_path / "cluster.toml"
     cfg_path.write_text(
-        'container_registry = "192.168.50.13:5000"\n'
-        'container_registry_push = "localhost:5000"\n'
+        'container_registry = "192.168.50.13:5000"\ncontainer_registry_push = "localhost:5000"\n'
     )
     cfg = load_cluster_config(cfg_path)
     assert cfg.container_registry == "192.168.50.13:5000"

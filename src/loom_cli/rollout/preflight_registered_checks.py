@@ -115,6 +115,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckSpec,
     EvidenceClass,
     EvidenceField,
+    EvidenceValue,
     MutationClass,
     RegisteredCheck,
     SecretRedactionPolicy,
@@ -3190,6 +3191,137 @@ def _empty_baseline_probe() -> CheckProbe:
     )
 
 
+ExecutionPrerequisitePublisher = Callable[
+    [BackupLease],
+    Mapping[str, EvidenceValue],
+]
+
+
+def build_execution_prerequisite_check(
+    publish: ExecutionPrerequisitePublisher,
+    *,
+    lease: BackupLease | None,
+    candidate_sha: str,
+    candidate_tree: str,
+    mutation_epoch: int,
+) -> RegisteredCheck:
+    """Build one stable Tier-3 check that is unavailable before lease publication."""
+
+    expected_bindings: dict[str, EvidenceValue] = {
+        "candidate.sha": candidate_sha,
+        "candidate.tree": candidate_tree,
+        "environment": "staging",
+        "namespace": "loom-staging",
+        "staging.mutation-epoch": mutation_epoch,
+    }
+    if (
+        not callable(publish)
+        or len(candidate_sha) != 40
+        or any(character not in "0123456789abcdef" for character in candidate_sha)
+        or len(candidate_tree) != 40
+        or any(character not in "0123456789abcdef" for character in candidate_tree)
+        or type(mutation_epoch) is not int
+        or mutation_epoch < 0
+    ):
+        raise ValueError("execution prerequisite check authority is invalid")
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if lease is None or any(
+            context.bindings.get(key) != value for key, value in expected_bindings.items()
+        ):
+            return _empty_execution_prerequisite_probe()
+        try:
+            evidence = dict(publish(lease))
+            artifact_sha256 = evidence.get("artifact-sha256")
+            artifact_path = Path(str(evidence.get("artifact-path", "")))
+            digest_fields = {
+                "artifact-sha256",
+                "core-artifact-bundle-sha256",
+                "execution-policy-sha256",
+                "executor-profile-seed-sha256",
+                "manager-route-sha256",
+                "access-metadata-sha256",
+                "coexistence-witness-sha256",
+                "legacy-writer-sha256",
+                "rollback-evidence-sha256",
+            }
+
+            def invalid_digest(value: EvidenceValue) -> bool:
+                return bool(
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(character not in "0123456789abcdef" for character in value)
+                )
+
+            if (
+                set(evidence) != {"schema-version", "artifact-path", *digest_fields}
+                or evidence["schema-version"] != 1
+                or not isinstance(artifact_sha256, str)
+                or not artifact_path.is_absolute()
+                or ".." in artifact_path.parts
+                or artifact_path.name != f"{artifact_sha256}.json"
+                or any(invalid_digest(evidence[name]) for name in digest_fields)
+            ):
+                raise ValueError("execution prerequisite publication evidence is invalid")
+        except Exception:
+            return _empty_execution_prerequisite_probe()
+        return CheckProbe(passed=True, evidence=evidence)
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="execution.prerequisites",
+            failure_code="execution.prerequisites.unavailable",
+            tier=3,
+            stage=StageCapability.ISOLATED_REHEARSAL,
+            dependencies=(
+                "artifacts.publish",
+                "external-supervisor.predecessor",
+                "rehearsal.cleanup",
+            ),
+            mutation_class=MutationClass.ISOLATED,
+            input_keys=tuple(sorted(expected_bindings)),
+            evidence_schema=(
+                EvidenceField("schema-version", "integer"),
+                EvidenceField("artifact-path", "string"),
+                EvidenceField("artifact-sha256", "sha256"),
+                EvidenceField("core-artifact-bundle-sha256", "sha256"),
+                EvidenceField("execution-policy-sha256", "sha256"),
+                EvidenceField("executor-profile-seed-sha256", "sha256"),
+                EvidenceField("manager-route-sha256", "sha256"),
+                EvidenceField("access-metadata-sha256", "sha256"),
+                EvidenceField("coexistence-witness-sha256", "sha256"),
+                EvidenceField("legacy-writer-sha256", "sha256"),
+                EvidenceField("rollback-evidence-sha256", "sha256"),
+            ),
+            timeout_seconds=120,
+            freshness_ttl_seconds=3600,
+            remediation="restore exact execution, lease, controller, credential, and writer authority",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_execution_prerequisite_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "schema-version": 0,
+            "artifact-path": "unavailable",
+            "artifact-sha256": "0" * 64,
+            "core-artifact-bundle-sha256": "0" * 64,
+            "execution-policy-sha256": "0" * 64,
+            "executor-profile-seed-sha256": "0" * 64,
+            "manager-route-sha256": "0" * 64,
+            "access-metadata-sha256": "0" * 64,
+            "coexistence-witness-sha256": "0" * 64,
+            "legacy-writer-sha256": "0" * 64,
+            "rollback-evidence-sha256": "0" * 64,
+        },
+    )
+
+
 def build_rehearsal_checks(
     actions: Mapping[str, RehearsalAction],
     *,
@@ -3358,7 +3490,11 @@ def build_final_gate_checks(
         "staging.mutation-epoch": mutation_epoch,
     }
     dependencies = {
-        "final.protected-apply": ("rehearsal.cleanup", "manifests.field-ownership"),
+        "final.protected-apply": (
+            "execution.prerequisites",
+            "rehearsal.cleanup",
+            "manifests.field-ownership",
+        ),
         "final.convergence": ("final.protected-apply",),
         "final.drift": ("final.convergence",),
         "final.capacity": ("final.drift",),
@@ -3525,6 +3661,7 @@ __all__ = [
     "build_capacity_high_water_check",
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
+    "build_execution_prerequisite_check",
     "build_external_supervisor_predecessor_check",
     "build_final_gate_checks",
     "build_gb10_candidate_source_check",

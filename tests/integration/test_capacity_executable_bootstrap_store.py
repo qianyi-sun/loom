@@ -319,9 +319,7 @@ async def test_protected_bootstrap_evidence_blocks_guard_downgrade(
     os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(
         capacity_guard_database, "observer_role"
     )
-    os.environ["LOOM_CAPACITY_GUARD_RUNTIME_ROLE"] = _value(
-        capacity_guard_database, "runtime_role"
-    )
+    os.environ["LOOM_CAPACITY_GUARD_RUNTIME_ROLE"] = _value(capacity_guard_database, "runtime_role")
     try:
         with pytest.raises(RuntimeError, match="protected bootstrap evidence exists"):
             command.downgrade(config, "guard_0011")
@@ -337,4 +335,4 @@ async def test_protected_bootstrap_evidence_blocks_guard_downgrade(
             await session.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             )
-        ).scalar_one() == "guard_0026"
+        ).scalar_one() == "guard_0027"

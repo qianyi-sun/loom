@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from loom_cli.__main__ import main
+from loom_cli.rollout import cli as rollout_cli
 from loom_cli.rollout.context import sha256_of_file
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.state import RolloutState
@@ -37,6 +38,12 @@ class _FakeSubprocess:
 
 
 class TestRolloutCLIDryRun:
+    def test_staging_preset_uses_dedicated_direct_completion_smoke_task(self) -> None:
+        staging = rollout_cli._ROLLOUT_PRESETS["staging"]
+
+        assert staging.smoke_task_id == "loom-smoke/gb10-direct-completion-hello-world"
+        assert staging.smoke_agent == "oracle"
+
     def test_refuses_short_rollout_without_environment_selector(
         self,
         capsys: pytest.CaptureFixture[str],
@@ -95,9 +102,7 @@ class TestRolloutCLIDryRun:
         assert "namespace: loom-staging" in out
         assert "environment: staging" in out
         assert "cp_url: http://127.0.0.1:18081" in out
-        assert (
-            "cluster_config_path: deploy/environments/staging.multinode.cluster.toml" in out
-        )
+        assert "cluster_config_path: deploy/environments/staging.multinode.cluster.toml" in out
         assert "backup_manifest_path: /data/loom-staging/backups/latest/backup-manifest.json" in out
         assert "rollout_root: " + str(tmp_path) in out
         assert "scope: current-gb10" in out

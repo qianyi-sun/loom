@@ -25,6 +25,16 @@ def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
     assert "do-not-use-in-prod" in gateway_key
 
 
+def test_compose_supplies_gateway_object_store_configuration() -> None:
+    compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
+    gateway = compose["services"]["llm-gateway"]
+
+    assert gateway["environment"]["LOOM_GW_MINIO_ENDPOINT"] == "http://minio:9000"
+    assert gateway["environment"]["LOOM_GW_MINIO_ACCESS_KEY"] == "loomtest"
+    assert gateway["environment"]["LOOM_GW_MINIO_SECRET_KEY"] == "loomtest"
+    assert gateway["depends_on"]["minio"] == {"condition": "service_healthy"}
+
+
 def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> None:
     compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
     services = compose["services"]

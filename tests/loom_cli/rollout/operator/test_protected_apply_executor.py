@@ -24,6 +24,11 @@ from loom_cli.rollout.operator.protected_apply_executor import (
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
+from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ProtectedApplyComponent,
+)
 from loom_cli.rollout.operator.protected_environment_state_component import (
     EnvironmentStateEvidence,
 )
@@ -34,10 +39,14 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorCompensationError,
 )
 from loom_cli.rollout.preflight_contract import CheckOperation
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _execution_plan
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
     _bound_artifact,
     _bound_multi_artifacts,
     _observation,
+)
+from tests.loom_cli.rollout.operator.test_protected_migration_component import (
+    _rebind_schema3_authority,
 )
 
 
@@ -229,6 +238,68 @@ class EnvironmentState:
         self.runtime_exact = True
 
 
+class StagingCapacityRuntime:
+    def __init__(self, calls: list[str], *, exact: bool = False) -> None:
+        self.calls = calls
+        self.exact = set(self.component_ids) if exact else set()
+
+    component_ids = (
+        "staging-capacity-credentials",
+        "staging-capacity-database",
+        "staging-protected-runtime-secret",
+        "capacity-manager-runtime",
+        "capacity-manager-configuration",
+        "staging-capacity-agent",
+    )
+
+    def components(self, plan, *, epoch_guard):
+        def component(component_id):
+            def classify(bound_plan):
+                epoch = epoch_guard(bound_plan)
+                state = (
+                    ComponentState.DRIFTED
+                    if epoch.state is not ComponentState.EXACT
+                    else ComponentState.EXACT
+                    if component_id in self.exact
+                    else ComponentState.READY
+                )
+                return ComponentObservation(
+                    state=state,
+                    evidence_digest="c" * 64,
+                    observed_epoch=plan.starting_mutation_epoch + 1,
+                )
+
+            def apply(bound_plan):
+                assert epoch_guard(bound_plan).state is ComponentState.EXACT
+                self.calls.append(f"{component_id}-apply")
+                self.exact.add(component_id)
+
+            return ProtectedApplyComponent(
+                component_id=component_id,
+                implementation_digest="a" * 64,
+                input_fingerprint="b" * 64,
+                classify=classify,
+                apply=apply,
+            )
+
+        return tuple(component(component_id) for component_id in self.component_ids)
+
+
+class ExecutionStagingCapacityRuntime(StagingCapacityRuntime):
+    component_ids = (
+        "staging-capacity-credentials",
+        "staging-capacity-database",
+        "staging-protected-runtime-secret",
+        "oldlab-controller-prerequisite",
+        "gb10-controller-prerequisite",
+        "staging-capacity-execution-credentials",
+        "capacity-manager-runtime",
+        "capacity-manager-configuration",
+        "staging-capacity-agent",
+        "capacity-execution-preparation",
+    )
+
+
 class ExternalSupervisors:
     def __init__(
         self,
@@ -388,6 +459,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         gb10_transport=GB10Fleet(),
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -402,12 +474,50 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     assert result.protected_mutation
     assert supervisors.calls[0] == "supervisor-reconcile"
     assert runner.calls.index("epoch-apply") < runner.calls.index("migration-apply")
-    assert runner.calls.index("migration-apply") < runner.calls.index("manifest-apply")
+    capacity_calls = [
+        f"{component_id}-apply" for component_id in StagingCapacityRuntime.component_ids
+    ]
+    assert runner.calls.index("migration-apply") < runner.calls.index(capacity_calls[0])
+    assert [call for call in runner.calls if call in capacity_calls] == capacity_calls
+    assert runner.calls.index(capacity_calls[-1]) < runner.calls.index("manifest-apply")
     before = tuple(runner.calls)
     assert executor("final.protected-apply", CheckOperation.APPLY, plan) == result
     assert "epoch-apply" not in runner.calls[len(before) :]
     assert "migration-apply" not in runner.calls[len(before) :]
     assert "manifest-apply" not in runner.calls[len(before) :]
+
+
+def test_schema_seven_accepts_the_complete_preparation_component_order(
+    tmp_path: Path,
+) -> None:
+    plan = _execution_plan(tmp_path)
+    runner = Runner(revision="0069", epoch=plan.starting_mutation_epoch + 1)
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
+    staging_capacity = ExecutionStagingCapacityRuntime(runner.calls)
+    executor = MigrationEpochProtectedApplyExecutor(
+        state_root=tmp_path / "state",
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
+        candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=staging_capacity,
+        external_supervisor_transport=ExternalSupervisors(),
+        external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
+    )
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+
+    components = executor._staging_capacity_components(plan, lambda _plan: epoch)
+
+    assert tuple(component.component_id for component in components) == (
+        ExecutionStagingCapacityRuntime.component_ids
+    )
 
 
 def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
@@ -427,6 +537,7 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
         gb10_transport=GB10Fleet(),
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -460,8 +571,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     state = tmp_path / "state"
     _attempt(state)
     plan = replace(
-        _plan(tmp_path),
-        schema_revision="0065",
+        _rebind_schema3_authority(_plan(tmp_path), schema_revision="0065"),
         starting_mutation_epoch=0,
     )
     runner = Runner(revision="0065", epoch=None)
@@ -474,6 +584,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         gb10_transport=GB10Fleet(),
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transport=ExternalSupervisors(),
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -489,25 +600,34 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[0].name == "00-external-supervisor-reconciliation"
     assert roots[1].name == "01-database-migration"
     assert roots[2].name == "02-mutation-epoch-claim"
-    assert roots[3].name == "03-staging-manifests"
-    assert roots[4].name == "04-external-supervisor-database-secret"
-    assert roots[5].name == "05-environment-state"
-    assert roots[6].name == "06-gb10-candidate"
-    assert roots[7].name == "07-production-defaults"
-    assert roots[8].name == "08-external-supervisor-transition-cleanup"
-    assert roots[9].name == "09-external-supervisor-credential-gb10"
-    assert roots[10].name == "10-external-supervisors-gb10"
+    assert [root.name for root in roots[3:9]] == [
+        f"{ordinal:02d}-{component_id}"
+        for ordinal, component_id in enumerate(
+            StagingCapacityRuntime.component_ids,
+            start=3,
+        )
+    ]
+    assert roots[9].name == "09-staging-manifests"
+    assert roots[10].name == "10-external-supervisor-database-secret"
+    assert roots[11].name == "11-environment-state"
+    assert roots[12].name == "12-gb10-candidate"
+    assert roots[13].name == "13-production-defaults"
+    assert roots[14].name == "14-external-supervisor-transition-cleanup"
+    assert roots[15].name == "15-external-supervisor-credential-gb10"
+    assert roots[16].name == "16-external-supervisors-gb10"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
     credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
+    runner = Runner(revision="0069", epoch=7)
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=tmp_path,
         service_uid=os.geteuid(),
-        runner=Runner(revision="0069", epoch=7),
+        runner=runner,
         gb10_transport=GB10Fleet(),
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transport=ExternalSupervisors(),
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -527,6 +647,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     supervisors = ExternalSupervisors()
     credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
     environment_state = EnvironmentState()
+    staging_capacity = StagingCapacityRuntime(runner.calls)
     applied = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
@@ -534,6 +655,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         gb10_transport=gb10,
         environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=staging_capacity,
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -549,6 +671,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         gb10_transport=gb10,
         environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=staging_capacity,
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -580,6 +703,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         gb10_transport=GB10Fleet(exact=False),
         environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transport=ExternalSupervisors(exact=False),
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -592,6 +716,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     assert set(result.blockers) == {
         "database-migration",
         "mutation-epoch-claim",
+        *StagingCapacityRuntime.component_ids,
         "staging-manifests",
         "external-supervisor-database-secret",
         "environment-state",
@@ -626,6 +751,7 @@ def test_convergence_blocks_when_only_oldlab_supervisor_is_stale(tmp_path: Path)
         gb10_transport=GB10Fleet(exact=True),
         environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=candidate_root,
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls, exact=True),
         external_supervisor_transports={
             "gx10-01c7": gb10_supervisor,
             "TRT-EAI-OLDLAB-1": ExternalSupervisors(
@@ -670,6 +796,7 @@ def test_protected_apply_journals_and_activates_both_supervisor_controllers(
         gb10_transport=GB10Fleet(),
         environment_state_transport=EnvironmentState(),
         candidate_root=candidate_root,
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transports=supervisors,
         external_supervisor_credential_transports=credentials,
         external_supervisor_credential_identities=_credential_identities(credentials),
@@ -721,6 +848,7 @@ def test_protected_apply_journals_both_narrow_credentials_before_supervisor_unit
         gb10_transport=GB10Fleet(),
         environment_state_transport=EnvironmentState(),
         candidate_root=candidate_root,
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
         external_supervisor_transports=supervisors,
         external_supervisor_credential_transports=credentials,
         external_supervisor_credential_identities={
@@ -735,15 +863,15 @@ def test_protected_apply_journals_both_narrow_credentials_before_supervisor_unit
         for path in (state / "requests/req-alpha/attempts/1/protected-apply").iterdir()
         if path.is_dir() and "-" in path.name
     )
-    assert roots[7:] == [
-        "07-production-defaults",
-        "08-external-supervisor-transition-cleanup",
-        "09-external-supervisor-credential-oldlab",
-        "10-external-supervisor-credential-gb10",
-        "11-external-supervisors-gb10",
-        "12-external-supervisors-oldlab",
+    assert roots[13:] == [
+        "13-production-defaults",
+        "14-external-supervisor-transition-cleanup",
+        "15-external-supervisor-credential-oldlab",
+        "16-external-supervisor-credential-gb10",
+        "17-external-supervisors-gb10",
+        "18-external-supervisors-oldlab",
     ]
-    assert "04-external-supervisor-database-secret" in roots
+    assert "10-external-supervisor-database-secret" in roots
     assert all(
         transport.calls.count("credential-publish") == 1 for transport in credentials.values()
     )
@@ -785,6 +913,7 @@ def test_second_credential_failure_leaves_supervisor_units_inactive_and_keeps_fi
             gb10_transport=GB10Fleet(),
             environment_state_transport=EnvironmentState(),
             candidate_root=candidate_root,
+            staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
             external_supervisor_transports=supervisors,
             external_supervisor_credential_transports=credentials,
             external_supervisor_credential_identities={
@@ -829,6 +958,7 @@ def test_credential_group_preclassification_blocks_both_publications(
             gb10_transport=GB10Fleet(),
             environment_state_transport=EnvironmentState(),
             candidate_root=candidate_root,
+            staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
             external_supervisor_transports=supervisors,
             external_supervisor_credential_transports=credentials,
             external_supervisor_credential_identities=_credential_identities(credentials),
@@ -861,6 +991,7 @@ def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
         gb10_transport=GB10Fleet(exact=True),
         environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls, exact=True),
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
@@ -878,12 +1009,14 @@ def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
 
 def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -> None:
     credentials = {"gx10-01c7": CredentialTransport("gx10-01c7", exact=True)}
+    runner = Runner(revision="0072", epoch=8)
     executor = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
-        runner=Runner(revision="0072", epoch=8),
+        runner=runner,
         gb10_transport=GB10Fleet(exact=True),
         environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls, exact=True),
         external_supervisor_transport=ExternalSupervisors(exact=True),
         external_supervisor_execution_host="gx10-01c7",
         external_supervisor_credential_transports=credentials,
