@@ -562,6 +562,7 @@ func newOrchestratorHarness(t *testing.T) *orchestratorHarness {
 	h.executor = &fakeOrchestratorExecutor{
 		h:        h,
 		buildErr: map[string]error{},
+		closeCh:  make(chan struct{}),
 		outputs: map[string]OCIOutput{
 			"task": {
 				Path:           "/tmp/secret-path/task.tar",
@@ -936,6 +937,7 @@ type fakeOrchestratorExecutor struct {
 	buildErr   map[string]error
 	closeErr   error
 	closeCalls int
+	closeInit  sync.Once
 	closeOnce  sync.Once
 	closeCh    chan struct{}
 	afterBuild func(string)
@@ -964,18 +966,23 @@ func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildCom
 func (e *fakeOrchestratorExecutor) Close(ctx context.Context) error {
 	e.h.events = append(e.h.events, "executor_close")
 	e.closeCalls++
+	closeCh := e.ensureCloseCh()
 	e.closeOnce.Do(func() {
-		if e.closeCh != nil {
-			close(e.closeCh)
-		}
+		close(closeCh)
 	})
 	return e.closeErr
 }
 
 func (e *fakeOrchestratorExecutor) closed() <-chan struct{} {
-	if e.closeCh == nil {
-		e.closeCh = make(chan struct{})
-	}
+	return e.ensureCloseCh()
+}
+
+func (e *fakeOrchestratorExecutor) ensureCloseCh() chan struct{} {
+	e.closeInit.Do(func() {
+		if e.closeCh == nil {
+			e.closeCh = make(chan struct{})
+		}
+	})
 	return e.closeCh
 }
 

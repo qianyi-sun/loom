@@ -321,11 +321,12 @@ func (e *Executor) verifyDaemonCgroup(process *Process) error {
 
 func (e *Executor) stopDaemon(ctx context.Context) error {
 	var errs []error
-	if e.daemon != nil {
-		if err := executorSignalProcess(e.daemon, syscall.SIGTERM); err != nil {
+	daemon := e.daemon
+	if daemon != nil {
+		if err := executorSignalProcess(daemon, syscall.SIGTERM); err != nil {
 			errs = append(errs, fmt.Errorf("signal daemon: %w", err))
 		}
-		waitErr := e.waitForDaemonExit(ctx)
+		waitErr := e.waitForDaemonExit(ctx, daemon, executorWaitProcess)
 		if !daemonExitAllowedAfterStop(waitErr) {
 			errs = append(errs, fmt.Errorf("wait daemon: %w", waitErr))
 		}
@@ -344,10 +345,10 @@ func (e *Executor) stopDaemon(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (e *Executor) waitForDaemonExit(ctx context.Context) error {
+func (e *Executor) waitForDaemonExit(ctx context.Context, daemon *Process, wait func(*Process) error) error {
 	done := make(chan error, 1)
 	go func() {
-		done <- executorWaitProcess(e.daemon)
+		done <- wait(daemon)
 	}()
 	select {
 	case err := <-done:
@@ -355,7 +356,7 @@ func (e *Executor) waitForDaemonExit(ctx context.Context) error {
 	case <-time.After(executorShutdownTimeout):
 	case <-ctx.Done():
 	}
-	killErr := e.daemon.Kill()
+	killErr := daemon.Kill()
 	select {
 	case err := <-done:
 		return errors.Join(killErr, err)
