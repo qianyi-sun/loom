@@ -44,6 +44,13 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.responses import StreamingResponse
 
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    enforce_request_attempt_deadline,
+    raise_deadline_http_exception,
+    request_attempt_deadline,
+    upstream_timeout,
+)
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
@@ -115,6 +122,7 @@ async def anthropic_messages_facade(
                 x_api_key,
             ),
             signing_key,
+            request=request,
         )
     assert ctx.team_id is not None
     assert ctx.trial_id is not None
@@ -163,13 +171,16 @@ async def anthropic_messages_facade(
                 upstream_url,
                 json=payload,
                 headers=upstream_headers,
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
                 follow_redirects=False,
             ),
             settings=settings,
             dialect="facade_anthropic",
+            deadline=request_attempt_deadline(request),
         )
         upstream_response = outcome.response
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as e:
         await record_facade_failed_call(
             request=request,
@@ -201,6 +212,7 @@ async def anthropic_messages_facade(
             detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
         await record_facade_failed_call(
@@ -302,16 +314,26 @@ async def _stream_anthropic_messages(
     row: Any,
     ctx: Any,
 ) -> StreamingResponse:
-    stream_cm = upstream.stream(
-        "POST",
-        upstream_url,
-        json=payload,
-        headers=upstream_headers,
-        timeout=request.app.state.settings.upstream_timeout_sec,
-        follow_redirects=False,
-    )
     try:
-        upstream_response = await stream_cm.__aenter__()
+        stream_cm = upstream.stream(
+            "POST",
+            upstream_url,
+            json=payload,
+            headers=upstream_headers,
+            timeout=upstream_timeout(
+                request,
+                request.app.state.settings.upstream_timeout_sec,
+            ),
+            follow_redirects=False,
+        )
+        deadline = request_attempt_deadline(request)
+        upstream_response = (
+            await stream_cm.__aenter__()
+            if deadline is None
+            else await deadline.run(stream_cm.__aenter__)
+        )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as e:
         await record_facade_failed_call(
             request=request,
@@ -343,8 +365,18 @@ async def _stream_anthropic_messages(
             detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
-        body = await upstream_response.aread()
+        try:
+            deadline = request_attempt_deadline(request)
+            body = (
+                await upstream_response.aread()
+                if deadline is None
+                else await deadline.run(upstream_response.aread)
+            )
+        except AttemptDeadlineReachedError as exc:
+            await stream_cm.__aexit__(None, None, None)
+            raise_deadline_http_exception(exc)
         await stream_cm.__aexit__(None, None, None)
         excerpt = redact_api_key(body.decode(errors="replace"), api_key)
         await record_facade_failed_call(
@@ -392,7 +424,17 @@ async def _iter_anthropic_sse_and_record_usage(
 ) -> AsyncIterator[bytes]:
     tracker = _AnthropicStreamUsageTracker()
     try:
-        async for chunk in response.aiter_bytes():
+        iterator = response.aiter_bytes()
+        while True:
+            try:
+                deadline = request_attempt_deadline(request)
+                chunk = (
+                    await iterator.__anext__()
+                    if deadline is None
+                    else await deadline.anext(iterator)
+                )
+            except StopAsyncIteration:
+                break
             tracker.feed(chunk)
             yield chunk
         tracker.finish()

@@ -29,6 +29,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
+
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SEC = 5.0
@@ -79,6 +81,7 @@ async def probe_responses_api(
     api_key: str,
     client: httpx.AsyncClient | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    deadline: GatewayAttemptDeadline | None = None,
 ) -> ProbeOutcome:
     """Fire one probe request.
 
@@ -92,24 +95,38 @@ async def probe_responses_api(
         async with httpx.AsyncClient(
             timeout=_PROBE_TIMEOUT_SEC, transport=transport,
         ) as owned_client:
-            return await _run_probe(owned_client, upstream_url, api_key)
-    return await _run_probe(client, upstream_url, api_key)
+            return await _run_probe(
+                owned_client,
+                upstream_url,
+                api_key,
+                deadline=deadline,
+            )
+    return await _run_probe(client, upstream_url, api_key, deadline=deadline)
 
 
 async def _run_probe(
     client: httpx.AsyncClient, upstream_url: str, api_key: str,
+    *,
+    deadline: GatewayAttemptDeadline | None = None,
 ) -> ProbeOutcome:
     try:
-        response = await client.post(
-            upstream_url,
-            json={
-                "model": _PROBE_MODEL_SENTINEL,
-                "input": "loom-probe",
-                "max_output_tokens": 1,
-            },
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=_PROBE_TIMEOUT_SEC,
-        )
+        timeout: float | httpx.Timeout = _PROBE_TIMEOUT_SEC
+        if deadline is not None:
+            timeout = deadline.httpx_timeout(_PROBE_TIMEOUT_SEC)
+
+        async def _post() -> httpx.Response:
+            return await client.post(
+                upstream_url,
+                json={
+                    "model": _PROBE_MODEL_SENTINEL,
+                    "input": "loom-probe",
+                    "max_output_tokens": 1,
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+
+        response = await _post() if deadline is None else await deadline.run(_post)
     except (
         httpx.TimeoutException,
         httpx.ConnectError,

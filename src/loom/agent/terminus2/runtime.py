@@ -27,6 +27,7 @@ from loom.agent.terminus2.model_switch import (
     seed_fingerprint,
 )
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
+from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
 from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
@@ -42,7 +43,19 @@ from loom.models.trajectory import (
 from loom.models.trial import MultiModelSwitchSpec
 from loom.models.types import OS, ModelSpec
 from loom.request_params import sanitize_request_extras
+from loom.trajectory.attempt_guard import AttemptTrajectoryFencedError
 from loom.trajectory.writer import TrajectoryWriter
+
+
+def _require_attempt_mutation_active(
+    trajectory: TrajectoryWriter,
+    deadline: AttemptDeadline | None,
+) -> None:
+    checker = getattr(trajectory, "require_attempt_active", None)
+    if callable(checker):
+        checker()
+    if deadline is not None:
+        deadline.require_remaining()
 
 
 def _import_terminus2() -> tuple[type, type]:
@@ -446,9 +459,24 @@ class LoomTerminus2Runtime:
     max_turns: int = 50
     workdir: PurePosixPath = field(default_factory=lambda: PurePosixPath("/workspace"))
     step_token_ttl_sec: int = 1800
+    _attempt_deadline: AttemptDeadline | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _active_env: Driver | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.request_params = sanitize_request_extras(self.request_params)
+
+    def begin_attempt(self, deadline: AttemptDeadline) -> None:
+        self._attempt_deadline = deadline
+
+    async def aclose_attempt(self) -> None:
+        """Interrupt Harbor's attempt-owned tmux session on supervisor stop."""
+
+        if self._active_env is not None:
+            await _reset_harbor_tmux_session(self._active_env)
 
     async def setup(self, env: Driver) -> None:
         await ensure_sandbox_deps(env)
@@ -467,18 +495,30 @@ class LoomTerminus2Runtime:
         del mcp, skills_dir
         terminus2_cls, agent_context_cls = _import_terminus2()
 
-        step_token = await self.cp_client.mint_step_token(
-            team_id=UUID(self.team_id),
-            trial_id=self.trial_id,
-            step_id=step_id,
-            ttl_sec=self.step_token_ttl_sec,
-        )
+        if self._attempt_deadline is None:
+            step_token = await self.cp_client.mint_step_token(
+                team_id=UUID(self.team_id),
+                trial_id=self.trial_id,
+                step_id=step_id,
+                ttl_sec=self.step_token_ttl_sec,
+            )
+        else:
+            grant = await self.cp_client.mint_attempt_step_token(
+                team_id=UUID(self.team_id),
+                trial_id=self.trial_id,
+                step_id=step_id,
+                ttl_sec=self.step_token_ttl_sec,
+                attempt_deadline_wall_clock=self._attempt_deadline.wall_deadline,
+            )
+            step_token = grant.token
+            self._attempt_deadline.require_remaining()
         api_base = _openai_gateway_base(self.gateway_url)
 
         logs_ctx = tempfile.TemporaryDirectory(
             prefix=f"loom-terminus2-{self.trial_id}-",
         )
         logs_root = Path(logs_ctx.name)
+        self._active_env = env
         try:
             await self._run_harbor(
                 instruction=instruction,
@@ -493,6 +533,7 @@ class LoomTerminus2Runtime:
             )
         finally:
             logs_ctx.cleanup()
+            self._active_env = None
 
     async def _run_harbor(
         self,
@@ -517,6 +558,7 @@ class LoomTerminus2Runtime:
             model=self.model,
             cp_client=self.cp_client,
         )
+        _require_attempt_mutation_active(trajectory, self._attempt_deadline)
         await bridge.emit_provenance()
 
         harbor_env = LoomHarborEnvironment.create(
@@ -731,6 +773,7 @@ class LoomTerminus2Runtime:
 
         async def _write_episode_checkpoint() -> None:
             nonlocal last_checkpointed_episode
+            _require_attempt_mutation_active(trajectory, self._attempt_deadline)
             if model_switch is None:
                 return
             post = getattr(self.cp_client, "post_episode_checkpoint", None)
@@ -742,15 +785,30 @@ class LoomTerminus2Runtime:
             if episode < 1 or episode <= last_checkpointed_episode:
                 return
             role = model_switch.role()
-            checksum_row = await post(
-                trial_id=self.trial_id,
-                execution_id=UUID(str(exec_id)),
-                run_attempt_id=UUID(str(attempt_id)),
-                episode=episode,
-                active_role=role,
-                last_call_ordinal=int(getattr(model_switch, "_call_ordinal", 0) or 0),
-                last_seq=int(getattr(trajectory, "_next_seq", 0) or 0),
-            )
+            post_kwargs = {
+                "trial_id": self.trial_id,
+                "execution_id": UUID(str(exec_id)),
+                "run_attempt_id": UUID(str(attempt_id)),
+                "episode": episode,
+                "active_role": role,
+                "last_call_ordinal": int(
+                    getattr(model_switch, "_call_ordinal", 0) or 0
+                ),
+                "last_seq": int(getattr(trajectory, "_next_seq", 0) or 0),
+                "attempt_deadline_wall_clock": (
+                    self._attempt_deadline.wall_deadline
+                    if self._attempt_deadline is not None
+                    else None
+                ),
+            }
+            if self._attempt_deadline is None:
+                checksum_row = await post(**post_kwargs)
+            else:
+                async with asyncio.timeout(
+                    self._attempt_deadline.require_remaining()
+                ):
+                    checksum_row = await post(**post_kwargs)
+            _require_attempt_mutation_active(trajectory, self._attempt_deadline)
             last_checkpointed_episode = episode
             await trajectory.append(
                 Terminus2EpisodeCheckpointEvent(
@@ -771,6 +829,9 @@ class LoomTerminus2Runtime:
             nonlocal bridge_error
             while not poll_stop.is_set():
                 try:
+                    _require_attempt_mutation_active(
+                        trajectory, self._attempt_deadline
+                    )
                     await bridge.sync_trajectory_file(
                         trajectory_path,
                         allow_incomplete=True,
@@ -778,6 +839,9 @@ class LoomTerminus2Runtime:
                     await _write_episode_checkpoint()
                 except CheckpointBridgeError as exc:
                     bridge_error = exc
+                    poll_stop.set()
+                    return
+                except (AttemptDeadlineExceededError, AttemptTrajectoryFencedError):
                     poll_stop.set()
                     return
                 try:
@@ -795,11 +859,18 @@ class LoomTerminus2Runtime:
         except asyncio.CancelledError:
             completeness = "partial"
             try:
+                _require_attempt_mutation_active(
+                    trajectory, self._attempt_deadline
+                )
                 await bridge.sync_trajectory_file(
                     trajectory_path, completeness=completeness,
                 )
                 await _write_episode_checkpoint()
-            except CheckpointBridgeError:
+            except (
+                AttemptDeadlineExceededError,
+                AttemptTrajectoryFencedError,
+                CheckpointBridgeError,
+            ):
                 pass
             raise
         except AgentError:
@@ -814,17 +885,38 @@ class LoomTerminus2Runtime:
             if bridge_error is not None:
                 raise AgentError(str(bridge_error)) from bridge_error
             try:
+                _require_attempt_mutation_active(
+                    trajectory, self._attempt_deadline
+                )
                 await bridge.sync_trajectory_file(
                     trajectory_path, completeness=completeness,
                 )
                 await _write_episode_checkpoint()
+                _require_attempt_mutation_active(
+                    trajectory, self._attempt_deadline
+                )
+                _assert_harbor_artifacts_have_no_step_secrets(logs_root)
+                if self._attempt_deadline is None:
+                    sandbox_paths = await _publish_harbor_artifacts_to_sandbox(
+                        env, logs_root, self.workdir,
+                    )
+                else:
+                    async with asyncio.timeout(
+                        self._attempt_deadline.require_remaining()
+                    ):
+                        sandbox_paths = await _publish_harbor_artifacts_to_sandbox(
+                            env, logs_root, self.workdir,
+                        )
+                _require_attempt_mutation_active(
+                    trajectory, self._attempt_deadline
+                )
+                await bridge.emit_artifact_refs(
+                    logs_root, sandbox_paths=sandbox_paths
+                )
             except CheckpointBridgeError as exc:
                 raise AgentError(str(exc)) from exc
-            _assert_harbor_artifacts_have_no_step_secrets(logs_root)
-            sandbox_paths = await _publish_harbor_artifacts_to_sandbox(
-                env, logs_root, self.workdir,
-            )
-            await bridge.emit_artifact_refs(logs_root, sandbox_paths=sandbox_paths)
+            except (AttemptDeadlineExceededError, AttemptTrajectoryFencedError):
+                pass
 
         if not trajectory_path.is_file():
             raise AgentError(

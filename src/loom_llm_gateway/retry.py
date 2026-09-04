@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from loom.errors import is_retryable
+from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 
 if TYPE_CHECKING:
     from loom_llm_gateway.config import GatewaySettings
@@ -57,6 +58,7 @@ async def send_with_retry(
     dialect: str,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
+    deadline: GatewayAttemptDeadline | None = None,
 ) -> RetryOutcome:
     """Run `send()` with retry on transient failures.
 
@@ -86,7 +88,11 @@ async def send_with_retry(
     for attempt in range(1, max_attempts + 1):
         last_exc = None
         try:
-            response = await send()
+            response = (
+                await send()
+                if deadline is None
+                else await deadline.run(send)
+            )
         except httpx.HTTPError as exc:
             last_exc = exc
             if not is_retryable(exc) or attempt >= max_attempts:
@@ -96,6 +102,8 @@ async def send_with_retry(
                 attempt=attempt, base=base_backoff,
                 jitter=jitter, cap=max_backoff,
             )
+            if deadline is not None and wait_for >= deadline.require_remaining():
+                await deadline.sleep(wait_for, sleep=sleep)
             if (now() - started) + wait_for > budget:
                 _record_budget_exceeded(dialect, attempt, status=0)
                 raise
@@ -103,7 +111,10 @@ async def send_with_retry(
                 "gateway_retry dialect=%s attempt=%d transport_error=%r wait=%.2fs",
                 dialect, attempt, exc, wait_for,
             )
-            await sleep(wait_for)
+            if deadline is None:
+                await sleep(wait_for)
+            else:
+                await deadline.sleep(wait_for, sleep=sleep)
             continue
 
         last_response = response
@@ -133,6 +144,8 @@ async def send_with_retry(
         wait_for = _next_backoff(
             attempt=attempt, base=base_backoff, jitter=jitter, cap=max_backoff,
         )
+        if deadline is not None and wait_for >= deadline.require_remaining():
+            await deadline.sleep(wait_for, sleep=sleep)
         if (now() - started) + wait_for > budget:
             _record_budget_exceeded(dialect, attempt, status)
             return RetryOutcome(response=response, attempt=attempt)
@@ -141,7 +154,10 @@ async def send_with_retry(
             "gateway_retry dialect=%s attempt=%d status=%d wait=%.2fs",
             dialect, attempt, status, wait_for,
         )
-        await sleep(wait_for)
+        if deadline is None:
+            await sleep(wait_for)
+        else:
+            await deadline.sleep(wait_for, sleep=sleep)
 
     # Loop exit without return: shouldn't happen given the bounds, but
     # defensive — re-raise the last exception or return the last response.

@@ -11,6 +11,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 
 from loom.agent.subprocess import SubprocessAgent
+from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.fake import FakeDriver
 from loom.errors import AgentError
 from loom.trajectory.storage import FakeObjectStore
@@ -20,6 +21,15 @@ from loom.trajectory.writer import TrajectoryWriter
 class _StubControlPlaneClient:
     async def mint_step_token(self, **_: object) -> str:
         return "loom_step_test-token"
+
+
+class _DeadlineCrossingControlPlaneClient:
+    def __init__(self, clock: list[float]) -> None:
+        self.clock = clock
+
+    async def mint_attempt_step_token(self, **_: object) -> object:
+        self.clock[0] = 1.0
+        return type("Grant", (), {"token": "loom_step_test-token"})()
 
 
 class _TrackingStreamingHandler:
@@ -207,6 +217,56 @@ async def test_cancelled_subprocess_agent_kills_streaming_exec(
             await asyncio.wait_for(task, timeout=0.01)
 
     assert streaming.kill_count == 1
+    await driver.stop()
+
+
+async def test_subprocess_does_not_start_when_token_mint_crosses_deadline(
+    tmp_path: Path,
+) -> None:
+    clock = [0.0]
+    starts = 0
+
+    def _unexpected_start(*_args: object, **_kwargs: object) -> ExecHandle:
+        nonlocal starts
+        starts += 1
+        raise AssertionError("subprocess must not start after its deadline")
+
+    driver = FakeDriver(streaming_handler=_unexpected_start)
+    await driver.start()
+    agent = SubprocessAgent(
+        adapter=_StdoutJsonlAdapter(),
+        model=ModelSpec(provider="anthropic", name="claude-sonnet-4-6"),
+        cp_client=_DeadlineCrossingControlPlaneClient(clock),  # type: ignore[arg-type]
+        gateway_url="http://gw",
+        team_id=uuid4(),
+        trial_id=uuid4(),
+    )
+    agent.begin_attempt(
+        AttemptDeadline.after(
+            1.0,
+            clock=lambda: clock[0],
+            wall_clock=lambda: 100.0,
+        )
+    )
+
+    async with TrajectoryWriter(
+        local_path=tmp_path / "deadline.jsonl",
+        store=FakeObjectStore(),
+        bucket="trajectories",
+        key="t/t/events.jsonl",
+        min_part_bytes=0,
+    ) as trajectory:
+        with pytest.raises(AttemptDeadlineExceededError):
+            await agent.run(
+                instruction="solve",
+                env=driver,
+                trajectory=trajectory,
+                mcp=[],
+                skills_dir=None,
+                step_id="main",
+            )
+
+    assert starts == 0
     await driver.stop()
 
 

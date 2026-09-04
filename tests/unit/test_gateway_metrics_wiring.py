@@ -42,6 +42,9 @@ def test_gateway_metric_objects_registered() -> None:
         "loom_gateway_llm_call_latency_sec",
         "loom_gateway_cost_usd",       # Counter — exposed with _total
         "loom_gateway_provider_validation",
+        "loom_gateway_auth_rejections",
+        "loom_gateway_attempt_deadline_reached",
+        "loom_gateway_legacy_attempt_deadline_token",
     }
     for stem in expected:
         assert stem in names or f"{stem}_total" in names or any(

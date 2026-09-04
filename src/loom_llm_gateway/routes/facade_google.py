@@ -37,6 +37,13 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    enforce_request_attempt_deadline,
+    raise_deadline_http_exception,
+    request_attempt_deadline,
+    upstream_timeout,
+)
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
@@ -81,6 +88,7 @@ async def google_generate_content_facade(
             session,
             authorization,
             signing_key,
+            request=request,
         )
     assert ctx.team_id is not None
     assert ctx.trial_id is not None
@@ -139,13 +147,16 @@ async def google_generate_content_facade(
                 # google-typed connections.
                 params={"key": api_key},
                 headers={"content-type": "application/json"},
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
                 follow_redirects=False,
             ),
             settings=settings,
             dialect="facade_google",
+            deadline=request_attempt_deadline(request),
         )
         upstream_response = outcome.response
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as e:
         await record_facade_failed_call(
             request=request,
@@ -177,6 +188,7 @@ async def google_generate_content_facade(
             detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
         # Redact: Google's API key lands in both the request URL AND
         # potentially in 4xx debug body bytes. Scrub both before

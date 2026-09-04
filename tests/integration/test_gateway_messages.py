@@ -407,8 +407,11 @@ async def test_messages_rejects_non_step_token(  # type: ignore[no-untyped-def]
                 "messages": [{"role": "user", "content": "hi"}],
             },
         )
-        # 401 (no llm:call scope) or 403 (step-scoped required); either is fine.
-        assert r.status_code in (401, 403)
+        assert r.status_code == 403
+        assert r.json()["detail"] == {
+            "code": "missing_scope",
+            "required_scope": "llm:call",
+        }
 
 
 async def test_messages_redacts_upstream_error_detail(gateway_setup):  # type: ignore[no-untyped-def]

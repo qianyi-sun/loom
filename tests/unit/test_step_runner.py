@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from loom.agent.oracle import OracleAgent
+from loom.attempt_deadline import AttemptDeadline
 from loom.driver.base import StartOptions
 from loom.driver.fake import FakeDriver, command_table_handler
 from loom.models.exec import ExecResult
@@ -24,9 +25,11 @@ from loom.models.task import (
 from loom.models.trajectory import EventKind
 from loom.models.trial import BackoffSpec, RetryPolicy, RetryReason
 from loom.models.verifier import VerifierResult
+from loom.trajectory.attempt_guard import AttemptTrajectoryFencedError
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
+from loom.trial.attempt_supervisor import AttemptTimeoutDiagnostic
 from loom.trial.step_runner import _isolated_verifier_start_options, run_step
 from loom.trial.trial import TrialContext
 from loom.trial.workspace import (
@@ -159,7 +162,7 @@ async def test_run_step_applies_effective_timeout_before_agent_run(
         )
 
     assert result.error is None
-    assert agent.observed_step_token_ttl_sec == 9300
+    assert agent.observed_step_token_ttl_sec == 9301
 
 
 async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Path):
@@ -199,6 +202,110 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
     reader = TrajectoryReader(context.local_trajectory_path)
     kinds = [e.kind for e in reader.iter_all()]
     assert EventKind.STEP_END in kinds
+
+
+async def test_gateway_deadline_response_uses_timeout_supervisor_path(
+    context: TrialContext,
+) -> None:
+    """A signed Gateway cutoff is the same timeout as the local deadline."""
+    from loom.errors import AgentError
+
+    class _GatewayDeadlineAgent:
+        mode = "out-of-box"
+        name = "gateway-deadline"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AgentError(
+                "gateway 504: {'detail': {'code': 'agent_timeout', "
+                "'reason': 'attempt_deadline_reached'}}"
+            )
+
+    context.agent = _GatewayDeadlineAgent()  # type: ignore[assignment]
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    assert result.error is not None
+    assert result.error.reason == "timeout"
+    assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
+
+
+async def test_gateway_deadline_retry_records_timeout_before_retry(
+    context: TrialContext,
+) -> None:
+    from loom.errors import AgentError
+
+    class _RetryGatewayDeadlineAgent:
+        mode = "out-of-box"
+        name = "retry-gateway-deadline"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                raise AgentError(
+                    "gateway 504: {'detail': {'code': 'agent_timeout', "
+                    "'reason': 'attempt_deadline_reached'}}"
+                )
+
+    agent = _RetryGatewayDeadlineAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        skip_verifier=True,
+        retry=RetryPolicy(
+            max_attempts=2,
+            retry_on=frozenset({RetryReason.AGENT_TIMEOUT}),
+            backoff=BackoffSpec(base_sec=0.001, max_sec=0.001, jitter=0),
+        ),
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    timeout_index = next(
+        index for index, event in enumerate(events) if event.kind == EventKind.AGENT_TIMEOUT
+    )
+    retry_index = next(
+        index for index, event in enumerate(events) if event.kind == EventKind.AGENT_RETRY
+    )
+    assert result.error is None
+    assert agent.calls == 2
+    assert timeout_index < retry_index
+    assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
 
 
 async def test_run_step_retries_retryable_gateway_failure(context: TrialContext):
@@ -709,3 +816,210 @@ async def test_private_verifier_driver_is_stopped_when_step_is_cancelled(
             await running
 
     assert verifier_driver.state == "stopped"
+
+
+async def test_agent_deadline_emits_one_diagnostic_and_does_not_retry_by_default(
+    context: TrialContext,
+) -> None:
+    class _DeadlineAgent:
+        mode = "out-of-box"
+        name = "deadline"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.deadlines: list[AttemptDeadline] = []
+            self.close_calls = 0
+            self.late_write_rejected = False
+
+        def begin_attempt(self, deadline: AttemptDeadline) -> None:
+            self.deadlines.append(deadline)
+
+        async def aclose_attempt(self) -> None:
+            self.close_calls += 1
+
+        async def run(self, *, trajectory, **_kwargs):  # type: ignore[no-untyped-def]
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                with pytest.raises(AttemptTrajectoryFencedError):
+                    await trajectory.write_raw_dict({"kind": "late"})
+                self.late_write_rejected = True
+                raise
+
+    agent = _DeadlineAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        override_agent_timeout_sec=0.01,
+        skip_verifier=True,
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    timeout_events = [event for event in events if event.kind == EventKind.AGENT_TIMEOUT]
+    retry_events = [event for event in events if event.kind == EventKind.AGENT_RETRY]
+    assert result.error is not None
+    assert result.error.phase == "agent"
+    assert result.error.reason == "timeout"
+    assert len(timeout_events) == 1
+    assert timeout_events[0].configured_timeout_sec == 0.01
+    assert timeout_events[0].task_stopped is True
+    assert retry_events == []
+    assert len(agent.deadlines) == 1
+    assert agent.close_calls == 1
+    assert agent.late_write_rejected
+
+
+async def test_explicit_agent_timeout_retry_gets_a_new_deadline(
+    context: TrialContext,
+) -> None:
+    class _RetryDeadlineAgent:
+        mode = "out-of-box"
+        name = "retry-deadline"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.deadlines: list[AttemptDeadline] = []
+            self.close_calls = 0
+
+        def begin_attempt(self, deadline: AttemptDeadline) -> None:
+            self.deadlines.append(deadline)
+
+        async def aclose_attempt(self) -> None:
+            self.close_calls += 1
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.Future()
+
+    agent = _RetryDeadlineAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        override_agent_timeout_sec=0.01,
+        skip_verifier=True,
+        retry=RetryPolicy(
+            max_attempts=2,
+            retry_on=frozenset({RetryReason.AGENT_TIMEOUT}),
+            backoff=BackoffSpec(base_sec=0.001, max_sec=0.001, jitter=0),
+        ),
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    assert result.error is None
+    assert agent.calls == 2
+    assert len(agent.deadlines) == 2
+    assert agent.deadlines[0] is not agent.deadlines[1]
+    assert agent.close_calls == 2
+    assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
+    assert sum(event.kind == EventKind.AGENT_RETRY for event in events) == 1
+
+
+async def test_cancellation_resistant_agent_skips_verifier_and_artifacts(
+    context: TrialContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NeverRunAgent:
+        mode = "out-of-box"
+        name = "unhealthy-deadline"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("fake supervisor must not call agent")
+
+    class _RecordingVerifier:
+        name = "recording"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def verify(self, **_kwargs):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return VerifierResult(rewards={"passed": 1.0})
+
+    async def fake_supervise(*, agent, **_kwargs):  # type: ignore[no-untyped-def]
+        agent._loom_worker_unhealthy = True
+        return AttemptTimeoutDiagnostic(
+            configured_timeout_sec=0.01,
+            elapsed_monotonic_sec=0.03,
+            cancellation_drain_sec=0.02,
+            transport_close_required=True,
+            task_stopped=False,
+        )
+
+    agent = _NeverRunAgent()
+    verifier = _RecordingVerifier()
+    context.agent = agent  # type: ignore[assignment]
+    context.verifier = verifier  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        override_agent_timeout_sec=0.01,
+        retry=RetryPolicy(
+            max_attempts=2,
+            retry_on=frozenset({RetryReason.AGENT_TIMEOUT}),
+            backoff=BackoffSpec(base_sec=0.001, max_sec=0.001, jitter=0),
+        ),
+    )
+    monkeypatch.setattr(
+        "loom.trial.step_runner.supervise_agent_attempt",
+        fake_supervise,
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    assert result.error is not None
+    assert result.error.reason == "timeout"
+    assert result.verifier_result is None
+    assert result.artifacts == []
+    assert verifier.calls == 0
+    assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
+    assert sum(event.kind == EventKind.AGENT_RETRY for event in events) == 0
+    assert sum(event.kind == EventKind.STEP_END for event in events) == 1
