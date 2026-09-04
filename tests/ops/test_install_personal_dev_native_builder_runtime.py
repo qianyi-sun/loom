@@ -8,7 +8,7 @@ import os
 import stat
 import tarfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -93,7 +93,20 @@ class HostRunner:
     runsc_version: str = "release-20260810.0"
     runsc_spec_version: str = "1.2.1"
     nft_table_output: str = ""
+    nft_check_result: NativeBuilderCommandResult = field(
+        default_factory=lambda: NativeBuilderCommandResult(0)
+    )
     sysusers_dry_run_stdout: str = ""
+    sysusers_dry_run_stderr: str = ""
+    dockerd_validate_result: NativeBuilderCommandResult = field(
+        default_factory=lambda: NativeBuilderCommandResult(
+            0,
+            stderr="configuration OK\n",
+        )
+    )
+    systemd_analyze_result: NativeBuilderCommandResult = field(
+        default_factory=lambda: NativeBuilderCommandResult(0)
+    )
     calls: list[tuple[str, ...]] | None = None
     environments: list[dict[str, str]] | None = None
 
@@ -183,14 +196,18 @@ class HostRunner:
             result = NativeBuilderCommandResult(
                 0,
                 self.sysusers_dry_run_stdout if "--dry-run" in call else "",
+                self.sysusers_dry_run_stderr if "--dry-run" in call else "",
             )
         elif executable == "nft":
-            result = NativeBuilderCommandResult(
-                0,
-                self.nft_table_output if "list" in call else "",
+            result = (
+                NativeBuilderCommandResult(0, self.nft_table_output)
+                if "list" in call
+                else self.nft_check_result
             )
-        elif executable in {"dockerd", "systemd-analyze"}:
-            result = NativeBuilderCommandResult(0)
+        elif executable == "dockerd":
+            result = self.dockerd_validate_result
+        elif executable == "systemd-analyze":
+            result = self.systemd_analyze_result
         elif executable == "runsc" and call[1:] == ("--version",):
             result = NativeBuilderCommandResult(
                 0,
@@ -526,6 +543,74 @@ def test_preflight_accepts_safe_sysusers_dry_run_plan_output(tmp_path: Path) -> 
     assert installer.preflight(archive)["operation"] == "preflight"
 
 
+def test_preflight_accepts_exact_dockerd_validation_success(tmp_path: Path) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile, runner=HostRunner())
+
+    assert installer.preflight(archive)["operation"] == "preflight"
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        NativeBuilderCommandResult(0),
+        NativeBuilderCommandResult(0, stderr="Configuration OK\n"),
+        NativeBuilderCommandResult(0, stderr="configuration OK\nwarning\n"),
+        NativeBuilderCommandResult(
+            0,
+            stdout="configuration OK\n",
+            stderr="configuration OK\n",
+        ),
+        NativeBuilderCommandResult(1, stderr="configuration OK\n"),
+    ),
+    ids=("empty-stderr", "wrong-text", "extra-line", "stdout", "nonzero"),
+)
+def test_preflight_rejects_noncanonical_dockerd_validation_result(
+    tmp_path: Path,
+    result: NativeBuilderCommandResult,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(dockerd_validate_result=result)
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="generated_input_invalid",
+    ):
+        installer.preflight(archive)
+
+
+@pytest.mark.parametrize(
+    "runner",
+    (
+        HostRunner(nft_check_result=NativeBuilderCommandResult(0, stdout="unexpected\n")),
+        HostRunner(nft_check_result=NativeBuilderCommandResult(0, stderr="unexpected\n")),
+        HostRunner(systemd_analyze_result=NativeBuilderCommandResult(0, stdout="unexpected\n")),
+        HostRunner(systemd_analyze_result=NativeBuilderCommandResult(0, stderr="unexpected\n")),
+        HostRunner(sysusers_dry_run_stderr="unexpected\n"),
+    ),
+    ids=(
+        "nft-stdout",
+        "nft-stderr",
+        "systemd-analyze-stdout",
+        "systemd-analyze-stderr",
+        "systemd-sysusers-stderr",
+    ),
+)
+def test_preflight_rejects_output_from_other_strict_generated_input_validators(
+    tmp_path: Path,
+    runner: HostRunner,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="generated_input_invalid",
+    ):
+        installer.preflight(archive)
+
+
 def test_preflight_isolates_systemd_unit_validation_from_host_units(
     tmp_path: Path,
 ) -> None:
@@ -590,8 +675,7 @@ def _mutated_test_certificate(original: bytes, replacement: bytes) -> bytes:
     assert invalid != der
     invalid_encoded = base64.b64encode(invalid)
     body = b"\n".join(
-        invalid_encoded[index : index + 64]
-        for index in range(0, len(invalid_encoded), 64)
+        invalid_encoded[index : index + 64] for index in range(0, len(invalid_encoded), 64)
     )
     return b"-----BEGIN CERTIFICATE-----\n" + body + b"\n-----END CERTIFICATE-----\n"
 
