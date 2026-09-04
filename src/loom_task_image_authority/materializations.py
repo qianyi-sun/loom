@@ -56,22 +56,53 @@ class TaskImageSessionMaterializationConflictError(RuntimeError):
 class TaskImageBuildSessionAuthorization(Protocol):
     """Structural session authority contract accepted from the projection store."""
 
-    grant_id: UUID
-    session_id: UUID
-    session_generation: int
-    authority_version: Literal[1, 2]
-    builder_release_sha256: str | None
-    supervisor_executable_sha256: str
-    purpose: Literal["production", "shadow"]
-    shadow_campaign_id: UUID | None
-    environment: str
-    pool_id: str
-    cpu_arch: Literal["x86_64", "arm64"]
-    attestation_generation: int
-    attestation_sha256: str
-    attestation_expires_at: datetime
-    session_expires_at: datetime
-    grant_expires_at: datetime
+    @property
+    def grant_id(self) -> UUID: ...
+
+    @property
+    def session_id(self) -> UUID: ...
+
+    @property
+    def session_generation(self) -> int: ...
+
+    @property
+    def authority_version(self) -> Literal[1, 2]: ...
+
+    @property
+    def builder_release_sha256(self) -> str | None: ...
+
+    @property
+    def supervisor_executable_sha256(self) -> str: ...
+
+    @property
+    def purpose(self) -> Literal["production", "shadow"]: ...
+
+    @property
+    def shadow_campaign_id(self) -> UUID | None: ...
+
+    @property
+    def environment(self) -> str: ...
+
+    @property
+    def pool_id(self) -> str: ...
+
+    @property
+    def cpu_arch(self) -> Literal["x86_64", "arm64"]: ...
+
+    @property
+    def attestation_generation(self) -> int: ...
+
+    @property
+    def attestation_sha256(self) -> str: ...
+
+    @property
+    def attestation_expires_at(self) -> datetime: ...
+
+    @property
+    def session_expires_at(self) -> datetime: ...
+
+    @property
+    def grant_expires_at(self) -> datetime: ...
 
 
 def _utc(value: datetime) -> datetime:

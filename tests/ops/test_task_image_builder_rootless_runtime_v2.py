@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "deploy/task-image-builder/Dockerfile.rootless-runtime-v2"
 MANIFEST = ROOT / "deploy/task-image-builder/rootless-runtime-v2.json"
