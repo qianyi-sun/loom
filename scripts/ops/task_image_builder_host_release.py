@@ -55,10 +55,12 @@ class HostReleaseError(ValueError):
 class RuntimeArtifact:
     name: str
     sha256: str | None
+    url: str | None = None
 
 
 @dataclass(frozen=True)
 class RuntimeManifest:
+    release: str
     artifacts: tuple[RuntimeArtifact, ...]
     binary_digests: Mapping[str, str]
 
@@ -494,19 +496,22 @@ def load_runtime_manifest(
             "runtime architecture",
         )
         artifacts_raw = runtime_architecture.get("artifacts")
-        if not isinstance(artifacts_raw, list) or len(artifacts_raw) != 4:
-            raise HostReleaseError("runtime artifact set is invalid")
         artifacts: list[RuntimeArtifact] = []
-        for item_raw in artifacts_raw:
-            item = _object(item_raw, "runtime artifact")
-            name = _safe_relative(item.get("name"), "runtime artifact name")
-            if PurePosixPath(name).name != name:
-                raise HostReleaseError("runtime artifact name must not contain a directory")
-            digest = _string(item.get("sha256"), "runtime artifact digest")
-            if SHA256_RE.fullmatch(digest) is None:
-                raise HostReleaseError("runtime artifact digest is invalid")
-            artifacts.append(RuntimeArtifact(name=name, sha256=digest))
+        if artifacts_raw is not None:
+            if not isinstance(artifacts_raw, list) or len(artifacts_raw) != 4:
+                raise HostReleaseError("runtime artifact set is invalid")
+            for item_raw in artifacts_raw:
+                item = _object(item_raw, "runtime artifact")
+                name = _safe_relative(item.get("name"), "runtime artifact name")
+                if PurePosixPath(name).name != name:
+                    raise HostReleaseError("runtime artifact name must not contain a directory")
+                digest = _string(item.get("sha256"), "runtime artifact digest")
+                if SHA256_RE.fullmatch(digest) is None:
+                    raise HostReleaseError("runtime artifact digest is invalid")
+                url = _string(item.get("url"), "runtime artifact URL")
+                artifacts.append(RuntimeArtifact(name=name, sha256=digest, url=url))
         return RuntimeManifest(
+            release=EXPECTED_RUNTIME_RELEASE,
             artifacts=tuple(artifacts),
             binary_digests=_runtime_binary_digests(
                 runtime_architecture.get("binaries"),
@@ -531,6 +536,7 @@ def load_runtime_manifest(
             label="runtime members",
         )
         return RuntimeManifest(
+            release=EXPECTED_RUNTIME_RELEASE_V2,
             artifacts=(
                 RuntimeArtifact(
                     name=f"buildkit-{buildkit_version}.linux-{debian_architecture}.tar.gz",
@@ -559,6 +565,8 @@ def _expected_bundle_paths(
     debian_architecture: str,
     runtime: RuntimeManifest,
 ) -> set[str]:
+    if len(runtime.artifacts) != 4:
+        raise HostReleaseError("runtime artifact set is invalid")
     runtime_paths = {f"runtime/{item.name}" for item in runtime.artifacts}
     package_paths = {
         f"packages/{PurePosixPath(item.filename).name}"

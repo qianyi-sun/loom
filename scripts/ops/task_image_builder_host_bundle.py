@@ -14,7 +14,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -119,31 +119,60 @@ class HttpsArtifactFetcher:
 
 
 def _runtime_artifacts(
-    runtime: Mapping[str, object],
-    architecture: str,
-) -> tuple[tuple[str, str], ...]:
-    architectures = host_release._object(runtime.get("architectures"), "runtime architectures")
-    selected = host_release._object(
-        architectures.get(architecture),
-        "runtime architecture",
-    )
-    raw_artifacts = selected.get("artifacts")
-    if not isinstance(raw_artifacts, list) or len(raw_artifacts) != 4:
+    runtime: host_release.RuntimeManifest,
+) -> tuple[host_release.RuntimeArtifact, ...]:
+    artifacts = runtime.artifacts
+    if len(artifacts) != 4:
         raise BundleAssemblyError("runtime artifact set is invalid")
-    artifacts: list[tuple[str, str]] = []
-    for raw in raw_artifacts:
-        item = host_release._object(raw, "runtime artifact")
-        name = host_release._safe_relative(item.get("name"), "runtime artifact name")
-        if PurePosixPath(name).name != name:
-            raise BundleAssemblyError("runtime artifact name is invalid")
-        url = _validate_https_url(
-            host_release._string(item.get("url"), "runtime artifact URL"),
-            "runtime URL",
-        )
-        artifacts.append((name, url))
-    if len({name for name, _ in artifacts}) != len(artifacts):
+    if len({item.name for item in artifacts}) != len(artifacts):
         raise BundleAssemblyError("runtime artifact names are not unique")
-    return tuple(artifacts)
+    for artifact in artifacts:
+        if artifact.url is not None:
+            _validate_https_url(artifact.url, "runtime URL")
+    return artifacts
+
+
+def _validate_runtime_artifact_root(path: Path, expected: set[str]) -> Path:
+    if not path.is_absolute():
+        raise BundleAssemblyError("runtime artifact root must be an absolute path")
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise BundleAssemblyError("runtime artifact root is unavailable") from exc
+    if (
+        path.is_symlink()
+        or resolved != path
+        or not stat.S_ISDIR(metadata.st_mode)
+        or bool(stat.S_IMODE(metadata.st_mode) & 0o022)
+    ):
+        raise BundleAssemblyError("runtime artifact root is unsafe")
+    try:
+        entries = sorted(path.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise BundleAssemblyError("runtime artifact root is unavailable") from exc
+    if {item.name for item in entries} != expected:
+        raise BundleAssemblyError("runtime artifact inventory is invalid")
+    return path
+
+
+def _stage_local_runtime_artifacts(
+    runtime_artifact_root: Path,
+    artifacts: Sequence[host_release.RuntimeArtifact],
+    destination: Path,
+) -> None:
+    source_root = _validate_runtime_artifact_root(
+        runtime_artifact_root,
+        {item.name for item in artifacts},
+    )
+    for artifact in artifacts:
+        payload = host_release._read_regular(
+            source_root / artifact.name,
+            host_release.MAX_ARTIFACT_BYTES,
+            "runtime artifact",
+            reject_group_world_write=True,
+        )
+        _write_private_file(destination / artifact.name, payload)
 
 
 def _write_private_file(path: Path, payload: bytes) -> None:
@@ -281,6 +310,7 @@ def assemble_host_bundle(
     architecture: str,
     output: Path,
     fetcher: ArtifactFetcher,
+    runtime_artifact_root: Path | None = None,
 ) -> str:
     temporary: Path | None = None
     published = False
@@ -293,8 +323,12 @@ def assemble_host_bundle(
         debian_architecture = release.architecture_map.get(architecture)
         if debian_architecture is None:
             raise BundleAssemblyError("architecture is not in the host release")
-        runtime = host_release._load_json(runtime_manifest_path, "runtime manifest")
-        runtime_artifacts = _runtime_artifacts(runtime, architecture)
+        runtime = host_release.load_runtime_manifest(
+            runtime_manifest_path,
+            architecture=architecture,
+            debian_architecture=debian_architecture,
+        )
+        runtime_artifacts = _runtime_artifacts(runtime)
         repository = release.repositories[debian_architecture]
         expected_base_url = (
             f"https://snapshot.ubuntu.com/ubuntu/{release.snapshot}"
@@ -329,17 +363,27 @@ def assemble_host_bundle(
                 temporary / "apt" / f"{suite}.Packages.xz",
                 index.packages_size,
             )
-        for artifact in release.packages[debian_architecture].values():
+        for package_artifact in release.packages[debian_architecture].values():
             fetcher.fetch(
-                _fetch_url(repository.base_url, artifact.filename),
-                temporary / "packages" / PurePosixPath(artifact.filename).name,
-                artifact.size,
+                _fetch_url(repository.base_url, package_artifact.filename),
+                temporary / "packages" / PurePosixPath(package_artifact.filename).name,
+                package_artifact.size,
             )
-        for name, url in runtime_artifacts:
-            fetcher.fetch(
-                url,
-                temporary / "runtime" / name,
-                host_release.MAX_ARTIFACT_BYTES,
+        if all(artifact.url is not None for artifact in runtime_artifacts):
+            for artifact in runtime_artifacts:
+                assert artifact.url is not None
+                fetcher.fetch(
+                    _validate_https_url(artifact.url, "runtime URL"),
+                    temporary / "runtime" / artifact.name,
+                    host_release.MAX_ARTIFACT_BYTES,
+                )
+        else:
+            if runtime_artifact_root is None:
+                raise BundleAssemblyError("runtime artifact root is required")
+            _stage_local_runtime_artifacts(
+                runtime_artifact_root,
+                runtime_artifacts,
+                temporary / "runtime",
             )
 
         verified = host_release.verify_host_bundle(
@@ -387,6 +431,7 @@ def _parser() -> argparse.ArgumentParser:
     assemble.add_argument("--release", type=Path, required=True)
     assemble.add_argument("--runtime-manifest", type=Path, required=True)
     assemble.add_argument("--keyring", type=Path, required=True)
+    assemble.add_argument("--runtime-artifact-root", type=Path)
     assemble.add_argument("--architecture", choices=tuple(host_release.ARCHITECTURE_MAP), required=True)
     assemble.add_argument("--output", type=Path, required=True)
     return parser
@@ -407,6 +452,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             architecture=args.architecture,
             output=args.output,
             fetcher=HttpsArtifactFetcher(),
+            runtime_artifact_root=args.runtime_artifact_root,
         )
     except BundleAssemblyError as exc:
         print(
