@@ -42,21 +42,39 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, UUID, str]]:
     with session_factory() as s:
         s.execute(insert(Team).values(id=team_id, name=f"x-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="worker", scopes=["worker:index"], team_id=None,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
-        s.execute(insert(Worker).values(
-            id=worker_id, hostname="h", version="v", capabilities=[],
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC), status="active",
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="worker",
+                scopes=["worker:index"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
+        s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="h",
+                version="v",
+                capabilities=[],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
         s.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
-        s.execute(insert(Trial).values(
-            id=trial_id, team_id=team_id, task_id="t",
-            config={}, requires_caps={}, state="running", worker_id=worker_id,
-        ))
+        s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id="t",
+                config={},
+                requires_caps={},
+                state="running",
+                worker_id=worker_id,
+            )
+        )
         s.commit()
     try:
         yield trial_id, team_id, worker_id, raw
@@ -84,7 +102,8 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, UUID, str]]:
 
 @pytest.fixture
 def app(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
     traj_seed: tuple[UUID, UUID, UUID, str],
 ):
     for k, v in {
@@ -106,9 +125,7 @@ def test_index_patch(app, traj_seed, postgres_url: str):  # type: ignore[no-unty
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "worker_id": str(worker_id),
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-                ),
+                "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
                 "trajectory_size_bytes": 1024,
                 "trajectory_sha256": "a" * 64,
                 "trajectory_version_id": None,
@@ -124,11 +141,43 @@ def test_index_patch(app, traj_seed, postgres_url: str):  # type: ignore[no-unty
         with sessionmaker(engine)() as session:
             lifecycle_object = session.scalars(
                 select(DataLifecycleObject).where(
-                    DataLifecycleObject.object_key
-                    == f"{team_id}/{trial_id}/events.jsonl"
+                    DataLifecycleObject.object_key == f"{team_id}/{trial_id}/events.jsonl"
                 )
             ).one()
         assert lifecycle_object.version_id is None
+    finally:
+        engine.dispose()
+
+
+def test_index_patch_rejects_contradictory_projected_result(
+    app,
+    traj_seed,
+    postgres_url: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, _team_id, worker_id, raw = traj_seed
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "result": {
+                    "schema_version": "1",
+                    "state": "succeeded",
+                    "failure_reason": "verifier_error",
+                    "aggregate_reward": 1.0,
+                },
+            },
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "trial_terminal_result_inconsistent"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.result is None
+            assert trial.trajectory_index is None
     finally:
         engine.dispose()
 
@@ -143,9 +192,7 @@ def test_index_patch_rejects_missing_object_version_evidence(
     trial_id, team_id, worker_id, raw = traj_seed
     payload: dict[str, object] = {
         "worker_id": str(worker_id),
-        "trajectory_uri": (
-            f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-        ),
+        "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
         "trajectory_size_bytes": 10,
         "trajectory_sha256": "3" * 64,
         "trajectory_version_id": None,
@@ -153,19 +200,23 @@ def test_index_patch_rejects_missing_object_version_evidence(
     if missing_version_kind == "trajectory":
         del payload["trajectory_version_id"]
     elif missing_version_kind == "atif":
-        payload.update({
-            "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
-            "atif_size_bytes": 20,
-            "atif_sha256": "4" * 64,
-        })
+        payload.update(
+            {
+                "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+                "atif_size_bytes": 20,
+                "atif_sha256": "4" * 64,
+            }
+        )
     else:
-        payload["artifacts"] = [{
-            "step_name": "main",
-            "bucket": "artifacts",
-            "key": f"{team_id}/{trial_id}/main/result.txt",
-            "size": 5,
-            "content_hash": "sha256:" + ("2" * 64),
-        }]
+        payload["artifacts"] = [
+            {
+                "step_name": "main",
+                "bucket": "artifacts",
+                "key": f"{team_id}/{trial_id}/main/result.txt",
+                "size": 5,
+                "content_hash": "sha256:" + ("2" * 64),
+            }
+        ]
 
     with TestClient(app) as client:
         response = client.patch(
@@ -175,9 +226,7 @@ def test_index_patch_rejects_missing_object_version_evidence(
         )
 
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == (
-        "trajectory_lifecycle_evidence_invalid"
-    )
+    assert response.json()["detail"]["code"] == ("trajectory_lifecycle_evidence_invalid")
     engine = create_engine(postgres_url)
     try:
         with sessionmaker(engine)() as session:
@@ -202,9 +251,7 @@ def test_index_patch_rejects_unclassified_object_evidence(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "worker_id": str(worker_id),
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-                ),
+                "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
                 "trajectory_size_bytes": 1024,
                 "trajectory_version_id": None,
             },
@@ -214,12 +261,10 @@ def test_index_patch_rejects_unclassified_object_evidence(
     engine = create_engine(postgres_url)
     try:
         with sessionmaker(engine)() as session:
-            trial = session.execute(
-                select(Trial).where(Trial.id == trial_id)
-            ).scalar_one()
-            artifacts = list(session.execute(
-                select(Artifact.id).where(Artifact.trial_id == trial_id)
-            ))
+            trial = session.execute(select(Trial).where(Trial.id == trial_id)).scalar_one()
+            artifacts = list(
+                session.execute(select(Artifact.id).where(Artifact.trial_id == trial_id))
+            )
         assert trial.trajectory_index is None
         assert artifacts == []
     finally:
@@ -239,50 +284,60 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
         team_id = conn.execute(
             select(Trial.team_id).where(Trial.id == trial_id),
         ).scalar_one()
-        conn.execute(insert(Batch).values(
-            id=batch_id,
-            team_id=team_id,
-            name="derived batch",
-            description=None,
-            task_filter={"subset_kind": "explicit", "task_ids": ["t"]},
-            trial_config={},
-            state="running",
-            created_by_token_prefix="test",
-            expected_trial_count=1,
-            backend="docker",
-            combinations=[],
-            source_provenance=[{
-                "kind": "reused_artifact",
-                "relation": "reused_as_input",
-                "source_artifact_id": str(parent_artifact_id),
-            }],
-        ))
-        conn.execute(update(Trial).where(Trial.id == trial_id).values(
-            batch_id=batch_id,
-        ))
-        conn.execute(insert(Artifact).values(
-            id=parent_artifact_id,
-            artifact_type="metric_table",
-            artifact_schema_version="1.0",
-            name="parent metrics",
-            team_id=team_id,
-            created_by={"kind": "manual_import"},
-            content_hash="sha256:" + ("1" * 64),
-            storage={
-                "backend": "object_store",
-                "bucket": "artifacts",
-                "key": "parent/metrics.json",
-                "media_type": "application/json",
-                "size_bytes": 12,
-            },
-            visibility="org",
-            share_status="shared",
-            redaction_state="redacted",
-            safety_state="safe",
-            retention={"class": "shared_reusable"},
-            provenance={},
-            artifact_metadata={},
-        ))
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="derived batch",
+                description=None,
+                task_filter={"subset_kind": "explicit", "task_ids": ["t"]},
+                trial_config={},
+                state="running",
+                created_by_token_prefix="test",
+                expected_trial_count=1,
+                backend="docker",
+                combinations=[],
+                source_provenance=[
+                    {
+                        "kind": "reused_artifact",
+                        "relation": "reused_as_input",
+                        "source_artifact_id": str(parent_artifact_id),
+                    }
+                ],
+            )
+        )
+        conn.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(
+                batch_id=batch_id,
+            )
+        )
+        conn.execute(
+            insert(Artifact).values(
+                id=parent_artifact_id,
+                artifact_type="metric_table",
+                artifact_schema_version="1.0",
+                name="parent metrics",
+                team_id=team_id,
+                created_by={"kind": "manual_import"},
+                content_hash="sha256:" + ("1" * 64),
+                storage={
+                    "backend": "object_store",
+                    "bucket": "artifacts",
+                    "key": "parent/metrics.json",
+                    "media_type": "application/json",
+                    "size_bytes": 12,
+                },
+                visibility="org",
+                share_status="shared",
+                redaction_state="redacted",
+                safety_state="safe",
+                retention={"class": "shared_reusable"},
+                provenance={},
+                artifact_metadata={},
+            )
+        )
 
     with TestClient(app) as client:
         r = client.patch(
@@ -294,9 +349,7 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                 "trial_id": str(trial_id),
                 "team_id": str(team_id),
                 "task_id": "t",
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-                ),
+                "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
                 "trajectory_size_bytes": 10,
                 "trajectory_sha256": "3" * 64,
                 "trajectory_version_id": "trajectory-version-123",
@@ -305,16 +358,18 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                 "atif_sha256": "4" * 64,
                 "atif_version_id": "atif-version-456",
                 "atif_schema_version": "1.7",
-                "artifacts": [{
-                    "step_name": "main",
-                    "bucket": "artifacts",
-                    "key": f"{team_id}/{trial_id}/main/result.txt",
-                    "size": 5,
-                    "content_hash": "sha256:" + ("2" * 64),
-                    "version_id": "artifact-version-789",
-                    "share_status": "shared",
-                    "blocked_reason": None,
-                }],
+                "artifacts": [
+                    {
+                        "step_name": "main",
+                        "bucket": "artifacts",
+                        "key": f"{team_id}/{trial_id}/main/result.txt",
+                        "size": 5,
+                        "content_hash": "sha256:" + ("2" * 64),
+                        "version_id": "artifact-version-789",
+                        "share_status": "shared",
+                        "blocked_reason": None,
+                    }
+                ],
             },
         )
 
@@ -322,64 +377,64 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
 
     sl = sessionmaker(engine)
     with sl() as s:
-        artifacts = list(s.execute(
-            select(Artifact).where(Artifact.trial_id == trial_id),
-        ).scalars())
-        edges = list(s.execute(
-            select(ArtifactLineageEdge).where(
-                ArtifactLineageEdge.parent_artifact_id == parent_artifact_id,
-            ),
-        ).scalars())
+        artifacts = list(
+            s.execute(
+                select(Artifact).where(Artifact.trial_id == trial_id),
+            ).scalars()
+        )
+        edges = list(
+            s.execute(
+                select(ArtifactLineageEdge).where(
+                    ArtifactLineageEdge.parent_artifact_id == parent_artifact_id,
+                ),
+            ).scalars()
+        )
     by_type = {artifact.artifact_type: artifact for artifact in artifacts}
     assert {"trajectory", "atif_projection", "evidence_bundle"}.issubset(by_type)
     assert by_type["evidence_bundle"].content_hash == "sha256:" + ("2" * 64)
     assert by_type["evidence_bundle"].storage["key"].endswith("/main/result.txt")
     assert all(artifact.lifecycle_authority_id is not None for artifact in artifacts)
     with sessionmaker(engine)() as s:
-        authorities = list(s.scalars(
-            select(DataLifecycleAuthority).where(
-                DataLifecycleAuthority.id.in_([
-                    artifact.lifecycle_authority_id for artifact in artifacts
-                ])
+        authorities = list(
+            s.scalars(
+                select(DataLifecycleAuthority).where(
+                    DataLifecycleAuthority.id.in_(
+                        [artifact.lifecycle_authority_id for artifact in artifacts]
+                    )
+                )
             )
-        ))
+        )
     assert len(authorities) == len(artifacts)
     assert all(authority.data_class == "artifact" for authority in authorities)
     assert {authority.owner_id for authority in authorities} == {
         str(artifact.id) for artifact in artifacts
     }
     with sessionmaker(engine)() as s:
-        objects = list(s.scalars(
-            select(DataLifecycleObject).where(
-                DataLifecycleObject.authority_id.in_([
-                    authority.id for authority in authorities
-                ])
+        objects = list(
+            s.scalars(
+                select(DataLifecycleObject).where(
+                    DataLifecycleObject.authority_id.in_(
+                        [authority.id for authority in authorities]
+                    )
+                )
             )
-        ))
+        )
     assert len(objects) == 3
     by_object_key = {obj.object_key: obj for obj in objects}
-    assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].content_sha256 == (
-        "3" * 64
-    )
+    assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].content_sha256 == ("3" * 64)
     assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].size_bytes == 10
     assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].version_id == (
         "trajectory-version-123"
     )
-    assert by_object_key[f"{team_id}/{trial_id}/atif.json"].content_sha256 == (
-        "4" * 64
-    )
-    assert by_object_key[f"{team_id}/{trial_id}/atif.json"].version_id == (
-        "atif-version-456"
-    )
+    assert by_object_key[f"{team_id}/{trial_id}/atif.json"].content_sha256 == ("4" * 64)
+    assert by_object_key[f"{team_id}/{trial_id}/atif.json"].version_id == ("atif-version-456")
     result_key = f"{team_id}/{trial_id}/main/result.txt"
     assert by_object_key[result_key].content_sha256 == "2" * 64
     assert by_object_key[result_key].size_bytes == 5
     assert by_object_key[result_key].version_id == "artifact-version-789"
     engine.dispose()
     assert all(edge.relation == "reused_as_input" for edge in edges)
-    assert {edge.child_artifact_id for edge in edges} == {
-        artifact.id for artifact in artifacts
-    }
+    assert {edge.child_artifact_id for edge in edges} == {artifact.id for artifact in artifacts}
 
 
 @pytest.mark.parametrize("malformed_version", ["", " surrounding ", 7, False, {}])
@@ -396,9 +451,7 @@ def test_index_patch_rejects_malformed_object_version_evidence(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "worker_id": str(worker_id),
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-                ),
+                "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
                 "trajectory_size_bytes": 10,
                 "trajectory_sha256": "3" * 64,
                 "trajectory_version_id": malformed_version,
@@ -406,9 +459,7 @@ def test_index_patch_rejects_malformed_object_version_evidence(
         )
 
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == (
-        "trajectory_lifecycle_evidence_invalid"
-    )
+    assert response.json()["detail"]["code"] == ("trajectory_lifecycle_evidence_invalid")
 
 
 def test_index_patch_fenced(app, traj_seed):  # type: ignore[no-untyped-def]
@@ -440,32 +491,34 @@ def test_retry_registration_creates_distinct_lifecycle_objects(
                 headers={"Authorization": f"Bearer {raw}"},
                 json={
                     "worker_id": str(worker_id),
-                    "trajectory_uri": (
-                        f"s3://trajectories/{prefix}/events.jsonl"
-                    ),
-                        "trajectory_size_bytes": 100 + attempt,
-                        "trajectory_sha256": str(attempt) * 64,
-                        "trajectory_version_id": None,
-                    },
+                    "trajectory_uri": (f"s3://trajectories/{prefix}/events.jsonl"),
+                    "trajectory_size_bytes": 100 + attempt,
+                    "trajectory_sha256": str(attempt) * 64,
+                    "trajectory_version_id": None,
+                },
             )
             assert response.status_code == 200, response.text
 
     engine = create_engine(postgres_url)
     try:
         with sessionmaker(engine)() as session:
-            artifacts = list(session.scalars(
-                select(Artifact).where(
-                    Artifact.trial_id == trial_id,
-                    Artifact.artifact_type == "trajectory",
+            artifacts = list(
+                session.scalars(
+                    select(Artifact).where(
+                        Artifact.trial_id == trial_id,
+                        Artifact.artifact_type == "trajectory",
+                    )
                 )
-            ))
-            objects = list(session.scalars(
-                select(DataLifecycleObject).where(
-                    DataLifecycleObject.authority_id.in_([
-                        artifact.lifecycle_authority_id for artifact in artifacts
-                    ])
+            )
+            objects = list(
+                session.scalars(
+                    select(DataLifecycleObject).where(
+                        DataLifecycleObject.authority_id.in_(
+                            [artifact.lifecycle_authority_id for artifact in artifacts]
+                        )
+                    )
                 )
-            ))
+            )
         expected_keys = {
             f"{team_id}/{trial_id}/attempts/1/events.jsonl",
             f"{team_id}/{trial_id}/attempts/2/events.jsonl",
@@ -488,9 +541,11 @@ def test_control_plane_download_uses_validated_attempt_uri(
         connection.execute(
             update(Trial)
             .where(Trial.id == trial_id)
-            .values(trajectory_index={
-                "trajectory_uri": f"s3://trajectories/{key}",
-            })
+            .values(
+                trajectory_index={
+                    "trajectory_uri": f"s3://trajectories/{key}",
+                }
+            )
         )
     engine.dispose()
 
@@ -502,9 +557,7 @@ def test_control_plane_download_uses_validated_attempt_uri(
         )
 
     assert response.status_code == 302, response.text
-    assert unquote(urlparse(response.headers["location"]).path).endswith(
-        f"/trajectories/{key}"
-    )
+    assert unquote(urlparse(response.headers["location"]).path).endswith(f"/trajectories/{key}")
 
 
 def test_control_plane_download_rejects_cross_bucket_uri(
@@ -518,11 +571,13 @@ def test_control_plane_download_rejects_cross_bucket_uri(
         connection.execute(
             update(Trial)
             .where(Trial.id == trial_id)
-            .values(trajectory_index={
-                "trajectory_uri": (
-                    f"s3://foreign/{team_id}/{trial_id}/attempts/4/events.jsonl"
-                ),
-            })
+            .values(
+                trajectory_index={
+                    "trajectory_uri": (
+                        f"s3://foreign/{team_id}/{trial_id}/attempts/4/events.jsonl"
+                    ),
+                }
+            )
         )
     engine.dispose()
 

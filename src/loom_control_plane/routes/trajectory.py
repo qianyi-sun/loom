@@ -21,6 +21,7 @@ from loom.data_lifecycle_registry import (
 )
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch
 from loom.db.schema import Trial as TrialRow
+from loom.terminal_result_semantics import projected_result_conflicts
 from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
@@ -663,6 +664,18 @@ async def patch_trajectory_index(
         ) from exc
     result_payload = payload.get("result")
     index_payload = {k: v for k, v in payload.items() if k not in {"worker_id", "result"}}
+    if result_payload is not None:
+        conflicts = projected_result_conflicts(result_payload)
+        if conflicts:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "trial_terminal_result_inconsistent",
+                    "message": "projected trial result has contradictory terminal semantics",
+                    "trial_id": str(trial_id),
+                    "conflicts": conflicts,
+                },
+            )
 
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(
