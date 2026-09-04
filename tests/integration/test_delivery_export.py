@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from botocore.exceptions import ClientError
-from sqlalchemy import create_engine, delete, insert, select, update
+from sqlalchemy import create_engine, delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -299,10 +299,33 @@ async def delivery_setup(
                 }
                 app.state.minio_client.objects[
                     (settings.trajectories_bucket, f"{prefix}/events.jsonl")
-                ] = (json.dumps({"trial_id": str(trial_id), "task_id": task_id}) + "\n").encode()
+                ] = (
+                    json.dumps(
+                        {
+                            "kind": "trial_end",
+                            "seq": 1,
+                            "emitted_at": now.isoformat(),
+                            "trial_id": str(trial_id),
+                            "step_id": "__trial__",
+                            "final_state": "succeeded",
+                            "reward": {"score": reward},
+                            "failure_reason": None,
+                        }
+                    )
+                    + "\n"
+                ).encode()
                 app.state.minio_client.objects[
                     (settings.trajectories_bucket, f"{prefix}/atif.json")
-                ] = json.dumps({"version": "1.7", "trial_id": str(trial_id)}).encode()
+                ] = json.dumps(
+                    {
+                        "version": "1.7",
+                        "trial_id": str(trial_id),
+                        "metadata": {
+                            "final_state": "succeeded",
+                            "reward": {"score": reward},
+                        },
+                    }
+                ).encode()
             s.execute(
                 insert(Trial).values(
                     id=trial_id,
@@ -659,6 +682,53 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
             batch = s.get(Batch, main_batch_id)
             assert batch is not None
             assert batch.lifecycle_authority_id is not None
+    finally:
+        sync_engine.dispose()
+
+
+async def test_delivery_export_rejects_selected_trial_result_state_drift(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    inconsistent_trial_id = next(iter(selected_trials.values()))
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(sync_engine)() as session:
+            trial = session.get(Trial, inconsistent_trial_id)
+            assert trial is not None
+            trial.result = {
+                "state": "succeeded",
+                "failure_reason": "verifier_error",
+                "aggregate_reward": 1.0,
+            }
+            session.commit()
+
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            response = await ac.post(
+                f"/api/v1/batches/{main_batch_id}/delivery-export",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "supplemental_batch_ids": [
+                        str(supplemental_batch_id),
+                        str(targeted_batch_id),
+                    ]
+                },
+            )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["code"] == "delivery_export_terminal_state_mismatch"
+        assert detail["inconsistent_trials"][0]["trial_id"] == str(inconsistent_trial_id)
+        with sessionmaker(sync_engine)() as session:
+            assert session.scalar(select(func.count()).select_from(Artifact)) == 0
     finally:
         sync_engine.dispose()
 
@@ -1334,7 +1404,12 @@ async def test_delivery_export_rejects_unresolved_platform_failures(
     assert body["detail"]["unresolved_trials"][0]["task_id"].startswith("source-useful-5003/")
 
 
-def _tb2_v2_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
+def _tb2_v2_events_jsonl(
+    *,
+    trial_id: UUID,
+    artifact_hash: str,
+    terminal_state: str = "succeeded",
+) -> bytes:
     emitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     common = {
         "trial_id": str(trial_id),
@@ -1431,6 +1506,15 @@ def _tb2_v2_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
             "size_bytes": 42,
             "share_policy": "restricted",
         },
+        {
+            "seq": 7,
+            "kind": "trial_end",
+            **common,
+            "step_id": "__trial__",
+            "final_state": terminal_state,
+            "reward": {"passed": 1.0} if terminal_state == "succeeded" else None,
+            "failure_reason": (None if terminal_state == "succeeded" else "verifier_error"),
+        },
     ]
     return b"".join((json.dumps(line) + "\n").encode() for line in lines)
 
@@ -1443,6 +1527,8 @@ def _seed_tb2_v2_trial(
     team_id: UUID,
     trial_id: UUID,
     task_id: str,
+    terminal_state: str = "succeeded",
+    atif_final_state: str = "succeeded",
 ) -> bytes:
     native = json.dumps(
         {
@@ -1473,8 +1559,27 @@ def _seed_tb2_v2_trial(
     verifier_output = b'{"rewards":{"passed":1.0}}'
     verifier_output_key = f"{prefix}/main/.loom/verifier/output.json"
     fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
-        _tb2_v2_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
+        _tb2_v2_events_jsonl(
+            trial_id=trial_id,
+            artifact_hash=artifact_hash,
+            terminal_state=terminal_state,
+        )
     )
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/atif.json")] = json.dumps(
+        {
+            "schema_version": "ATIF-v1.7",
+            "steps": [],
+            "metadata": {
+                "final_state": atif_final_state,
+                "reward": ({"passed": 1.0} if atif_final_state == "succeeded" else None),
+                "error": (
+                    None
+                    if atif_final_state == "succeeded"
+                    else {"failure_reason": "verifier_error"}
+                ),
+            },
+        }
+    ).encode()
     fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
     fake_s3.objects[(settings.artifacts_bucket, verifier_log_key)] = verifier_log
     fake_s3.objects[(settings.artifacts_bucket, verifier_meta_key)] = verifier_meta
@@ -1576,6 +1681,19 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
                             "trial_id": str(trial_id),
                             "emitted_at": emitted_at,
                             "content": "legacy subprocess thought",
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "seq": 3,
+                            "kind": "trial_end",
+                            "step_id": "__trial__",
+                            "trial_id": str(trial_id),
+                            "emitted_at": emitted_at,
+                            "final_state": "succeeded",
+                            "reward": {"score": 0.0},
+                            "failure_reason": None,
                         }
                     )
                     + "\n"
@@ -1799,6 +1917,15 @@ def _openhands_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
             "size_bytes": 128,
             "share_policy": "restricted",
         },
+        {
+            "seq": 3,
+            "kind": "trial_end",
+            **common,
+            "step_id": "__trial__",
+            "final_state": "succeeded",
+            "reward": {"score": 1.0},
+            "failure_reason": None,
+        },
     ]
     return b"".join((json.dumps(line) + "\n").encode() for line in lines)
 
@@ -1987,6 +2114,29 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
     try:
         with sync_engine.begin() as conn:
             prefix = f"{team_id}/{first_trial}"
+            terminal_event = {
+                "kind": "trial_end",
+                "seq": 1,
+                "emitted_at": datetime.now(UTC).isoformat(),
+                "trial_id": str(first_trial),
+                "step_id": "__trial__",
+                "final_state": "succeeded",
+                "reward": {"passed": 1.0},
+                "failure_reason": None,
+            }
+            fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
+                json.dumps(terminal_event) + "\n"
+            ).encode()
+            fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/atif.json")] = json.dumps(
+                {
+                    "version": "1.7",
+                    "trial_id": str(first_trial),
+                    "metadata": {
+                        "final_state": "succeeded",
+                        "reward": {"passed": 1.0},
+                    },
+                }
+            ).encode()
             conn.execute(
                 update(Trial)
                 .where(Trial.id == first_trial)

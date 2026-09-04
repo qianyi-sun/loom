@@ -27,6 +27,7 @@ from loom.family_run.orchestration import apply_advance_decision
 from loom.family_run.registry import resolve_plugin
 from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
+from loom.terminal_result_semantics import terminal_result_conflicts
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
 from loom_control_plane.protected_worker_session import ProtectedBodyWorkerStateSession
 from loom_control_plane.routes.execution_fence import (
@@ -78,13 +79,13 @@ UPDATE trials
  RETURNING id, state;
 """).bindparams(bindparam("result_payload", type_=JSONB))
 
-_SUCCEEDED_RESULT_GUARD_SQL = text("""
-SELECT id
+_STATE_PATCH_RESULT_SQL = text("""
+SELECT result, config
   FROM trials
  WHERE id = (:trial_id)::uuid
    AND worker_id = (:worker_id)::uuid
    AND state = ANY(:allowed_from)
-   AND result IS NULL
+ FOR UPDATE
 """)
 
 _TERMINAL = {
@@ -320,18 +321,24 @@ async def patch_state(
             surface="result",
             lock=True,
         )
-        if new_state == TrialState.SUCCEEDED and not has_result:
-            missing_result = (
-                await session.execute(
-                    _SUCCEEDED_RESULT_GUARD_SQL,
-                    {
-                        "trial_id": trial_id,
-                        "worker_id": worker_id,
-                        "allowed_from": allowed_from,
-                    },
+        current = None
+        if new_state in _TERMINAL:
+            current = (
+                (
+                    await session.execute(
+                        _STATE_PATCH_RESULT_SQL,
+                        {
+                            "trial_id": trial_id,
+                            "worker_id": worker_id,
+                            "allowed_from": allowed_from,
+                        },
+                    )
                 )
-            ).first()
-            if missing_result is not None:
+                .mappings()
+                .one_or_none()
+            )
+        if new_state == TrialState.SUCCEEDED and not has_result:
+            if current is not None and current["result"] is None:
                 STATE_PATCH_TOTAL.labels(
                     endpoint="state",
                     result="invalid",
@@ -341,6 +348,28 @@ async def patch_state(
                     detail=(
                         "state 'succeeded' requires result to be supplied or already persisted"
                     ),
+                )
+        if current is not None and new_state in _TERMINAL:
+            effective_result = result_payload if has_result else current["result"]
+            conflicts = terminal_result_conflicts(
+                state=new_state.value,
+                result=effective_result,
+                failure_reason=failure_reason_str,
+                config=current["config"],
+            )
+            if conflicts:
+                STATE_PATCH_TOTAL.labels(endpoint="state", result="invalid").inc()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "trial_terminal_result_inconsistent",
+                        "message": (
+                            "terminal state does not agree with the persisted trial result"
+                        ),
+                        "trial_id": str(trial_id),
+                        "requested_state": new_state.value,
+                        "conflicts": conflicts,
+                    },
                 )
         row = (
             (

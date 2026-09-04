@@ -126,6 +126,92 @@ def test_state_patch_terminal_state(
         engine.dispose()
 
 
+def test_state_patch_rejects_terminal_result_conflict(
+    app, state_seed, postgres_url,
+):  # type: ignore[no-untyped-def]
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={
+                "worker_id": str(worker_a),
+                "state": "succeeded",
+                "result": {
+                    "state": "failed",
+                    "failure_reason": "verifier_error",
+                    "aggregate_reward": 1.0,
+                },
+            },
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "trial_terminal_result_inconsistent"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.state == "claimed"
+            assert trial.result is None
+    finally:
+        engine.dispose()
+
+
+def test_state_patch_rejects_persisted_success_failure_reason(
+    app, state_seed, postgres_url,
+):  # type: ignore[no-untyped-def]
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            trial.result = {
+                "state": "succeeded",
+                "failure_reason": "verifier_error",
+                "aggregate_reward": 1.0,
+            }
+            session.commit()
+        with TestClient(app) as client:
+            response = client.patch(
+                f"/trials/{trial_id}/state",
+                headers={"Authorization": f"Bearer {raw_a}"},
+                json={"worker_id": str(worker_a), "state": "succeeded"},
+            )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == (
+            "trial_terminal_result_inconsistent"
+        )
+    finally:
+        engine.dispose()
+
+
+def test_state_patch_accepts_explicit_unscored_collection(
+    app, state_seed, postgres_url,
+):  # type: ignore[no-untyped-def]
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            trial.config = {"skip_verifier": True}
+            session.commit()
+    finally:
+        engine.dispose()
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={
+                "worker_id": str(worker_a),
+                "state": "succeeded",
+                "result": {"state": "succeeded", "reward": None},
+            },
+        )
+    assert response.status_code == 200
+
+
 def test_state_patch_rejects_succeeded_without_result(
     app, state_seed,
 ):  # type: ignore[no-untyped-def]

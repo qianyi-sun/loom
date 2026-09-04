@@ -133,6 +133,37 @@ def test_index_patch(app, traj_seed, postgres_url: str):  # type: ignore[no-unty
         engine.dispose()
 
 
+def test_index_patch_rejects_contradictory_projected_result(
+    app, traj_seed, postgres_url: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, _team_id, worker_id, raw = traj_seed
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "result": {
+                    "schema_version": "1",
+                    "state": "succeeded",
+                    "failure_reason": "verifier_error",
+                    "aggregate_reward": 1.0,
+                },
+            },
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "trial_terminal_result_inconsistent"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.result is None
+            assert trial.trajectory_index is None
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize("missing_version_kind", ["trajectory", "atif", "artifact"])
 def test_index_patch_rejects_missing_object_version_evidence(
     app,

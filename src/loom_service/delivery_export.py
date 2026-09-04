@@ -26,7 +26,13 @@ from loom.data_lifecycle_registry import (
     register_lifecycle_object,
 )
 from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial, TrialResourceUsage
+from loom.models.trajectory import TrialEndEvent
 from loom.resource_usage_store import resource_usage_response, row_to_report
+from loom.terminal_result_semantics import (
+    explicit_skip_verifier,
+    has_numeric_reward,
+    terminal_result_conflicts,
+)
 from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
@@ -84,6 +90,10 @@ class UnresolvedDeliveryTrialsError(DeliveryExportError):
 class InvalidDeliveryBatchFamilyError(DeliveryExportError):
     code = "delivery_export_invalid_batch_family"
     status_code = 400
+
+
+class TerminalStateMismatchError(DeliveryExportError):
+    code = "delivery_export_terminal_state_mismatch"
 
 
 @dataclass(frozen=True)
@@ -276,9 +286,7 @@ def _object_ref_for_trial(
 ) -> ObjectRef:
     index = trial.trajectory_index if isinstance(trial.trajectory_index, dict) else {}
     uri_key = "trajectory_uri" if kind == "trajectory" else "atif_uri"
-    filename: TrajectoryObjectFilename = (
-        "events.jsonl" if kind == "trajectory" else "atif.json"
-    )
+    filename: TrajectoryObjectFilename = "events.jsonl" if kind == "trajectory" else "atif.json"
     try:
         key = resolve_trajectory_object_key(
             uri=index.get(uri_key),
@@ -745,10 +753,38 @@ def _select_trials(
                 "unresolved_trials": unresolved,
             }
         )
-    return [
+    selected = [
         selected_by_key[key]
         for key in sorted(selected_by_key, key=lambda item: (item[0], item[1], item[2]))
     ]
+    inconsistent: list[dict[str, Any]] = []
+    for item in selected:
+        trial = item.trial
+        conflicts = terminal_result_conflicts(
+            state=str(trial.state),
+            result=trial.result,
+            failure_reason=trial.failure_reason,
+            config=trial.config,
+        )
+        if conflicts:
+            inconsistent.append(
+                {
+                    "trial_id": str(trial.id),
+                    "batch_id": str(item.batch.id),
+                    "task_id": trial.task_id,
+                    "sample_idx": int(trial.sample_idx),
+                    "combination_idx": int(trial.combination_idx),
+                    "conflicts": conflicts,
+                }
+            )
+    if inconsistent:
+        raise TerminalStateMismatchError(
+            {
+                "message": "selected delivery trials have contradictory terminal semantics",
+                "inconsistent_trials": inconsistent,
+            }
+        )
+    return selected
 
 
 def _head_delivery_objects(
@@ -1643,6 +1679,7 @@ def _build_archive(
     rows: list[dict[str, Any]],
     selected: list[SelectedTrial],
     mode: DeliveryExportMode,
+    trajectory_events_by_trial: dict[UUID, list[Any]] | None = None,
     tasks_by_id: dict[str, Task] | None = None,
     llm_calls_by_trial: dict[UUID, list[LlmCall]] | None = None,
     resource_usage_by_trial: dict[UUID, list[TrialResourceUsage]] | None = None,
@@ -1749,6 +1786,7 @@ def _build_archive(
                     add_bytes=add_bytes,
                     add_ref=add_ref,
                     selected=selected,
+                    trajectory_events_by_trial=trajectory_events_by_trial or {},
                     tasks_by_id=tasks_by_id or {},
                     llm_calls_by_trial=llm_calls_by_trial or {},
                     resource_usage_by_trial=usage_rows,
@@ -1851,6 +1889,178 @@ def _load_trajectory_events(client: Any, ref: ObjectRef) -> list[Any]:
             close()
 
 
+def _validate_typed_terminal_evidence(
+    *,
+    item: SelectedTrial,
+    events: list[Any],
+) -> None:
+    terminal_events = [event for event in events if isinstance(event, TrialEndEvent)]
+    conflicts: list[dict[str, Any]] = []
+    if len(terminal_events) != 1:
+        conflicts.append(
+            {
+                "field": "trajectory.trial_end_count",
+                "expected": 1,
+                "actual": len(terminal_events),
+            }
+        )
+    else:
+        terminal = terminal_events[0]
+        if terminal.final_state != str(item.trial.state):
+            conflicts.append(
+                {
+                    "field": "trajectory.trial_end.final_state",
+                    "expected": str(item.trial.state),
+                    "actual": terminal.final_state,
+                }
+            )
+        if str(item.trial.state) == "succeeded" and terminal.failure_reason is not None:
+            conflicts.append(
+                {
+                    "field": "trajectory.trial_end.failure_reason",
+                    "expected": None,
+                    "actual": terminal.failure_reason,
+                }
+            )
+        if (
+            str(item.trial.state) == "succeeded"
+            and not has_numeric_reward(terminal.reward)
+            and not explicit_skip_verifier(item.trial.config)
+        ):
+            conflicts.append(
+                {
+                    "field": "trajectory.trial_end.reward",
+                    "expected": "numeric reward or config.skip_verifier=true",
+                    "actual": terminal.reward,
+                }
+            )
+        result = item.trial.result
+        if isinstance(result, dict) and "reward" in result and result["reward"] != terminal.reward:
+            conflicts.append(
+                {
+                    "field": "trajectory.trial_end.reward",
+                    "expected": result["reward"],
+                    "actual": terminal.reward,
+                }
+            )
+    if conflicts:
+        raise TerminalStateMismatchError(
+            {
+                "message": "typed trajectory terminal evidence disagrees with the trial row",
+                "inconsistent_trials": [
+                    {
+                        "trial_id": str(item.trial.id),
+                        "batch_id": str(item.batch.id),
+                        "task_id": item.trial.task_id,
+                        "conflicts": conflicts,
+                    }
+                ],
+            }
+        )
+
+
+def _validate_atif_terminal_evidence(*, client: Any, item: SelectedTrial) -> None:
+    body = _get_object_bytes(client, item.atif)
+    try:
+        document = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TerminalStateMismatchError(
+            {
+                "message": "ATIF terminal evidence is not valid JSON",
+                "inconsistent_trials": [
+                    {
+                        "trial_id": str(item.trial.id),
+                        "batch_id": str(item.batch.id),
+                        "task_id": item.trial.task_id,
+                        "conflicts": [
+                            {
+                                "field": "atif",
+                                "expected": "JSON object",
+                                "actual": "invalid_json",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ) from exc
+    metadata = document.get("metadata") if isinstance(document, dict) else None
+    conflicts: list[dict[str, Any]] = []
+    if not isinstance(metadata, dict):
+        conflicts.append(
+            {"field": "atif.metadata", "expected": "object", "actual": type(metadata).__name__}
+        )
+    else:
+        final_state = metadata.get("final_state")
+        if final_state != str(item.trial.state):
+            conflicts.append(
+                {
+                    "field": "atif.metadata.final_state",
+                    "expected": str(item.trial.state),
+                    "actual": final_state,
+                }
+            )
+        error = metadata.get("error")
+        failure_reason = error.get("failure_reason") if isinstance(error, dict) else None
+        if str(item.trial.state) == "succeeded" and failure_reason is not None:
+            conflicts.append(
+                {
+                    "field": "atif.metadata.error.failure_reason",
+                    "expected": None,
+                    "actual": failure_reason,
+                }
+            )
+        reward = metadata.get("reward")
+        if (
+            str(item.trial.state) == "succeeded"
+            and not has_numeric_reward(reward)
+            and not explicit_skip_verifier(item.trial.config)
+        ):
+            conflicts.append(
+                {
+                    "field": "atif.metadata.reward",
+                    "expected": "numeric reward or config.skip_verifier=true",
+                    "actual": reward,
+                }
+            )
+        result = item.trial.result
+        if isinstance(result, dict) and "reward" in result and result["reward"] != reward:
+            conflicts.append(
+                {
+                    "field": "atif.metadata.reward",
+                    "expected": result["reward"],
+                    "actual": reward,
+                }
+            )
+    if conflicts:
+        raise TerminalStateMismatchError(
+            {
+                "message": "ATIF terminal evidence disagrees with the trial row",
+                "inconsistent_trials": [
+                    {
+                        "trial_id": str(item.trial.id),
+                        "batch_id": str(item.batch.id),
+                        "task_id": item.trial.task_id,
+                        "conflicts": conflicts,
+                    }
+                ],
+            }
+        )
+
+
+def _validate_selected_terminal_evidence(
+    *,
+    client: Any,
+    selected: list[SelectedTrial],
+) -> dict[UUID, list[Any]]:
+    events_by_trial: dict[UUID, list[Any]] = {}
+    for item in selected:
+        events = _load_trajectory_events(client, item.trajectory)
+        _validate_typed_terminal_evidence(item=item, events=events)
+        _validate_atif_terminal_evidence(client=client, item=item)
+        events_by_trial[item.trial.id] = events
+    return events_by_trial
+
+
 def _add_raw_harbor_entries(
     *,
     tar: tarfile.TarFile,
@@ -1858,6 +2068,7 @@ def _add_raw_harbor_entries(
     add_bytes: Any,
     add_ref: Any,
     selected: list[SelectedTrial],
+    trajectory_events_by_trial: dict[UUID, list[Any]],
     tasks_by_id: dict[str, Task],
     llm_calls_by_trial: dict[UUID, list[LlmCall]],
     resource_usage_by_trial: dict[UUID, list[TrialResourceUsage]],
@@ -1935,7 +2146,7 @@ def _add_raw_harbor_entries(
 
         trajectory_artifacts: list[dict[str, str]]
         if openhands_profile:
-            events = _load_trajectory_events(client, item.trajectory)
+            events = trajectory_events_by_trial[item.trial.id]
             openhands_bundle = build_per_trial_openhands_bundle(
                 trial=item.trial,
                 events=events,
@@ -1972,7 +2183,7 @@ def _add_raw_harbor_entries(
                 )
             trajectory_artifacts = list(openhands_bundle.artifact_manifest_entries)
         elif tb2_v2_profile:
-            events = _load_trajectory_events(client, item.trajectory)
+            events = trajectory_events_by_trial[item.trial.id]
             tb2_v2_bundle = build_per_trial_v2_bundle(
                 trial=item.trial,
                 events=events,
@@ -2293,6 +2504,10 @@ async def create_delivery_export(
         selected,
         canonical_bundles,
     )
+    trajectory_events_by_trial = _validate_selected_terminal_evidence(
+        client=minio_client,
+        selected=selected,
+    )
     tasks_by_id: dict[str, Task] = {}
     llm_calls_by_trial: dict[UUID, list[LlmCall]] = {}
     resource_usage_by_trial = await _resource_usage_for_selected(session, selected)
@@ -2338,6 +2553,7 @@ async def create_delivery_export(
         rows=rows,
         selected=selected,
         mode=mode,
+        trajectory_events_by_trial=trajectory_events_by_trial,
         tasks_by_id=tasks_by_id,
         llm_calls_by_trial=llm_calls_by_trial,
         resource_usage_by_trial=resource_usage_by_trial,

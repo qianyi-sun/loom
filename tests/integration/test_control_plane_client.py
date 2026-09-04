@@ -381,6 +381,43 @@ async def test_patch_state_returns_false_when_fenced(  # type: ignore[no-untyped
         await http.aclose()
 
 
+async def test_patch_state_raises_for_terminal_semantic_conflict(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="claimed", worker_id=wid,
+                result={
+                    "state": "succeeded",
+                    "failure_reason": "verifier_error",
+                    "aggregate_reward": 1.0,
+                },
+            ))
+        engine.dispose()
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await cp.patch_state(
+                trial_id=trial_id, worker_id=wid, state="succeeded",
+            )
+        assert caught.value.response.status_code == 422
+        assert caught.value.response.json()["detail"]["code"] == (
+            "trial_terminal_result_inconsistent"
+        )
+    finally:
+        await http.aclose()
+
+
 async def test_requeue_trial_retry_moves_prestart_claim_back_to_queue(  # type: ignore[no-untyped-def]
     cp_setup, postgres_url,
 ):
@@ -970,7 +1007,10 @@ async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # ty
             await cp.patch_output_projection(
                 trial_id=trial_id,
                 worker_id=worker_id,
-                result={"schema_version": "1", "state": "succeeded"},
+                result={
+                    "schema_version": "1", "state": "succeeded",
+                    "aggregate_reward": 1.0,
+                },
                 trajectory_index={
                     "trajectory_uri": (
                         f"s3://wrong-bucket/{team_id}/{trial_id}/events.jsonl"
@@ -1023,7 +1063,10 @@ async def test_patch_output_projection_returns_false_only_for_claim_fence(  # ty
         assert await cp.patch_output_projection(
             trial_id=trial_id,
             worker_id=worker_id,
-            result={"schema_version": "1", "state": "succeeded"},
+                result={
+                    "schema_version": "1", "state": "succeeded",
+                    "aggregate_reward": 1.0,
+                },
             trajectory_index={
                 "trajectory_uri": (
                     f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
