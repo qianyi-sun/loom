@@ -517,12 +517,18 @@ async def _drive_spawn(runner_target: object, *, attempt_count: object = 1) -> P
     return captured[0]
 
 
-class _SucceedingRunner:
+class _RunnerDouble:
+    async def interrupt_attempt(self) -> None:
+        """These runners own no agent resources outside their run coroutine."""
+        return None
+
+
+class _SucceedingRunner(_RunnerDouble):
     async def run(self) -> None:
         return None
 
 
-class _FailingRunner:
+class _FailingRunner(_RunnerDouble):
     async def run(self) -> None:
         raise RuntimeError("simulated agent error")
 
@@ -595,7 +601,7 @@ async def test_spawn_uses_script_verifier_from_task_config() -> None:
     pool = RunnerPool(max_concurrent=1)
     captured: dict[str, object] = {}
 
-    class _CapturingRunner:
+    class _CapturingRunner(_RunnerDouble):
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
@@ -639,7 +645,7 @@ async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
     pool = RunnerPool(max_concurrent=1)
     captured: dict[str, object] = {}
 
-    class _CapturingRunner:
+    class _CapturingRunner(_RunnerDouble):
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
@@ -698,7 +704,7 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
     checksummed_paths: list[Path] = []
     metadata_paths: list[Path] = []
 
-    class _CapturingRunner:
+    class _CapturingRunner(_RunnerDouble):
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
@@ -1064,7 +1070,7 @@ async def test_setup_retry_report_false_falls_back_to_terminal_patch() -> None:
 async def test_tempdir_cleaned_on_cancellation() -> None:
     from loom_worker.vllm_registry import WorkerVLLMRegistry
 
-    class _SlowRunner:
+    class _SlowRunner(_RunnerDouble):
         async def run(self) -> None:
             await asyncio.sleep(10.0)
 
