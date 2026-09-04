@@ -39,6 +39,7 @@ class EventKind(StrEnum):
     TOOL_USE = "tool_use"
     AGENT_THOUGHT = "agent_thought"
     AGENT_RETRY = "agent_retry"
+    AGENT_TIMEOUT = "agent_timeout"
     # Verifier-level
     VERIFIER_START = "verifier_start"
     VERIFIER_END = "verifier_end"
@@ -280,6 +281,17 @@ class AgentRetryEvent(_EventBase):
     failure_reason: str
     failure_message: str | None = None
     retry_after_sec: float = Field(ge=0)
+
+
+class AgentTimeoutEvent(_EventBase):
+    """One supervisor-owned diagnostic emitted when an attempt deadline wins."""
+
+    kind: Literal[EventKind.AGENT_TIMEOUT] = EventKind.AGENT_TIMEOUT
+    configured_timeout_sec: float = Field(gt=0)
+    elapsed_monotonic_sec: float = Field(ge=0)
+    cancellation_drain_sec: float = Field(ge=0)
+    transport_close_required: bool
+    task_stopped: bool
 
 
 class VerifierStartEvent(_EventBase):
@@ -525,6 +537,7 @@ TrajectoryEvent = Annotated[
     | EnvStartEvent | EnvReadyEvent | EnvStopEvent | EnvExecEvent
     | FileUploadEvent | FileDownloadEvent
     | LLMCallEvent | ToolUseEvent | AgentThoughtEvent | AgentRetryEvent
+    | AgentTimeoutEvent
     | VerifierStartEvent | VerifierEndEvent | VerifierCheckEvent
     | NetworkPolicyChangeEvent
     | WorkerLostClaimEvent | WorkerDrainInterruptedEvent
