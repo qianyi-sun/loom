@@ -317,6 +317,15 @@ checked polling, claim TTL, concurrency, and source-retention settings. A
 restart reclaims expired materialization leases from PostgreSQL; no operator
 must reconnect a completed Batch or copy artifacts manually.
 
+Uploaded TaskSets retain the source `task.toml` identity while registering the
+Task under a team/TaskSet-qualified catalog ID. Canonical trajectory events and
+ATIF use the Trial's referenced catalog Task ID; comparing it directly with the
+embedded source ID is invalid. A historical `task_identity_drift` failure must
+not be repaired by rewriting Task or Trial rows. Deploy the corrected
+materializer and verify a fresh ordinary-user submission; keep the original
+failed Trial and committed source evidence for diagnosis. This identity mapping
+does not relax output manifest, producer, runtime-result, or digest validation.
+
 The evidence collector uses checksum-pinned Trivy and `crane` binaries on the
 gateway, authenticates to Nebius Registry with the VM service account, rejects
 CRITICAL findings, and atomically retains owner-only CycloneDX SBOMs, complete
