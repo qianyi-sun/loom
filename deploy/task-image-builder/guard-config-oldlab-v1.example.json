@@ -76,6 +76,13 @@
     "bpf_program_sha256": "dcec31541f762642b6a5a2211813a67983b25a6315e6993b8b1b3085247d4173",
     "bpf_map_schema_sha256": "272db8ab014f094fa3e1d4364ee94fd0892ad8db4c6422ec6e4409829feb69d4"
   },
+  "storage": {
+    "root": "/var/lib/loom-task-builder",
+    "mount_device": "259:1",
+    "project_id": 300993,
+    "byte_limit": 107374182400,
+    "inode_limit": 1000000
+  },
   "service": {
     "attestation_interval_seconds": 15,
     "attestation_lifetime_seconds": 60,

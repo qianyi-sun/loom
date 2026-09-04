@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -17,6 +18,7 @@ from loom.db.schema import (
     TaskImageBuildGrantEvent,
     TaskImageBuildProjection,
     TaskImageBuildProjectionEvent,
+    TaskImageBuildSessionGeneration,
 )
 from loom.security.secret_store import SecretStore
 from loom_control_plane.task_image_build_environment import (
@@ -36,14 +38,15 @@ from loom_control_plane.task_image_build_grants import (
 from loom_task_image_authority.contracts import (
     TaskImageAttachmentProofV1,
     TaskImageBootstrapExchangeV1,
-    TaskImageBuildGrantAuthorityV1,
-    TaskImageBuildSessionV1,
+    TaskImageBuildGrantAuthorityV2,
+    TaskImageBuildSessionV2,
     TaskImageContainmentAttachmentV1,
     TaskImageContainmentAttestationV1,
     TaskImageGuardPrincipalV1,
     TaskImageProjectionChallengeV1,
     TaskImageProjectionRequestV1,
     TaskImageProjectionRevocationV1,
+    TaskImageSessionRenewalV1,
     canonical_authority_sha256,
     canonical_public_binding_sha256,
 )
@@ -56,6 +59,7 @@ from loom_task_image_authority.store import (
     exchange_task_image_bootstrap,
     expire_task_image_projection,
     record_task_image_containment_attestation,
+    renew_task_image_build_session,
     request_task_image_projection,
     revoke_task_image_projection,
 )
@@ -68,7 +72,10 @@ PROOF_ID = UUID("44444444-4444-4444-4444-444444444444")
 EXCHANGE_ID = UUID("55555555-5555-5555-5555-555555555555")
 NODE_BOOT_ID = UUID("77777777-7777-7777-7777-777777777777")
 ATTESTATION_ID = UUID("88888888-8888-8888-8888-888888888888")
+RENEWAL_ID = UUID("99999999-9999-9999-9999-999999999999")
+NEXT_SESSION_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 SUPERVISOR_SHA256 = "6" * 64
+PROVIDER_RELEASE_SHA256 = "a" * 64
 CGROUP_PATH = "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch"
 
 
@@ -100,7 +107,8 @@ def _policy() -> SlurmBuildEnvironmentPolicyV1:
 
 def _grant(*, expires_at: datetime = NOW + timedelta(hours=2)):
     policy = _policy()
-    authority = TaskImageBuildGrantAuthorityV1(
+    authority = TaskImageBuildGrantAuthorityV2(
+        schema_version=2,
         purpose="production",
         shadow_campaign_id=None,
         environment="staging",
@@ -108,7 +116,8 @@ def _grant(*, expires_at: datetime = NOW + timedelta(hours=2)):
         slurm_cluster_id="gb10",
         cpu_arch="arm64",
         slurm_request_sha256=canonical_request_sha256(policy.request_identity()),
-        builder_release_sha256=SUPERVISOR_SHA256,
+        builder_release_sha256=PROVIDER_RELEASE_SHA256,
+        supervisor_executable_sha256=SUPERVISOR_SHA256,
         build_policy_sha256="3" * 64,
         containment_policy_sha256="4" * 64,
         resource_profile_sha256="5" * 64,
@@ -286,6 +295,7 @@ async def projection_session(
         yield factory
     finally:
         async with factory() as session:
+            await session.execute(delete(TaskImageBuildSessionGeneration))
             await session.execute(delete(TaskImageBuildContainmentAttestation))
             await session.execute(delete(TaskImageBuildProjectionEvent))
             await session.execute(delete(TaskImageBuildProjection))
@@ -328,9 +338,7 @@ async def test_challenge_is_durable_exactly_replayable_and_conflict_bound(
         assert challenge.challenge_nonce == CHALLENGE_NONCE
         assert challenge.request_sha256 == canonical_authority_sha256(request)
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "challenged"
@@ -388,9 +396,7 @@ async def test_projection_rejects_stored_identity_scalar_drift(
             challenge_nonce_factory=lambda: CHALLENGE_NONCE,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         setattr(row, field, changed_value)
@@ -428,9 +434,7 @@ async def test_projection_rejects_stored_request_document_drift(
             challenge_nonce_factory=lambda: CHALLENGE_NONCE,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         row.request_json = {**row.request_json, "supervisor_pid": 42101}
@@ -474,9 +478,7 @@ async def test_projection_rejects_stored_challenge_scalar_drift(
             challenge_nonce_factory=lambda: CHALLENGE_NONCE,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         setattr(row, field, changed_value)
@@ -511,15 +513,11 @@ async def test_projection_rejects_rehashed_challenge_authority_drift(
             challenge_nonce_factory=lambda: CHALLENGE_NONCE,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         changed = TaskImageProjectionChallengeV1.model_validate_json(
-            json.dumps(
-                {**row.challenge_json, "containment_policy_sha256": "a" * 64}
-            )
+            json.dumps({**row.challenge_json, "containment_policy_sha256": "a" * 64})
         )
         row.challenge_json = changed.model_dump(mode="json", exclude_none=False)
         row.challenge_sha256 = canonical_authority_sha256(changed)
@@ -554,9 +552,7 @@ async def test_projection_rejects_rehashed_challenge_before_request_observation(
             challenge_nonce_factory=lambda: CHALLENGE_NONCE,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         changed = TaskImageProjectionChallengeV1.model_validate_json(
@@ -614,9 +610,7 @@ async def test_challenge_rejects_untrusted_or_stale_job_facts_before_state(
     projection_session: async_sessionmaker[AsyncSession],
     drift: str,
 ) -> None:
-    expires_at = NOW + (
-        timedelta(seconds=4) if drift == "grant_expiry" else timedelta(hours=2)
-    )
+    expires_at = NOW + (timedelta(seconds=4) if drift == "grant_expiry" else timedelta(hours=2))
     principal = _principal()
     request = _request()
     now = NOW + timedelta(seconds=4)
@@ -683,6 +677,29 @@ async def test_challenge_rejects_untrusted_or_stale_job_facts_before_state(
         )
 
 
+async def test_challenge_rejects_non_object_stored_grant_authority_fail_closed(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    async with projection_session() as session:
+        await _release_grant(session)
+        row = await session.get(TaskImageBuildGrant, GRANT_ID)
+        assert row is not None
+        row.authority_spec = []  # type: ignore[assignment]
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="build grant authority is invalid",
+        ):
+            with session.no_autoflush:
+                await request_task_image_projection(
+                    session,
+                    principal=_principal(),
+                    request=_request(),
+                    now=NOW + timedelta(seconds=4),
+                    challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+                )
+
+
 async def test_projection_persists_one_hashed_secret_and_initial_attestation(
     projection_session: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -709,9 +726,7 @@ async def test_projection_persists_one_hashed_secret_and_initial_attestation(
         )
 
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         attestations = list(
             (
@@ -725,9 +740,10 @@ async def test_projection_persists_one_hashed_secret_and_initial_attestation(
         assert row is not None
         assert receipt.bootstrap_token.startswith("loom_tibp_")
         assert row.state == "projected"
-        assert row.bootstrap_token_hash == hashlib.sha256(
-            receipt.bootstrap_token.encode("utf-8")
-        ).digest()
+        assert (
+            row.bootstrap_token_hash
+            == hashlib.sha256(receipt.bootstrap_token.encode("utf-8")).digest()
+        )
         assert row.bootstrap_secret_ref is not None
         assert row.bootstrap_secret_ref.startswith("loom://task-image-bootstrap/")
         assert receipt.bootstrap_token not in json.dumps(row.proof_json)
@@ -862,9 +878,7 @@ async def test_projection_rejects_invalid_proof_before_creating_a_secret(
             attachment=_attachment(cgroup_inode=987655),
         )
     elif drift == "changed_cgroup_path":
-        changed_cgroup = (
-            "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_54321/step_batch"
-        )
+        changed_cgroup = "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_54321/step_batch"
         changed_root = f"{changed_cgroup}/loom-builder"
         proof = _proof(
             cgroup_path=changed_cgroup,
@@ -904,9 +918,7 @@ async def test_projection_rejects_invalid_proof_before_creating_a_secret(
                 bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
             )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "challenged"
@@ -942,9 +954,7 @@ async def test_secret_store_failure_rolls_projection_back_to_challenged(
         await session.rollback()
 
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "challenged"
@@ -994,9 +1004,7 @@ async def test_secret_bearing_projection_validation_redacts_raw_tokens(
             bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         row.bootstrap_issued_at = NOW - timedelta(seconds=30)
@@ -1087,9 +1095,7 @@ def _attestation(
         "cgroup_inode": proof.cgroup_inode,
         "attachment": proof.attachment,
         "issued_at": (
-            proof.observed_at
-            if generation == 1
-            else NOW + timedelta(seconds=10 + generation)
+            proof.observed_at if generation == 1 else NOW + timedelta(seconds=10 + generation)
         ),
         "expires_at": (
             proof.attestation_expires_at
@@ -1145,15 +1151,14 @@ async def test_exchange_consumes_one_bootstrap_and_exact_replay_is_bounded(
             NOW + timedelta(seconds=40),
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "exchanged"
-        assert row.session_token_hash == hashlib.sha256(
-            build_session.session_token.encode("utf-8")
-        ).digest()
+        assert (
+            row.session_token_hash
+            == hashlib.sha256(build_session.session_token.encode("utf-8")).digest()
+        )
         assert row.session_secret_ref is not None
         assert row.session_secret_ref.startswith("loom://task-image-session/")
         assert row.session_json == build_session.public_binding()
@@ -1182,7 +1187,7 @@ async def test_exchange_consumes_one_bootstrap_and_exact_replay_is_bounded(
         row.session_sha256 = "c" * 64
         with pytest.raises(
             TaskImageProjectionAuthorizationError,
-            match="stored task-image build session changed",
+            match="current pointer changed",
         ):
             await exchange_task_image_bootstrap(
                 session,
@@ -1192,6 +1197,158 @@ async def test_exchange_consumes_one_bootstrap_and_exact_replay_is_bounded(
                 secret_store=secrets,
                 session_token_factory=lambda: "loom_tibs_" + "E" * 64,
             )
+
+
+async def test_renewal_atomically_advances_session_and_attestation_with_exact_replay(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    principal = _principal()
+    async with projection_session() as session:
+        grant, _principal_value, proof, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        initial = await exchange_task_image_bootstrap(
+            session,
+            principal=principal,
+            request=_exchange(receipt),
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        assert isinstance(initial, TaskImageBuildSessionV2)
+        assert initial.generation == 1
+        next_attestation = _attestation(proof, generation=2)
+        renewal = TaskImageSessionRenewalV1(
+            renewal_id=RENEWAL_ID,
+            grant_id=GRANT_ID,
+            session_id=initial.session_id,
+            session_generation=initial.generation,
+            session_token=initial.session_token,
+            attestation=next_attestation,
+            observed_at=next_attestation.issued_at,
+        )
+
+        renewed = await renew_task_image_build_session(
+            session,
+            principal=principal,
+            request=renewal,
+            now=NOW + timedelta(seconds=13),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+            session_id_factory=lambda: NEXT_SESSION_ID,
+        )
+        replay = await renew_task_image_build_session(
+            session,
+            principal=principal,
+            request=renewal,
+            now=NOW + timedelta(seconds=14),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "D" * 64,
+            session_id_factory=lambda: UUID(int=11),
+        )
+        second_replay = await renew_task_image_build_session(
+            session,
+            principal=principal,
+            request=renewal,
+            now=NOW + timedelta(seconds=14),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "E" * 64,
+            session_id_factory=lambda: UUID(int=12),
+        )
+
+        assert renewed == replay == second_replay
+        assert renewed.generation == 2
+        assert renewed.session_id == NEXT_SESSION_ID
+        assert renewed.session_id != initial.session_id
+        assert renewed.attestation_generation == 2
+        assert renewed.attestation_sha256 == canonical_authority_sha256(next_attestation)
+        assert (
+            receipt.expires_at
+            < renewed.expires_at
+            <= min(
+                grant.authority.expires_at,
+                next_attestation.expires_at,
+                NOW + timedelta(minutes=15, seconds=13),
+            )
+        )
+        generations = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildSessionGeneration)
+                    .where(TaskImageBuildSessionGeneration.grant_id == GRANT_ID)
+                    .order_by(TaskImageBuildSessionGeneration.generation)
+                )
+            ).all()
+        )
+        assert [item.generation for item in generations] == [1, 2]
+        assert generations[0].renewal_id is None
+        assert generations[1].renewal_id == RENEWAL_ID
+        assert generations[1].predecessor_session_id == initial.session_id
+        assert generations[1].renewal_sha256 == canonical_public_binding_sha256(renewal)
+        projection = await session.scalar(
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
+        )
+        assert projection is not None
+        assert projection.session_id == renewed.session_id
+        assert projection.session_generation == renewed.generation
+        assert projection.attestation_generation == renewed.attestation_generation
+        assert secrets.put_count == 3
+
+        authorization = await authorize_task_image_build_session(
+            session,
+            grant_id=GRANT_ID,
+            session_id=renewed.session_id,
+            session_generation=renewed.generation,
+            raw_session_token=renewed.session_token,
+            now=NOW + timedelta(seconds=14),
+        )
+        assert authorization.session_id == renewed.session_id
+        assert authorization.session_generation == 2
+        assert authorization.builder_release_sha256 == PROVIDER_RELEASE_SHA256
+        assert authorization.supervisor_executable_sha256 == SUPERVISOR_SHA256
+        with pytest.raises(TaskImageProjectionAuthorizationError):
+            await authorize_task_image_build_session(
+                session,
+                grant_id=GRANT_ID,
+                session_id=initial.session_id,
+                session_generation=initial.generation,
+                raw_session_token=initial.session_token,
+                now=NOW + timedelta(seconds=14),
+            )
+
+        changed = renewal.model_copy(
+            update={
+                "attestation": next_attestation.model_copy(
+                    update={"expires_at": next_attestation.expires_at - timedelta(seconds=1)}
+                )
+            }
+        )
+        with pytest.raises(TaskImageProjectionConflictError):
+            await renew_task_image_build_session(
+                session,
+                principal=principal,
+                request=changed,
+                now=NOW + timedelta(seconds=14),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "F" * 64,
+                session_id_factory=lambda: UUID(int=13),
+            )
+        assert projection.state == "exchanged"
+        assert projection.session_id == renewed.session_id
+        assert secrets.put_count == 3
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildProjectionEvent).where(
+                        TaskImageBuildProjectionEvent.grant_id == GRANT_ID
+                    )
+                )
+            ).all()
+        )
+        assert [event.event_type for event in events].count("renewed") == 1
+        assert [event.event_type for event in events].count("renewal_replayed") == 1
 
 
 @pytest.mark.parametrize(
@@ -1225,9 +1382,7 @@ async def test_exchange_rejects_wrong_guard_before_session_secret_creation(
             )
 
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "projected"
@@ -1367,9 +1522,7 @@ async def test_exchange_rejects_changed_attestation_high_water(
             secret_store=secrets,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         row.attestation_sha256 = "a" * 64
@@ -1399,9 +1552,7 @@ async def test_exchange_rejects_rehashed_stored_proof_drift(
             secret_store=secrets,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.proof_json is not None
@@ -1442,9 +1593,7 @@ async def test_exchange_rejects_bootstrap_expiry_beyond_initial_attestation(
             secret_store=secrets,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         row.bootstrap_expires_at = proof.attestation_expires_at + timedelta(seconds=1)
@@ -1483,9 +1632,7 @@ async def test_exchange_replay_rejects_stored_exchange_document_drift(
             session_token_factory=lambda: "loom_tibs_" + "B" * 64,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.exchange_json is not None
@@ -1595,13 +1742,16 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
         assert replay == second_replay == generation_one
 
         generation_two = _attestation(proof, generation=2)
-        recorded = await record_task_image_containment_attestation(
-            session,
-            principal=principal,
-            attestation=generation_two,
-            now=NOW + timedelta(seconds=13),
-        )
-        assert recorded == generation_two
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="requires atomic renewal",
+        ):
+            await record_task_image_containment_attestation(
+                session,
+                principal=principal,
+                attestation=generation_two,
+                now=NOW + timedelta(seconds=13),
+            )
 
         replayed_session = await exchange_task_image_bootstrap(
             session,
@@ -1616,6 +1766,8 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
         authorization = await authorize_task_image_build_session(
             session,
             grant_id=GRANT_ID,
+            session_id=build_session.session_id,
+            session_generation=build_session.generation,
             raw_session_token=build_session.session_token,
             now=NOW + timedelta(seconds=14),
         )
@@ -1624,32 +1776,28 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
         assert authorization.purpose == "production"
         assert authorization.pool_id == "staging-gb10-task-image"
         assert authorization.cpu_arch == "arm64"
-        assert authorization.attestation_generation == 2
-        assert authorization.attestation_sha256 == canonical_authority_sha256(
-            generation_two
-        )
+        assert authorization.attestation_generation == 1
+        assert authorization.attestation_sha256 == canonical_authority_sha256(generation_one)
         assert authorization.grant_expires_at == grant.authority.expires_at
 
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         original_session_json = row.session_json
         original_session_sha256 = row.session_sha256
-        changed_session = build_session.model_copy(
-            update={"pool_id": "attacker-pool"}
-        )
+        changed_session = build_session.model_copy(update={"pool_id": "attacker-pool"})
         row.session_json = changed_session.public_binding()
         row.session_sha256 = canonical_public_binding_sha256(changed_session)
         with pytest.raises(
             TaskImageProjectionAuthorizationError,
-            match="stored task-image build session changed",
+            match="current pointer changed",
         ):
             await authorize_task_image_build_session(
                 session,
                 grant_id=GRANT_ID,
+                session_id=build_session.session_id,
+                session_generation=build_session.generation,
                 raw_session_token=build_session.session_token,
                 now=NOW + timedelta(seconds=14),
             )
@@ -1666,25 +1814,26 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
             ).all()
         )
         assert [event.event_type for event in events].count("attestation_replayed") == 1
-        assert [event.event_type for event in events].count("attested") == 1
+        assert [event.event_type for event in events].count("attested") == 0
 
         with pytest.raises(TaskImageProjectionAuthorizationError):
             await authorize_task_image_build_session(
                 session,
                 grant_id=GRANT_ID,
+                session_id=build_session.session_id,
+                session_generation=build_session.generation,
                 raw_session_token="loom_tibs_" + "Z" * 64,
                 now=NOW + timedelta(seconds=14),
             )
 
-        row.attestation_expires_at = NOW + timedelta(seconds=14)
-        await session.flush()
-        assert build_session.expires_at > NOW + timedelta(seconds=14)
         with pytest.raises(TaskImageProjectionExpiredError):
             await authorize_task_image_build_session(
                 session,
                 grant_id=GRANT_ID,
+                session_id=build_session.session_id,
+                session_generation=build_session.generation,
                 raw_session_token=build_session.session_token,
-                now=NOW + timedelta(seconds=14),
+                now=build_session.expires_at,
             )
 
 
@@ -1706,14 +1855,11 @@ async def test_session_rejects_rehashed_expiry_beyond_its_bootstrap_and_attestat
             session_token_factory=lambda: "loom_tibs_" + "B" * 64,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
-        changed = TaskImageBuildSessionV1.model_validate(
-            build_session.model_dump(mode="python")
-            | {"expires_at": NOW + timedelta(minutes=5)}
+        changed = TaskImageBuildSessionV2.model_validate(
+            build_session.model_dump(mode="python") | {"expires_at": NOW + timedelta(minutes=5)}
         )
         row.session_json = changed.public_binding()
         row.session_sha256 = canonical_public_binding_sha256(changed)
@@ -1721,11 +1867,13 @@ async def test_session_rejects_rehashed_expiry_beyond_its_bootstrap_and_attestat
 
         with pytest.raises(
             TaskImageProjectionAuthorizationError,
-            match="stored task-image build session changed",
+            match="current pointer changed",
         ):
             await authorize_task_image_build_session(
                 session,
                 grant_id=GRANT_ID,
+                session_id=build_session.session_id,
+                session_generation=build_session.generation,
                 raw_session_token=build_session.session_token,
                 now=NOW + timedelta(seconds=14),
             )
@@ -1751,7 +1899,7 @@ async def test_session_rejects_rehashed_expiry_beyond_its_bootstrap_and_attestat
         "resource_digest",
     ],
 )
-async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
+async def test_renewal_rejects_skips_or_attachment_drift(
     projection_session: async_sessionmaker[AsyncSession],
     drift: str,
 ) -> None:
@@ -1761,7 +1909,7 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
             session,
             secret_store=secrets,
         )
-        await exchange_task_image_bootstrap(
+        build_session = await exchange_task_image_bootstrap(
             session,
             principal=principal,
             request=_exchange(receipt),
@@ -1773,7 +1921,7 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
         expected: type[Exception] = TaskImageProjectionAuthorizationError
         if drift == "skipped_generation":
             candidate = _attestation(proof, generation=3)
-            expected = TaskImageProjectionConflictError
+            expected = ValidationError
         elif drift == "nonmonotonic_observation":
             candidate = _attestation(
                 proof,
@@ -1812,9 +1960,7 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
                 attachment=_attachment(cgroup_inode=987655),
             )
         elif drift == "cgroup_path":
-            changed_cgroup = (
-                "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_54321/step_batch"
-            )
+            changed_cgroup = "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_54321/step_batch"
             changed_root = f"{changed_cgroup}/loom-builder"
             candidate = _attestation(
                 proof,
@@ -1858,16 +2004,25 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
             )
 
         with pytest.raises(expected):
-            await record_task_image_containment_attestation(
+            await renew_task_image_build_session(
                 session,
                 principal=principal,
-                attestation=candidate,
+                request=TaskImageSessionRenewalV1(
+                    renewal_id=RENEWAL_ID,
+                    grant_id=GRANT_ID,
+                    session_id=build_session.session_id,
+                    session_generation=build_session.generation,
+                    session_token=build_session.session_token,
+                    attestation=candidate,
+                    observed_at=candidate.issued_at,
+                ),
                 now=NOW + timedelta(seconds=13),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+                session_id_factory=lambda: NEXT_SESSION_ID,
             )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.attestation_generation == 1
@@ -1903,9 +2058,7 @@ async def test_attestation_equivocation_durably_revokes_projection(
 
     async with projection_session() as session:
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "revoked"
@@ -1954,9 +2107,7 @@ async def test_guard_revocation_binds_principal_grant_time_reason_and_event(
             session_token_factory=lambda: "loom_tibs_" + "B" * 64,
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
 
@@ -2083,6 +2234,8 @@ async def test_revocation_is_exact_irreversible_and_blocks_session_and_attestati
             await authorize_task_image_build_session(
                 session,
                 grant_id=GRANT_ID,
+                session_id=build_session.session_id,
+                session_generation=build_session.generation,
                 raw_session_token=build_session.session_token,
                 now=NOW + timedelta(seconds=13),
             )
@@ -2122,9 +2275,7 @@ async def test_expiration_requires_the_earliest_deadline_and_is_idempotent(
             now=NOW + timedelta(seconds=41),
         )
         row = await session.scalar(
-            select(TaskImageBuildProjection).where(
-                TaskImageBuildProjection.grant_id == GRANT_ID
-            )
+            select(TaskImageBuildProjection).where(TaskImageBuildProjection.grant_id == GRANT_ID)
         )
         assert row is not None
         assert row.state == "expired"

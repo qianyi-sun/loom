@@ -1,0 +1,1525 @@
+"""Behavioral tests for the inert, content-addressed provider release."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+import struct
+import subprocess
+from pathlib import Path
+
+import pytest
+from scripts.ops import task_image_builder_provider_release as release_module
+from scripts.ops.task_image_builder_provider_release import (
+    Architecture,
+    ProviderReleaseError,
+    build_certified_releases,
+    build_release,
+    verify_release_directory,
+)
+
+_ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _canonical(value: object) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("ascii")
+
+
+def _digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _directory_identity(path: Path) -> tuple[int, int, int]:
+    metadata = path.lstat()
+    return metadata.st_dev, metadata.st_ino, metadata.st_uid
+
+
+def _elf_payload(machine: int, label: str, *, elf_type: int = 3) -> bytes:
+    ident = b"\x7fELF" + bytes((2, 1, 1, 0)) + bytes(8)
+    return (
+        _ELF_HEADER.pack(
+            ident,
+            elf_type,
+            machine,
+            1,
+            0,
+            0,
+            0,
+            0,
+            64,
+            0,
+            0,
+            64,
+            0,
+            0,
+        )
+        + label.encode("ascii")
+        + b"\n"
+    )
+
+
+def _write(path: Path, payload: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    path.chmod(mode)
+
+
+def _guard_release(root: Path, *, release_spec_sha256: str) -> tuple[Path, str]:
+    return _guard_release_for(
+        root,
+        architecture="x86_64",
+        machine=62,
+        release_spec_sha256=release_spec_sha256,
+    )
+
+
+def _guard_release_for(
+    root: Path,
+    *,
+    architecture: str,
+    machine: int,
+    release_spec_sha256: str,
+    bpftool_payload: bytes | None = None,
+) -> tuple[Path, str]:
+    release_root = root / "guard-release"
+    map_schema = _canonical(
+        {
+            "schema": "loom.task-image-builder-guard-bpf-maps/v1",
+            "maps": [],
+        }
+    )
+    bpf_object = _elf_payload(247, "bpf", elf_type=1)
+    files = (
+        (
+            "bpftool",
+            (
+                _elf_payload(machine, f"bpftool-{architecture}")
+                if bpftool_payload is None
+                else bpftool_payload
+            ),
+            0o555,
+        ),
+        (
+            "guard-network-map-schema-v1.json",
+            map_schema,
+            0o444,
+        ),
+        (
+            "guard-network-v1.bpf.build.json",
+            _canonical(
+                {
+                    "schema": "loom.task-image-builder-guard-bpf-build/v1",
+                    "builder_image": "docker.io/example/bpf@sha256:" + "1" * 64,
+                    "builder_platform": "linux/amd64",
+                    "clang_version": "clang version fixture",
+                    "target": "bpfel",
+                    "source_sha256": "2" * 64,
+                    "object_sha256": _digest(bpf_object),
+                    "object_size": len(bpf_object),
+                    "map_schema_sha256": _digest(map_schema),
+                    "program_sections": [],
+                    "program_symbols": [],
+                    "map_symbols": [],
+                }
+            ),
+            0o444,
+        ),
+        (
+            "guard-network-v1.bpf.o",
+            bpf_object,
+            0o444,
+        ),
+        (
+            "loom-task-image-builder-node-guard.service",
+            (
+                ROOT / "deploy/task-image-builder/loom-task-image-builder-node-guard.service"
+            ).read_bytes(),
+            0o444,
+        ),
+        (
+            "loom-task-image-builder-guard.pyz",
+            _elf_payload(machine, f"guard-{architecture}"),
+            0o555,
+        ),
+    )
+    identity = {
+        "architecture": architecture,
+        "files": [
+            {
+                "mode": f"{mode:04o}",
+                "path": name,
+                "sha256": _digest(payload),
+                "size": len(payload),
+            }
+            for name, payload, mode in files
+        ],
+        "interpreter": "/usr/bin/python3 -I -B",
+        "release_spec_sha256": release_spec_sha256,
+        "schema": "loom.task-image-builder-guard-bundle/v1",
+    }
+    guard_digest = _digest(_canonical(identity))
+    release = release_root / guard_digest
+    for name, payload, mode in files:
+        _write(release / name, payload, mode)
+    manifest = {**identity, "release_sha256": guard_digest}
+    _write(release / "release-manifest.json", _canonical(manifest), 0o444)
+    release.chmod(0o555)
+    return release, guard_digest
+
+
+def _runtime_tree(root: Path) -> Path:
+    return _runtime_tree_for(root, machine=62)
+
+
+def _runtime_tree_for(root: Path, *, machine: int) -> Path:
+    runtime = root / "runtime-root" / "runtime"
+    members = {
+        "buildctl": _elf_payload(machine, "buildctl"),
+        "buildkitd": _elf_payload(machine, "buildkitd"),
+        "buildkit-runc": _elf_payload(machine, "buildkit-runc"),
+        "rootlesskit": _elf_payload(machine, "rootlesskit"),
+        "rootlessctl": _elf_payload(machine, "rootlessctl"),
+        "slirp4netns": _elf_payload(machine, "slirp4netns"),
+        "fuse-overlayfs": _elf_payload(machine, "fuse-overlayfs"),
+    }
+    for name, payload in members.items():
+        _write(runtime / name, payload, 0o555)
+    runtime.chmod(0o555)
+    return runtime.parent
+
+
+def _set_reviewed_runtime_member(
+    source: Path,
+    runtime_root: Path,
+    name: str,
+    *,
+    payload: bytes | None = None,
+    digest: str | None = None,
+    size: int | None = None,
+) -> Path:
+    if payload is None and (digest is None or size is None):
+        raise AssertionError("sparse runtime member fixtures need digest and size")
+    runtime_dir = runtime_root / "runtime"
+    runtime_dir.chmod(0o755)
+    target = runtime_dir / name
+    target.chmod(0o755)
+    if payload is not None:
+        target.write_bytes(payload)
+        digest = _digest(payload)
+    else:
+        with target.open("wb") as stream:
+            stream.truncate(size)
+    target.chmod(0o555)
+    runtime_dir.chmod(0o555)
+    runtime_manifest_path = source / "deploy/task-image-builder/rootless-runtime-v2.json"
+    runtime_manifest = json.loads(runtime_manifest_path.read_bytes())
+    runtime_manifest["architectures"]["amd64"]["members"][name] = digest
+    runtime_manifest_path.chmod(0o644)
+    runtime_manifest_path.write_bytes(_canonical(runtime_manifest))
+    runtime_manifest_path.chmod(0o444)
+    spec_path = source / "deploy/task-image-builder/provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["runtime_manifest"]["sha256"] = _digest(runtime_manifest_path.read_bytes())
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+    return target
+
+
+def _source_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    source = tmp_path / "source"
+    deploy = source / "deploy/task-image-builder"
+    scripts = source / "scripts/ops"
+    cmd = source / "cmd/loom-task-image-builder-supervisor"
+    deploy.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    cmd.mkdir(parents=True)
+
+    guard_spec_payload = _canonical(
+        {
+            "schema": "loom.task-image-builder-guard-release-spec/v1",
+            "version": 1,
+        }
+    )
+    guard_release, guard_digest = _guard_release(
+        tmp_path,
+        release_spec_sha256=_digest(guard_spec_payload),
+    )
+    runtime_root = _runtime_tree(tmp_path)
+    runtime_members = {
+        name: _digest((runtime_root / "runtime" / name).read_bytes())
+        for name in (
+            "buildctl",
+            "buildkitd",
+            "buildkit-runc",
+            "rootlesskit",
+            "rootlessctl",
+            "slirp4netns",
+            "fuse-overlayfs",
+        )
+    }
+    host_release = {
+        "schema": "loom.task-image-builder-host-release/v2",
+        "release": "host-release-v2",
+        "runtime_manifest": "rootless-runtime-v2.json",
+    }
+    runtime_manifest = {
+        "schema": "loom.task-image-builder-rootless-runtime/v2",
+        "release": "rootless-runtime-v2",
+        "toolchain": {
+            "go": "go1.26.7",
+            "image": "golang:1.26-alpine3.23",
+            "image_sha256": "3" * 64,
+            "x_crypto": "v0.55.0",
+            "reproducible_flags": ["-trimpath", "-buildvcs=false"],
+        },
+        "architectures": {
+            "amd64": {
+                "platform": "linux/amd64",
+                "members": runtime_members,
+            }
+        },
+    }
+    authority = b"apiVersion: v1\nkind: Service\n"
+    oldlab = _canonical(
+        {
+            "schema": "loom.task-image-builder-supervisor-config/v1",
+            "release_sha256": "1" * 64,
+            "cpu_arch": "x86_64",
+        }
+    )
+    gb10 = _canonical(
+        {
+            "schema": "loom.task-image-builder-supervisor-config/v1",
+            "release_sha256": "a" * 64,
+            "cpu_arch": "arm64",
+        }
+    )
+    installer = b"#!/usr/bin/env python3\nprint('install fixture')\n"
+    conformance = b"#!/usr/bin/env python3\nprint('conformance fixture')\n"
+    supervisor_main = b"package main\nfunc main() {}\n"
+
+    _write(deploy / "guard-release-v1.json", guard_spec_payload, 0o444)
+    _write(deploy / "host-release-v2.json", _canonical(host_release), 0o444)
+    _write(deploy / "rootless-runtime-v2.json", _canonical(runtime_manifest), 0o444)
+    _write(deploy / "authority-service-v1.yaml", authority, 0o444)
+    _write(deploy / "supervisor-config-oldlab-v1.example.json", oldlab, 0o444)
+    _write(deploy / "supervisor-config-gb10-v1.example.json", gb10, 0o444)
+    _write(scripts / "install_task_image_builder_provider_release.py", installer, 0o555)
+    _write(scripts / "task_image_builder_provider_conformance.py", conformance, 0o555)
+    _write(cmd / "main.go", supervisor_main, 0o444)
+
+    spec = {
+        "schema": "loom.task-image-builder-provider-release-spec/v1",
+        "version": 1,
+        "authority_contract_version": 2,
+        "provider_install_root": "/opt/loom-task-image-builder-provider/releases",
+        "supervisor_relative_path": "bin/loom-task-builder-supervisor",
+        "guard_release": {
+            "path": "deploy/task-image-builder/guard-release-v1.json",
+            "sha256": _digest((deploy / "guard-release-v1.json").read_bytes()),
+            "bundle_sha256": {"x86_64": guard_digest, "aarch64": "6" * 64},
+        },
+        "host_release": {
+            "path": "deploy/task-image-builder/host-release-v2.json",
+            "sha256": _digest((deploy / "host-release-v2.json").read_bytes()),
+        },
+        "runtime_manifest": {
+            "path": "deploy/task-image-builder/rootless-runtime-v2.json",
+            "sha256": _digest((deploy / "rootless-runtime-v2.json").read_bytes()),
+        },
+        "supervisor": {
+            "sources": [
+                {
+                    "path": "cmd/loom-task-image-builder-supervisor/main.go",
+                    "sha256": _digest(supervisor_main),
+                }
+            ],
+            "sha256": {
+                "x86_64": _digest(_elf_payload(62, "supervisor")),
+                "aarch64": "5" * 64,
+            },
+        },
+        "configs": [
+            {
+                "path": "deploy/task-image-builder/authority-service-v1.yaml",
+                "sha256": _digest(authority),
+                "destination": "configs/authority-service-v1.yaml",
+                "mode": "0444",
+            },
+            {
+                "path": "deploy/task-image-builder/supervisor-config-gb10-v1.example.json",
+                "sha256": _digest(gb10),
+                "destination": "configs/supervisor-config-gb10-v1.example.json",
+                "mode": "0444",
+            },
+            {
+                "path": "deploy/task-image-builder/supervisor-config-oldlab-v1.example.json",
+                "sha256": _digest(oldlab),
+                "destination": "configs/supervisor-config-oldlab-v1.example.json",
+                "mode": "0444",
+            },
+        ],
+        "scripts": [
+            {
+                "path": "scripts/ops/install_task_image_builder_provider_release.py",
+                "sha256": _digest(installer),
+                "destination": "ops/install_task_image_builder_provider_release.py",
+                "mode": "0555",
+            },
+            {
+                "path": "scripts/ops/task_image_builder_provider_conformance.py",
+                "sha256": _digest(conformance),
+                "destination": "ops/task_image_builder_provider_conformance.py",
+                "mode": "0555",
+            },
+        ],
+    }
+    _write(deploy / "provider-release-v1.json", _canonical(spec), 0o444)
+    return source, guard_release, runtime_root
+
+
+def _multi_arch_source_tree(
+    tmp_path: Path,
+) -> tuple[Path, dict[Architecture, Path], dict[Architecture, Path]]:
+    source, x86_guard, x86_runtime = _source_tree(tmp_path)
+    deploy = source / "deploy/task-image-builder"
+    guard_spec_sha256 = _digest((deploy / "guard-release-v1.json").read_bytes())
+    aarch_guard, aarch_guard_digest = _guard_release_for(
+        tmp_path / "aarch64",
+        architecture="aarch64",
+        machine=183,
+        release_spec_sha256=guard_spec_sha256,
+    )
+    aarch_runtime = _runtime_tree_for(tmp_path / "aarch64", machine=183)
+    runtime_path = deploy / "rootless-runtime-v2.json"
+    runtime_manifest = json.loads(runtime_path.read_bytes())
+    runtime_manifest["architectures"]["arm64"] = {
+        "platform": "linux/arm64",
+        "members": {
+            name: _digest((aarch_runtime / "runtime" / name).read_bytes())
+            for name in (
+                "buildctl",
+                "buildkitd",
+                "buildkit-runc",
+                "rootlesskit",
+                "rootlessctl",
+                "slirp4netns",
+                "fuse-overlayfs",
+            )
+        },
+    }
+    runtime_path.chmod(0o644)
+    runtime_path.write_bytes(_canonical(runtime_manifest))
+    runtime_path.chmod(0o444)
+    spec_path = deploy / "provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["guard_release"]["bundle_sha256"]["aarch64"] = aarch_guard_digest
+    spec["runtime_manifest"]["sha256"] = _digest(runtime_path.read_bytes())
+    spec["supervisor"]["sha256"]["aarch64"] = _digest(_elf_payload(183, "supervisor"))
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+    return (
+        source,
+        {"x86_64": x86_guard, "aarch64": aarch_guard},
+        {"x86_64": x86_runtime, "aarch64": aarch_runtime},
+    )
+
+
+def test_release_is_content_addressed_and_binds_expected_members(tmp_path: Path) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+
+    manifest = json.loads((result.directory / "release-manifest.json").read_bytes())
+    assert result.directory.name == result.release_sha256
+    assert manifest["architecture"] == "x86_64"
+    assert manifest["authority_contract_version"] == 2
+    assert manifest["guard_release_sha256"] == guard_release.name
+    assert manifest["runtime_release"] == "rootless-runtime-v2"
+    assert manifest["runtime_x_crypto"] == "v0.55.0"
+    assert manifest["provider_install_root"] == "/opt/loom-task-image-builder-provider/releases"
+    assert manifest["supervisor_relative_path"] == "bin/loom-task-builder-supervisor"
+    assert [record["path"] for record in manifest["files"]] == [
+        "bin/fuse-overlayfs",
+        "bin/loom-task-builder-supervisor",
+        "bin/rootlessctl",
+        "bin/rootlesskit",
+        "bin/slirp4netns",
+        "bpftool",
+        "configs/authority-service-v1.yaml",
+        "configs/supervisor-config-gb10-v1.example.json",
+        "configs/supervisor-config-oldlab-v1.example.json",
+        "guard-network-map-schema-v1.json",
+        "guard-network-v1.bpf.build.json",
+        "guard-network-v1.bpf.o",
+        "loom-task-image-builder-guard.pyz",
+        "loom-task-image-builder-node-guard.service",
+        "ops/install_task_image_builder_provider_release.py",
+        "ops/task_image_builder_provider_conformance.py",
+        "runtime/buildctl",
+        "runtime/buildkit-runc",
+        "runtime/buildkitd",
+    ]
+    assert all(record["mode"] in {"0444", "0555"} for record in manifest["files"])
+    assert not (result.directory / "current").exists()
+
+
+def test_release_accepts_current_guard_bundle_and_embeds_native_bpftool(
+    tmp_path: Path,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+
+    manifest = json.loads((result.directory / "release-manifest.json").read_bytes())
+    bpftool_record = next(
+        record for record in manifest["files"] if record["path"] == "bpftool"
+    )
+    assert bpftool_record["mode"] == "0555"
+    assert bpftool_record["sha256"] == _digest((guard_release / "bpftool").read_bytes())
+    assert (result.directory / "bpftool").read_bytes() == (
+        guard_release / "bpftool"
+    ).read_bytes()
+
+
+def test_release_verifier_accepts_reviewed_bpftool_above_generic_member_cap(
+    tmp_path: Path,
+) -> None:
+    source, _guard_release, runtime_root = _source_tree(tmp_path)
+    guard_spec_sha256 = _digest(
+        (source / "deploy/task-image-builder/guard-release-v1.json").read_bytes()
+    )
+    bpftool_payload = _elf_payload(62, "large-bpftool") + b"x" * (16 * 1024 * 1024)
+    guard_release, guard_digest = _guard_release_for(
+        tmp_path / "large-guard",
+        architecture="x86_64",
+        machine=62,
+        release_spec_sha256=guard_spec_sha256,
+        bpftool_payload=bpftool_payload,
+    )
+    spec_path = source / "deploy/task-image-builder/provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["guard_release"]["bundle_sha256"]["x86_64"] = guard_digest
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+
+    verify_release_directory(
+        result.directory,
+        expected_release_sha256=result.release_sha256,
+        expected_architecture="x86_64",
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+
+
+def test_release_rejects_guard_bundle_not_bound_to_reviewed_guard_spec(
+    tmp_path: Path,
+) -> None:
+    source, _guard_release, runtime_root = _source_tree(tmp_path)
+    mismatched_guard_release, mismatched_guard_digest = _guard_release_for(
+        tmp_path / "mismatched-guard",
+        architecture="x86_64",
+        machine=62,
+        release_spec_sha256="3" * 64,
+    )
+    spec_path = source / "deploy/task-image-builder/provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["guard_release"]["bundle_sha256"]["x86_64"] = mismatched_guard_digest
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+
+    with pytest.raises(
+        ProviderReleaseError,
+        match="guard release differs from reviewed specification",
+    ):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=mismatched_guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+
+def test_release_streams_reviewed_runtime_members_instead_of_buffering_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    generic_cap = 16 * 1024 * 1024
+    large_runtime_payload = _elf_payload(62, "large-buildkitd") + b"x" * generic_cap
+    runtime_member = _set_reviewed_runtime_member(
+        source,
+        runtime_root,
+        "buildkitd",
+        payload=large_runtime_payload,
+    )
+    regular_reader = release_module._read_regular
+    runtime_names = {
+        "buildctl",
+        "buildkit-runc",
+        "buildkitd",
+        "fuse-overlayfs",
+        "rootlessctl",
+        "rootlesskit",
+        "slirp4netns",
+    }
+
+    def reject_buffered_runtime_read(
+        path: Path,
+        *,
+        maximum: int,
+        executable: bool = False,
+    ) -> bytes:
+        if path.name in runtime_names and (
+            path.parent.name == "runtime" or path.parent.name == "bin"
+        ):
+            raise AssertionError(f"runtime member was buffered: {path.name}")
+        return regular_reader(path, maximum=maximum, executable=executable)
+
+    monkeypatch.setattr(release_module, "_read_regular", reject_buffered_runtime_read)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    verified = verify_release_directory(
+        result.directory,
+        expected_release_sha256=result.release_sha256,
+        expected_architecture="x86_64",
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+
+    assert runtime_member.stat().st_size > generic_cap
+    buildkitd = next(
+        member for member in verified.members if member.path == "runtime/buildkitd"
+    )
+    assert buildkitd.sha256 == _digest(large_runtime_payload)
+    assert buildkitd.size == len(large_runtime_payload)
+
+
+def test_release_rejects_reviewed_runtime_member_for_wrong_architecture(
+    tmp_path: Path,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    _set_reviewed_runtime_member(
+        source,
+        runtime_root,
+        "buildkitd",
+        payload=_elf_payload(183, "wrong-architecture-buildkitd"),
+    )
+
+    with pytest.raises(ProviderReleaseError, match="architecture"):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+
+def test_release_rejects_runtime_member_larger_than_runtime_bound_without_reading(
+    tmp_path: Path,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    runtime_bound = 1024 * 1024 * 1024
+    sparse_member = _set_reviewed_runtime_member(
+        source,
+        runtime_root,
+        "buildkitd",
+        digest="4" * 64,
+        size=runtime_bound + 1,
+    )
+
+    with pytest.raises(ProviderReleaseError, match="empty or too large"):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+    assert sparse_member.stat().st_size == runtime_bound + 1
+
+
+def test_verify_release_directory_keeps_non_runtime_members_on_generic_cap(
+    tmp_path: Path,
+) -> None:
+    generic_cap = 16 * 1024 * 1024
+    payload_digest = "5" * 64
+    identity = {
+        "architecture": "x86_64",
+        "authority_contract_version": 2,
+        "files": [
+            {
+                "path": "bin/not-a-runtime-member",
+                "mode": "0555",
+                "sha256": payload_digest,
+            }
+        ],
+        "guard_release_sha256": "6" * 64,
+        "provider_install_root": "/opt/loom-task-image-builder-provider/releases",
+        "release_spec_sha256": "7" * 64,
+        "runtime_release": "rootless-runtime-v2",
+        "runtime_x_crypto": "v0.55.0",
+        "schema": "loom.task-image-builder-provider-bundle/v1",
+        "supervisor_relative_path": "bin/loom-task-builder-supervisor",
+    }
+    release_sha256 = _digest(_canonical(identity))
+    release = tmp_path / release_sha256
+    release.mkdir()
+    _write(
+        release / "release-manifest.json",
+        _canonical({**identity, "release_sha256": release_sha256}),
+        0o444,
+    )
+    oversized = release / "bin/not-a-runtime-member"
+    oversized.parent.mkdir()
+    with oversized.open("wb") as stream:
+        stream.truncate(generic_cap + 1)
+    oversized.chmod(0o555)
+    oversized.parent.chmod(0o555)
+    release.chmod(0o555)
+
+    with pytest.raises(ProviderReleaseError, match="empty or too large"):
+        verify_release_directory(
+            release,
+            expected_release_sha256=release_sha256,
+            expected_architecture="x86_64",
+            expected_uid=os.geteuid(),
+            expected_gid=os.getegid(),
+        )
+
+
+def test_verify_release_directory_binds_metadata_to_the_hashed_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    target = result.directory / "runtime/buildkitd"
+    inspect_regular = release_module._inspect_regular
+    swapped = False
+
+    def swap_before_open(
+        path: Path,
+        *,
+        maximum: int,
+        executable: bool = False,
+    ) -> tuple[str, bytes, tuple[int, int, int, int, int, int, int, int, int], int]:
+        nonlocal swapped
+        if path == target and not swapped:
+            swapped = True
+            payload = path.read_bytes()
+            path.parent.chmod(0o755)
+            path.unlink()
+            _write(path, payload, 0o755)
+            path.parent.chmod(0o555)
+        return inspect_regular(path, maximum=maximum, executable=executable)
+
+    monkeypatch.setattr(release_module, "_inspect_regular", swap_before_open)
+
+    with pytest.raises(ProviderReleaseError, match="metadata"):
+        verify_release_directory(
+            result.directory,
+            expected_release_sha256=result.release_sha256,
+            expected_architecture="x86_64",
+            expected_uid=os.geteuid(),
+            expected_gid=os.getegid(),
+        )
+
+
+def test_checked_in_release_spec_uses_inert_ops_script_destinations() -> None:
+    spec = json.loads(
+        (ROOT / "deploy/task-image-builder/provider-release-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert spec["schema"] == "loom.task-image-builder-provider-release-spec/v1"
+    assert spec["provider_install_root"] == "/opt/loom-task-image-builder-provider/releases"
+    assert spec["supervisor_relative_path"] == "bin/loom-task-builder-supervisor"
+    assert [record["destination"] for record in spec["scripts"]] == [
+        "ops/install_task_image_builder_provider_release.py",
+        "ops/task_image_builder_provider_conformance.py",
+    ]
+    assert all(record["mode"] == "0555" for record in spec["scripts"])
+    for section in ("configs", "scripts"):
+        for record in spec[section]:
+            assert _digest((ROOT / record["path"]).read_bytes()) == record["sha256"]
+    for record in spec["supervisor"]["sources"]:
+        assert _digest((ROOT / record["path"]).read_bytes()) == record["sha256"]
+    for section in ("guard_release", "host_release", "runtime_manifest"):
+        record = spec[section]
+        assert _digest((ROOT / record["path"]).read_bytes()) == record["sha256"]
+    serialized = json.dumps(spec, sort_keys=True)
+    for forbidden in ("current", "systemctl", "activation", "credential"):
+        assert forbidden not in serialized
+
+
+def test_release_is_deterministic_across_source_metadata_noise(tmp_path: Path) -> None:
+    first_source, first_guard, first_runtime = _source_tree(tmp_path / "first")
+    second_source, second_guard, second_runtime = _source_tree(tmp_path / "second")
+    for index, path in enumerate(sorted(second_source.rglob("*"), reverse=True)):
+        if path.is_file():
+            timestamp = 1_800_000_000 + index
+            os.utime(path, (timestamp, timestamp))
+
+    first = build_release(
+        first_source,
+        tmp_path / "out-one",
+        "x86_64",
+        guard_release_directory=first_guard,
+        runtime_root=first_runtime,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    second = build_release(
+        second_source,
+        tmp_path / "out-two",
+        "x86_64",
+        guard_release_directory=second_guard,
+        runtime_root=second_runtime,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+
+    assert first.release_sha256 == second.release_sha256
+    assert {
+        item.relative_to(first.directory).as_posix(): item.read_bytes()
+        for item in first.directory.rglob("*")
+        if item.is_file()
+    } == {
+        item.relative_to(second.directory).as_posix(): item.read_bytes()
+        for item in second.directory.rglob("*")
+        if item.is_file()
+    }
+
+
+def test_release_builds_supervisor_twice_before_publishing(tmp_path: Path) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    calls: list[tuple[Path, Architecture]] = []
+
+    def build_supervisor(src: Path, arch: Architecture) -> bytes:
+        calls.append((src, arch))
+        return _elf_payload(62, "supervisor")
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=build_supervisor,
+    )
+
+    assert result.directory.exists()
+    assert calls == [(source, "x86_64"), (source, "x86_64")]
+
+
+def test_release_default_supervisor_builder_ignores_runtime_toolchain_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: default supervisor builds use the rootless runtime's Go
+    # 1.26 payload image instead of the pinned Go 1.23.4 supervisor toolchain.
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    runtime_manifest = json.loads(
+        (source / "deploy/task-image-builder/rootless-runtime-v2.json").read_bytes()
+    )
+    supervisor_payload = _elf_payload(62, "supervisor")
+    observed_images: list[str] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        cwd: Path,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, cwd, timeout
+        image = command[command.index("-w") + 2]
+        observed_images.append(image)
+        if image != "golang:1.23.4-bookworm":
+            raise AssertionError(f"supervisor used runtime toolchain image {image}")
+        for index, item in enumerate(command):
+            if item == "-v" and command[index + 1].endswith(":/out"):
+                output_root = Path(command[index + 1].removesuffix(":/out"))
+                _write(output_root / "loom-task-builder-supervisor", supervisor_payload, 0o555)
+                break
+        else:  # pragma: no cover - fixed command invariant
+            raise AssertionError("supervisor output mount missing")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(release_module.subprocess, "run", fake_run)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+    )
+
+    assert runtime_manifest["toolchain"]["image"] == "golang:1.26-alpine3.23"
+    assert observed_images == ["golang:1.23.4-bookworm", "golang:1.23.4-bookworm"]
+    assert (result.directory / "bin/loom-task-builder-supervisor").read_bytes() == supervisor_payload
+
+
+def test_release_rejects_nondeterministic_supervisor_builder(tmp_path: Path) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    payloads = iter(
+        (
+            _elf_payload(62, "supervisor"),
+            _elf_payload(62, "supervisor-drift"),
+        )
+    )
+
+    with pytest.raises(ProviderReleaseError, match="deterministic"):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: next(payloads),
+        )
+
+    assert not any((tmp_path / "out").glob("*/release-manifest.json"))
+
+
+def test_release_failure_after_candidate_creation_preserves_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: standalone release failure recursively deletes the unique
+    # hidden candidate instead of preserving it as failure evidence.
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    original_write_file = release_module._write_file
+    candidates: list[Path] = []
+
+    def record_candidate_with_evidence(*, prefix: str, dir: Path | str | None = None) -> str:
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release." and Path(dir) == output_root:
+            candidates.append(path)
+            evidence_dir = path / "evidence-sentinel"
+            evidence_dir.mkdir()
+            evidence_dir.chmod(0o700)
+        return raw_path
+
+    def fail_first_candidate_write(path: Path, payload: bytes, mode: int) -> None:
+        if candidates and path.is_relative_to(candidates[0]):
+            raise release_module.ProviderReleaseError("injected candidate write failure")
+        original_write_file(path, payload, mode)
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_candidate_with_evidence)
+    monkeypatch.setattr(release_module, "_write_file", fail_first_candidate_write)
+
+    with pytest.raises(ProviderReleaseError):
+        build_release(
+            source,
+            output_root,
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+    assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
+    assert len(candidates) == 1
+    assert candidates[0].exists()
+    evidence_dir = candidates[0] / "evidence-sentinel"
+    assert evidence_dir.is_dir()
+    assert stat.S_IMODE(evidence_dir.lstat().st_mode) == 0o700
+
+
+def test_certified_release_builds_both_architectures_twice_all_or_nothing(
+    tmp_path: Path,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    calls: list[Architecture] = []
+
+    def build_supervisor(_src: Path, arch: Architecture) -> bytes:
+        calls.append(arch)
+        return _elf_payload(62 if arch == "x86_64" else 183, "supervisor")
+
+    result = build_certified_releases(
+        source,
+        tmp_path / "out",
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=build_supervisor,
+    )
+
+    assert sorted(result) == ["aarch64", "x86_64"]
+    assert all(release.directory.exists() for release in result.values())
+    visible = [item for item in (tmp_path / "out").iterdir() if not item.name.startswith(".")]
+    assert len(visible) == 1
+    release_set = visible[0]
+    assert release_set.is_dir()
+    set_manifest = json.loads((release_set / "provider-release-set-manifest.json").read_bytes())
+    assert set_manifest["schema"] == "loom.task-image-builder-provider-release-set/v1"
+    assert set_manifest["release_set_sha256"] == release_set.name
+    assert set(set_manifest["architectures"]) == {"x86_64", "aarch64"}
+    for architecture, release in result.items():
+        assert release.directory == release_set / release.release_sha256
+        assert release.sidecar_path == release.directory / "release-manifest.json"
+        assert set_manifest["architectures"][architecture]["release_sha256"] == release.release_sha256
+        assert (release.directory / "release-manifest.json").exists()
+    assert calls == ["x86_64", "x86_64", "aarch64", "aarch64"]
+
+
+def test_certified_release_success_publishes_one_digest_set_without_hidden_candidate(
+    tmp_path: Path,
+) -> None:
+    # Mutation caught: certified success keeps a post-publication staging/candidate
+    # directory or publishes more than the single content-addressed release set.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+
+    releases = build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    entries = sorted(output_root.iterdir(), key=lambda item: item.name)
+    assert len(entries) == 1
+    [release_set] = entries
+    assert release_set.is_dir()
+    assert not release_set.name.startswith(".")
+    assert len(release_set.name) == 64
+    assert all(character in "0123456789abcdef" for character in release_set.name)
+    set_manifest = json.loads((release_set / "provider-release-set-manifest.json").read_bytes())
+    assert set_manifest["release_set_sha256"] == release_set.name
+    assert {
+        architecture: release.directory
+        for architecture, release in releases.items()
+    } == {
+        architecture: release_set / release.release_sha256
+        for architecture, release in releases.items()
+    }
+
+
+def test_certified_release_embedded_leaves_emit_no_per_leaf_sidecars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: certified mode calls the standalone leaf publisher, which
+    # creates transient <leaf>.manifest.json sidecars in a hidden staging tree.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    observed_sidecars: list[list[str]] = []
+    original_seal_release_tree = release_module._seal_release_tree
+
+    def observe_sidecars_before_set_seal(candidate: Path) -> None:
+        if candidate.parent == output_root and (candidate / "provider-release-set-manifest.json").exists():
+            observed_sidecars.append(
+                sorted(
+                    path.relative_to(output_root).as_posix()
+                    for path in output_root.rglob("*.manifest.json")
+                )
+            )
+        original_seal_release_tree(candidate)
+
+    monkeypatch.setattr(release_module, "_seal_release_tree", observe_sidecars_before_set_seal)
+
+    build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    assert observed_sidecars == [[]]
+    assert [path for path in output_root.rglob("*.manifest.json")] == []
+
+
+def test_certified_release_publishes_original_candidate_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: certified success copies releases from one hidden staging
+    # tree into a second final candidate, making cleanup part of the design.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    candidate_identity: tuple[int, int, int] | None = None
+
+    def record_release_set_candidate(*, prefix: str, dir: Path | str | None = None) -> str:
+        nonlocal candidate_identity
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release-set." and Path(dir) == output_root:
+            candidate_identity = _directory_identity(path)
+        return raw_path
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_release_set_candidate)
+
+    build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    [release_set] = [item for item in output_root.iterdir() if not item.name.startswith(".")]
+    assert candidate_identity is not None
+    assert _directory_identity(release_set) == candidate_identity
+
+
+def test_certified_release_failure_after_candidate_creation_preserves_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: failure handling recursively chmods/deletes the unique
+    # release-set candidate instead of preserving it as failure evidence.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    original_write_file = release_module._write_file
+    candidates: list[Path] = []
+
+    def record_candidate_with_evidence(*, prefix: str, dir: Path | str | None = None) -> str:
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release-set." and Path(dir) == output_root:
+            candidates.append(path)
+            evidence_dir = path / "evidence-sentinel"
+            evidence_dir.mkdir()
+            evidence_dir.chmod(0o700)
+        return raw_path
+
+    def fail_first_candidate_write(path: Path, payload: bytes, mode: int) -> None:
+        if candidates and path.is_relative_to(candidates[0]):
+            raise release_module.ProviderReleaseError("injected candidate write failure")
+        original_write_file(path, payload, mode)
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_candidate_with_evidence)
+    monkeypatch.setattr(release_module, "_write_file", fail_first_candidate_write)
+
+    with pytest.raises(ProviderReleaseError):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
+        )
+
+    assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
+    assert len(candidates) == 1
+    assert candidates[0].exists()
+    evidence_dir = candidates[0] / "evidence-sentinel"
+    assert evidence_dir.is_dir()
+    assert stat.S_IMODE(evidence_dir.lstat().st_mode) == 0o700
+
+
+def test_certified_release_failure_never_deletes_swapped_external_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: failure cleanup validates a mutable hidden path, then a
+    # same-parent rename swaps an external directory under the recursive delete.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    external = output_root / "external-evidence"
+    external_file = external / "keep.txt"
+    external.mkdir()
+    external_file.write_text("do not delete or chmod\n", encoding="utf-8")
+    external_file.chmod(0o444)
+    external.chmod(0o555)
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    original_write_file = release_module._write_file
+    original_rmtree = release_module.shutil.rmtree
+    candidates: list[Path] = []
+    displaced: list[Path] = []
+
+    def record_candidate(*, prefix: str, dir: Path | str | None = None) -> str:
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release-set." and Path(dir) == output_root:
+            candidates.append(path)
+        return raw_path
+
+    def fail_first_candidate_write(path: Path, payload: bytes, mode: int) -> None:
+        if candidates and path.is_relative_to(candidates[0]):
+            raise release_module.ProviderReleaseError("injected candidate write failure")
+        original_write_file(path, payload, mode)
+
+    def swap_external_before_recursive_delete(path: Path, *args: object, **kwargs: object) -> None:
+        target = Path(path)
+        if candidates and target == candidates[0] and external.exists():
+            hidden_displaced = target.with_name(target.name + ".displaced")
+            target.rename(hidden_displaced)
+            external.rename(target)
+            displaced.append(hidden_displaced)
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_candidate)
+    monkeypatch.setattr(release_module, "_write_file", fail_first_candidate_write)
+    monkeypatch.setattr(release_module.shutil, "rmtree", swap_external_before_recursive_delete)
+
+    with pytest.raises(ProviderReleaseError):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
+        )
+
+    assert external.is_dir()
+    assert external_file.read_text(encoding="utf-8") == "do not delete or chmod\n"
+    assert stat.S_IMODE(external.lstat().st_mode) == 0o555
+    assert stat.S_IMODE(external_file.lstat().st_mode) == 0o444
+    assert displaced == []
+
+
+def test_certified_release_refuses_whole_publication_when_any_architecture_drifts(
+    tmp_path: Path,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    aarch64_calls = 0
+
+    def build_supervisor(_src: Path, arch: Architecture) -> bytes:
+        nonlocal aarch64_calls
+        if arch == "aarch64":
+            aarch64_calls += 1
+            return _elf_payload(183, "supervisor-drift" if aarch64_calls == 2 else "supervisor")
+        return _elf_payload(62, "supervisor")
+
+    with pytest.raises(ProviderReleaseError, match="deterministic"):
+        build_certified_releases(
+            source,
+            tmp_path / "out",
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=build_supervisor,
+        )
+
+    assert not list((tmp_path / "out").glob("*/release-manifest.json"))
+
+
+def test_certified_release_final_rename_failure_preserves_original_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: final publication failure deletes the single assembled
+    # release-set candidate instead of preserving it as failure evidence.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_rename = release_module._rename_noreplace
+
+    def fail_final_publish(path: Path, target: Path) -> None:
+        if path.name.startswith(".provider-release-set.") and target.parent == output_root:
+            raise release_module.ProviderReleaseError("injected final publish failure")
+        original_rename(path, target)
+
+    monkeypatch.setattr(release_module, "_rename_noreplace", fail_final_publish)
+
+    with pytest.raises(ProviderReleaseError, match="publication failed"):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
+        )
+
+    assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
+    preserved = list(output_root.glob(".provider-release-set.*"))
+    assert len(preserved) == 1
+    assert (preserved[0] / "provider-release-set-manifest.json").is_file()
+    assert len(list(preserved[0].rglob("release-manifest.json"))) == 2
+
+
+def test_certified_release_never_exposes_architecture_siblings_at_output_root(
+    tmp_path: Path,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+
+    releases = build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    visible = sorted(item.name for item in output_root.iterdir() if not item.name.startswith("."))
+    assert len(visible) == 1
+    release_set = output_root / visible[0]
+    assert set(release.directory.parent for release in releases.values()) == {release_set}
+    assert not any((output_root / release.release_sha256).exists() for release in releases.values())
+    assert not any((output_root / f"{release.release_sha256}.manifest.json").exists() for release in releases.values())
+
+
+def test_release_assembler_cli_requires_both_architecture_inputs() -> None:
+    completed = subprocess.run(
+        (
+            "/usr/bin/python3",
+            "scripts/ops/task_image_builder_provider_release.py",
+            "--help",
+        ),
+        cwd=ROOT,
+        env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    help_text = completed.stdout.decode("utf-8")
+    assert "--architecture" not in help_text
+    assert "--guard-release-directory-x86-64" in help_text
+    assert "--guard-release-directory-aarch64" in help_text
+    assert "--runtime-root-x86-64" in help_text
+    assert "--runtime-root-aarch64" in help_text
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("wrong-gid", "writable-subdirectory", "foreign-directory"),
+)
+def test_verify_release_directory_rejects_directory_metadata_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    expected_gid = os.getegid()
+    if mutation == "wrong-gid":
+        expected_gid += 1
+    elif mutation == "writable-subdirectory":
+        (result.directory / "configs").chmod(0o755)
+    else:
+        result.directory.chmod(0o755)
+        foreign = result.directory / "foreign"
+        foreign.mkdir()
+        foreign.chmod(0o555)
+        result.directory.chmod(0o555)
+
+    with pytest.raises(ProviderReleaseError, match=r"metadata|inventory"):
+        verify_release_directory(
+            result.directory,
+            expected_release_sha256=result.release_sha256,
+            expected_architecture="x86_64",
+            expected_uid=os.geteuid(),
+            expected_gid=expected_gid,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "tampered-guard-member",
+        "wrong-guard-member-mode",
+        "wrong-guard-directory-basename",
+    ),
+)
+def test_release_rejects_guard_bundle_identity_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    if mutation == "tampered-guard-member":
+        target = guard_release / "guard-network-map-schema-v1.json"
+        target.chmod(0o644)
+        target.write_bytes(
+            _canonical(
+                {
+                    "schema": "loom.task-image-builder-guard-bpf-maps/v1",
+                    "maps": [{"name": "drift"}],
+                }
+            )
+        )
+        target.chmod(0o444)
+    elif mutation == "wrong-guard-member-mode":
+        (guard_release / "guard-network-v1.bpf.o").chmod(0o555)
+    else:
+        renamed = guard_release.with_name("8" * 64)
+        guard_release.rename(renamed)
+        guard_release = renamed
+
+    with pytest.raises(ProviderReleaseError):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "runtime-x-crypto",
+        "writable-config",
+        "writable-spec",
+        "writable-script",
+        "script-symlink",
+        "missing-guard-member",
+        "extra-runtime-member",
+        "symlinked-runtime-dir",
+        "writable-runtime-dir",
+        "reordered-configs",
+        "self-referential-destination",
+    ),
+)
+def test_release_rejects_unsafe_or_nondeterministic_inputs(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    spec_path = source / "deploy/task-image-builder/provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+
+    if mutation == "runtime-x-crypto":
+        runtime_path = source / "deploy/task-image-builder/rootless-runtime-v2.json"
+        runtime = json.loads(runtime_path.read_bytes())
+        runtime["toolchain"]["x_crypto"] = "v0.54.0"
+        runtime_path.chmod(0o644)
+        runtime_path.write_bytes(_canonical(runtime))
+        runtime_path.chmod(0o444)
+    elif mutation == "writable-config":
+        (source / "deploy/task-image-builder/authority-service-v1.yaml").chmod(0o464)
+    elif mutation == "writable-spec":
+        spec_path.chmod(0o464)
+    elif mutation == "writable-script":
+        script = source / "scripts/ops/install_task_image_builder_provider_release.py"
+        script.chmod(0o775)
+    elif mutation == "script-symlink":
+        script = source / "scripts/ops/task_image_builder_provider_conformance.py"
+        target = script.read_bytes()
+        script.unlink()
+        shadow = script.with_name("shadow.py")
+        _write(shadow, target, 0o555)
+        script.symlink_to(shadow.name)
+    elif mutation == "missing-guard-member":
+        guard_release.chmod(0o755)
+        (guard_release / "loom-task-image-builder-guard.pyz").unlink()
+        guard_release.chmod(0o555)
+    elif mutation == "extra-runtime-member":
+        (runtime_root / "runtime").chmod(0o755)
+        _write(runtime_root / "runtime/extra", b"unexpected\n", 0o555)
+        (runtime_root / "runtime").chmod(0o555)
+    elif mutation == "symlinked-runtime-dir":
+        linked_runtime_root = tmp_path / "linked-runtime-root"
+        linked_runtime_root.mkdir()
+        (linked_runtime_root / "runtime").symlink_to(
+            runtime_root / "runtime",
+            target_is_directory=True,
+        )
+        runtime_root = linked_runtime_root
+    elif mutation == "writable-runtime-dir":
+        (runtime_root / "runtime").chmod(0o755)
+    elif mutation == "reordered-configs":
+        spec["configs"] = list(reversed(spec["configs"]))
+        spec_path.chmod(0o644)
+        spec_path.write_bytes(_canonical(spec))
+        spec_path.chmod(0o444)
+    else:
+        spec["scripts"][0]["destination"] = "release-manifest.json"
+        spec_path.chmod(0o644)
+        spec_path.write_bytes(_canonical(spec))
+        spec_path.chmod(0o444)
+
+    with pytest.raises(ProviderReleaseError):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )

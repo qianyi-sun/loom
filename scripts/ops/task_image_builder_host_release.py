@@ -35,6 +35,7 @@ EXPECTED_PACKAGE_SUITES = {
 }
 EXPECTED_SETUID_PATHS = {"./usr/bin/newgidmap", "./usr/bin/newuidmap"}
 EXPECTED_RUNTIME_RELEASE = "rootless-runtime-v1"
+EXPECTED_RUNTIME_RELEASE_V2 = "rootless-runtime-v2"
 EXPECTED_RUNTIME_BINARIES = {
     "buildctl",
     "buildkit-runc",
@@ -48,6 +49,20 @@ EXPECTED_RUNTIME_BINARIES = {
 
 class HostReleaseError(ValueError):
     """The offline host release or bundle is unsafe."""
+
+
+@dataclass(frozen=True)
+class RuntimeArtifact:
+    name: str
+    sha256: str | None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeManifest:
+    release: str
+    artifacts: tuple[RuntimeArtifact, ...]
+    binary_digests: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -190,14 +205,20 @@ def _safe_relative(value: object, label: str) -> str:
     return raw
 
 
-def _read_regular(path: Path, limit: int, label: str) -> bytes:
+def _read_regular(
+    path: Path,
+    limit: int,
+    label: str,
+    *,
+    reject_group_world_write: bool = False,
+) -> bytes:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             initial = os.fstat(descriptor)
             if not stat.S_ISREG(initial.st_mode):
                 raise HostReleaseError(f"{label} must be a regular file")
-            if initial.st_mode & 0o022:
+            if reject_group_world_write and initial.st_mode & 0o022:
                 raise HostReleaseError(f"{label} is group/world writable")
             if initial.st_size > limit:
                 raise HostReleaseError(f"{label} exceeds its size limit")
@@ -438,23 +459,115 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _runtime_binary_digests(
+    value: object,
+    *,
+    label: str,
+) -> dict[str, str]:
+    binaries = _object(value, label)
+    if set(binaries) != EXPECTED_RUNTIME_BINARIES:
+        raise HostReleaseError("runtime binary allowlist is invalid")
+    normalized: dict[str, str] = {}
+    for name, digest_raw in binaries.items():
+        if not isinstance(name, str) or PurePosixPath(name).name != name:
+            raise HostReleaseError("runtime binary name is invalid")
+        digest = _string(digest_raw, "runtime binary digest")
+        if SHA256_RE.fullmatch(digest) is None:
+            raise HostReleaseError("runtime binary digest is invalid")
+        normalized[name] = digest
+    return normalized
+
+
+def load_runtime_manifest(
+    path: Path,
+    *,
+    architecture: str,
+    debian_architecture: str,
+) -> RuntimeManifest:
+    runtime = _load_json(path, "runtime manifest")
+    architectures = _object(runtime.get("architectures"), "runtime architectures")
+    schema = runtime.get("schema")
+    release = runtime.get("release")
+    if schema == "loom.task-image-builder-rootless-runtime/v1":
+        if release != EXPECTED_RUNTIME_RELEASE:
+            raise HostReleaseError("runtime manifest release is invalid")
+        runtime_architecture = _object(
+            architectures.get(architecture),
+            "runtime architecture",
+        )
+        artifacts_raw = runtime_architecture.get("artifacts")
+        artifacts: list[RuntimeArtifact] = []
+        if artifacts_raw is not None:
+            if not isinstance(artifacts_raw, list) or len(artifacts_raw) != 4:
+                raise HostReleaseError("runtime artifact set is invalid")
+            for item_raw in artifacts_raw:
+                item = _object(item_raw, "runtime artifact")
+                name = _safe_relative(item.get("name"), "runtime artifact name")
+                if PurePosixPath(name).name != name:
+                    raise HostReleaseError("runtime artifact name must not contain a directory")
+                digest = _string(item.get("sha256"), "runtime artifact digest")
+                if SHA256_RE.fullmatch(digest) is None:
+                    raise HostReleaseError("runtime artifact digest is invalid")
+                url = _string(item.get("url"), "runtime artifact URL")
+                artifacts.append(RuntimeArtifact(name=name, sha256=digest, url=url))
+        return RuntimeManifest(
+            release=EXPECTED_RUNTIME_RELEASE,
+            artifacts=tuple(artifacts),
+            binary_digests=_runtime_binary_digests(
+                runtime_architecture.get("binaries"),
+                label="runtime binaries",
+            ),
+        )
+    if schema == "loom.task-image-builder-rootless-runtime/v2":
+        if release != EXPECTED_RUNTIME_RELEASE_V2:
+            raise HostReleaseError("runtime manifest release is invalid")
+        source = _object(runtime.get("source"), "runtime source")
+        buildkit = _object(source.get("buildkit"), "runtime buildkit source")
+        _object(source.get("rootlesskit"), "runtime rootlesskit source")
+        buildkit_version = _string(buildkit.get("version"), "runtime buildkit version")
+        runtime_architecture = _object(
+            architectures.get(debian_architecture),
+            "runtime architecture",
+        )
+        if runtime_architecture.get("platform") != f"linux/{debian_architecture}":
+            raise HostReleaseError("runtime platform is invalid")
+        members = _runtime_binary_digests(
+            runtime_architecture.get("members"),
+            label="runtime members",
+        )
+        return RuntimeManifest(
+            release=EXPECTED_RUNTIME_RELEASE_V2,
+            artifacts=(
+                RuntimeArtifact(
+                    name=f"buildkit-{buildkit_version}.linux-{debian_architecture}.tar.gz",
+                    sha256=None,
+                ),
+                RuntimeArtifact(
+                    name=f"rootlesskit-{architecture}.tar.gz",
+                    sha256=None,
+                ),
+                RuntimeArtifact(
+                    name=f"slirp4netns-{architecture}",
+                    sha256=members["slirp4netns"],
+                ),
+                RuntimeArtifact(
+                    name=f"fuse-overlayfs-{architecture}",
+                    sha256=members["fuse-overlayfs"],
+                ),
+            ),
+            binary_digests=members,
+        )
+    raise HostReleaseError("runtime manifest schema is invalid")
+
+
 def _expected_bundle_paths(
     release: HostRelease,
     debian_architecture: str,
-    runtime: Mapping[str, object],
-    native_architecture: str,
+    runtime: RuntimeManifest,
 ) -> set[str]:
-    architecture = _object(
-        _object(runtime.get("architectures"), "runtime architectures").get(native_architecture),
-        "runtime architecture",
-    )
-    artifacts = architecture.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise HostReleaseError("runtime artifacts are invalid")
-    runtime_paths: set[str] = set()
-    for item_raw in artifacts:
-        item = _object(item_raw, "runtime artifact")
-        runtime_paths.add(f"runtime/{_safe_relative(item.get('name'), 'runtime artifact name')}")
+    if len(runtime.artifacts) != 4:
+        raise HostReleaseError("runtime artifact set is invalid")
+    runtime_paths = {f"runtime/{item.name}" for item in runtime.artifacts}
     package_paths = {
         f"packages/{PurePosixPath(item.filename).name}"
         for item in release.packages[debian_architecture].values()
@@ -817,7 +930,12 @@ def _runtime_binary_payloads(
             raise HostReleaseError("runtime binary digest is invalid")
         direct_path = direct.get(binary)
         if direct_path is not None:
-            payload = _read_regular(direct_path, MAX_BINARY_BYTES, "runtime binary")
+            payload = _read_regular(
+                direct_path,
+                MAX_BINARY_BYTES,
+                "runtime binary",
+                reject_group_world_write=True,
+            )
         else:
             matches: list[bytes] = []
             for archive_path in archives:
@@ -873,12 +991,12 @@ def verify_host_bundle(
     runtime_path = runtime_manifest_path or release.source_path.parent / release.runtime_manifest
     if runtime_path.name != release.runtime_manifest:
         raise HostReleaseError("runtime manifest path does not match the release")
-    runtime = _load_json(runtime_path, "runtime manifest")
-    if runtime.get("schema") != "loom.task-image-builder-rootless-runtime/v1":
-        raise HostReleaseError("runtime manifest schema is invalid")
-    if runtime.get("release") != EXPECTED_RUNTIME_RELEASE:
-        raise HostReleaseError("runtime manifest release is invalid")
-    expected = _expected_bundle_paths(release, debian_architecture, runtime, architecture)
+    runtime = load_runtime_manifest(
+        runtime_path,
+        architecture=architecture,
+        debian_architecture=debian_architecture,
+    )
+    expected = _expected_bundle_paths(release, debian_architecture, runtime)
     snapshot_root = _snapshot_bundle(
         bundle,
         expected,
@@ -890,19 +1008,30 @@ def verify_host_bundle(
     try:
         _verify_layout(snapshot_root, expected)
         keyring_path = snapshot_root / release.keyring_name
-        keyring = _read_regular(keyring_path, MAX_METADATA_BYTES, "Ubuntu archive keyring")
+        keyring = _read_regular(
+            keyring_path,
+            MAX_METADATA_BYTES,
+            "Ubuntu archive keyring",
+            reject_group_world_write=True,
+        )
         if _sha256(keyring) != release.keyring_sha256:
             raise HostReleaseError("Ubuntu archive keyring digest is invalid")
         repository = release.repositories[debian_architecture]
         package_indexes: dict[str, dict[str, dict[str, str]]] = {}
         for suite, index in repository.indexes.items():
             inrelease_path = snapshot_root / "apt" / f"{suite}.InRelease"
-            inrelease = _read_regular(inrelease_path, MAX_METADATA_BYTES, "InRelease")
+            inrelease = _read_regular(
+                inrelease_path,
+                MAX_METADATA_BYTES,
+                "InRelease",
+                reject_group_world_write=True,
+            )
             packages_path = snapshot_root / "apt" / f"{suite}.Packages.xz"
             packages_payload = _read_regular(
                 packages_path,
                 MAX_METADATA_BYTES,
                 "Packages index",
+                reject_group_world_write=True,
             )
             if (
                 len(inrelease) != index.inrelease_size
@@ -950,7 +1079,12 @@ def verify_host_bundle(
             if any(fields.get(key) != value for key, value in expected_fields.items()):
                 raise HostReleaseError("package signed metadata is invalid")
             package_path = snapshot_root / "packages" / PurePosixPath(artifact.filename).name
-            package_payload = _read_regular(package_path, MAX_ARTIFACT_BYTES, "package artifact")
+            package_payload = _read_regular(
+                package_path,
+                MAX_ARTIFACT_BYTES,
+                "package artifact",
+                reject_group_world_write=True,
+            )
             if len(package_payload) != artifact.size or _sha256(package_payload) != artifact.sha256:
                 raise HostReleaseError("package artifact digest or size is invalid")
             control_fields = {
@@ -970,25 +1104,18 @@ def verify_host_bundle(
             _verify_package_contents(package, contents.stdout)
             package_paths.append(package_path)
 
-        runtime_architectures = _object(runtime.get("architectures"), "runtime architectures")
-        runtime_architecture = _object(runtime_architectures.get(architecture), "runtime architecture")
-        artifacts_raw = runtime_architecture.get("artifacts")
-        binaries_raw = _object(runtime_architecture.get("binaries"), "runtime binaries")
-        if not isinstance(artifacts_raw, list) or len(artifacts_raw) != 4:
-            raise HostReleaseError("runtime artifact set is invalid")
         runtime_paths: list[Path] = []
         runtime_by_installed_name: dict[str, Path] = {}
-        for item_raw in artifacts_raw:
-            item = _object(item_raw, "runtime artifact")
-            name = _safe_relative(item.get("name"), "runtime artifact name")
-            if PurePosixPath(name).name != name:
-                raise HostReleaseError("runtime artifact name must not contain a directory")
-            runtime_digest = _string(item.get("sha256"), "runtime artifact digest")
-            if SHA256_RE.fullmatch(runtime_digest) is None:
-                raise HostReleaseError("runtime artifact digest is invalid")
+        for item in runtime.artifacts:
+            name = item.name
             artifact_path = snapshot_root / "runtime" / name
-            payload = _read_regular(artifact_path, MAX_ARTIFACT_BYTES, "runtime artifact")
-            if _sha256(payload) != runtime_digest:
+            payload = _read_regular(
+                artifact_path,
+                MAX_ARTIFACT_BYTES,
+                "runtime artifact",
+                reject_group_world_write=True,
+            )
+            if item.sha256 is not None and _sha256(payload) != item.sha256:
                 raise HostReleaseError("runtime artifact digest is invalid")
             runtime_paths.append(artifact_path)
             if name.startswith("slirp4netns"):
@@ -997,12 +1124,17 @@ def verify_host_bundle(
                 runtime_by_installed_name["fuse-overlayfs"] = artifact_path
             else:
                 runtime_by_installed_name[name] = artifact_path
-        binary_payloads = _runtime_binary_payloads(runtime_by_installed_name, binaries_raw)
+        binary_payloads = _runtime_binary_payloads(runtime_by_installed_name, runtime.binary_digests)
         _verify_static_binaries(binary_payloads, runner)
 
         bundle_hasher = hashlib.sha256()
         for relative in sorted(expected):
-            payload = _read_regular(snapshot_root / relative, MAX_ARTIFACT_BYTES, "bundle input")
+            payload = _read_regular(
+                snapshot_root / relative,
+                MAX_ARTIFACT_BYTES,
+                "bundle input",
+                reject_group_world_write=True,
+            )
             bundle_hasher.update(
                 relative.encode("utf-8") + b"\0" + _sha256(payload).encode("ascii") + b"\0"
             )

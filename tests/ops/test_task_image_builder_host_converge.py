@@ -604,7 +604,10 @@ def test_identity_preflight_rejects_symlinked_database(tmp_path: Path) -> None:
 
 
 def test_runtime_readback_verifies_exact_installed_binary_digest(tmp_path: Path) -> None:
-    payload = b"runtime-binary\n"
+    payloads = {
+        name: f"runtime-binary:{name}\n".encode("ascii")
+        for name in sorted(host.host_release.EXPECTED_RUNTIME_BINARIES)
+    }
     manifest = tmp_path / "rootless-runtime-v1.json"
     manifest.write_text(
         json.dumps(
@@ -612,7 +615,12 @@ def test_runtime_readback_verifies_exact_installed_binary_digest(tmp_path: Path)
                 "schema": "loom.task-image-builder-rootless-runtime/v1",
                 "release": "rootless-runtime-v1",
                 "architectures": {
-                    "x86_64": {"binaries": {"buildkitd": _sha(payload)}}
+                    "x86_64": {
+                        "binaries": {
+                            name: _sha(payload)
+                            for name, payload in payloads.items()
+                        }
+                    }
                 },
             },
             sort_keys=True,
@@ -625,15 +633,19 @@ def test_runtime_readback_verifies_exact_installed_binary_digest(tmp_path: Path)
     binary_dir.mkdir(parents=True)
     release.chmod(0o755)
     binary_dir.chmod(0o755)
-    binary = binary_dir / "buildkitd"
-    binary.write_bytes(payload)
-    binary.chmod(0o755)
+    for name, payload in payloads.items():
+        binary = binary_dir / name
+        binary.write_bytes(payload)
+        binary.chmod(0o755)
     receipt = {
         "schema": "loom.task-image-builder-installed-runtime/v1",
         "release": "rootless-runtime-v1",
         "architecture": "x86_64",
         "manifest_sha256": _sha(manifest.read_bytes()),
-        "binary_sha256": {"buildkitd": _sha(payload)},
+        "binary_sha256": {
+            name: _sha(payload)
+            for name, payload in payloads.items()
+        },
     }
     receipt_path = release / "receipt.json"
     receipt_path.write_bytes(host._canonical(receipt) + b"\n")
@@ -647,7 +659,7 @@ def test_runtime_readback_verifies_exact_installed_binary_digest(tmp_path: Path)
         required_owner=os.geteuid(),
     )
 
-    binary.write_bytes(b"drift\n")
+    (binary_dir / "buildkitd").write_bytes(b"drift\n")
     with pytest.raises(host.HostConvergenceError, match="runtime drift"):
         host.SystemHostBackend._runtime_exact(
             manifest,
@@ -655,6 +667,91 @@ def test_runtime_readback_verifies_exact_installed_binary_digest(tmp_path: Path)
             install_base=install_base,
             required_owner=os.geteuid(),
         )
+
+
+def test_default_runtime_manifest_matches_checked_in_host_release_binding() -> None:
+    release = host.host_release.load_host_release(host.DEFAULT_PATHS.release)
+
+    assert host.DEFAULT_PATHS.runtime_manifest.name == release.runtime_manifest
+
+
+def test_runtime_readback_accepts_v2_manifest_with_native_binary_receipt(
+    tmp_path: Path,
+) -> None:
+    payloads = {
+        name: f"runtime-binary:{name}\n".encode("ascii")
+        for name in sorted(host.host_release.EXPECTED_RUNTIME_BINARIES)
+    }
+    manifest = tmp_path / "rootless-runtime-v2.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "loom.task-image-builder-rootless-runtime/v2",
+                "release": "rootless-runtime-v2",
+                "source": {
+                    "buildkit": {
+                        "version": "v0.32.2",
+                        "signed_tag_commit": "1" * 40,
+                        "archive_sha256": "2" * 64,
+                    },
+                    "rootlesskit": {
+                        "version": "v3.1.0",
+                        "signed_tag_commit": "3" * 40,
+                        "archive_sha256": "4" * 64,
+                    },
+                },
+                "toolchain": {
+                    "go": "go1.26.7",
+                    "image": "golang:1.26-alpine3.23",
+                    "image_sha256": "5" * 64,
+                    "x_crypto": "v0.55.0",
+                    "reproducible_flags": ["-trimpath", "-buildvcs=false"],
+                },
+                "architectures": {
+                    "amd64": {
+                        "platform": "linux/amd64",
+                        "members": {
+                            name: _sha(payload)
+                            for name, payload in payloads.items()
+                        },
+                    }
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    install_base = tmp_path / "install"
+    release = install_base / "releases/rootless-runtime-v2"
+    binary_dir = release / "bin"
+    binary_dir.mkdir(parents=True)
+    release.chmod(0o755)
+    binary_dir.chmod(0o755)
+    for name, payload in payloads.items():
+        binary = binary_dir / name
+        binary.write_bytes(payload)
+        binary.chmod(0o755)
+    receipt = {
+        "schema": "loom.task-image-builder-installed-runtime/v1",
+        "release": "rootless-runtime-v2",
+        "architecture": "x86_64",
+        "manifest_sha256": _sha(manifest.read_bytes()),
+        "binary_sha256": {
+            name: _sha(payload)
+            for name, payload in payloads.items()
+        },
+    }
+    receipt_path = release / "receipt.json"
+    receipt_path.write_bytes(host._canonical(receipt) + b"\n")
+    receipt_path.chmod(0o644)
+    (install_base / "current").symlink_to("releases/rootless-runtime-v2")
+
+    assert host.SystemHostBackend._runtime_exact(
+        manifest,
+        "x86_64",
+        install_base=install_base,
+        required_owner=os.geteuid(),
+    )
 
 
 def test_runtime_install_consumes_verified_snapshot_and_backend_cleanup_removes_it(

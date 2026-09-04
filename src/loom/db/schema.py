@@ -2427,9 +2427,7 @@ class TaskImageBuildGrant(Base):
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     authority_spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     authority_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    grant_expires_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
-    )
+    grant_expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     slurm_comment: Mapped[str] = mapped_column(Text, nullable=False)
     ambiguity_settle_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     ambiguity_settle_until: Mapped[datetime | None] = mapped_column(
@@ -2512,6 +2510,16 @@ class TaskImageBuildProjection(Base):
             ["grant_id"],
             ["task_image_build_grants.id"],
             name="task_image_build_projections_grant_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_build_projections_current_session_fkey",
             ondelete="RESTRICT",
         ),
         UniqueConstraint(
@@ -2631,6 +2639,11 @@ class TaskImageBuildProjection(Base):
             "AND (exchange_id IS NULL OR session_issued_at < session_expires_at)",
             name="task_image_build_projections_time_check",
         ),
+        CheckConstraint(
+            "(session_id IS NULL AND session_generation IS NULL) OR "
+            "(session_id IS NOT NULL AND session_generation > 0)",
+            name="task_image_build_projections_session_generation_check",
+        ),
         Index(
             "task_image_build_projections_active_session_idx",
             "session_expires_at",
@@ -2666,18 +2679,12 @@ class TaskImageBuildProjection(Base):
     challenge_nonce: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     challenge_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     challenge_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    challenge_issued_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
-    )
-    challenge_expires_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
-    )
+    challenge_issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    challenge_expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     proof_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     proof_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     proof_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    bootstrap_token_hash: Mapped[bytes | None] = mapped_column(
-        LargeBinary(32), nullable=True
-    )
+    bootstrap_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
     bootstrap_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     bootstrap_issued_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
@@ -2689,6 +2696,7 @@ class TaskImageBuildProjection(Base):
     exchange_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     exchange_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    session_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     session_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
     session_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
@@ -2747,12 +2755,11 @@ class TaskImageBuildProjectionEvent(Base):
         CheckConstraint(
             "event_type IN ('challenged','challenge_replayed','projected',"
             "'projection_replayed','exchanged','exchange_replayed','attested',"
-            "'attestation_replayed','revoked','expired')",
+            "'attestation_replayed','renewed','renewal_replayed','revoked','expired')",
             name="task_image_build_projection_events_type_check",
         ),
         CheckConstraint(
-            "event_key ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$' "
-            "AND jsonb_typeof(payload_json) = 'object'",
+            "event_key ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$' AND jsonb_typeof(payload_json) = 'object'",
             name="task_image_build_projection_events_key_check",
         ),
         Index(
@@ -2793,8 +2800,7 @@ class TaskImageBuildContainmentAttestation(Base):
             name="task_image_build_containment_attestations_generation_uidx",
         ),
         CheckConstraint(
-            "id <> '00000000-0000-0000-0000-000000000000'::uuid "
-            "AND generation > 0",
+            "id <> '00000000-0000-0000-0000-000000000000'::uuid AND generation > 0",
             name="task_image_build_containment_attestations_generation_check",
         ),
         CheckConstraint(
@@ -2827,6 +2833,114 @@ class TaskImageBuildContainmentAttestation(Base):
     )
 
 
+class TaskImageBuildSessionGeneration(Base):
+    """Immutable secret-hash and attestation binding for one session generation."""
+
+    __tablename__ = "task_image_build_session_generations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["grant_id"],
+            ["task_image_build_projections.grant_id"],
+            name="task_image_build_session_generations_projection_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "attestation_generation"],
+            [
+                "task_image_build_containment_attestations.grant_id",
+                "task_image_build_containment_attestations.generation",
+            ],
+            name="task_image_build_session_generations_attestation_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["predecessor_session_id"],
+            ["task_image_build_session_generations.session_id"],
+            name="task_image_build_session_generations_predecessor_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "generation",
+            name="task_image_build_session_generations_generation_uidx",
+        ),
+        UniqueConstraint(
+            "session_id",
+            name="task_image_build_session_generations_session_uidx",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "generation",
+            "session_id",
+            name="task_image_build_session_generations_current_uidx",
+        ),
+        UniqueConstraint(
+            "renewal_id",
+            name="task_image_build_session_generations_renewal_uidx",
+        ),
+        CheckConstraint(
+            "id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND generation > 0 AND octet_length(session_token_hash) = 32 "
+            "AND session_secret_ref ~ "
+            "'^loom://task-image-session/[A-Za-z0-9._/-]+$' "
+            "AND octet_length(session_secret_ref) BETWEEN "
+            "octet_length('loom://task-image-session/') + 1 AND "
+            "octet_length('loom://task-image-session/') + 512",
+            name="task_image_build_session_generations_identity_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(session_json) = 'object' "
+            "AND session_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND session_sha256 <> repeat('0', 64) "
+            "AND attestation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND attestation_sha256 <> repeat('0', 64)",
+            name="task_image_build_session_generations_digest_check",
+        ),
+        CheckConstraint(
+            "(generation = 1 AND renewal_id IS NULL "
+            "AND renewal_sha256 IS NULL AND predecessor_session_id IS NULL) OR "
+            "(generation > 1 AND renewal_id IS NOT NULL "
+            "AND renewal_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND renewal_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND renewal_sha256 <> repeat('0', 64) "
+            "AND predecessor_session_id IS NOT NULL "
+            "AND predecessor_session_id <> session_id)",
+            name="task_image_build_session_generations_chain_check",
+        ),
+        CheckConstraint(
+            "issued_at < expires_at",
+            name="task_image_build_session_generations_time_check",
+        ),
+        Index(
+            "task_image_build_session_generations_expiry_idx",
+            "expires_at",
+            "grant_id",
+            "generation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    session_secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    session_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    session_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    attestation_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attestation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    renewal_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    renewal_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    predecessor_session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TaskImageMaterializationAttempt(Base):
     """Immutable builder/attempt/lease identity created with every claim."""
 
@@ -2835,6 +2949,34 @@ class TaskImageMaterializationAttempt(Base):
         CheckConstraint(
             "attempt_number > 0 AND lease_epoch > 0",
             name="task_image_materialization_attempts_counters_check",
+        ),
+        CheckConstraint(
+            "num_nonnulls(grant_id, session_id, session_generation, claim_id, "
+            "claim_deterministic_failure_count, claim_lease_expires_at, "
+            "claim_plan_json, claim_plan_sha256) IN (0, 8)",
+            name="task_image_materialization_attempts_session_fields_check",
+        ),
+        CheckConstraint(
+            "claim_id IS NULL OR ("
+            "claim_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_generation > 0 "
+            "AND builder_id = 'rootless:' || replace(session_id::text, '-', '') "
+            "AND claim_deterministic_failure_count >= 0 "
+            "AND claimed_at < claim_lease_expires_at "
+            "AND jsonb_typeof(claim_plan_json) = 'object' "
+            "AND claim_plan_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND claim_plan_sha256 <> repeat('0', 64))",
+            name="task_image_materialization_attempts_claim_id_check",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_materialization_attempts_session_fkey",
+            ondelete="RESTRICT",
         ),
         UniqueConstraint(
             "materialization_id",
@@ -2848,6 +2990,19 @@ class TaskImageMaterializationAttempt(Base):
             "lease_epoch",
             "builder_id",
             name="task_image_materialization_attempts_binding_uidx",
+        ),
+        UniqueConstraint(
+            "claim_id",
+            name="task_image_materialization_attempts_claim_uidx",
+        ),
+        UniqueConstraint(
+            "id",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+            "builder_id",
+            "grant_id",
+            name="task_image_materialization_attempts_operation_binding_uidx",
         ),
         Index(
             "task_image_materialization_attempts_lookup_idx",
@@ -2866,10 +3021,134 @@ class TaskImageMaterializationAttempt(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    session_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    claim_deterministic_failure_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    claim_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    claim_plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    claim_plan_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     claimed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class TaskImageMaterializationOperationEvent(Base):
+    """One bounded idempotent transition result for a session-owned lease."""
+
+    __tablename__ = "task_image_materialization_operation_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+                "grant_id",
+            ],
+            [
+                "task_image_materialization_attempts.id",
+                "task_image_materialization_attempts.materialization_id",
+                "task_image_materialization_attempts.attempt_number",
+                "task_image_materialization_attempts.lease_epoch",
+                "task_image_materialization_attempts.builder_id",
+                "task_image_materialization_attempts.grant_id",
+            ],
+            name="task_image_materialization_operation_events_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_materialization_operation_events_session_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            name="task_image_materialization_operation_events_operation_uidx",
+        ),
+        CheckConstraint(
+            "id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND operation_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND attempt_number > 0 AND lease_epoch > 0 "
+            "AND session_generation > 0 AND result_attempt_count >= 0",
+            name="task_image_materialization_operation_events_identity_check",
+        ),
+        CheckConstraint(
+            "operation_type IN ('start','heartbeat','bundle','release',"
+            "'containment_release','deterministic_fail')",
+            name="task_image_materialization_operation_events_type_check",
+        ),
+        CheckConstraint(
+            "(operation_type IN ('start','heartbeat','bundle') "
+            "AND result_state IN ('claimed','running') "
+            "AND result_lease_expires_at IS NOT NULL) OR "
+            "(operation_type IN ('release','containment_release','deterministic_fail') "
+            "AND result_state IN ('queued','failed') "
+            "AND result_lease_expires_at IS NULL)",
+            name="task_image_materialization_operation_events_result_check",
+        ),
+        CheckConstraint(
+            "(operation_type <> 'bundle' "
+            "AND secret_response_ref IS NULL "
+            "AND secret_response_sha256 IS NULL "
+            "AND secret_response_expires_at IS NULL) OR "
+            "(operation_type = 'bundle' "
+            "AND num_nonnulls(secret_response_ref, secret_response_sha256, "
+            "secret_response_expires_at) = 3 "
+            "AND secret_response_ref ~ "
+            "'^loom://task-image-bundle-capability/[A-Za-z0-9._/-]+$' "
+            "AND octet_length(secret_response_ref) BETWEEN "
+            "octet_length('loom://task-image-bundle-capability/') + 1 AND "
+            "octet_length('loom://task-image-bundle-capability/') + 512 "
+            "AND secret_response_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND secret_response_sha256 <> repeat('0', 64) "
+            "AND recorded_at < secret_response_expires_at)",
+            name="task_image_materialization_operation_events_secret_check",
+        ),
+        Index(
+            "task_image_materialization_operation_events_attempt_idx",
+            "materialization_id",
+            "lease_epoch",
+            "recorded_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    result_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    result_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    secret_response_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_response_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    secret_response_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class TaskImagePublicationEvidence(Base):

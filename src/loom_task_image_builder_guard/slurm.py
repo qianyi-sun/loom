@@ -395,6 +395,21 @@ class SlurmFacts:
     wall_time: str
 
 
+@dataclass(frozen=True, slots=True)
+class SlurmTerminalFacts:
+    job_id: str
+    node_name: str
+    comment: str
+    account: str
+    partition: str
+    qos: str
+    cpus: int
+    memory_mib: int
+    wall_time: str
+    controller_state: str
+    accounting_state: str
+
+
 def _oneline(value: str) -> dict[str, str]:
     lines = [line for line in value.splitlines() if line.strip()]
     if len(lines) != 1:
@@ -468,7 +483,14 @@ class SlurmInspector:
             raise GuardError("slurm_command_failed")
         return result.stdout
 
-    def observe(self, *, job_id: str, grant_id: UUID) -> SlurmFacts:
+    def _observe(
+        self,
+        *,
+        job_id: str,
+        grant_id: UUID,
+        states: frozenset[str],
+        state_error: str,
+    ) -> tuple[SlurmFacts, str, str]:
         if _JOB_ID.fullmatch(job_id) is None or grant_id.int == 0:
             raise GuardError("slurm_request_invalid")
         control = _oneline(
@@ -502,8 +524,9 @@ class SlurmInspector:
             raise GuardError("slurm_controller_invalid")
         if control["JobId"] != job_id:
             raise GuardError("slurm_controller_invalid")
-        if control["JobState"] != "RUNNING":
-            raise GuardError("slurm_job_not_running")
+        controller_state = control["JobState"]
+        if controller_state not in states:
+            raise GuardError(state_error)
         if (
             control["UserId"] != f"loom-builder({self.identity.uid})"
             or control["GroupId"] != f"loom-task-builder({self.identity.gid})"
@@ -587,7 +610,8 @@ class SlurmInspector:
             raise GuardError("slurm_accounting_invalid") from None
         if (
             acct_job != job_id
-            or state != "RUNNING"
+            or state != controller_state
+            or state not in states
             or user != "loom-builder"
             or group != "loom-task-builder"
             or account != self.policy.account
@@ -602,7 +626,7 @@ class SlurmInspector:
             or tres_memory != memory_mib
         ):
             raise GuardError("slurm_accounting_invalid")
-        return SlurmFacts(
+        facts = SlurmFacts(
             job_id=job_id,
             node_name=self.node_name,
             comment=comment,
@@ -612,6 +636,54 @@ class SlurmInspector:
             cpus=cpus,
             memory_mib=memory_mib,
             wall_time=control["TimeLimit"],
+        )
+        return facts, controller_state, state
+
+    def observe(self, *, job_id: str, grant_id: UUID) -> SlurmFacts:
+        facts, _controller_state, _accounting_state = self._observe(
+            job_id=job_id,
+            grant_id=grant_id,
+            states=frozenset({"RUNNING"}),
+            state_error="slurm_job_not_running",
+        )
+        return facts
+
+    def observe_terminal(
+        self,
+        *,
+        job_id: str,
+        grant_id: UUID,
+    ) -> SlurmTerminalFacts:
+        facts, controller_state, accounting_state = self._observe(
+            job_id=job_id,
+            grant_id=grant_id,
+            states=frozenset(
+                {
+                    "BOOT_FAIL",
+                    "CANCELLED",
+                    "COMPLETED",
+                    "DEADLINE",
+                    "FAILED",
+                    "NODE_FAIL",
+                    "OUT_OF_MEMORY",
+                    "PREEMPTED",
+                    "TIMEOUT",
+                }
+            ),
+            state_error="slurm_terminal_invalid",
+        )
+        return SlurmTerminalFacts(
+            facts.job_id,
+            facts.node_name,
+            facts.comment,
+            facts.account,
+            facts.partition,
+            facts.qos,
+            facts.cpus,
+            facts.memory_mib,
+            facts.wall_time,
+            controller_state,
+            accounting_state,
         )
 
     def quarantine_capability(self) -> None:
@@ -633,4 +705,5 @@ __all__ = [
     "PinnedCommandRunner",
     "SlurmFacts",
     "SlurmInspector",
+    "SlurmTerminalFacts",
 ]

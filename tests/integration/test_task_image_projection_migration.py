@@ -16,6 +16,79 @@ from loom.db import schema
 NOW = datetime(2026, 9, 2, 14, 0, tzinfo=UTC)
 GRANT_ID = UUID("11111111-1111-1111-1111-111111111111")
 
+PROJECTION_0125_COLUMNS = {
+    "id",
+    "grant_id",
+    "state",
+    "principal_id",
+    "principal_sha256",
+    "request_id",
+    "request_json",
+    "request_sha256",
+    "node_name",
+    "node_boot_id",
+    "slurm_cluster_id",
+    "slurm_job_id",
+    "supervisor_pid",
+    "supervisor_uid",
+    "supervisor_gid",
+    "supervisor_executable_sha256",
+    "cgroup_path",
+    "cgroup_inode",
+    "challenge_nonce",
+    "challenge_json",
+    "challenge_sha256",
+    "challenge_issued_at",
+    "challenge_expires_at",
+    "proof_id",
+    "proof_json",
+    "proof_sha256",
+    "bootstrap_token_hash",
+    "bootstrap_secret_ref",
+    "bootstrap_issued_at",
+    "bootstrap_expires_at",
+    "exchange_id",
+    "exchange_json",
+    "exchange_sha256",
+    "session_id",
+    "session_token_hash",
+    "session_secret_ref",
+    "session_json",
+    "session_sha256",
+    "session_issued_at",
+    "session_expires_at",
+    "attestation_generation",
+    "attestation_sha256",
+    "attestation_expires_at",
+    "event_sequence",
+    "created_at",
+    "updated_at",
+    "revoked_at",
+    "revoke_reason",
+    "expired_at",
+}
+
+PROJECTION_EVENT_0125_COLUMNS = {
+    "id",
+    "grant_id",
+    "event_sequence",
+    "event_type",
+    "event_key",
+    "payload_json",
+    "created_at",
+}
+
+CONTAINMENT_ATTESTATION_0125_COLUMNS = {
+    "id",
+    "grant_id",
+    "generation",
+    "attestation_json",
+    "attestation_sha256",
+    "issued_at",
+    "expires_at",
+    "recorded_at",
+}
+
 
 def _config(postgres_url: str) -> Config:
     config = Config("migrations/alembic.ini")
@@ -150,14 +223,24 @@ def test_0125_adds_fail_closed_projection_authority_and_round_trips(
             schema.TaskImageBuildProjectionEvent.__tablename__,
             schema.TaskImageBuildContainmentAttestation.__tablename__,
         } <= tables
-        for model in (
-            schema.TaskImageBuildProjection,
-            schema.TaskImageBuildProjectionEvent,
-            schema.TaskImageBuildContainmentAttestation,
-        ):
-            assert set(model.__table__.columns.keys()) == {
-                item["name"] for item in inspector.get_columns(model.__tablename__)
-            }
+        assert PROJECTION_0125_COLUMNS == {
+            item["name"]
+            for item in inspector.get_columns(
+                schema.TaskImageBuildProjection.__tablename__
+            )
+        }
+        assert PROJECTION_EVENT_0125_COLUMNS == {
+            item["name"]
+            for item in inspector.get_columns(
+                schema.TaskImageBuildProjectionEvent.__tablename__
+            )
+        }
+        assert CONTAINMENT_ATTESTATION_0125_COLUMNS == {
+            item["name"]
+            for item in inspector.get_columns(
+                schema.TaskImageBuildContainmentAttestation.__tablename__
+            )
+        }
 
         grant_columns = {
             item["name"] for item in inspector.get_columns("task_image_build_grants")

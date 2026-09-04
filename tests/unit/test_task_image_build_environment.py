@@ -20,6 +20,7 @@ from loom_control_plane.task_image_build_environment import (
 )
 from loom_task_image_authority.contracts import (
     TaskImageBuildGrantAuthorityV1,
+    TaskImageBuildGrantAuthorityV2,
     canonical_authority_sha256,
 )
 
@@ -69,7 +70,9 @@ def _authority(
         "slurm_cluster_id": policy.slurm_cluster_id,
         "cpu_arch": policy.cpu_arch,
         "slurm_request_sha256": canonical_request_sha256(policy.request_identity()),
+        "schema_version": 2,
         "builder_release_sha256": "2" * 64,
+        "supervisor_executable_sha256": "6" * 64,
         "build_policy_sha256": "3" * 64,
         "containment_policy_sha256": "4" * 64,
         "resource_profile_sha256": "5" * 64,
@@ -77,7 +80,7 @@ def _authority(
         "expires_at": _NOW + timedelta(hours=2),
     }
     values.update(changes)
-    return TaskImageBuildGrantAuthorityV1.model_validate(values)
+    return TaskImageBuildGrantAuthorityV2.model_validate(values)
 
 
 def _grant(policy: SlurmBuildEnvironmentPolicyV1):
@@ -178,6 +181,7 @@ def test_grant_rejects_changed_or_mismatched_authority() -> None:
         authority=authority,
     )
     assert grant.authority == authority
+    assert grant.schema_version == "loom.task-image-build-grant/v2"
     assert grant.authority_sha256 == canonical_authority_sha256(authority)
 
     with pytest.raises(ValueError, match="cluster"):
@@ -202,6 +206,17 @@ def test_grant_rejects_changed_or_mismatched_authority() -> None:
             grant_id=_GRANT_ID,
             authority=_authority(policy, slurm_request_sha256="6" * 64),
         )
+
+    legacy = TaskImageBuildGrantAuthorityV1.model_validate(
+        {
+            key: value
+            for key, value in authority.model_dump().items()
+            if key != "supervisor_executable_sha256"
+        }
+        | {"schema_version": 1, "builder_release_sha256": "6" * 64}
+    )
+    with pytest.raises(ValueError, match="V2"):
+        issue_slurm_build_grant(policy, grant_id=_GRANT_ID, authority=legacy)
 
     changed_digest = grant.model_dump()
     changed_digest["authority_sha256"] = "f" * 64

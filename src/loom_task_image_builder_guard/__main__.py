@@ -38,6 +38,7 @@ from loom_task_image_builder_guard.service import (
     SystemReconciliationProbe,
 )
 from loom_task_image_builder_guard.slurm import PinnedCommandRunner, SlurmInspector
+from loom_task_image_builder_guard.storage import ProjectQuotaStorage
 
 _UNSAFE_ENVIRONMENT = frozenset(
     {
@@ -186,6 +187,11 @@ def build_service(
         bpf_loader=loader,
         device_probe=device_probe,
     )
+    storage = ProjectQuotaStorage(
+        config.storage,
+        uid=config.identity.uid,
+        gid=config.identity.gid,
+    )
     policy = GuardPolicy(
         cpus=config.slurm.cpus,
         memory_mib=config.slurm.memory_mib,
@@ -210,6 +216,7 @@ def build_service(
         config.containment.bpffs_root,
         probe=cast(ReconciliationProbe, probe),
         slurm=slurm,
+        storage=storage,
         progress=progress.mark,
     )
     authority = AuthorityClient(config.authority, progress=progress.mark)
@@ -227,6 +234,7 @@ def build_service(
             ),
         ),
         containment=cast(Containment, containment),
+        storage=storage,
         policy=policy,
         authority=authority,
         reconciler=reconciler,

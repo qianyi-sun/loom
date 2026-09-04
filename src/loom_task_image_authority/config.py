@@ -12,9 +12,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from loom.task_image_build_plan import (
+    MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
+    MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
+)
 
 _MAX_KEYRING_BYTES = 1024 * 1024
 _MAX_KEY_VERSION = (1 << 31) - 1
@@ -44,6 +50,51 @@ class TaskImageAuthoritySettings(BaseSettings):
     port: int = Field(default=8445, ge=1, le=65535)
     request_rate_limit_per_second: int = Field(default=64, ge=1, le=10_000)
     request_concurrency_limit: int = Field(default=32, ge=1, le=1024)
+    bundle_public_https_origin: str | None = Field(default=None, max_length=2048)
+    bundle_expected_bucket: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=63,
+        pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+    )
+    bundle_maximum_objects: int = Field(
+        default=MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
+        ge=1,
+        le=MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
+    )
+    bundle_maximum_bytes: int = Field(
+        default=MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
+        ge=1,
+        le=MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
+    )
+    bundle_url_expiry_seconds: int = Field(default=900, ge=1, le=900)
+
+    @model_validator(mode="after")
+    def _bundle_configuration_is_complete_and_safe(
+        self,
+    ) -> TaskImageAuthoritySettings:
+        if (self.bundle_public_https_origin is None) != (self.bundle_expected_bucket is None):
+            raise ValueError("bundle capability configuration must be all present or absent")
+        if self.bundle_public_https_origin is not None:
+            parsed = urlsplit(self.bundle_public_https_origin)
+            if (
+                parsed.scheme != "https"
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.hostname is None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("bundle public origin must be an origin-only HTTPS URL")
+        if self.bundle_expected_bucket is not None and (
+            ".." in self.bundle_expected_bucket
+            or self.bundle_expected_bucket.startswith("xn--")
+            or self.bundle_expected_bucket.endswith("-s3alias")
+        ):
+            raise ValueError("bundle expected bucket is invalid")
+        return self
 
 
 def read_owner_only_bytes(path: Path, *, max_bytes: int = 16 * 1024) -> bytes:
@@ -104,9 +155,7 @@ def read_owner_only_bytes(path: Path, *, max_bytes: int = 16 * 1024) -> bytes:
                 opened.st_mtime_ns,
                 opened.st_ctime_ns,
             ):
-                raise TaskImageAuthorityConfigurationError(
-                    "owner-only file changed while reading"
-                )
+                raise TaskImageAuthorityConfigurationError("owner-only file changed while reading")
             payload = b"".join(chunks)
         finally:
             os.close(descriptor)
@@ -216,9 +265,7 @@ def load_secret_store_keyring(path: Path) -> TaskImageSecretStoreKeyring:
         raise TaskImageAuthorityConfigurationError("invalid keyring document") from None
 
     primary_key = _decode_key(document.primary.key_base64)
-    fallback_keys = {
-        entry.version: _decode_key(entry.key_base64) for entry in document.fallbacks
-    }
+    fallback_keys = {entry.version: _decode_key(entry.key_base64) for entry in document.fallbacks}
     if len({primary_key, *fallback_keys.values()}) != 1 + len(fallback_keys):
         raise TaskImageAuthorityConfigurationError("keyring key material must be unique")
     return TaskImageSecretStoreKeyring(

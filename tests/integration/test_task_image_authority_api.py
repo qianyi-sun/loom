@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
-from sqlalchemy import delete, select
+from sqlalchemy import delete, null, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.exceptions import StarletteDeprecationWarning
@@ -32,18 +32,37 @@ from loom.db.schema import (
     TaskImageBuildGrantEvent,
     TaskImageBuildProjection,
     TaskImageBuildProjectionEvent,
+    TaskImageBuildSessionGeneration,
+    TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
+    TaskImageMaterializationOperationEvent,
+    TaskImagePublicationEvidence,
 )
+from loom.task_image_materialization import task_image_materialization_key
 from loom_task_image_authority import api
 from loom_task_image_authority.api import create_app
 from loom_task_image_authority.auth import TaskImagePrincipalVerifier
+from loom_task_image_authority.bundle_capability import (
+    TaskImageBundleCapabilityProvider,
+    TaskImageBundleCapabilityV1,
+    TaskImageBundleObject,
+)
 from loom_task_image_authority.config import TaskImageAuthoritySettings
 from loom_task_image_authority.contracts import (
     MAX_CONTRACT_BYTES,
+    TaskImageBuildSessionV2,
+    TaskImageMaterializationClaimRequestV1,
+    TaskImageMaterializationFailureRequestV1,
+    TaskImageMaterializationOperationRequestV1,
     TaskImageProjectionChallengeV1,
     TaskImageProjectionReceiptV1,
+    TaskImageSessionRenewalV1,
+)
+from loom_task_image_authority.http_contracts import (
+    TaskImageMaterializationClaimResponseV1,
+    TaskImageMaterializationOperationResponseV1,
 )
 from tests.integration.test_task_image_projection_store import (
-    ATTESTATION_ID,
     CHALLENGE_NONCE,
     GRANT_ID,
     NOW,
@@ -58,7 +77,54 @@ from tests.integration.test_task_image_projection_store import (
 _BEARER = "phase2b1-api-test-node-bearer"
 _BOOTSTRAP = "loom_tibp_" + "A" * 64
 _SESSION = "loom_tibs_" + "B" * 64
+_NEXT_SESSION = "loom_tibs_" + "C" * 64
 _HEADERS = {"Authorization": f"Bearer {_BEARER}"}
+_NEXT_SESSION_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+_CLAIM_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+_START_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+_HEARTBEAT_ID = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
+_RELEASE_ID = UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+
+
+class _FakeBundleBackend:
+    def __init__(self) -> None:
+        self.list_calls = 0
+        self.presign_calls = 0
+
+    def list_objects(
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        maximum_objects: int,
+    ) -> tuple[TaskImageBundleObject, ...]:
+        assert bucket == "loom-bundles"
+        assert prefix == "phase2c/session-bound/"
+        assert maximum_objects == 2_001
+        self.list_calls += 1
+        return (
+            TaskImageBundleObject(key=f"{prefix}task.toml", size_bytes=20),
+            TaskImageBundleObject(
+                key=f"{prefix}.loom-bundle-file-metadata.json",
+                size_bytes=42,
+            ),
+        )
+
+    def presign_get(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        expires_in_seconds: int,
+    ) -> str:
+        assert bucket == "loom-bundles"
+        assert 0 < expires_in_seconds <= 600
+        self.presign_calls += 1
+        return (
+            f"https://objects.example/{key}"
+            f"?X-Amz-Date=20260902T140000Z&X-Amz-Expires={expires_in_seconds}"
+            "&X-Amz-Signature=secret"
+        )
 
 
 def _owner_file(path: Path, payload: str | bytes) -> Path:
@@ -124,9 +190,7 @@ def _settings(
         "secret_store_keyring_file": keyring,
         "tls_cert_file": _owner_file(tmp_path / f"server-{uuid4()}.pem", "test"),
         "tls_key_file": _owner_file(tmp_path / f"server-key-{uuid4()}.pem", "test"),
-        "tls_client_ca_file": _owner_file(
-            tmp_path / f"client-ca-{uuid4()}.pem", "test"
-        ),
+        "tls_client_ca_file": _owner_file(tmp_path / f"client-ca-{uuid4()}.pem", "test"),
     }
     values.update(changes)
     return TaskImageAuthoritySettings(**values)
@@ -137,14 +201,38 @@ async def _clear_authority_rows(database_url: str) -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session:
-            await session.execute(delete(TaskImageBuildContainmentAttestation))
+            await session.execute(delete(TaskImageMaterializationOperationEvent))
+            await session.execute(delete(TaskImagePublicationEvidence))
+            await session.execute(delete(TaskImageMaterializationAttempt))
+            await session.execute(delete(TaskImageMaterialization))
             await session.execute(delete(TaskImageBuildProjectionEvent))
+            await session.execute(
+                update(TaskImageBuildProjection)
+                .where(TaskImageBuildProjection.session_id.is_not(None))
+                .values(
+                    state="projected",
+                    exchange_id=None,
+                    exchange_json=null(),
+                    exchange_sha256=None,
+                    session_id=None,
+                    session_generation=None,
+                    session_token_hash=None,
+                    session_secret_ref=None,
+                    session_json=null(),
+                    session_sha256=None,
+                    session_issued_at=None,
+                    session_expires_at=None,
+                    revoked_at=None,
+                    revoke_reason=None,
+                    expired_at=None,
+                )
+            )
+            await session.execute(delete(TaskImageBuildSessionGeneration))
+            await session.execute(delete(TaskImageBuildContainmentAttestation))
             await session.execute(delete(TaskImageBuildProjection))
             await session.execute(delete(TaskImageBuildGrantEvent))
             await session.execute(delete(TaskImageBuildGrant))
-            await session.execute(
-                delete(Secret).where(Secret.ref.like("loom://task-image-%"))
-            )
+            await session.execute(delete(Secret).where(Secret.ref.like("loom://task-image-%")))
             await session.commit()
     finally:
         await engine.dispose()
@@ -161,12 +249,63 @@ async def _seed_released_grant(database_url: str) -> None:
         await engine.dispose()
 
 
+async def _seed_materialization(
+    database_url: str,
+    *,
+    task_config: dict[str, object] | None = None,
+) -> UUID:
+    engine = create_async_engine(database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    materialization_id = uuid4()
+    try:
+        async with factory() as session:
+            checksum = "4" * 64
+            session.add(
+                TaskImageMaterialization(
+                    id=materialization_id,
+                    materialization_key=task_image_materialization_key(
+                        task_id="phase2c/session-bound",
+                        task_checksum=checksum,
+                        cpu_arch="arm64",
+                    ),
+                    task_id="phase2c/session-bound",
+                    task_checksum=checksum,
+                    cpu_arch="arm64",
+                    task_config=task_config
+                    or {
+                        "schema_version": "1",
+                        "task": {
+                            "id": "phase2c/session-bound",
+                            "name": "session-bound",
+                        },
+                        "environment": {
+                            "os": "linux",
+                            "cpu_arch": "arm64",
+                            "dockerfile": "environment/Dockerfile",
+                            "build_timeout_sec": 600.0,
+                        },
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                    },
+                    task_source="s3://loom-bundles/phase2c/session-bound/",
+                    task_source_provenance={
+                        "bundle_file_metadata_sha256": "sha256:" + "5" * 64,
+                    },
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+    return materialization_id
+
+
 @dataclass
 class _ApiContext:
     client: TestClient
     app: FastAPI
     now: list[datetime]
     settings: TaskImageAuthoritySettings
+    bundle_backend: _FakeBundleBackend
 
 
 @pytest.fixture
@@ -176,19 +315,50 @@ async def authority_api(
 ) -> AsyncIterator[_ApiContext]:
     await _clear_authority_rows(postgres_url)
     await _seed_released_grant(postgres_url)
-    settings = _settings(tmp_path, postgres_url)
+    settings = _settings(
+        tmp_path,
+        postgres_url,
+        bundle_public_https_origin="https://objects.example",
+        bundle_expected_bucket="loom-bundles",
+        bundle_url_expiry_seconds=600,
+    )
     current_now = [NOW + timedelta(seconds=4)]
+    session_tokens = iter((_SESSION, _NEXT_SESSION))
+    bundle_backend = _FakeBundleBackend()
+    capability_ids = iter(
+        (
+            UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            UUID("fefefefe-fefe-fefe-fefe-fefefefefefe"),
+        )
+    )
+    capability_provider = TaskImageBundleCapabilityProvider(
+        backend=bundle_backend,
+        public_https_origin=settings.bundle_public_https_origin or "",
+        expected_bucket=settings.bundle_expected_bucket or "",
+        maximum_objects=settings.bundle_maximum_objects,
+        maximum_bytes=settings.bundle_maximum_bytes,
+        url_expiry_seconds=settings.bundle_url_expiry_seconds,
+        capability_id_factory=lambda: next(capability_ids),
+    )
     app = create_app(
         settings,
         verifier=TaskImagePrincipalVerifier.from_file(settings.principals_file),
         now_factory=lambda: current_now[0],
         challenge_nonce_factory=lambda: CHALLENGE_NONCE,
         bootstrap_token_factory=lambda: _BOOTSTRAP,
-        session_token_factory=lambda: _SESSION,
+        session_token_factory=lambda: next(session_tokens),
+        session_id_factory=lambda: _NEXT_SESSION_ID,
+        bundle_capability_provider=capability_provider,
     )
     try:
         with TestClient(app) as client:
-            yield _ApiContext(client=client, app=app, now=current_now, settings=settings)
+            yield _ApiContext(
+                client=client,
+                app=app,
+                now=current_now,
+                settings=settings,
+                bundle_backend=bundle_backend,
+            )
     finally:
         await _clear_authority_rows(postgres_url)
 
@@ -207,6 +377,94 @@ def _put(
     )
 
 
+def _post(
+    context: _ApiContext,
+    path: str,
+    model: object,
+    *,
+    headers: dict[str, str] | None = None,
+):
+    return context.client.post(
+        path,
+        headers=_HEADERS if headers is None else headers,
+        json=model.model_dump(mode="json"),  # type: ignore[attr-defined]
+    )
+
+
+def _renewed_session(context: _ApiContext) -> TaskImageBuildSessionV2:
+    assert (
+        _put(
+            context,
+            f"/v1/projections/{GRANT_ID}/challenge",
+            _request(),
+        ).status_code
+        == 200
+    )
+    context.now[0] = NOW + timedelta(seconds=6)
+    receipt_response = _put(
+        context,
+        f"/v1/projections/{GRANT_ID}/attachment",
+        _proof(),
+    )
+    receipt = TaskImageProjectionReceiptV1.model_validate_json(receipt_response.content)
+    context.now[0] = NOW + timedelta(seconds=8)
+    exchange_response = _put(
+        context,
+        f"/v1/projections/{GRANT_ID}/exchange",
+        _exchange(receipt),
+    )
+    current = TaskImageBuildSessionV2.model_validate_json(exchange_response.content)
+    context.now[0] = NOW + timedelta(seconds=13)
+    renewal = TaskImageSessionRenewalV1(
+        renewal_id=UUID("99999999-9999-9999-9999-999999999999"),
+        grant_id=GRANT_ID,
+        session_id=current.session_id,
+        session_generation=current.generation,
+        session_token=current.session_token,
+        attestation=_attestation(_proof(), generation=2),
+        observed_at=NOW + timedelta(seconds=12),
+    )
+    response = _put(
+        context,
+        f"/v1/projections/{GRANT_ID}/sessions/1/renew",
+        renewal,
+    )
+    assert response.status_code == 200
+    return TaskImageBuildSessionV2.model_validate_json(response.content)
+
+
+def _claim_request(
+    build_session: TaskImageBuildSessionV2,
+    *,
+    claim_id: UUID = _CLAIM_ID,
+) -> TaskImageMaterializationClaimRequestV1:
+    return TaskImageMaterializationClaimRequestV1(
+        claim_id=claim_id,
+        grant_id=GRANT_ID,
+        session_id=build_session.session_id,
+        session_generation=build_session.generation,
+        session_token=build_session.session_token,
+    )
+
+
+def _operation_request(
+    build_session: TaskImageBuildSessionV2,
+    receipt: TaskImageMaterializationClaimResponseV1,
+    *,
+    operation_id: UUID,
+) -> TaskImageMaterializationOperationRequestV1:
+    return TaskImageMaterializationOperationRequestV1(
+        operation_id=operation_id,
+        grant_id=GRANT_ID,
+        session_id=build_session.session_id,
+        session_generation=build_session.generation,
+        session_token=build_session.session_token,
+        materialization_id=receipt.materialization_id,
+        attempt_id=receipt.attempt_id,
+        lease_epoch=receipt.lease_epoch,
+    )
+
+
 async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays(
     authority_api: _ApiContext,
 ) -> None:
@@ -215,9 +473,7 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
 
-    route_paths = {
-        route.path for route in context.app.routes if isinstance(route, APIRoute)
-    }
+    route_paths = {route.path for route in context.app.routes if isinstance(route, APIRoute)}
     assert route_paths == {
         "/healthz",
         "/metrics",
@@ -225,6 +481,13 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
         "/v1/projections/{grant_id}/attachment",
         "/v1/projections/{grant_id}/exchange",
         "/v1/projections/{grant_id}/attestations/{generation}",
+        "/v1/projections/{grant_id}/sessions/{generation}/renew",
+        "/v1/projections/{grant_id}/materializations/claim",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/start",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/heartbeat",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/release",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/fail",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/bundle",
         "/v1/projections/{grant_id}/revocation",
     }
     for disabled in ("/openapi.json", "/docs", "/redoc"):
@@ -237,9 +500,7 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
     )
     assert challenge_response.status_code == 200
     assert challenge_response.headers["content-type"] == "application/json"
-    challenge = TaskImageProjectionChallengeV1.model_validate_json(
-        challenge_response.content
-    )
+    challenge = TaskImageProjectionChallengeV1.model_validate_json(challenge_response.content)
     assert challenge.challenge_nonce == CHALLENGE_NONCE
     challenge_replay = _put(
         context,
@@ -272,6 +533,7 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
     )
     assert exchange_response.status_code == 200
     assert exchange_response.json()["session_token"] == _SESSION
+    initial_session = TaskImageBuildSessionV2.model_validate_json(exchange_response.content)
     exchange_replay = _put(
         context,
         f"/v1/projections/{GRANT_ID}/exchange",
@@ -280,20 +542,31 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
     assert exchange_replay.json() == exchange_response.json()
 
     context.now[0] = NOW + timedelta(seconds=13)
-    attestation = _attestation(_proof(), generation=2)
-    attestation_response = _put(
-        context,
-        f"/v1/projections/{GRANT_ID}/attestations/2",
-        attestation,
+    renewal = TaskImageSessionRenewalV1(
+        renewal_id=UUID("99999999-9999-9999-9999-999999999999"),
+        grant_id=GRANT_ID,
+        session_id=initial_session.session_id,
+        session_generation=initial_session.generation,
+        session_token=initial_session.session_token,
+        attestation=_attestation(_proof(), generation=2),
+        observed_at=NOW + timedelta(seconds=12),
     )
-    assert attestation_response.status_code == 200
-    assert attestation_response.json()["attestation_id"] == str(ATTESTATION_ID)
-    attestation_replay = _put(
+    renewal_response = _put(
         context,
-        f"/v1/projections/{GRANT_ID}/attestations/2",
-        attestation,
+        f"/v1/projections/{GRANT_ID}/sessions/1/renew",
+        renewal,
     )
-    assert attestation_replay.json() == attestation_response.json()
+    assert renewal_response.status_code == 200
+    renewed_session = TaskImageBuildSessionV2.model_validate_json(renewal_response.content)
+    assert renewed_session.generation == 2
+    assert renewed_session.session_id == _NEXT_SESSION_ID
+    assert renewed_session.session_token == _NEXT_SESSION
+    renewal_replay = _put(
+        context,
+        f"/v1/projections/{GRANT_ID}/sessions/1/renew",
+        renewal,
+    )
+    assert renewal_replay.json() == renewal_response.json()
 
     context.now[0] = NOW + timedelta(seconds=14)
     revocation_response = _put(
@@ -310,6 +583,404 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
     )
     assert revocation_replay.status_code == 204
     assert revocation_replay.content == b""
+
+
+async def test_session_routes_drive_claim_bundle_and_lease_operations(
+    authority_api: _ApiContext,
+    postgres_url: str,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+
+    authority_api.now[0] = NOW + timedelta(seconds=14)
+    claim_request = _claim_request(build_session)
+    claim_response = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        claim_request,
+    )
+    assert claim_response.status_code == 200
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(claim_response.content)
+    assert claim.claim_id == _CLAIM_ID
+    assert claim.materialization_id == materialization_id
+    assert claim.state == "claimed"
+    assert claim.deterministic_failure_count == 0
+    assert claim.plan.materialization_id == materialization_id
+    assert claim.plan.session_id == build_session.session_id
+    assert claim.plan.session_generation == build_session.generation
+    assert claim.plan.builder_id == f"rootless:{build_session.session_id.hex}"
+    replay = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        claim_request,
+    )
+    assert replay.status_code == 200
+    assert replay.json() == claim_response.json()
+
+    authority_api.now[0] = NOW + timedelta(seconds=15)
+    start_request = _operation_request(
+        build_session,
+        claim,
+        operation_id=_START_ID,
+    )
+    start_response = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/start",
+        start_request,
+    )
+    start = TaskImageMaterializationOperationResponseV1.model_validate_json(start_response.content)
+    assert start_response.status_code == 200
+    assert start.operation == "start"
+    assert start.state == "running"
+    assert start.attempt_id == claim.attempt_id
+
+    authority_api.now[0] = NOW + timedelta(seconds=16)
+    bundle_request = _operation_request(
+        build_session,
+        claim,
+        operation_id=UUID("12121212-1212-1212-1212-121212121212"),
+    )
+    bundle_response = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/bundle",
+        bundle_request,
+    )
+    assert bundle_response.status_code == 200
+    capability = TaskImageBundleCapabilityV1.model_validate_json(bundle_response.content)
+    assert capability.materialization_id == materialization_id
+    assert capability.session_id == build_session.session_id
+    assert capability.expires_at <= build_session.expires_at
+    assert all(item.url.startswith("https://objects.example/") for item in capability.objects)
+    bundle_replay = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/bundle",
+        bundle_request,
+    )
+    assert bundle_replay.status_code == 200
+    assert bundle_replay.json() == bundle_response.json()
+    assert authority_api.bundle_backend.list_calls == 1
+    assert authority_api.bundle_backend.presign_calls == len(capability.objects)
+
+    authority_api.now[0] = NOW + timedelta(seconds=17)
+    heartbeat_request = _operation_request(
+        build_session,
+        claim,
+        operation_id=_HEARTBEAT_ID,
+    )
+    heartbeat_response = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/heartbeat",
+        heartbeat_request,
+    )
+    heartbeat = TaskImageMaterializationOperationResponseV1.model_validate_json(
+        heartbeat_response.content
+    )
+    assert heartbeat_response.status_code == 200
+    assert heartbeat.operation == "heartbeat"
+    assert heartbeat.state == "running"
+
+    authority_api.now[0] = NOW + timedelta(seconds=18)
+    release_request = _operation_request(
+        build_session,
+        claim,
+        operation_id=_RELEASE_ID,
+    )
+    release_response = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/release",
+        release_request,
+    )
+    release = TaskImageMaterializationOperationResponseV1.model_validate_json(
+        release_response.content
+    )
+    assert release_response.status_code == 200
+    assert release.operation == "release"
+    assert release.state == "queued"
+    assert release.deterministic_failure_count == 0
+    assert release.lease_expires_at is None
+    release_replay = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/release",
+        release_request,
+    )
+    assert release_replay.json() == release_response.json()
+    heartbeat_replay_after_release = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/heartbeat",
+        heartbeat_request,
+    )
+    assert heartbeat_replay_after_release.status_code == 200
+    assert heartbeat_replay_after_release.json() == heartbeat_response.json()
+    claim_replay_after_release = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        claim_request,
+    )
+    assert claim_replay_after_release.status_code == 200
+    assert claim_replay_after_release.json() == claim_response.json()
+
+    engine = create_async_engine(postgres_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                update(TaskImageMaterialization)
+                .where(TaskImageMaterialization.id == materialization_id)
+                .values(next_attempt_at=NOW + timedelta(seconds=19))
+            )
+    finally:
+        await engine.dispose()
+
+    authority_api.now[0] = NOW + timedelta(seconds=19)
+    second_claim_response = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        _claim_request(build_session, claim_id=uuid4()),
+    )
+    second_claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
+        second_claim_response.content
+    )
+    failure_request = TaskImageMaterializationFailureRequestV1(
+        **_operation_request(
+            build_session,
+            second_claim,
+            operation_id=uuid4(),
+        ).model_dump(mode="python"),
+        failure_kind="deterministic",
+    )
+    authority_api.now[0] = NOW + timedelta(seconds=20)
+    failure_response = _put(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/fail",
+        failure_request,
+    )
+    failure = TaskImageMaterializationOperationResponseV1.model_validate_json(
+        failure_response.content
+    )
+    assert failure_response.status_code == 200
+    assert failure.operation == "deterministic_fail"
+    assert failure.state == "queued"
+    assert failure.deterministic_failure_count == 1
+
+
+async def test_materialization_routes_bind_session_path_attempt_and_guard_identity(
+    authority_api: _ApiContext,
+    postgres_url: str,
+    tmp_path: Path,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+    path = f"/v1/projections/{GRANT_ID}/materializations/claim"
+    valid_claim = _claim_request(build_session)
+
+    for field, value in (
+        ("session_id", uuid4()),
+        ("session_generation", 1),
+        ("session_token", "loom_tibs_" + "PRIVATE_WRONG_" + "D" * 64),
+    ):
+        payload = valid_claim.model_dump(mode="python")
+        payload[field] = value
+        changed = TaskImageMaterializationClaimRequestV1.model_validate(payload)
+        response = _post(authority_api, path, changed)
+        assert response.status_code == 403
+        assert response.json() == {"detail": "task-image authority rejected"}
+        assert str(value) not in response.text
+
+    wrong_bearer = "wrong-node-materialization-private-bearer"
+    wrong_principals = _owner_file(
+        tmp_path / "wrong-node-materialization-principals.json",
+        json.dumps(
+            _principal_document(
+                bearer=wrong_bearer,
+                principal_id="gb10-trt-gb10-2",
+                node="trt-gb10-2",
+            )
+        ),
+    )
+    wrong_app = create_app(
+        authority_api.settings,
+        verifier=TaskImagePrincipalVerifier.from_file(wrong_principals),
+        now_factory=lambda: NOW + timedelta(seconds=14),
+    )
+    with TestClient(wrong_app) as wrong_client:
+        response = wrong_client.post(
+            path,
+            headers={"Authorization": f"Bearer {wrong_bearer}"},
+            json=valid_claim.model_dump(mode="json"),
+        )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "task-image authority rejected"}
+    assert wrong_bearer not in response.text
+
+    claim_response = _post(authority_api, path, valid_claim)
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(claim_response.content)
+    operation = _operation_request(build_session, claim, operation_id=_START_ID)
+    wrong_materialization = authority_api.client.put(
+        f"/v1/projections/{GRANT_ID}/materializations/{uuid4()}/start",
+        headers=_HEADERS,
+        json=operation.model_dump(mode="json"),
+    )
+    assert wrong_materialization.status_code == 409
+    assert wrong_materialization.json() == {"detail": "task-image authority conflict"}
+    wrong_grant = authority_api.client.put(
+        f"/v1/projections/{uuid4()}/materializations/{materialization_id}/start",
+        headers=_HEADERS,
+        json=operation.model_dump(mode="json"),
+    )
+    assert wrong_grant.status_code == 409
+
+    for field, value in (("attempt_id", uuid4()), ("lease_epoch", 2)):
+        payload = operation.model_dump(mode="python")
+        payload[field] = value
+        changed = TaskImageMaterializationOperationRequestV1.model_validate(payload)
+        response = _put(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/start",
+            changed,
+        )
+        assert response.status_code == 409
+        assert response.json() == {"detail": "task-image authority conflict"}
+
+    unknown = operation.model_dump(mode="json") | {"private_task_config": "must-not-echo"}
+    response = authority_api.client.put(
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/start",
+        headers=_HEADERS,
+        json=unknown,
+    )
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid task-image authority contract"}
+    assert "must-not-echo" not in response.text
+
+
+async def test_bundle_route_fails_closed_without_provider_and_redacts_backend_errors(
+    authority_api: _ApiContext,
+    postgres_url: str,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+    claim_response = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        _claim_request(build_session),
+    )
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(claim_response.content)
+    request = _operation_request(
+        build_session,
+        claim,
+        operation_id=uuid4(),
+    )
+    path = f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/bundle"
+
+    unavailable_app = create_app(
+        authority_api.settings,
+        verifier=TaskImagePrincipalVerifier.from_file(authority_api.settings.principals_file),
+        now_factory=lambda: NOW + timedelta(seconds=16),
+    )
+    with TestClient(unavailable_app) as client:
+        unavailable = client.put(
+            path,
+            headers=_HEADERS,
+            json=request.model_dump(mode="json"),
+        )
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"detail": "task-image authority unavailable"}
+
+    class FailingBackend:
+        def list_objects(self, **kwargs: object) -> tuple[TaskImageBundleObject, ...]:
+            del kwargs
+            raise RuntimeError("private-backend-error s3://loom-bundles/private-source-key")
+
+        def presign_get(self, **kwargs: object) -> str:
+            del kwargs
+            raise AssertionError("presign must not follow failed listing")
+
+    failing_provider = TaskImageBundleCapabilityProvider(
+        backend=FailingBackend(),
+        public_https_origin="https://objects.example",
+        expected_bucket="loom-bundles",
+        maximum_objects=2_000,
+        maximum_bytes=512 * 1024 * 1024,
+        url_expiry_seconds=600,
+    )
+    failing_app = create_app(
+        authority_api.settings,
+        verifier=TaskImagePrincipalVerifier.from_file(authority_api.settings.principals_file),
+        now_factory=lambda: NOW + timedelta(seconds=16),
+        bundle_capability_provider=failing_provider,
+    )
+    with TestClient(failing_app) as client:
+        failed = client.put(
+            path,
+            headers=_HEADERS,
+            json=request.model_dump(mode="json"),
+        )
+        metrics = client.get("/metrics")
+    assert failed.status_code == 503
+    assert failed.json() == {"detail": "task-image authority unavailable"}
+    for private in (
+        "private-backend-error",
+        "private-source-key",
+        build_session.session_token,
+        "X-Amz-Signature",
+    ):
+        assert private not in failed.text
+        assert private not in metrics.text
+
+
+async def test_oversized_claim_response_is_rejected_before_a_lease_is_committed(
+    authority_api: _ApiContext,
+    postgres_url: str,
+) -> None:
+    oversized_config: dict[str, object] = {
+        "schema_version": "1",
+        "task": {"id": "phase2c/session-bound", "name": "session-bound"},
+        "environment": {
+            "os": "linux",
+            "cpu_arch": "arm64",
+            "dockerfile": "environment/Dockerfile",
+            "build_timeout_sec": 600.0,
+            "sidecars": [
+                {
+                    "name": f"component-{index:03d}",
+                    "dockerfile": f"component-{index:03d}/" + "x" * 1024,
+                }
+                for index in range(127)
+            ],
+        },
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+    }
+    materialization_id = await _seed_materialization(
+        postgres_url,
+        task_config=oversized_config,
+    )
+    build_session = _renewed_session(authority_api)
+
+    response = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        _claim_request(build_session),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "task-image authority unavailable"}
+    assert "component-126" not in response.text
+    engine = create_async_engine(postgres_url)
+    try:
+        async with AsyncSession(engine) as session:
+            row = await session.get(TaskImageMaterialization, materialization_id)
+            assert row is not None
+            assert row.state == "queued"
+            assert row.claimed_by is None
+            assert (
+                await session.scalar(
+                    select(TaskImageMaterializationAttempt).where(
+                        TaskImageMaterializationAttempt.materialization_id == materialization_id
+                    )
+                )
+                is None
+            )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -391,9 +1062,7 @@ async def test_authentication_scope_and_store_failures_use_bounded_responses(
         json=payload,
     )
     assert duplicate.status_code == 401
-    assert duplicate.json() == {
-        "detail": "invalid task-image authority credentials"
-    }
+    assert duplicate.json() == {"detail": "invalid task-image authority credentials"}
     assert "duplicate-private-bearer" not in duplicate.text
 
     unauthenticated_malformed = authority_api.client.put(
@@ -453,9 +1122,7 @@ async def test_authentication_scope_and_store_failures_use_bounded_responses(
             json=_attestation(_proof(), generation=2).model_dump(mode="json"),
         )
     assert forbidden_attestation.status_code == 403
-    assert forbidden_attestation.json() == {
-        "detail": "task-image authority forbidden"
-    }
+    assert forbidden_attestation.json() == {"detail": "task-image authority forbidden"}
     assert project_only_bearer not in forbidden_attestation.text
 
     first = authority_api.client.put(path, headers=_HEADERS, json=payload)
@@ -658,9 +1325,7 @@ async def test_concurrency_limiter_rejects_work_instead_of_queueing_unboundedly(
 async def test_rate_limiter_bounds_mutations_per_process(
     authority_api: _ApiContext,
 ) -> None:
-    settings = authority_api.settings.model_copy(
-        update={"request_rate_limit_per_second": 1}
-    )
+    settings = authority_api.settings.model_copy(update={"request_rate_limit_per_second": 1})
     limited_app = create_app(settings)
     payload = _request().model_dump(mode="json")
     path = f"/v1/projections/{GRANT_ID}/challenge"
@@ -686,11 +1351,14 @@ async def test_attestation_equivocation_commits_quarantine_before_bounded_confli
     authority_api: _ApiContext,
     postgres_url: str,
 ) -> None:
-    assert _put(
-        authority_api,
-        f"/v1/projections/{GRANT_ID}/challenge",
-        _request(),
-    ).status_code == 200
+    assert (
+        _put(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/challenge",
+            _request(),
+        ).status_code
+        == 200
+    )
     authority_api.now[0] = NOW + timedelta(seconds=6)
     receipt_response = _put(
         authority_api,
@@ -699,11 +1367,14 @@ async def test_attestation_equivocation_commits_quarantine_before_bounded_confli
     )
     receipt = TaskImageProjectionReceiptV1.model_validate_json(receipt_response.content)
     authority_api.now[0] = NOW + timedelta(seconds=8)
-    assert _put(
-        authority_api,
-        f"/v1/projections/{GRANT_ID}/exchange",
-        _exchange(receipt),
-    ).status_code == 200
+    assert (
+        _put(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/exchange",
+            _exchange(receipt),
+        ).status_code
+        == 200
+    )
 
     authority_api.now[0] = NOW + timedelta(seconds=9)
     equivocation = _attestation(
@@ -862,8 +1533,8 @@ async def test_startup_fails_closed_for_invalid_keyring_and_schema(
         assert response.json() == {"detail": "task-image authority not ready"}
         assert keyring_app.state.ready is False
 
-    empty_database_url = make_url(postgres_url).set(database="postgres").render_as_string(
-        hide_password=False
+    empty_database_url = (
+        make_url(postgres_url).set(database="postgres").render_as_string(hide_password=False)
     )
     schema_settings = _settings(tmp_path, empty_database_url)
     schema_app = create_app(schema_settings)

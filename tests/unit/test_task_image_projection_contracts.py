@@ -11,7 +11,9 @@ from loom_task_image_authority.contracts import (
     TaskImageAttachmentProofV1,
     TaskImageBootstrapExchangeV1,
     TaskImageBuildGrantAuthorityV1,
+    TaskImageBuildGrantAuthorityV2,
     TaskImageBuildSessionV1,
+    TaskImageBuildSessionV2,
     TaskImageContainmentAttachmentV1,
     TaskImageContainmentAttestationV1,
     TaskImageGuardPrincipalV1,
@@ -19,6 +21,7 @@ from loom_task_image_authority.contracts import (
     TaskImageProjectionReceiptV1,
     TaskImageProjectionRequestV1,
     TaskImageProjectionRevocationV1,
+    TaskImageSessionRenewalV1,
     canonical_authority_bytes,
     canonical_authority_sha256,
     new_bootstrap_token,
@@ -54,6 +57,17 @@ def _authority(**changes: object) -> TaskImageBuildGrantAuthorityV1:
     }
     values.update(changes)
     return TaskImageBuildGrantAuthorityV1.model_validate(values)
+
+
+def _authority_v2(**changes: object) -> TaskImageBuildGrantAuthorityV2:
+    values = _authority().model_dump()
+    values.update(
+        schema_version=2,
+        builder_release_sha256="a" * 64,
+        supervisor_executable_sha256="2" * 64,
+    )
+    values.update(changes)
+    return TaskImageBuildGrantAuthorityV2.model_validate(values)
 
 
 def _request(**changes: object) -> TaskImageProjectionRequestV1:
@@ -189,6 +203,22 @@ def test_shadow_authority_requires_and_binds_one_campaign() -> None:
 
     assert authority.purpose == "shadow"
     assert authority.shadow_campaign_id == GRANT_ID
+
+
+def test_v2_grant_authority_separates_provider_release_from_native_elf() -> None:
+    authority = _authority_v2()
+
+    assert authority.schema_version == 2
+    assert authority.builder_release_sha256 == "a" * 64
+    assert authority.supervisor_executable_sha256 == "2" * 64
+    assert canonical_authority_sha256(authority) != canonical_authority_sha256(_authority())
+    with pytest.raises(ValidationError):
+        TaskImageBuildGrantAuthorityV2.model_validate(
+            {
+                **authority.model_dump(),
+                "supervisor_executable_sha256": "0" * 64,
+            }
+        )
 
 
 def test_guard_principal_is_canonical_and_single_node_bound() -> None:
@@ -410,18 +440,83 @@ def test_secret_responses_expose_only_hashed_public_bindings() -> None:
     assert "bootstrap_token" not in receipt_binding
     assert "bootstrap_token" not in exchange_binding
     assert "session_token" not in session_binding
-    assert receipt_binding["bootstrap_token_sha256"] == hashlib.sha256(
-        receipt.bootstrap_token.encode("utf-8")
-    ).hexdigest()
-    assert exchange_binding["bootstrap_token_sha256"] == receipt_binding[
-        "bootstrap_token_sha256"
-    ]
-    assert session_binding["session_token_sha256"] == hashlib.sha256(
-        session.session_token.encode("utf-8")
-    ).hexdigest()
+    assert (
+        receipt_binding["bootstrap_token_sha256"]
+        == hashlib.sha256(receipt.bootstrap_token.encode("utf-8")).hexdigest()
+    )
+    assert exchange_binding["bootstrap_token_sha256"] == receipt_binding["bootstrap_token_sha256"]
+    assert (
+        session_binding["session_token_sha256"]
+        == hashlib.sha256(session.session_token.encode("utf-8")).hexdigest()
+    )
     for model in (receipt, exchange, session):
         with pytest.raises(TypeError, match="secret-bearing"):
             canonical_authority_bytes(model)
+
+
+def test_v2_session_and_renewal_bind_the_exact_generation_without_exposing_token() -> None:
+    current = TaskImageBuildSessionV2(
+        grant_id=GRANT_ID,
+        generation=1,
+        session_id=SESSION_ID,
+        purpose="production",
+        shadow_campaign_id=None,
+        pool_id="staging-gb10-task-image",
+        cpu_arch="arm64",
+        session_token="loom_tibs_" + "B" * 64,
+        attestation_generation=1,
+        attestation_sha256="c" * 64,
+        issued_at=NOW + timedelta(seconds=6),
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    attestation = TaskImageContainmentAttestationV1(
+        attestation_id=ATTESTATION_ID,
+        grant_id=GRANT_ID,
+        generation=2,
+        node_name="trt-gb10-1",
+        node_boot_id=NODE_BOOT_ID,
+        slurm_cluster_id="gb10",
+        slurm_job_id="12345",
+        cgroup_path=_request().cgroup_path,
+        cgroup_inode=987654,
+        attachment=_attachment(),
+        issued_at=NOW + timedelta(seconds=20),
+        expires_at=NOW + timedelta(seconds=50),
+    )
+    renewal = TaskImageSessionRenewalV1(
+        renewal_id=UUID("99999999-9999-9999-9999-999999999999"),
+        grant_id=GRANT_ID,
+        session_id=current.session_id,
+        session_generation=current.generation,
+        session_token=current.session_token,
+        attestation=attestation,
+        observed_at=attestation.issued_at,
+    )
+
+    assert current.public_binding()["generation"] == 1
+    assert "session_token" not in current.public_binding()
+    assert "session_token" not in renewal.public_binding()
+    assert (
+        renewal.public_binding()["session_token_sha256"]
+        == hashlib.sha256(current.session_token.encode("ascii")).hexdigest()
+    )
+    with pytest.raises(ValidationError, match="next generation"):
+        TaskImageSessionRenewalV1.model_validate(
+            {
+                **renewal.model_dump(),
+                "attestation": {
+                    **attestation.model_dump(),
+                    "generation": 3,
+                },
+            }
+        )
+    with pytest.raises(ValidationError, match="observation"):
+        TaskImageSessionRenewalV1.model_validate(
+            {
+                **renewal.model_dump(),
+                "observed_at": NOW + timedelta(seconds=21),
+            }
+        )
 
 
 def test_token_factories_are_typed_random_and_noninterchangeable() -> None:
