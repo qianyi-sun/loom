@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
+from uuid import uuid4
 
 Architecture = Literal["x86_64", "aarch64"]
 
@@ -908,20 +909,31 @@ def build_certified_releases(
             ).exists():
                 raise ProviderReleaseError("release destination collision")
         published: dict[Architecture, ProviderRelease] = {}
-        for architecture, release in staged.items():
-            directory = output_root / release.release_sha256
-            sidecar_path = output_root / f"{release.release_sha256}.manifest.json"
-            release.directory.chmod(0o755)
-            release.directory.rename(directory)
-            directory.chmod(0o555)
-            release.sidecar_path.rename(sidecar_path)
-            published[architecture] = ProviderRelease(
-                release_sha256=release.release_sha256,
-                directory=directory,
-                manifest_path=directory / _MANIFEST,
-                sidecar_path=sidecar_path,
-                manifest=release.manifest,
-            )
+        try:
+            for architecture, release in staged.items():
+                directory = output_root / release.release_sha256
+                sidecar_path = output_root / f"{release.release_sha256}.manifest.json"
+                release.directory.chmod(0o755)
+                release.directory.rename(directory)
+                directory.chmod(0o555)
+                release.sidecar_path.rename(sidecar_path)
+                published[architecture] = ProviderRelease(
+                    release_sha256=release.release_sha256,
+                    directory=directory,
+                    manifest_path=directory / _MANIFEST,
+                    sidecar_path=sidecar_path,
+                    manifest=release.manifest,
+                )
+        except OSError as exc:
+            conflict = output_root / f".provider-release-set-conflict.{uuid4()}"
+            conflict.mkdir(mode=0o700)
+            for release in published.values():
+                if release.directory.exists():
+                    release.directory.chmod(0o755)
+                    release.directory.rename(conflict / release.directory.name)
+                if release.sidecar_path.exists():
+                    release.sidecar_path.rename(conflict / release.sidecar_path.name)
+            raise ProviderReleaseError("release set publication failed") from exc
         return published
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

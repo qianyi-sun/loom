@@ -286,10 +286,28 @@ class DefaultLiveProbeRunner:
     def _probe_clone3_scratch_cgroup(self, request: LiveProbeRequest) -> ConformanceCheck:
         identifier = "live_clone3_scratch_cgroup"
         script = (
-            "import os,sys\n"
-            "c=sys.argv[1]\n"
-            "open(os.path.join(c,'cgroup.procs'),'a',encoding='ascii').write(str(os.getpid()))\n"
-            "print('clone3:ok cgroup:attached')\n"
+            "import ctypes, os, signal, sys\n"
+            "SYS_clone3 = 435\n"
+            "CLONE_INTO_CGROUP = 0x200000000\n"
+            "class CloneArgs(ctypes.Structure):\n"
+            "    _fields_ = [(name, ctypes.c_ulonglong) for name in (\n"
+            "        'flags','pidfd','child_tid','parent_tid','exit_signal','stack',\n"
+            "        'stack_size','tls','set_tid','set_tid_size','cgroup')]\n"
+            "fd = os.open(sys.argv[1], os.O_DIRECTORY | os.O_RDONLY | os.O_CLOEXEC)\n"
+            "try:\n"
+            "    args = CloneArgs(flags=CLONE_INTO_CGROUP, exit_signal=signal.SIGCHLD, cgroup=fd)\n"
+            "    libc = ctypes.CDLL(None, use_errno=True)\n"
+            "    pid = libc.syscall(SYS_clone3, ctypes.byref(args), ctypes.sizeof(args))\n"
+            "    if pid < 0:\n"
+            "        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))\n"
+            "    if pid == 0:\n"
+            "        os._exit(0)\n"
+            "    waited, status = os.waitpid(pid, 0)\n"
+            "    if waited != pid or status != 0:\n"
+            "        raise SystemExit(2)\n"
+            "    print('clone3:ok cgroup:attached')\n"
+            "finally:\n"
+            "    os.close(fd)\n"
         )
         output = self._system.run(
             ("python3", "-c", script, str(request.scratch_cgroup_root)),
@@ -340,7 +358,29 @@ class DefaultLiveProbeRunner:
 
     def _probe_process_ancestry(self, request: LiveProbeRequest) -> ConformanceCheck:
         identifier = "live_process_ancestry"
-        output = self._system.run(("ps", "-eo", "pid,ppid,comm,args"), label=identifier, timeout=10)
+        script = (
+            "import os, subprocess, sys, time\n"
+            "supervisor = sys.argv[1]\n"
+            "proc = subprocess.Popen([supervisor, '--help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n"
+            "try:\n"
+            "    time.sleep(0.05)\n"
+            "    parent = os.getpid()\n"
+            "    output = subprocess.run(['ps','-eo','pid,ppid,comm,args'], capture_output=True, text=True, check=True).stdout\n"
+            "    if str(proc.pid) not in output or str(parent) not in output:\n"
+            "        raise SystemExit(3)\n"
+            "    print(output)\n"
+            "finally:\n"
+            "    proc.terminate()\n"
+            "    try:\n"
+            "        proc.wait(timeout=2)\n"
+            "    except subprocess.TimeoutExpired:\n"
+            "        proc.kill(); proc.wait(timeout=2)\n"
+        )
+        output = self._system.run(
+            ("python3", "-c", script, str(self._supervisor_path(request))),
+            label=identifier,
+            timeout=10,
+        )
         _require_text(
             output,
             ("loom-task-builder-supervisor", "rootlesskit", "buildkitd"),
@@ -352,13 +392,54 @@ class DefaultLiveProbeRunner:
 
     def _probe_network_denial(self, request: LiveProbeRequest) -> ConformanceCheck:
         identifier = "live_network_denial"
-        output = self._system.run(("python3", "-c", "print('network-denial-probe')"), label=identifier, timeout=20)
+        script = (
+            "import socket\n"
+            "targets = [('tcp-egress', socket.SOCK_STREAM, ('198.51.100.1', 443)),"
+            "('udp-egress', socket.SOCK_DGRAM, ('198.51.100.1', 53)),"
+            "('metadata', socket.SOCK_STREAM, ('169.254.169.254', 80))]\n"
+            "for name, kind, target in targets:\n"
+            "    sock = socket.socket(socket.AF_INET, kind)\n"
+            "    sock.settimeout(1.0)\n"
+            "    try:\n"
+            "        sock.connect(target)\n"
+            "        raise SystemExit(f'{name}:allowed')\n"
+            "    except OSError:\n"
+            "        print(f'{name}:denied')\n"
+            "    finally:\n"
+            "        sock.close()\n"
+        )
+        output = self._system.run(("python3", "-c", script), label=identifier, timeout=20)
         _require_text(output, ("tcp-egress:denied", "udp-egress:denied", "metadata:denied"), label=identifier)
         return _live_check(identifier, {"network": output})
 
     def _probe_cleanup(self, request: LiveProbeRequest) -> ConformanceCheck:
         identifier = "live_cleanup"
-        output = self._system.run(("python3", "-c", "print('cleanup-probe')"), label=identifier, timeout=20)
+        script = (
+            "import os, sys\n"
+            "scratch, storage, cgroup = sys.argv[1:4]\n"
+            "if os.listdir(scratch):\n"
+            "    raise SystemExit('scratch-not-empty')\n"
+            "if os.listdir(storage):\n"
+            "    raise SystemExit('storage-not-empty')\n"
+            "procs = os.path.join(cgroup, 'cgroup.procs')\n"
+            "if os.path.exists(procs) and open(procs, encoding='ascii').read().strip():\n"
+            "    raise SystemExit('cgroup-not-empty')\n"
+            "print('scratch-empty:yes')\n"
+            "print('storage-empty:yes')\n"
+            "print('cgroup-removed:yes')\n"
+        )
+        output = self._system.run(
+            (
+                "python3",
+                "-c",
+                script,
+                str(request.scratch_root),
+                str(request.storage_root),
+                str(request.scratch_cgroup_root),
+            ),
+            label=identifier,
+            timeout=20,
+        )
         _require_text(output, ("scratch-empty:yes", "storage-empty:yes"), label=identifier)
         _validate_live_root(request.scratch_root, label="scratch")
         _validate_live_root(request.storage_root, label="storage")
@@ -366,8 +447,16 @@ class DefaultLiveProbeRunner:
 
     def _probe_fail_closed_guard_restart(self, request: LiveProbeRequest) -> ConformanceCheck:
         identifier = "live_fail_closed_guard_restart"
+        script = (
+            "import subprocess, sys\n"
+            "completed = subprocess.run([sys.argv[1], '--guard-restart-probe'], capture_output=True, text=True, timeout=5)\n"
+            "if completed.returncode == 0:\n"
+            "    raise SystemExit('guard-restart-allowed')\n"
+            "print('guard-restart:denied')\n"
+            "print('supervisor-exit:nonzero')\n"
+        )
         output = self._system.run(
-            ("python3", "-c", "print('guard-restart-probe')"),
+            ("python3", "-c", script, str(self._supervisor_path(request))),
             label=identifier,
             timeout=20,
         )
@@ -377,8 +466,18 @@ class DefaultLiveProbeRunner:
     def _probe_no_slurm_or_foreign_cgroup(self, request: LiveProbeRequest) -> ConformanceCheck:
         identifier = "live_no_slurm_or_foreign_cgroup"
         _validate_scratch_cgroup_root(request.scratch_cgroup_root)
+        script = (
+            "import os, sys\n"
+            "path = os.path.realpath(sys.argv[1])\n"
+            "parts = {part.lower() for part in path.split(os.sep)}\n"
+            "if 'slurm' in parts or any(part.startswith('job_') for part in parts) or any('foreign' in part for part in parts):\n"
+            "    raise SystemExit('foreign-cgroup')\n"
+            "print('cgroup-owner:loom-provider')\n"
+            "print('slurm:no')\n"
+            "print('foreign:no')\n"
+        )
         output = self._system.run(
-            ("python3", "-c", "print('cgroup-ownership-probe')"),
+            ("python3", "-c", script, str(request.scratch_cgroup_root)),
             label=identifier,
             timeout=10,
         )

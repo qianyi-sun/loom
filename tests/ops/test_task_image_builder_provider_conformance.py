@@ -728,6 +728,7 @@ class _FakeLiveSystem:
     def __init__(self, *, fail_label: str | None = None) -> None:
         self.fail_label = fail_label
         self.labels: list[str] = []
+        self.commands: dict[str, list[tuple[str, ...]]] = {}
 
     def _record(self, label: str) -> None:
         self.labels.append(label)
@@ -745,8 +746,9 @@ class _FakeLiveSystem:
         return path.read_text(encoding="utf-8")[:maximum]
 
     def run(self, command: tuple[str, ...], *, label: str, timeout: int) -> str:
-        del command, timeout
+        del timeout
         self._record(label)
+        self.commands.setdefault(label, []).append(command)
         return {
             "live_native_static_supervisor": "Elf file type is EXEC\nProgram Headers: LOAD R E\n",
             "live_supervisor_module_metadata": (
@@ -805,6 +807,35 @@ def test_default_live_probe_runner_performs_all_required_raw_probes(tmp_path: Pa
     assert tuple(check.id for check in checks) == _REQUIRED_LIVE_CHECK_IDS
     assert set(_REQUIRED_LIVE_CHECK_IDS) <= set(system.labels)
     assert "live_runtime_transitive_provenance" in system.labels
+
+
+def test_default_live_probe_runner_uses_real_probe_semantics_not_markers(
+    tmp_path: Path,
+) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import DefaultLiveProbeRunner
+
+    system = _FakeLiveSystem()
+    request = _live_runner_request(tmp_path)
+
+    DefaultLiveProbeRunner(system=system).run(request)
+
+    clone_script = system.commands["live_clone3_scratch_cgroup"][0][2]
+    network_script = system.commands["live_network_denial"][0][2]
+    cleanup_script = system.commands["live_cleanup"][0][2]
+    restart_script = system.commands["live_fail_closed_guard_restart"][0][2]
+    ancestry_command = system.commands["live_process_ancestry"][0]
+
+    assert "SYS_clone3" in clone_script
+    assert "CLONE_INTO_CGROUP" in clone_script
+    assert "write(str(os.getpid()))" not in clone_script
+    assert "network-denial-probe" not in network_script
+    assert "socket." in network_script
+    assert "cleanup-probe" not in cleanup_script
+    assert "os.listdir" in cleanup_script
+    assert "print('guard-restart-probe')" not in restart_script
+    assert "subprocess.run" in restart_script
+    assert ancestry_command[0:2] == ("python3", "-c")
+    assert str(request.staged_release / "bin/loom-task-builder-supervisor") in " ".join(ancestry_command)
 
 
 @pytest.mark.parametrize("failed_probe", _REQUIRED_LIVE_CHECK_IDS)

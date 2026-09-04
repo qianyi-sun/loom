@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from scripts.ops.task_image_builder_provider_release import (
+    Architecture,
     ProviderReleaseError,
     build_certified_releases,
     build_release,
@@ -288,7 +289,9 @@ def _source_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     return source, guard_release, runtime_root
 
 
-def _multi_arch_source_tree(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, Path]]:
+def _multi_arch_source_tree(
+    tmp_path: Path,
+) -> tuple[Path, dict[Architecture, Path], dict[Architecture, Path]]:
     source, x86_guard, x86_runtime = _source_tree(tmp_path)
     aarch_guard, aarch_guard_digest = _guard_release_for(
         tmp_path / "aarch64",
@@ -444,7 +447,11 @@ def test_release_is_deterministic_across_source_metadata_noise(tmp_path: Path) -
 
 def test_release_builds_supervisor_twice_before_publishing(tmp_path: Path) -> None:
     source, guard_release, runtime_root = _source_tree(tmp_path)
-    calls: list[tuple[Path, str]] = []
+    calls: list[tuple[Path, Architecture]] = []
+
+    def build_supervisor(src: Path, arch: Architecture) -> bytes:
+        calls.append((src, arch))
+        return _elf_payload(62, "supervisor")
 
     result = build_release(
         source,
@@ -452,8 +459,7 @@ def test_release_builds_supervisor_twice_before_publishing(tmp_path: Path) -> No
         "x86_64",
         guard_release_directory=guard_release,
         runtime_root=runtime_root,
-        build_supervisor=lambda src, arch: calls.append((src, arch))
-        or _elf_payload(62, "supervisor"),
+        build_supervisor=build_supervisor,
     )
 
     assert result.directory.exists()
@@ -486,15 +492,18 @@ def test_certified_release_builds_both_architectures_twice_all_or_nothing(
     tmp_path: Path,
 ) -> None:
     source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
-    calls: list[str] = []
+    calls: list[Architecture] = []
+
+    def build_supervisor(_src: Path, arch: Architecture) -> bytes:
+        calls.append(arch)
+        return _elf_payload(62 if arch == "x86_64" else 183, "supervisor")
 
     result = build_certified_releases(
         source,
         tmp_path / "out",
         guard_release_directories=guard_releases,
         runtime_roots=runtime_roots,
-        build_supervisor=lambda _src, arch: calls.append(arch)
-        or _elf_payload(62 if arch == "x86_64" else 183, "supervisor"),
+        build_supervisor=build_supervisor,
     )
 
     assert sorted(result) == ["aarch64", "x86_64"]
@@ -508,7 +517,7 @@ def test_certified_release_refuses_whole_publication_when_any_architecture_drift
     source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
     aarch64_calls = 0
 
-    def build_supervisor(_src: Path, arch: str) -> bytes:
+    def build_supervisor(_src: Path, arch: Architecture) -> bytes:
         nonlocal aarch64_calls
         if arch == "aarch64":
             aarch64_calls += 1
@@ -525,6 +534,45 @@ def test_certified_release_refuses_whole_publication_when_any_architecture_drift
         )
 
     assert not list((tmp_path / "out").glob("*/release-manifest.json"))
+
+
+def test_certified_release_removes_partial_publication_when_second_move_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_rename = Path.rename
+    published_directories = 0
+
+    def fail_second_directory_publish(path: Path, target: Path) -> Path:
+        nonlocal published_directories
+        if path.is_dir() and target.parent == output_root and not target.name.startswith("."):
+            published_directories += 1
+            if published_directories == 2:
+                raise OSError("injected second architecture publish failure")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_second_directory_publish)
+
+    with pytest.raises(ProviderReleaseError, match="publication failed"):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
+        )
+
+    assert not [
+        item for item in output_root.iterdir() if item.is_dir() and not item.name.startswith(".")
+    ]
+    preserved = list(output_root.glob(".provider-release-set-conflict.*"))
+    assert len(preserved) == 1
+    assert list(preserved[0].rglob("release-manifest.json"))
 
 
 def test_release_assembler_cli_requires_both_architecture_inputs() -> None:
