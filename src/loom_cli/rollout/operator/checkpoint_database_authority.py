@@ -102,11 +102,12 @@ class DatabaseAuthorityError(ValueError):
 
 
 class DatabaseAuthorityRunner(Protocol):
-    def capture_stdout(
+    def capture_stdout_with_input(
         self,
         argv: Sequence[str],
         *,
         env: Mapping[str, str],
+        input_payload: bytes,
         timeout_seconds: float,
     ) -> bytes: ...
 
@@ -462,12 +463,13 @@ def capture_database_authority(
     if namespace != "loom-staging":
         raise DatabaseAuthorityError("database authority namespace is invalid")
     try:
-        payload = runner.capture_stdout(
+        payload = runner.capture_stdout_with_input(
             (
                 "kubectl",
                 "--namespace",
                 namespace,
                 "exec",
+                "--stdin=true",
                 "service/loom-postgres-rw",
                 "--",
                 "psql",
@@ -478,10 +480,10 @@ def capture_database_authority(
                 "--set=ON_ERROR_STOP=1",
                 "--username=postgres",
                 "--dbname=loom",
-                "--command",
-                _DATABASE_AUTHORITY_SQL,
+                "--file=-",
             ),
             env=env,
+            input_payload=_DATABASE_AUTHORITY_SQL.encode("utf-8"),
             timeout_seconds=_QUERY_TIMEOUT_SECONDS,
         )
         return parse_database_authority_observation(payload.strip())

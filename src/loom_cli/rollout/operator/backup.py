@@ -140,6 +140,15 @@ class BackupCommandRunner(Protocol):
         timeout_seconds: float,
     ) -> bytes: ...
 
+    def capture_stdout_with_input(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes,
+        timeout_seconds: float,
+    ) -> bytes: ...
+
     def start(
         self,
         argv: Sequence[str],
@@ -2050,6 +2059,27 @@ class SubprocessBackupCommandRunner:
         result = subprocess.run(
             list(argv),
             stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=dict(env),
+            check=False,
+            timeout=timeout_seconds,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("backup command failed")
+        return result.stdout
+
+    def capture_stdout_with_input(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        result = subprocess.run(
+            list(argv),
+            input=input_payload,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=dict(env),

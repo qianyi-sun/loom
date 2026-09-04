@@ -223,16 +223,36 @@ def test_authority_capture_uses_one_read_only_transaction_and_secret_safe_failur
     class Runner:
         def __init__(self) -> None:
             self.argv: list[str] = []
+            self.input_payload: bytes | None = None
+            self.used_legacy_capture = False
 
         def capture_stdout(self, argv, *, env, timeout_seconds):
+            self.used_legacy_capture = True
             self.argv = list(argv)
+            raise RuntimeError(marker)
+
+        def capture_stdout_with_input(
+            self,
+            argv,
+            *,
+            env,
+            input_payload,
+            timeout_seconds,
+        ):
+            self.argv = list(argv)
+            self.input_payload = input_payload
             raise RuntimeError(marker)
 
     runner = Runner()
     with pytest.raises(DatabaseAuthorityError) as caught:
         capture_database_authority(runner, env={"PATH": "/bin"}, namespace="loom-staging")
 
-    rendered = " ".join(runner.argv)
+    assert not runner.used_legacy_capture
+    assert "--stdin=true" in runner.argv
+    assert runner.argv[-1] == "--file=-"
+    assert "--command" not in runner.argv
+    assert runner.input_payload is not None
+    rendered = runner.input_payload.decode()
     assert "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in rendered
     assert "FROM public.alembic_version" in rendered
     assert rendered.count("FROM public.capacity_configuration_epochs") == 2
