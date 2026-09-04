@@ -77,6 +77,7 @@ class HostRunner:
     cpus: int = 20
     memory_bytes: int = 125_513_936 * 1024
     disk_bytes: int = 183_255_265_280
+    disk_stdout: str | None = None
     routes: tuple[str, ...] = (
         "10.42.0.0/24",
         "172.17.0.0/16",
@@ -166,7 +167,10 @@ class HostRunner:
         elif executable == "awk":
             result = NativeBuilderCommandResult(0, f"{self.memory_bytes}\n")
         elif executable == "df":
-            result = NativeBuilderCommandResult(0, f"Avail\n{self.disk_bytes}\n")
+            result = NativeBuilderCommandResult(
+                0,
+                (f"Avail\n{self.disk_bytes}\n" if self.disk_stdout is None else self.disk_stdout),
+            )
         elif executable == "ip":
             result = NativeBuilderCommandResult(
                 0,
@@ -372,6 +376,56 @@ def test_preflight_accepts_nonempty_cgroup_controller_pseudofile_with_zero_stat_
     receipt = installer.preflight(archive)
 
     assert receipt["operation"] == "preflight"
+    assert not _mapped(installer, profile.release_root).exists()
+
+
+def test_preflight_accepts_gnu_df_right_aligned_available_header(tmp_path: Path) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(
+        disk_bytes=profile.minimum_disk_free_bytes,
+        disk_stdout=f"       Avail\n  {profile.minimum_disk_free_bytes}\n",
+    )
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    receipt = installer.preflight(archive)
+
+    assert receipt["operation"] == "preflight"
+    assert not _mapped(installer, profile.release_root).exists()
+
+
+@pytest.mark.parametrize(
+    "disk_template",
+    (
+        "\tAvail\n{disk_bytes}\n",
+        "Avail \n{disk_bytes}\n",
+        "Avail\n\t{disk_bytes}\n",
+        "Avail\n{disk_bytes} \n",
+        "Avail\n{disk_bytes}bytes\n",
+        "Avail\n\n",
+        "Avail\n+{disk_bytes}\n",
+        "Avail\n-{disk_bytes}\n",
+        "Avail\n{disk_bytes}\nextra\n",
+        "Avail\n{disk_bytes}",
+    ),
+)
+def test_preflight_rejects_malformed_df_available_output(
+    tmp_path: Path,
+    disk_template: str,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(
+        disk_stdout=disk_template.format(
+            disk_bytes=profile.minimum_disk_free_bytes,
+        )
+    )
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="host_capacity_invalid",
+    ):
+        installer.preflight(archive)
+
     assert not _mapped(installer, profile.release_root).exists()
 
 
