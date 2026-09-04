@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
@@ -10,6 +11,7 @@ from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.models.trajectory import ChatMessage
 from loom.models.types import ModelSpec
+from loom_worker.control_plane_client import StepTokenGrant
 from loom_worker.step_gateway_client import StepTokenGatewayClient
 
 
@@ -45,6 +47,30 @@ class _TokenIssuer:
         if self.clock is not None:
             self.clock.now = 200.0
         return f"attempt-token-{len(self.calls)}"
+
+    async def mint_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime,
+    ) -> StepTokenGrant:
+        token = await self.mint_step_token(
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id=step_id,
+            ttl_sec=ttl_sec,
+        )
+        return StepTokenGrant(
+            token=token,
+            expires_at=max(
+                datetime.now(UTC) + timedelta(seconds=ttl_sec),
+                attempt_deadline_wall_clock + timedelta(seconds=300),
+            ),
+            attempt_deadline_wall_clock=attempt_deadline_wall_clock,
+        )
 
 
 def _request(team_id: UUID, trial_id: UUID, *, step_id: str = "solve") -> GatewayCallRequest:

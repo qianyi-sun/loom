@@ -27,6 +27,7 @@ from loom.agent.terminus2.model_switch import (
     seed_fingerprint,
 )
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
+from loom.attempt_deadline import AttemptDeadline
 from loom.driver.base import Driver
 from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
@@ -446,9 +447,24 @@ class LoomTerminus2Runtime:
     max_turns: int = 50
     workdir: PurePosixPath = field(default_factory=lambda: PurePosixPath("/workspace"))
     step_token_ttl_sec: int = 1800
+    _attempt_deadline: AttemptDeadline | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _active_env: Driver | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.request_params = sanitize_request_extras(self.request_params)
+
+    def begin_attempt(self, deadline: AttemptDeadline) -> None:
+        self._attempt_deadline = deadline
+
+    async def aclose_attempt(self) -> None:
+        """Interrupt Harbor's attempt-owned tmux session on supervisor stop."""
+
+        if self._active_env is not None:
+            await _reset_harbor_tmux_session(self._active_env)
 
     async def setup(self, env: Driver) -> None:
         await ensure_sandbox_deps(env)
@@ -467,18 +483,29 @@ class LoomTerminus2Runtime:
         del mcp, skills_dir
         terminus2_cls, agent_context_cls = _import_terminus2()
 
-        step_token = await self.cp_client.mint_step_token(
-            team_id=UUID(self.team_id),
-            trial_id=self.trial_id,
-            step_id=step_id,
-            ttl_sec=self.step_token_ttl_sec,
-        )
+        if self._attempt_deadline is None:
+            step_token = await self.cp_client.mint_step_token(
+                team_id=UUID(self.team_id),
+                trial_id=self.trial_id,
+                step_id=step_id,
+                ttl_sec=self.step_token_ttl_sec,
+            )
+        else:
+            grant = await self.cp_client.mint_attempt_step_token(
+                team_id=UUID(self.team_id),
+                trial_id=self.trial_id,
+                step_id=step_id,
+                ttl_sec=self.step_token_ttl_sec,
+                attempt_deadline_wall_clock=self._attempt_deadline.wall_deadline,
+            )
+            step_token = grant.token
         api_base = _openai_gateway_base(self.gateway_url)
 
         logs_ctx = tempfile.TemporaryDirectory(
             prefix=f"loom-terminus2-{self.trial_id}-",
         )
         logs_root = Path(logs_ctx.name)
+        self._active_env = env
         try:
             await self._run_harbor(
                 instruction=instruction,
@@ -493,6 +520,7 @@ class LoomTerminus2Runtime:
             )
         finally:
             logs_ctx.cleanup()
+            self._active_env = None
 
     async def _run_harbor(
         self,

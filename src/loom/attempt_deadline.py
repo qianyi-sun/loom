@@ -7,6 +7,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 
 class AttemptDeadlineExceededError(TimeoutError):
@@ -23,8 +24,14 @@ class AttemptDeadline:
     """
 
     monotonic_deadline: float
+    wall_deadline_epoch_sec: float | None = None
     _clock: Callable[[], float] = field(
         default=time.monotonic,
+        repr=False,
+        compare=False,
+    )
+    _wall_clock: Callable[[], float] = field(
+        default=time.time,
         repr=False,
         compare=False,
     )
@@ -32,6 +39,14 @@ class AttemptDeadline:
     def __post_init__(self) -> None:
         if not math.isfinite(self.monotonic_deadline):
             raise ValueError("attempt deadline must be finite")
+        if self.wall_deadline_epoch_sec is None:
+            object.__setattr__(
+                self,
+                "wall_deadline_epoch_sec",
+                self._wall_clock() + max(0.0, self.monotonic_deadline - self._clock()),
+            )
+        elif not math.isfinite(self.wall_deadline_epoch_sec):
+            raise ValueError("attempt wall deadline must be finite")
 
     @classmethod
     def after(
@@ -39,6 +54,7 @@ class AttemptDeadline:
         timeout_sec: float,
         *,
         clock: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> AttemptDeadline:
         """Create a deadline ``timeout_sec`` from one monotonic observation.
 
@@ -53,7 +69,43 @@ class AttemptDeadline:
                 clock = asyncio.get_running_loop().time
             except RuntimeError:
                 clock = time.monotonic
-        return cls(monotonic_deadline=clock() + timeout_sec, _clock=clock)
+        return cls(
+            monotonic_deadline=clock() + timeout_sec,
+            wall_deadline_epoch_sec=wall_clock() + timeout_sec,
+            _clock=clock,
+            _wall_clock=wall_clock,
+        )
+
+    @classmethod
+    def from_wall_deadline(
+        cls,
+        wall_deadline_epoch_sec: float,
+        *,
+        clock: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] = time.time,
+    ) -> AttemptDeadline:
+        """Translate a signed cross-process wall deadline into a local cutoff.
+
+        Monotonic values are process-local and must never cross the token
+        boundary.  The signed epoch claim is observed once on admission and
+        converted to this process' monotonic clock without adding a skew or
+        cleanup allowance.
+        """
+
+        if not math.isfinite(wall_deadline_epoch_sec):
+            raise ValueError("attempt wall deadline must be finite")
+        if clock is None:
+            try:
+                clock = asyncio.get_running_loop().time
+            except RuntimeError:
+                clock = time.monotonic
+        remaining = max(0.0, wall_deadline_epoch_sec - wall_clock())
+        return cls(
+            monotonic_deadline=clock() + remaining,
+            wall_deadline_epoch_sec=wall_deadline_epoch_sec,
+            _clock=clock,
+            _wall_clock=wall_clock,
+        )
 
     def remaining(self) -> float:
         """Return the non-negative duration remaining on this attempt."""
@@ -71,3 +123,10 @@ class AttemptDeadline:
     @property
     def reached(self) -> bool:
         return self.remaining() <= 0
+
+    @property
+    def wall_deadline(self) -> datetime:
+        """Return the signed cross-process boundary as an aware UTC time."""
+
+        assert self.wall_deadline_epoch_sec is not None
+        return datetime.fromtimestamp(self.wall_deadline_epoch_sec, tz=UTC)

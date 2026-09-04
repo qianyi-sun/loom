@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from loom.agent.gateway_client import GatewayCallRequest, GatewayCallResponse
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.attempt_deadline import AttemptDeadline
 from loom.errors import AgentError
+from loom_worker.control_plane_client import StepTokenGrant
 
 
 class _StepTokenIssuer(Protocol):
@@ -24,6 +26,16 @@ class _StepTokenIssuer(Protocol):
         step_id: str,
         ttl_sec: int,
     ) -> str: ...
+
+    async def mint_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime,
+    ) -> StepTokenGrant: ...
 
 
 @dataclass
@@ -101,6 +113,15 @@ class StepTokenGatewayClient:
             return self._scoped_gateway
 
     async def _mint(self, step_id: str) -> str:
+        if self.attempt_deadline is not None:
+            grant = await self.token_issuer.mint_attempt_step_token(
+                team_id=self.team_id,
+                trial_id=self.trial_id,
+                step_id=step_id,
+                ttl_sec=self.token_ttl_sec,
+                attempt_deadline_wall_clock=self.attempt_deadline.wall_deadline,
+            )
+            return grant.token
         return await self.token_issuer.mint_step_token(
             team_id=self.team_id,
             trial_id=self.trial_id,
