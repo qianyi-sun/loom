@@ -262,7 +262,11 @@ func dupFileDescriptor(t interface {
 }
 
 func runtimeSessionArch() string {
-	return runtime.GOARCH
+	authorityArch, _, err := authorityArchForGo(runtime.GOARCH)
+	if err != nil {
+		return runtime.GOARCH
+	}
+	return authorityArch
 }
 
 func secretSHA256(data []byte) string {

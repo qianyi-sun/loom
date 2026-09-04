@@ -477,9 +477,24 @@ class _Attachment:
     program_ids = tuple(range(201, 225))
     map_ids = tuple(range(301, 319))
 
-    def __init__(self, events: list[str], build_egress_cgroup: Path) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        build_egress_cgroup: Path,
+        *,
+        bpf_program_sha256: str = DIGEST_A,
+        bpf_map_schema_sha256: str = DIGEST_B,
+        containment_policy_sha256: str = DIGEST_C,
+        resource_limits_sha256: str = DIGEST_D,
+        probe_sha256: str = "5" * 64,
+    ) -> None:
         self.events = events
         self.build_egress_cgroup = str(build_egress_cgroup)
+        self.bpf_program_sha256 = bpf_program_sha256
+        self.bpf_map_schema_sha256 = bpf_map_schema_sha256
+        self.containment_policy_sha256 = containment_policy_sha256
+        self.resource_limits_sha256 = resource_limits_sha256
+        self.probe_sha256 = probe_sha256
 
     def close(self) -> None:
         self.events.append("attachment_close")
@@ -506,7 +521,17 @@ class _Containment:
         assert self.ledger.get(grant_id).state == "containment_pending"  # type: ignore[union-attr]
         self.events.append("containment_attach")
         peer.adopt_trusted_service_cgroup()
-        return _Attachment(self.events, self.build_egress_cgroup)
+        return _Attachment(
+            self.events,
+            self.build_egress_cgroup,
+            bpf_program_sha256=getattr(self, "bpf_program_sha256", DIGEST_A),
+            bpf_map_schema_sha256=getattr(self, "bpf_map_schema_sha256", DIGEST_B),
+            containment_policy_sha256=getattr(
+                self, "containment_policy_sha256", DIGEST_C
+            ),
+            resource_limits_sha256=getattr(self, "resource_limits_sha256", DIGEST_D),
+            probe_sha256=getattr(self, "probe_sha256", "5" * 64),
+        )
 
 
 class _Storage:
@@ -1284,6 +1309,7 @@ def _service(
     startup: object | None = None,
     ready: object | None = None,
     watchdog: object | None = None,
+    now_factory: object | None = None,
     keepalive_interval_seconds: float = 10.0,
     progress_timeout_seconds: float = 75.0,
     startup_extension_limit_seconds: float = 900.0,
@@ -1320,7 +1346,7 @@ def _service(
         reconciler=_Reconciler(events),
         node_boot_id=BOOT,
         uuid_factory=iter((REQUEST, PROOF, RESPONSE, RESPONSE)).__next__,
-        now_factory=lambda: NOW + timedelta(seconds=3),
+        now_factory=(lambda: NOW + timedelta(seconds=3)) if now_factory is None else now_factory,  # type: ignore[arg-type]
         monotonic=monotonic_factory,  # type: ignore[arg-type]
         trusted_uid=os.geteuid(),
         trusted_gid=os.getegid(),

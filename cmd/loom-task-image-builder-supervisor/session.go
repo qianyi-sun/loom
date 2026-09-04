@@ -25,6 +25,10 @@ type SessionEnvelope struct {
 	SessionPublicBindingSHA256 string
 }
 
+var runtimeGOARCH = runtimeGOARCHDefault
+
+func runtimeGOARCHDefault() string { return runtime.GOARCH }
+
 type sessionRenewer interface {
 	Renew(context.Context, string, string, *SecretBuffer) (*SessionEnvelope, error)
 }
@@ -106,7 +110,7 @@ func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	if session.schemaVersion != 2 || !isCanonicalNonZeroUUID(session.grantID) || !isCanonicalNonZeroUUID(session.sessionID) || session.cpuArch != runtime.GOARCH || session.generation <= 0 || session.attestationGeneration <= 0 || !isDigest(session.attestationSHA256) || !isNonEmptyJSONStringLiteral(session.sessionToken) {
+	if session.schemaVersion != 2 || !isCanonicalNonZeroUUID(session.grantID) || !isCanonicalNonZeroUUID(session.sessionID) || !sessionArchMatchesRuntime(session.cpuArch, runtimeGOARCH()) || session.generation <= 0 || session.attestationGeneration <= 0 || !isDigest(session.attestationSHA256) || !isNonEmptyJSONStringLiteral(session.sessionToken) {
 		return nil, errors.New("session payload invalid")
 	}
 	issuedAt, err := time.Parse(time.RFC3339, session.issuedAt)
@@ -130,6 +134,11 @@ func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {
 		IssuedAt:              issuedAt,
 		ExpiresAt:             expiresAt,
 	}, nil
+}
+
+func sessionArchMatchesRuntime(authorityArch string, goArch string) bool {
+	native, _, err := authorityArchForGo(goArch)
+	return err == nil && authorityArch == native
 }
 
 func newUUID() (string, error) {

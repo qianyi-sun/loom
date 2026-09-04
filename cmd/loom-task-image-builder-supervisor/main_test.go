@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunRejectsInheritedEnvironmentAuthority(t *testing.T) {
@@ -53,7 +54,7 @@ func TestRunConstructsEnvironmentFromProjectedQuotaDirectory(t *testing.T) {
 	compiledConfigPath = configPath
 	compiledReleaseSHA256 = release
 	var applied []string
-	guardClientFactory = func(cfg Config) supervisorProjectClient {
+	guardClientFactory = func(cfg Config) TaskImageGuard {
 		return supervisorProjectClientFunc(func(ctx context.Context, grantID string) (*AllocationCapabilities, error) {
 			bootstrapFD := createMemfdFixture(t, "bootstrap", []byte(`{"bootstrap_token":"sentinel-secret-text"}`), requiredMemfdSeals, true)
 			bootstrap, err := NewSecretBuffer(bootstrapFD, maxSecretBytes)
@@ -66,6 +67,7 @@ func TestRunConstructsEnvironmentFromProjectedQuotaDirectory(t *testing.T) {
 			buildStat := mustFstat(t, buildFD)
 			return &AllocationCapabilities{
 				Bootstrap:          bootstrap,
+				ProofSHA256:        strings.Repeat("a", 64),
 				JobDirectoryFD:     jobFD,
 				JobDirectoryDevice: uint64(jobStat.Dev),
 				JobDirectoryInode:  uint64(jobStat.Ino),
@@ -124,4 +126,40 @@ type supervisorProjectClientFunc func(context.Context, string) (*AllocationCapab
 
 func (fn supervisorProjectClientFunc) Project(ctx context.Context, grantID string) (*AllocationCapabilities, error) {
 	return fn(ctx, grantID)
+}
+
+func (fn supervisorProjectClientFunc) Exchange(context.Context, string, string, string, *SecretBuffer) (*SessionEnvelope, error) {
+	return testSession(1, time.Date(2026, 9, 3, 12, 10, 0, 0, time.UTC)), nil
+}
+
+func (fn supervisorProjectClientFunc) Renew(context.Context, string, string, *SecretBuffer) (*SessionEnvelope, error) {
+	return testSession(2, time.Date(2026, 9, 3, 12, 20, 0, 0, time.UTC)), nil
+}
+
+func (fn supervisorProjectClientFunc) Claim(context.Context, string, string, *SecretBuffer) (*SecretBuffer, bool, error) {
+	return nil, false, nil
+}
+
+func (fn supervisorProjectClientFunc) Bundle(context.Context, string, string, string, string, int, *SecretBuffer) (*SecretBuffer, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) Release(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) Fail(context.Context, string, string, string, string, int, string, *SecretBuffer) (*LeaseResponse, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) Finish(context.Context, string, string, map[string]int) error {
+	return nil
 }

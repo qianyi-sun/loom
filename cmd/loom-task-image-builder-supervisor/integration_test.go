@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,10 +39,10 @@ func TestSupervisorCrossLanguageLocalSocketFlow(t *testing.T) {
 	supervisor := &Orchestrator{
 		GrantID: testGrantID,
 		Config: Config{
-			CPUArch: "arm64",
+			CPUArch: runtime.GOARCH,
 		},
-		Guard:        NewGuardClient(socketPath, 8*1024*1024, time.Second),
-		Clock:        &fakeClock{now: testNow},
+		Guard:        NewGuardClient(socketPath, 8*1024*1024, 2*time.Second),
+		Clock:        newManualClock(testNow),
 		IdleGrace:    time.Millisecond,
 		CleanupGrace: time.Second,
 		Download: fakeBundleDownloader(func(ctx context.Context, secret *SecretBuffer, fd int) (*DownloadedBundle, error) {
@@ -65,7 +66,7 @@ func TestSupervisorCrossLanguageLocalSocketFlow(t *testing.T) {
 						FileSHA256:     strings.Repeat("b", 64),
 						SizeBytes:      77,
 						OS:             "linux",
-						Architecture:   "arm64",
+						Architecture:   runtime.GOARCH,
 					},
 					"sidecar:cache": {
 						Path:           filepath.Join(jobRoot, "oci/0001.tar"),
@@ -73,7 +74,7 @@ func TestSupervisorCrossLanguageLocalSocketFlow(t *testing.T) {
 						FileSHA256:     strings.Repeat("d", 64),
 						SizeBytes:      88,
 						OS:             "linux",
-						Architecture:   "arm64",
+						Architecture:   runtime.GOARCH,
 					},
 				},
 			}, nil
@@ -101,10 +102,196 @@ func TestSupervisorCrossLanguageLocalSocketFlow(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	server.wantOperations([]string{"project", "exchange", "renew", "claim", "bundle", "start", "release", "finish"})
+	server.wantOperations([]string{"project", "exchange", "claim", "bundle", "start", "release", "claim", "claim", "finish"})
 	if !reflect.DeepEqual(events, []string{"download", "handoff"}) {
 		t.Fatalf("events = %#v, want download/handoff", events)
 	}
+}
+
+// Break caught: the supervisor only passes against a fake Go socket and no longer speaks the real guard-service protocol.
+func TestSupervisorExternalGuardFlow(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := os.Getenv("LOOM_PHASE2C_SOCKET")
+	if socketPath == "" {
+		t.Skip("LOOM_PHASE2C_SOCKET not set")
+	}
+	grantID := os.Getenv("LOOM_PHASE2C_GRANT_ID")
+	if !isCanonicalNonZeroUUID(grantID) {
+		t.Fatalf("LOOM_PHASE2C_GRANT_ID invalid")
+	}
+	expectedMaterializationID := os.Getenv("LOOM_PHASE2C_MATERIALIZATION_ID")
+	if expectedMaterializationID != "" && !isCanonicalNonZeroUUID(expectedMaterializationID) {
+		t.Fatalf("LOOM_PHASE2C_MATERIALIZATION_ID invalid")
+	}
+	goArch := os.Getenv("LOOM_PHASE2C_GOARCH_OVERRIDE")
+	if goArch == "" {
+		goArch = runtime.GOARCH
+	}
+	if _, _, err := authorityArchForGo(goArch); err != nil {
+		t.Fatalf("LOOM_PHASE2C_GOARCH_OVERRIDE invalid")
+	}
+	previous := runtimeGOARCH
+	runtimeGOARCH = func() string { return goArch }
+	t.Cleanup(func() { runtimeGOARCH = previous })
+
+	clock := newManualClock(time.Date(2026, 9, 2, 14, 0, 0, 0, time.UTC))
+	var events []string
+	var accepted []BuiltComponentSet
+	supervisor := &Orchestrator{
+		GrantID: grantID,
+		Config: Config{
+			CPUArch: goArch,
+		},
+		Guard:        NewGuardClient(socketPath, 8*1024*1024, 2*time.Second),
+		Clock:        clock,
+		IdleGrace:    time.Millisecond,
+		CleanupGrace: time.Second,
+		Download: fakeBundleDownloader(func(ctx context.Context, secret *SecretBuffer, fd int) (*DownloadedBundle, error) {
+			if fd < 0 {
+				t.Fatal("DownloadBundle received invalid workspace descriptor")
+			}
+			var capability struct {
+				SchemaVersion            string `json:"schema_version"`
+				CapabilityID             string `json:"capability_id"`
+				GrantID                  string `json:"grant_id"`
+				SessionID                string `json:"session_id"`
+				SessionGeneration        int    `json:"session_generation"`
+				MaterializationID        string `json:"materialization_id"`
+				TaskChecksum             string `json:"task_checksum"`
+				BundleFileMetadataSHA256 string `json:"bundle_file_metadata_sha256"`
+				FileCount                int    `json:"file_count"`
+				TotalBytes               int64  `json:"total_bytes"`
+				IssuedAt                 string `json:"issued_at"`
+				ExpiresAt                string `json:"expires_at"`
+				Objects                  []struct {
+					RelativePath string `json:"relative_path"`
+					SizeBytes    int64  `json:"size_bytes"`
+					URL          string `json:"url"`
+				} `json:"objects"`
+			}
+			decoder := json.NewDecoder(strings.NewReader(string(secret.data)))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&capability); err != nil {
+				t.Fatalf("bundle capability JSON invalid")
+			}
+			if err := expectJSONEOF(decoder); err != nil {
+				t.Fatalf("bundle capability JSON invalid")
+			}
+			if capability.SchemaVersion != "loom.task-image-bundle-capability.v1" ||
+				capability.GrantID != grantID ||
+				!isCanonicalNonZeroUUID(capability.CapabilityID) ||
+				!isCanonicalNonZeroUUID(capability.SessionID) ||
+				capability.SessionGeneration <= 0 ||
+				!isCanonicalNonZeroUUID(capability.MaterializationID) ||
+				(expectedMaterializationID != "" && capability.MaterializationID != expectedMaterializationID) ||
+				!isDigest(capability.TaskChecksum) ||
+				!isDigest(capability.BundleFileMetadataSHA256) ||
+				capability.FileCount != len(capability.Objects) ||
+				capability.TotalBytes <= 0 ||
+				capability.IssuedAt == "" ||
+				capability.ExpiresAt == "" {
+				t.Fatalf("bundle capability binding invalid")
+			}
+			sawSignedURL := false
+			for _, object := range capability.Objects {
+				if object.RelativePath == "" || object.SizeBytes < 0 || !strings.HasPrefix(object.URL, "https://objects.example/") {
+					t.Fatalf("bundle capability object invalid")
+				}
+				if strings.Contains(object.URL, "X-Amz-Signature=") {
+					sawSignedURL = true
+				}
+			}
+			if !sawSignedURL {
+				t.Fatalf("bundle capability did not include signed object URLs")
+			}
+			events = append(events, "download")
+			return &DownloadedBundle{}, nil
+		}),
+		NewExecutor: func(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (BuildExecutor, error) {
+			if cfg.CPUArch != goArch ||
+				caps == nil ||
+				plan.Architecture != goArch ||
+				plan.NetworkMode != "sandbox" ||
+				len(plan.Components) != 1 ||
+				plan.Components[0].Name != "task" ||
+				plan.Components[0].Dockerfile != "environment/Dockerfile" ||
+				plan.Components[0].ContextDir != "." {
+				return nil, errors.New("external build plan invalid")
+			}
+			return &externalFlowExecutor{
+				clock:  clock,
+				events: &events,
+				output: OCIOutput{
+					Path:           "/tmp/phase2c-external/oci/0000.tar",
+					TopLevelDigest: "sha256:" + strings.Repeat("a", 64),
+					FileSHA256:     strings.Repeat("b", 64),
+					SizeBytes:      77,
+					OS:             "linux",
+					Architecture:   goArch,
+				},
+			}, nil
+		},
+		Handoff: &captureHandoff{accepted: func(set BuiltComponentSet) {
+			events = append(events, "handoff")
+			accepted = append(accepted, set)
+		}},
+		RecordOutcome: func(outcome BuildOutcome) {
+			wire, err := outcome.MarshalJSON()
+			if err != nil {
+				t.Fatalf("outcome marshal error = %v", err)
+			}
+			for _, forbidden := range []string{"loom_tib", "X-Amz-Signature", "objects.example", "/tmp/phase2c-external"} {
+				if strings.Contains(string(wire), forbidden) {
+					t.Fatalf("outcome leaked sensitive detail")
+				}
+			}
+		},
+	}
+
+	if err := supervisor.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !reflect.DeepEqual(events, []string{"download", "executor_start", "build:task", "handoff", "executor_close"}) {
+		t.Fatalf("events = %#v, want single external build flow", events)
+	}
+	if len(accepted) != 1 {
+		t.Fatalf("handoff accepted %d sets, want 1", len(accepted))
+	}
+	set := accepted[0]
+	if set.GrantID != grantID ||
+		(expectedMaterializationID != "" && set.MaterializationID != expectedMaterializationID) ||
+		set.AttemptID == "" ||
+		set.LeaseEpoch <= 0 ||
+		len(set.Components) != 1 ||
+		set.Components[0].Name != "task" {
+		t.Fatalf("handoff set binding invalid")
+	}
+}
+
+type externalFlowExecutor struct {
+	clock  *manualClock
+	events *[]string
+	output OCIOutput
+}
+
+func (e *externalFlowExecutor) Start(ctx context.Context) error {
+	*e.events = append(*e.events, "executor_start")
+	return nil
+}
+
+func (e *externalFlowExecutor) Build(ctx context.Context, component BuildComponent) (OCIOutput, error) {
+	*e.events = append(*e.events, "build:"+component.Name)
+	if component.Name != "task" {
+		return OCIOutput{}, errors.New("unexpected component")
+	}
+	e.clock.advance(31 * time.Second)
+	time.Sleep(10 * time.Millisecond)
+	return e.output, nil
+}
+
+func (e *externalFlowExecutor) Close(ctx context.Context) error {
+	*e.events = append(*e.events, "executor_close")
+	return nil
 }
 
 type supervisorFlowServer struct {
@@ -114,6 +301,7 @@ type supervisorFlowServer struct {
 	maxOps     int
 	mu         sync.Mutex
 	ops        []string
+	claims     int
 	jobRoot    string
 	buildRoot  string
 }
@@ -134,7 +322,7 @@ func startSupervisorFlowServer(t *testing.T, socketPath string, jobRoot string, 
 		t:          t,
 		listenerFD: listenerFD,
 		done:       make(chan struct{}),
-		maxOps:     8,
+		maxOps:     9,
 		jobRoot:    jobRoot,
 		buildRoot:  buildRoot,
 	}
@@ -144,7 +332,10 @@ func startSupervisorFlowServer(t *testing.T, socketPath string, jobRoot string, 
 
 func (s *supervisorFlowServer) close() {
 	syscall.Close(s.listenerFD)
-	<-s.done
+	select {
+	case <-s.done:
+	case <-time.After(time.Second):
+	}
 }
 
 func (s *supervisorFlowServer) wantOperations(want []string) {
@@ -202,7 +393,23 @@ func (s *supervisorFlowServer) handle(connFD int) {
 	case "renew":
 		s.respondSession(connFD, 2)
 	case "claim":
-		s.respondSecret(connFD, "claim", []byte(testClaimJSON()), map[string]any{
+		s.claims++
+		if s.claims > 1 {
+			s.respondAckOnly(connFD, "claim", map[string]any{
+				"operation_id": request["operation_id"],
+				"available":    false,
+			})
+			return
+		}
+		claim := defaultClaimMutation()
+		if runtime.GOARCH == "amd64" {
+			claim.CPUArch = "x86_64"
+			claim.Platform = "linux/amd64"
+		}
+		if id, ok := request["operation_id"].(string); ok {
+			claim.ClaimID = id
+		}
+		s.respondSecret(connFD, "claim", []byte(testClaimJSON(claim)), map[string]any{
 			"operation_id": request["operation_id"],
 		})
 	case "bundle":
@@ -246,8 +453,13 @@ func (s *supervisorFlowServer) respondProject(connFD int) {
 }
 
 func (s *supervisorFlowServer) respondSession(connFD int, generation int) {
+	authorityArch, _, err := authorityArchForGo(runtime.GOARCH)
+	if err != nil {
+		s.t.Errorf("authorityArchForGo() error = %v", err)
+		return
+	}
 	payload := []byte(fmt.Sprintf(`{"schema_version":2,"grant_id":%q,"session_id":%q,"purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":%q,"session_token":%q,"generation":%d,"attestation_generation":%d,"attestation_sha256":%q,"issued_at":"2026-09-03T12:00:00Z","expires_at":"2026-09-03T12:10:00Z"}`,
-		testGrantID, testSessionID, runtime.GOARCH, "loom_tibs_"+strings.Repeat(fmt.Sprintf("%d", generation), 64), generation, generation, strings.Repeat("a", 64)))
+		testGrantID, testSessionID, authorityArch, "loom_tibs_"+strings.Repeat(fmt.Sprintf("%d", generation), 64), generation, generation, strings.Repeat("a", 64)))
 	fd := createMemfdFixture(s.t, "session", payload, requiredMemfdSeals, true)
 	defer syscall.Close(fd)
 	s.respond(connFD, map[string]any{

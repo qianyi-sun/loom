@@ -163,8 +163,26 @@ func TestProtocolExchangeSendsSealedSecretDescriptorAndAcknowledgesSessionRespon
 		if err != nil {
 			t.Fatalf("NewSecretBuffer() error = %v", err)
 		}
-		if !strings.Contains(string(buffer.data), "bootstrap_token") {
-			t.Fatalf("bootstrap exchange payload = %q", string(buffer.data))
+		var exchange struct {
+			SchemaVersion  int    `json:"schema_version"`
+			ExchangeID     string `json:"exchange_id"`
+			GrantID        string `json:"grant_id"`
+			ProofSHA256    string `json:"proof_sha256"`
+			BootstrapToken string `json:"bootstrap_token"`
+			ObservedAt     string `json:"observed_at"`
+		}
+		if err := decodeStrictJSON(buffer.data, &exchange); err != nil {
+			t.Fatalf("exchange descriptor JSON error = %v", err)
+		}
+		if exchange.SchemaVersion != 1 ||
+			exchange.ExchangeID != "22222222-2222-4222-8222-222222222222" ||
+			exchange.GrantID != "11111111-1111-4111-8111-111111111111" ||
+			exchange.ProofSHA256 != strings.Repeat("a", 64) ||
+			exchange.BootstrapToken != "sentinel-secret-text" {
+			t.Fatalf("exchange descriptor binding = %#v", exchange)
+		}
+		if _, err := time.Parse(time.RFC3339, exchange.ObservedAt); err != nil {
+			t.Fatalf("exchange observed_at = %q, want RFC3339 timestamp", exchange.ObservedAt)
 		}
 		buffer.Close()
 		sessionFD := createMemfdFixture(t, "session", []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"`+runtimeSessionArch()+`","session_token":"sentinel-secret-text","generation":2,"attestation_generation":2,"attestation_sha256":"`+strings.Repeat("b", 64)+`","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`), requiredMemfdSeals, true)

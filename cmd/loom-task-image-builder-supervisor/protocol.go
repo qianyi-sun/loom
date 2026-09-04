@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"syscall"
 	"time"
 )
@@ -172,7 +171,7 @@ func (c *GuardClient) Exchange(ctx context.Context, grantID string, exchangeID s
 		"exchange_id":  exchangeID,
 		"proof_sha256": proofSHA256,
 	}
-	fd, err := bootstrap.cloneSealedMemfd("bootstrap-exchange", maxSecretBytes)
+	fd, err := bootstrapExchangeMemfd(grantID, exchangeID, proofSHA256, bootstrap)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +183,47 @@ func (c *GuardClient) Exchange(ctx context.Context, grantID string, exchangeID s
 	defer closeRights(rights)
 	defer packet.Close()
 	return c.decodeSessionResponse(packet, rights, grantID)
+}
+
+func bootstrapExchangeMemfd(grantID string, exchangeID string, proofSHA256 string, bootstrap *SecretBuffer) (int, error) {
+	if bootstrap == nil || bootstrap.closed || len(bootstrap.data) == 0 {
+		return -1, errors.New("secret unavailable")
+	}
+	var receipt struct {
+		SchemaVersion  int    `json:"schema_version"`
+		GrantID        string `json:"grant_id"`
+		ProofID        string `json:"proof_id"`
+		ProofSHA256    string `json:"proof_sha256"`
+		BootstrapToken string `json:"bootstrap_token"`
+		IssuedAt       string `json:"issued_at"`
+		ExpiresAt      string `json:"expires_at"`
+	}
+	if err := decodeStrictJSON(bootstrap.data, &receipt); err != nil {
+		return -1, err
+	}
+	if receipt.BootstrapToken == "" {
+		return -1, errors.New("bootstrap receipt invalid")
+	}
+	observedAt := receipt.IssuedAt
+	if observedAt == "" {
+		observedAt = time.Now().UTC().Format(time.RFC3339)
+	} else if parsed, err := time.Parse(time.RFC3339, observedAt); err == nil {
+		observedAt = parsed.UTC().Format(time.RFC3339)
+	} else {
+		return -1, errors.New("bootstrap receipt invalid")
+	}
+	payload, err := encodeCanonicalJSON(map[string]any{
+		"schema_version":  1,
+		"exchange_id":     exchangeID,
+		"grant_id":        grantID,
+		"proof_sha256":    proofSHA256,
+		"bootstrap_token": receipt.BootstrapToken,
+		"observed_at":     observedAt,
+	})
+	if err != nil {
+		return -1, err
+	}
+	return createSealedMemfd("bootstrap-exchange", payload, maxSecretBytes)
 }
 
 func (c *GuardClient) Renew(ctx context.Context, grantID string, operationID string, current *SecretBuffer) (*SessionEnvelope, error) {
@@ -552,13 +592,7 @@ func sendLocalPacket(fd int, request map[string]any, rights []int) error {
 	if err != nil {
 		return err
 	}
-	credentials := syscall.UnixCredentials(&syscall.Ucred{
-		Pid: int32(os.Getpid()),
-		Uid: uint32(os.Geteuid()),
-		Gid: uint32(os.Getegid()),
-	})
-	oob := make([]byte, 0, len(credentials)+128)
-	oob = append(oob, credentials...)
+	var oob []byte
 	if len(rights) > 0 {
 		oob = append(oob, syscall.UnixRights(rights...)...)
 	}

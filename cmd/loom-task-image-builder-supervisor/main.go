@@ -16,16 +16,12 @@ type startupOptions struct {
 	GrantID string
 }
 
-type supervisorProjectClient interface {
-	Project(context.Context, string) (*AllocationCapabilities, error)
-}
-
 var (
 	compiledConfigPath      = "/etc/loom-task-image-builder/supervisor-config.json"
 	compiledGuardSocketPath = "/run/loom-task-image-builder-guard/guard.sock"
 	compiledReleaseSHA256   = ""
 	compiledReleaseBasePath = "/opt/loom-task-image-builder-provider/releases"
-	guardClientFactory      = func(cfg Config) supervisorProjectClient {
+	guardClientFactory      = func(cfg Config) TaskImageGuard {
 		return NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second)
 	}
 	applyProcessEnvironment      = replaceProcessEnvironment
@@ -54,42 +50,22 @@ func run(args []string, environ []string) error {
 	if err != nil {
 		return err
 	}
-	client := guardClientFactory(cfg)
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	caps, err := client.Project(ctx, options.GrantID)
-	if err != nil {
-		return err
-	}
-	defer caps.Close()
-	if finisher, ok := client.(interface {
-		Finish(context.Context, string, string, map[string]int) error
-	}); ok {
-		operationID, idErr := newUUID()
-		if idErr != nil {
-			return idErr
+	supervisor := productionOrchestrator(options.GrantID, cfg)
+	supervisor.Guard = guardClientFactory(cfg)
+	supervisor.PostProject = func(ctx context.Context, caps *AllocationCapabilities) error {
+		quotaRoot, err := quotaRootFromDirectoryFD(caps.JobDirectoryFD)
+		if err != nil {
+			return err
 		}
-		defer func() {
-			finishCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second)
-			defer cancel()
-			_ = finisher.Finish(finishCtx, options.GrantID, operationID, map[string]int{
-				"descendant_processes": 0,
-				"mounts":               0,
-				"sockets":              0,
-				"open_files":           0,
-			})
-		}()
+		sanitized, err := sanitizeEnvironment(environ, quotaRoot)
+		if err != nil {
+			return err
+		}
+		return applyProcessEnvironment(sanitized)
 	}
-
-	quotaRoot, err := quotaRootFromDirectoryFD(caps.JobDirectoryFD)
-	if err != nil {
-		return err
-	}
-	sanitized, err := sanitizeEnvironment(environ, quotaRoot)
-	if err != nil {
-		return err
-	}
-	return applyProcessEnvironment(sanitized)
+	return supervisor.Run(ctx)
 }
 
 func productionOrchestrator(grantID string, cfg Config) *Orchestrator {

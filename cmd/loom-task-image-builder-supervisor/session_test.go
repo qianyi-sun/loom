@@ -156,6 +156,39 @@ func TestSessionEnvelopeRejectsMalformedJSONTokenLiteral(t *testing.T) {
 	}
 }
 
+func TestSessionEnvelopeAcceptsAuthorityNativeArchitectureNames(t *testing.T) {
+	tests := []struct {
+		name          string
+		goArch        string
+		authorityArch string
+		wantOK        bool
+	}{
+		{name: "amd64 accepts x86_64", goArch: "amd64", authorityArch: "x86_64", wantOK: true},
+		{name: "arm64 accepts arm64", goArch: "arm64", authorityArch: "arm64", wantOK: true},
+		{name: "amd64 rejects arm64", goArch: "amd64", authorityArch: "arm64", wantOK: false},
+		{name: "arm64 rejects x86_64", goArch: "arm64", authorityArch: "x86_64", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previous := runtimeGOARCH
+			runtimeGOARCH = func() string { return tt.goArch }
+			t.Cleanup(func() { runtimeGOARCH = previous })
+			buffer := mustSecretBuffer(t, []byte(fmt.Sprintf(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"%s","session_token":"loom_tibs_%s","generation":1,"attestation_generation":1,"attestation_sha256":"%s","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`, tt.authorityArch, strings.Repeat("A", 64), strings.Repeat("a", 64))))
+			session, err := parseSessionEnvelope(buffer)
+			if tt.wantOK && err != nil {
+				t.Fatalf("parseSessionEnvelope() error = %v", err)
+			}
+			if !tt.wantOK && err == nil {
+				session.Secret.Close()
+				t.Fatal("parseSessionEnvelope() succeeded, want architecture rejection")
+			}
+			if session != nil {
+				session.Secret.Close()
+			}
+		})
+	}
+}
+
 func TestSessionEnvelopeScannerKeepsTokenSliceInsideLockedBuffer(t *testing.T) {
 	buffer := mustSecretBuffer(t, []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"`+runtimeSessionArch()+`","session_token":"sentinel-secret-text","generation":1,"attestation_generation":1,"attestation_sha256":"`+strings.Repeat("a", 64)+`","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`))
 	defer buffer.Close()
