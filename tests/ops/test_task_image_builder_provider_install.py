@@ -132,10 +132,11 @@ def _runtime_tree(root: Path) -> Path:
     }
     for name, payload in members.items():
         _write(runtime / name, payload, 0o555)
+    runtime.chmod(0o555)
     return runtime.parent
 
 
-def _bundle(tmp_path: Path) -> Path:
+def _source_bundle(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "source"
     deploy = source / "deploy/task-image-builder"
     scripts = source / "scripts/ops"
@@ -288,7 +289,11 @@ def _bundle(tmp_path: Path) -> Path:
         runtime_root=runtime_root,
         build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
     )
-    return release.directory
+    return source, release.directory
+
+
+def _bundle(tmp_path: Path) -> Path:
+    return _source_bundle(tmp_path)[1]
 
 
 def _context(tmp_path: Path, bundle: Path) -> InstallContext:
@@ -299,7 +304,36 @@ def _context(tmp_path: Path, bundle: Path) -> InstallContext:
         live=False,
         expected_release_sha256=bundle.name,
         architecture="x86_64",
+        source_root=tmp_path / "source",
     )
+
+
+def _forge_self_consistent_bundle(bundle: Path, member: str, payload: bytes) -> Path:
+    bundle.chmod(0o755)
+    member_path = bundle / member
+    member_path.parent.chmod(0o755)
+    member_path.chmod(0o644)
+    member_path.write_bytes(payload)
+    member_path.chmod(0o444)
+    member_path.parent.chmod(0o555)
+    manifest_path = bundle / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    for record in manifest["files"]:
+        if record["path"] == member:
+            record["sha256"] = _digest(payload)
+            break
+    else:  # pragma: no cover - fixture invariant
+        raise AssertionError(f"{member} missing from release manifest")
+    identity = dict(manifest)
+    identity.pop("release_sha256")
+    manifest["release_sha256"] = _digest(_canonical(identity))
+    manifest_path.chmod(0o644)
+    manifest_path.write_bytes(_canonical(manifest))
+    manifest_path.chmod(0o444)
+    forged = bundle.with_name(manifest["release_sha256"])
+    bundle.rename(forged)
+    forged.chmod(0o555)
+    return forged
 
 
 def _file_digest_tree(path: Path) -> dict[str, tuple[int, str]]:
@@ -504,6 +538,20 @@ def test_staging_rejects_manifest_and_member_substitution(
 
     with pytest.raises(ProviderInstallError):
         stage_provider_release(bundle, _context(tmp_path, bundle))
+
+
+def test_staging_rejects_self_consistent_bundle_not_bound_to_reviewed_spec(
+    tmp_path: Path,
+) -> None:
+    _source, bundle = _source_bundle(tmp_path)
+    forged = _forge_self_consistent_bundle(
+        bundle,
+        "configs/authority-service-v1.yaml",
+        b"apiVersion: v1\nkind: ForgedService\n",
+    )
+
+    with pytest.raises(ProviderInstallError, match="reviewed"):
+        stage_provider_release(forged, _context(tmp_path, forged))
 
 
 def test_same_digest_collision_preserves_existing_and_candidate_for_inspection(

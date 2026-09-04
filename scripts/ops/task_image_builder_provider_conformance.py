@@ -33,7 +33,7 @@ from scripts.ops.task_image_builder_provider_release import (
     Architecture,
     ProviderReleaseError,
     VerifiedProviderRelease,
-    verify_release_directory,
+    verify_release_directory_against_spec,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -155,7 +155,7 @@ def _read_regular_path(path: Path, *, maximum: int, label: str) -> bytes:
             or initial.st_nlink != 1
             or initial.st_size <= 0
             or initial.st_size > maximum
-            or initial.st_mode & 0o002
+            or initial.st_mode & 0o022
         ):
             raise ProviderConformanceError(f"{label} is unsafe")
         descriptor = os.open(
@@ -366,7 +366,7 @@ def _verify_authority(source_root: Path) -> str:
     return _sha(payload)
 
 
-def _release_from_path(path: Path, *, live: bool) -> VerifiedProviderRelease:
+def _release_from_path(path: Path, *, live: bool, source_root: Path) -> VerifiedProviderRelease:
     manifest_path = path / "release-manifest.json"
     try:
         raw = json.loads(
@@ -382,15 +382,17 @@ def _release_from_path(path: Path, *, live: bool) -> VerifiedProviderRelease:
     if architecture not in {"x86_64", "aarch64"}:
         raise ProviderConformanceError("provider release architecture is invalid")
     try:
-        return verify_release_directory(
+        return verify_release_directory_against_spec(
             path,
-            expected_release_sha256=path.name,
+            source_root=source_root,
             expected_architecture=cast(Architecture, architecture),
             expected_uid=0 if live else os.geteuid(),
             expected_gid=0 if live else os.getegid(),
         )
     except ProviderReleaseError as exc:
-        raise ProviderConformanceError("provider release verification failed") from exc
+        raise ProviderConformanceError(
+            "provider release verification failed against reviewed specification"
+        ) from exc
 
 
 def _verify_receipt(root: Path, release: VerifiedProviderRelease) -> str:
@@ -510,7 +512,7 @@ def conform(
         raise ProviderConformanceError("staged release path is invalid")
     if live:
         raise ProviderConformanceError(_LIVE_UNAVAILABLE)
-    release = _release_from_path(staged_release, live=live)
+    release = _release_from_path(staged_release, live=live, source_root=source_root)
     checks = [
         ConformanceCheck("authority_inert", "pass", _verify_authority(source_root)),
         ConformanceCheck("host_release", "pass", _verify_host_release(source_root)),

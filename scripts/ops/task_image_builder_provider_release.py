@@ -49,6 +49,20 @@ _GUARD_MEMBERS = (
     "loom-task-image-builder-guard.pyz",
     "loom-task-image-builder-node-guard.service",
 )
+_RELEASE_MANIFEST_KEYS = {
+    "architecture",
+    "authority_contract_version",
+    "files",
+    "guard_release_sha256",
+    "provider_install_root",
+    "release_sha256",
+    "release_spec_sha256",
+    "runtime_release",
+    "runtime_x_crypto",
+    "schema",
+    "supervisor_relative_path",
+}
+_RELEASE_MEMBER_KEYS = {"mode", "path", "sha256"}
 _RENAME_NOREPLACE = 1
 _AT_FDCWD = -100
 
@@ -121,6 +135,15 @@ def _digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        and value != "0" * 64
+    )
+
+
 def _safe_relative(value: object, *, suffix: str | None = None) -> PurePosixPath:
     if not isinstance(value, str):
         raise ProviderReleaseError("release input path is invalid")
@@ -172,7 +195,7 @@ def _read_regular(path: Path, *, maximum: int, executable: bool = False) -> byte
             or initial.st_nlink != 1
         ):
             raise ProviderReleaseError("release input must be a single-link regular file")
-        if initial.st_mode & 0o002 or (executable and initial.st_mode & 0o020):
+        if initial.st_mode & 0o022:
             raise ProviderReleaseError("release input is group/world writable")
         if executable and initial.st_mode & 0o111 == 0:
             raise ProviderReleaseError("release executable is not executable")
@@ -504,12 +527,17 @@ def _load_guard_release(path: Path, *, architecture: Architecture, expected_rele
     return payloads
 
 
-def _load_runtime(
+def _runtime_member_destination(name: str) -> str:
+    if name in {"buildctl", "buildkit-runc", "buildkitd"}:
+        return f"runtime/{name}"
+    return f"bin/{name}"
+
+
+def _runtime_manifest_binding(
     manifest_path: Path,
-    runtime_root: Path,
     *,
     architecture: Architecture,
-) -> tuple[dict[str, bytes], str, str, str]:
+) -> tuple[dict[str, str], str, str, str]:
     manifest = _read_json_path(manifest_path, label="runtime manifest")
     if (
         manifest.get("schema") != "loom.task-image-builder-rootless-runtime/v2"
@@ -536,10 +564,51 @@ def _load_runtime(
     entry = cast(dict[str, object], architectures[arch_name])
     if entry.get("platform") != f"linux/{arch_name}" or not isinstance(entry.get("members"), dict):
         raise ProviderReleaseError("runtime manifest is invalid")
-    expected = cast(dict[str, object], entry["members"])
-    if tuple(sorted(expected)) != tuple(sorted(_RUNTIME_MEMBERS)):
+    raw_members = cast(dict[str, object], entry["members"])
+    if tuple(sorted(raw_members)) != tuple(sorted(_RUNTIME_MEMBERS)):
         raise ProviderReleaseError("runtime member inventory is invalid")
+    expected: dict[str, str] = {}
+    for name in _RUNTIME_MEMBERS:
+        digest = raw_members.get(name)
+        if not _is_sha256(digest):
+            raise ProviderReleaseError("runtime member digest is invalid")
+        expected[name] = cast(str, digest)
+    return (
+        expected,
+        cast(str, manifest["release"]),
+        cast(str, toolchain["x_crypto"]),
+        f"{image}@sha256:{image_sha256}",
+    )
+
+
+def _validate_runtime_directory(path: Path) -> Path:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ProviderReleaseError("runtime member directory is unavailable") from exc
+    if (
+        path.is_symlink()
+        or resolved != path
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) & 0o222
+    ):
+        raise ProviderReleaseError("runtime member directory is unsafe")
+    return path
+
+
+def _load_runtime(
+    manifest_path: Path,
+    runtime_root: Path,
+    *,
+    architecture: Architecture,
+) -> tuple[dict[str, bytes], str, str, str]:
+    expected, runtime_release, runtime_x_crypto, toolchain_image = _runtime_manifest_binding(
+        manifest_path,
+        architecture=architecture,
+    )
     runtime_dir = _validate_root(runtime_root, "runtime root") / "runtime"
+    runtime_dir = _validate_runtime_directory(runtime_dir)
     try:
         entries = sorted(runtime_dir.iterdir(), key=lambda item: item.name)
     except OSError as exc:
@@ -552,12 +621,7 @@ def _load_runtime(
         if _digest(payload) != expected.get(item.name):
             raise ProviderReleaseError("runtime member digest differs from manifest")
         payloads[item.name] = payload
-    return (
-        payloads,
-        cast(str, manifest["release"]),
-        cast(str, toolchain["x_crypto"]),
-        f"{image}@sha256:{image_sha256}",
-    )
+    return payloads, runtime_release, runtime_x_crypto, toolchain_image
 
 
 def _write_payload(descriptor: int, payload: bytes, mode: int) -> None:
@@ -981,6 +1045,111 @@ def build_certified_releases(
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def _read_reviewed_spec(
+    source_root: Path,
+    *,
+    architecture: Architecture,
+) -> tuple[_Spec, bytes, dict[str, str], str, str]:
+    source_root = _validate_root(source_root, "reviewed source root")
+    spec_path = _assert_safe_parents(source_root, PurePosixPath(_SPEC.as_posix()))
+    spec_payload = _read_regular(spec_path, maximum=_MAX_JSON_BYTES)
+    spec = _load_spec(source_root)
+    _checked_payload(
+        source_root,
+        _Input(spec.guard_release_path, spec.guard_release_sha256),
+        maximum=_MAX_JSON_BYTES,
+    )
+    host_release_path = _assert_safe_parents(source_root, spec.host_release_path)
+    runtime_manifest_path = _assert_safe_parents(source_root, spec.runtime_manifest_path)
+    if _digest(_read_regular(host_release_path, maximum=_MAX_JSON_BYTES)) != spec.host_release_sha256:
+        raise ProviderReleaseError("release input digest differs from specification")
+    if _digest(_read_regular(runtime_manifest_path, maximum=_MAX_JSON_BYTES)) != spec.runtime_manifest_sha256:
+        raise ProviderReleaseError("release input digest differs from specification")
+    host_release = _read_json_path(host_release_path, label="host release")
+    if host_release.get("runtime_manifest") != spec.runtime_manifest_path.name:
+        raise ProviderReleaseError("host release does not bind the runtime manifest")
+    for item in (*spec.configs, *spec.scripts, *spec.supervisor_sources):
+        _checked_payload(
+            source_root,
+            item,
+            maximum=_MAX_JSON_BYTES,
+            executable=item.mode == 0o555,
+        )
+    runtime_members, runtime_release, runtime_x_crypto, _toolchain_image = _runtime_manifest_binding(
+        runtime_manifest_path,
+        architecture=architecture,
+    )
+    return spec, spec_payload, runtime_members, runtime_release, runtime_x_crypto
+
+
+def _verified_member_records(
+    release: VerifiedProviderRelease,
+) -> tuple[tuple[str, int, str], ...]:
+    return tuple(
+        (name, mode, _digest(payload))
+        for name, mode, payload in release.members
+    )
+
+
+def _guard_member_records(
+    member_records: tuple[tuple[str, int, str], ...],
+) -> tuple[tuple[str, int, str], ...]:
+    return tuple(
+        record
+        for record in member_records
+        if record[0] in _GUARD_MEMBERS
+    )
+
+
+def _guard_bundle_identity_sha256(
+    guard_records: tuple[tuple[str, int, str], ...],
+    *,
+    architecture: Architecture,
+) -> str:
+    expected_names = tuple(sorted(_GUARD_MEMBERS))
+    if tuple(name for name, _mode, _sha256 in guard_records) != expected_names:
+        raise ProviderReleaseError("release guard member inventory is invalid")
+    files: list[dict[str, object]] = []
+    for name, mode, digest in guard_records:
+        expected_mode = 0o555 if name.endswith(".pyz") else 0o444
+        if mode != expected_mode or not _is_sha256(digest):
+            raise ProviderReleaseError("release guard member identity is invalid")
+        files.append({"path": name, "mode": f"{mode:04o}", "sha256": digest})
+    return _digest(
+        _canonical(
+            {
+                "architecture": architecture,
+                "files": files,
+                "schema": "loom.task-image-builder-guard-bundle/v1",
+            }
+        )
+    )
+
+
+def _expected_spec_bound_records(
+    spec: _Spec,
+    architecture: Architecture,
+    runtime_members: Mapping[str, str],
+    guard_records: tuple[tuple[str, int, str], ...],
+) -> tuple[tuple[str, int, str], ...]:
+    records: list[tuple[str, int, str]] = []
+    for item in (*spec.configs, *spec.scripts):
+        if item.destination is None or item.mode is None:
+            raise ProviderReleaseError("release specification artifact coverage is invalid")
+        records.append((item.destination, item.mode, item.sha256))
+    records.extend(guard_records)
+    for name in _RUNTIME_MEMBERS:
+        records.append((_runtime_member_destination(name), 0o555, runtime_members[name]))
+    records.append(
+        (
+            "bin/loom-task-builder-supervisor",
+            0o555,
+            spec.supervisor_sha256[architecture],
+        )
+    )
+    return tuple(sorted(records, key=lambda item: item[0]))
+
+
 def verify_release_directory(
     path: Path,
     *,
@@ -1008,7 +1177,9 @@ def verify_release_directory(
     ):
         raise ProviderReleaseError("release member metadata is invalid")
     if (
-        manifest.get("schema") != _BUNDLE_SCHEMA
+        set(manifest) != _RELEASE_MANIFEST_KEYS
+        or manifest_payload != _canonical(manifest)
+        or manifest.get("schema") != _BUNDLE_SCHEMA
         or manifest.get("release_sha256") != expected_release_sha256
         or manifest.get("architecture") != expected_architecture
         or not isinstance(manifest.get("files"), list)
@@ -1024,10 +1195,10 @@ def verify_release_directory(
     for record in cast(list[object], manifest["files"]):
         if (
             not isinstance(record, dict)
-            or set(record) != {"path", "mode", "sha256"}
+            or set(record) != _RELEASE_MEMBER_KEYS
             or not isinstance(record["path"], str)
             or not isinstance(record["mode"], str)
-            or not isinstance(record["sha256"], str)
+            or not _is_sha256(record["sha256"])
         ):
             raise ProviderReleaseError("release manifest is invalid")
         relative = _safe_relative(record["path"])
@@ -1040,7 +1211,12 @@ def verify_release_directory(
             parent = parent.parent
         member_path = _assert_safe_parents(path, relative)
         metadata = member_path.lstat()
-        mode = int(record["mode"], 8)
+        try:
+            mode = int(record["mode"], 8)
+        except ValueError as exc:
+            raise ProviderReleaseError("release manifest is invalid") from exc
+        if record["mode"] != f"{mode:04o}" or mode not in {0o444, 0o555}:
+            raise ProviderReleaseError("release manifest is invalid")
         payload = _read_regular(member_path, maximum=_MAX_BYTES, executable=mode == 0o555)
         if (
             stat.S_IMODE(metadata.st_mode) != mode
@@ -1081,6 +1257,86 @@ def verify_release_directory(
         manifest=manifest,
         members=tuple(members),
     )
+
+
+def verify_release_directory_against_spec(
+    path: Path,
+    *,
+    source_root: Path,
+    expected_architecture: Architecture,
+    expected_uid: int,
+    expected_gid: int,
+    expected_release_sha256: str | None = None,
+) -> VerifiedProviderRelease:
+    """Verify a release against the reviewed provider spec, not caller digest."""
+
+    release = verify_release_directory(
+        path,
+        expected_release_sha256=path.name,
+        expected_architecture=expected_architecture,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+    )
+    (
+        spec,
+        spec_payload,
+        runtime_members,
+        runtime_release,
+        runtime_x_crypto,
+    ) = _read_reviewed_spec(source_root, architecture=expected_architecture)
+    member_records = _verified_member_records(release)
+    guard_records = _guard_member_records(member_records)
+    if (
+        release.manifest.get("release_spec_sha256") != _digest(spec_payload)
+        or release.manifest.get("architecture") != expected_architecture
+        or release.manifest.get("authority_contract_version") != spec.authority_contract_version
+        or release.manifest.get("provider_install_root") != spec.provider_install_root
+        or release.manifest.get("supervisor_relative_path") != spec.supervisor_relative_path
+        or release.manifest.get("runtime_release") != runtime_release
+        or release.manifest.get("runtime_x_crypto") != runtime_x_crypto
+        or release.manifest.get("guard_release_sha256")
+        != spec.guard_bundle_sha256[expected_architecture]
+        or _guard_bundle_identity_sha256(
+            guard_records,
+            architecture=expected_architecture,
+        )
+        != spec.guard_bundle_sha256[expected_architecture]
+    ):
+        raise ProviderReleaseError("release differs from reviewed specification")
+    expected_records = _expected_spec_bound_records(
+        spec,
+        expected_architecture,
+        runtime_members,
+        guard_records,
+    )
+    if member_records != expected_records:
+        raise ProviderReleaseError("release differs from reviewed specification")
+    identity: dict[str, object] = {
+        "architecture": expected_architecture,
+        "authority_contract_version": spec.authority_contract_version,
+        "files": [
+            {"path": name, "mode": f"{mode:04o}", "sha256": digest}
+            for name, mode, digest in expected_records
+        ],
+        "guard_release_sha256": spec.guard_bundle_sha256[expected_architecture],
+        "provider_install_root": spec.provider_install_root,
+        "release_spec_sha256": _digest(spec_payload),
+        "runtime_release": runtime_release,
+        "runtime_x_crypto": runtime_x_crypto,
+        "schema": _BUNDLE_SCHEMA,
+        "supervisor_relative_path": spec.supervisor_relative_path,
+    }
+    reviewed_release_sha256 = _digest(_canonical(identity))
+    if (
+        release.release_sha256 != reviewed_release_sha256
+        or release.manifest != {**identity, "release_sha256": reviewed_release_sha256}
+        or (
+            expected_release_sha256 is not None
+            and expected_release_sha256 != reviewed_release_sha256
+        )
+    ):
+        raise ProviderReleaseError("release differs from reviewed specification")
+    return release
 
 
 def main(argv: Sequence[str] | None = None) -> int:

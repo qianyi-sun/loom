@@ -156,6 +156,7 @@ def _runtime_tree(root: Path) -> Path:
     }
     for name, payload in members.items():
         _write(runtime / name, payload, 0o555)
+    runtime.chmod(0o555)
     return runtime.parent
 
 
@@ -435,6 +436,7 @@ def _staged(tmp_path: Path) -> tuple[Path, Path, Path]:
             live=False,
             expected_release_sha256=bundle.name,
             architecture="x86_64",
+            source_root=source,
         ),
     )
     installed = (
@@ -449,6 +451,56 @@ def _rewrite_text(path: Path, text: str) -> None:
     path.chmod(0o644)
     path.write_text(text, encoding="utf-8")
     path.chmod(0o444)
+
+
+def _forge_installed_release(
+    installed: Path,
+    target_root: Path,
+    member: str,
+    payload: bytes,
+) -> Path:
+    installed.chmod(0o755)
+    member_path = installed / member
+    member_path.parent.chmod(0o755)
+    member_path.chmod(0o644)
+    member_path.write_bytes(payload)
+    member_path.chmod(0o444)
+    member_path.parent.chmod(0o555)
+    manifest_path = installed / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    for record in manifest["files"]:
+        if record["path"] == member:
+            record["sha256"] = _digest(payload)
+            break
+    else:  # pragma: no cover - fixture invariant
+        raise AssertionError(f"{member} missing from release manifest")
+    identity = dict(manifest)
+    identity.pop("release_sha256")
+    manifest["release_sha256"] = _digest(_canonical(identity))
+    manifest_path.chmod(0o644)
+    manifest_payload = _canonical(manifest)
+    manifest_path.write_bytes(manifest_payload)
+    manifest_path.chmod(0o444)
+    forged = installed.with_name(manifest["release_sha256"])
+    installed.rename(forged)
+    forged.chmod(0o555)
+    receipts = target_root / "var/lib/loom-task-image-builder-provider/staged"
+    receipt_path = receipts / f"{installed.name}.json"
+    receipt = {
+        "activated": False,
+        "architecture": manifest["architecture"],
+        "installed_path": (
+            f"/opt/loom-task-image-builder-provider/releases/{manifest['release_sha256']}"
+        ),
+        "manifest_sha256": _digest(manifest_payload),
+        "production_ready": False,
+        "release_sha256": manifest["release_sha256"],
+        "schema": "loom.task-image-builder-provider-stage-receipt/v1",
+    }
+    receipt_path.chmod(0o600)
+    receipt_path.unlink()
+    _write(receipts / f"{manifest['release_sha256']}.json", _canonical(receipt), 0o600)
+    return forged
 
 
 def test_documented_conformance_cli_runs_without_ambient_pythonpath() -> None:
@@ -678,6 +730,26 @@ def test_conformance_rejects_installed_release_mode_drift(tmp_path: Path) -> Non
     assert os.geteuid() == member.stat().st_uid
 
 
+def test_conformance_rejects_self_consistent_release_not_bound_to_reviewed_spec(
+    tmp_path: Path,
+) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import (
+        ProviderConformanceError,
+        conform,
+    )
+
+    installed, target_root, source = _staged(tmp_path)
+    forged = _forge_installed_release(
+        installed,
+        target_root,
+        "configs/authority-service-v1.yaml",
+        b"apiVersion: v1\nkind: ForgedService\n",
+    )
+
+    with pytest.raises(ProviderConformanceError, match="reviewed"):
+        conform(forged, live=False, root=target_root, source_root=source)
+
+
 def test_conformance_rejects_a_preserved_release_collision(tmp_path: Path) -> None:
     from scripts.ops.task_image_builder_provider_conformance import (
         ProviderConformanceError,
@@ -765,7 +837,11 @@ def _patch_live_conformance_verifiers(monkeypatch: pytest.MonkeyPatch) -> Path:
         release_sha256=release_sha256,
     )
     monkeypatch.setattr(conformance_module.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(conformance_module, "_release_from_path", lambda _path, *, live: release)
+    monkeypatch.setattr(
+        conformance_module,
+        "_release_from_path",
+        lambda _path, *, live, source_root: release,
+    )
     monkeypatch.setattr(conformance_module, "_verify_authority", lambda _root: _digest(b"authority"))
     monkeypatch.setattr(conformance_module, "_verify_host_release", lambda _root: _digest(b"host"))
     monkeypatch.setattr(conformance_module, "_verify_inert_paths", lambda _root: _digest(b"inert"))

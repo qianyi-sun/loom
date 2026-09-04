@@ -146,6 +146,7 @@ def _runtime_tree(root: Path) -> Path:
     }
     for name, payload in members.items():
         _write(runtime / name, payload, 0o555)
+    runtime.chmod(0o555)
     return runtime.parent
 
 

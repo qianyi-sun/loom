@@ -142,6 +142,7 @@ def _runtime_tree_for(root: Path, *, machine: int) -> Path:
     }
     for name, payload in members.items():
         _write(runtime / name, payload, 0o555)
+    runtime.chmod(0o555)
     return runtime.parent
 
 
@@ -799,10 +800,14 @@ def test_release_rejects_guard_bundle_identity_drift(
     "mutation",
     (
         "runtime-x-crypto",
+        "writable-config",
+        "writable-spec",
         "writable-script",
         "script-symlink",
         "missing-guard-member",
         "extra-runtime-member",
+        "symlinked-runtime-dir",
+        "writable-runtime-dir",
         "reordered-configs",
         "self-referential-destination",
     ),
@@ -822,6 +827,10 @@ def test_release_rejects_unsafe_or_nondeterministic_inputs(
         runtime_path.chmod(0o644)
         runtime_path.write_bytes(_canonical(runtime))
         runtime_path.chmod(0o444)
+    elif mutation == "writable-config":
+        (source / "deploy/task-image-builder/authority-service-v1.yaml").chmod(0o464)
+    elif mutation == "writable-spec":
+        spec_path.chmod(0o464)
     elif mutation == "writable-script":
         script = source / "scripts/ops/install_task_image_builder_provider_release.py"
         script.chmod(0o775)
@@ -835,7 +844,19 @@ def test_release_rejects_unsafe_or_nondeterministic_inputs(
     elif mutation == "missing-guard-member":
         (guard_release / "loom-task-image-builder-guard.pyz").unlink()
     elif mutation == "extra-runtime-member":
+        (runtime_root / "runtime").chmod(0o755)
         _write(runtime_root / "runtime/extra", b"unexpected\n", 0o555)
+        (runtime_root / "runtime").chmod(0o555)
+    elif mutation == "symlinked-runtime-dir":
+        linked_runtime_root = tmp_path / "linked-runtime-root"
+        linked_runtime_root.mkdir()
+        (linked_runtime_root / "runtime").symlink_to(
+            runtime_root / "runtime",
+            target_is_directory=True,
+        )
+        runtime_root = linked_runtime_root
+    elif mutation == "writable-runtime-dir":
+        (runtime_root / "runtime").chmod(0o755)
     elif mutation == "reordered-configs":
         spec["configs"] = list(reversed(spec["configs"]))
         spec_path.chmod(0o644)

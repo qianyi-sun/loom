@@ -218,7 +218,7 @@ loom_node_validate_provider_release() {
     loom_node_error "provider release directory is unavailable"
     return
   fi
-  if ! release_sha="$(python3 - "$bundle_dir" "$LOOM_EXPECTED_ARCH" "$LOOM_PROVIDER_INSTALLER" <<'PY'
+  if ! release_sha="$(python3 - "$bundle_dir" "$LOOM_EXPECTED_ARCH" "$LOOM_PROVIDER_INSTALLER" "$LOOM_HOST_RELEASE_MANIFEST" <<'PY'
 import os
 import pathlib
 import sys
@@ -226,17 +226,20 @@ import sys
 bundle = pathlib.Path(sys.argv[1]).resolve(strict=True)
 architecture = sys.argv[2]
 installer = pathlib.Path(sys.argv[3]).resolve(strict=True)
+host_release = pathlib.Path(sys.argv[4]).resolve(strict=True)
 repository = installer.parents[2]
+source_root = host_release.parents[2]
 sys.path[:0] = [str(repository), str(repository / "src")]
 
-from scripts.ops.task_image_builder_provider_release import verify_release_directory
+from scripts.ops.task_image_builder_provider_release import verify_release_directory_against_spec
 
-verify_release_directory(
+verify_release_directory_against_spec(
     bundle,
-    expected_release_sha256=bundle.name,
+    source_root=source_root,
     expected_architecture=architecture,
     expected_uid=os.geteuid(),
     expected_gid=os.getegid(),
+    expected_release_sha256=bundle.name,
 )
 print(bundle.name)
 PY
@@ -251,13 +254,25 @@ PY
   LOOM_PROVIDER_RELEASE_SHA256="$release_sha"
 }
 
+loom_node_reviewed_source_root() {
+  python3 - "$LOOM_HOST_RELEASE_MANIFEST" <<'PY'
+import pathlib
+import sys
+
+print(pathlib.Path(sys.argv[1]).resolve(strict=True).parents[2])
+PY
+}
+
 loom_node_provider_stage_args() {
+  local source_root
+  source_root="$(loom_node_reviewed_source_root)"
   local args=(
     "$LOOM_PROVIDER_INSTALLER"
     "--bundle" "$1"
     "--release-sha256" "$LOOM_PROVIDER_RELEASE_SHA256"
     "--architecture" "$LOOM_EXPECTED_ARCH"
     "--root" "$LOOM_STAGE_ROOT"
+    "--source-root" "$source_root"
   )
   if [[ "$LOOM_STAGE_ROOT" == "/" ]]; then
     args+=("--live")

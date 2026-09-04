@@ -37,7 +37,7 @@ from scripts.ops.task_image_builder_provider_release import (
     Architecture,
     ProviderReleaseError,
     VerifiedProviderRelease,
-    verify_release_directory,
+    verify_release_directory_against_spec,
 )
 
 _RELEASES = Path("opt/loom-task-image-builder-provider/releases")
@@ -59,11 +59,14 @@ class InstallContext:
     live: bool
     expected_release_sha256: str
     architecture: Architecture
+    source_root: Path = _DIRECT_REPOSITORY
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.root, Path)
             or not self.root.is_absolute()
+            or not isinstance(self.source_root, Path)
+            or not self.source_root.is_absolute()
             or len(self.expected_release_sha256) != 64
             or any(
                 character not in "0123456789abcdef"
@@ -276,12 +279,13 @@ def _copy_candidate(release: VerifiedProviderRelease, releases: Path) -> Path:
 
 def _existing_is_exact(target: Path, context: InstallContext) -> bool:
     try:
-        verify_release_directory(
+        verify_release_directory_against_spec(
             target,
-            expected_release_sha256=context.expected_release_sha256,
+            source_root=context.source_root,
             expected_architecture=context.architecture,
             expected_uid=0 if context.live else os.geteuid(),
             expected_gid=0 if context.live else os.getegid(),
+            expected_release_sha256=context.expected_release_sha256,
         )
         return True
     except ProviderReleaseError:
@@ -410,15 +414,18 @@ def _verify_context(context: InstallContext) -> tuple[int, int]:
 
 def _verified_bundle(bundle: Path, context: InstallContext) -> VerifiedProviderRelease:
     try:
-        return verify_release_directory(
+        return verify_release_directory_against_spec(
             bundle,
-            expected_release_sha256=context.expected_release_sha256,
+            source_root=context.source_root,
             expected_architecture=context.architecture,
             expected_uid=0 if context.live else os.geteuid(),
             expected_gid=0 if context.live else os.getegid(),
+            expected_release_sha256=context.expected_release_sha256,
         )
     except ProviderReleaseError as exc:
-        raise ProviderInstallError("provider release verification failed") from exc
+        raise ProviderInstallError(
+            "provider release verification failed against reviewed specification"
+        ) from exc
 
 
 def verify_staged_release(bundle: Path, context: InstallContext) -> StageReceipt:
@@ -509,6 +516,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--release-sha256", required=True)
     parser.add_argument("--architecture", choices=("aarch64", "x86_64"), required=True)
     parser.add_argument("--root", type=Path, default=Path("/"))
+    parser.add_argument("--source-root", type=Path, default=_DIRECT_REPOSITORY)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--verify-staged", action="store_true")
     arguments = parser.parse_args(argv)
@@ -521,6 +529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     live=arguments.live,
                     expected_release_sha256=arguments.release_sha256,
                     architecture=cast(Architecture, arguments.architecture),
+                    source_root=arguments.source_root.resolve(strict=True),
                 ),
             )
             if arguments.verify_staged
@@ -531,6 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     live=arguments.live,
                     expected_release_sha256=arguments.release_sha256,
                     architecture=cast(Architecture, arguments.architecture),
+                    source_root=arguments.source_root.resolve(strict=True),
                 ),
             )
         )
