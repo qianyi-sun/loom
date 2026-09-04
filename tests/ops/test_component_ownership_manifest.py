@@ -1175,7 +1175,7 @@ def test_release_image_selection_fails_safe_for_authority_changes() -> None:
     assert matrix == component_ownership.release_image_matrix(manifest)
 
 
-def test_each_release_dockerfile_selects_only_its_owned_build() -> None:
+def test_each_release_dockerfile_selects_its_owned_build_and_required_companions() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
     for component in manifest.release_components():
@@ -1185,7 +1185,24 @@ def test_each_release_dockerfile_selects_only_its_owned_build() -> None:
             force_all=False,
         )
 
-        assert [entry["image"] for entry in matrix] == [component.id]
+        expected = {component.id}
+        if component.id == "service":
+            expected.add("execution-runtime")
+        assert {entry["image"] for entry in matrix} == expected
+
+
+def test_service_release_selects_exact_nebius_runtime_companion() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    matrix = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("migrations/versions/0129_service_execution_materialization.py",),
+        force_all=False,
+    )
+
+    selected = {entry["image"] for entry in matrix}
+    assert "service" in selected
+    assert "execution-runtime" in selected
 
 
 def test_release_image_pair_rejects_matrix_tampering() -> None:

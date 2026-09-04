@@ -22,6 +22,14 @@ class ManifestError(ValueError):
     """The component authority is malformed or unsafe to consume."""
 
 
+_RELEASE_COMPANIONS: dict[str, tuple[str, ...]] = {
+    # A Nebius runtime profile binds the service task image and an exact-candidate
+    # execution runtime image. A service-only release therefore still needs a
+    # runtime release record for the same protected commit.
+    "service": ("execution-runtime",),
+}
+
+
 @dataclass(frozen=True)
 class Component:
     id: str
@@ -1074,6 +1082,8 @@ def select_release_image_matrix(
             for path in changed_paths
         ):
             selected_ids = {component.id for component in release_components}
+    for selected_id in tuple(selected_ids):
+        selected_ids.update(_RELEASE_COMPANIONS.get(selected_id, ()))
     matrix = tuple(
         entry for entry in release_image_matrix(manifest) if entry["image"] in selected_ids
     )
