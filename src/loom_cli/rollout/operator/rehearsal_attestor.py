@@ -8,7 +8,11 @@ from datetime import datetime
 from typing import Protocol
 
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
-from loom_cli.rollout.preflight_contract import CheckContext, PreflightAttestation
+from loom_cli.rollout.preflight_contract import (
+    CheckContext,
+    PreflightAttestation,
+    RegisteredCheck,
+)
 from loom_cli.rollout.preflight_pipeline import (
     PreflightAssessment,
     PreflightPipeline,
@@ -20,6 +24,8 @@ from .backup import BackupError
 from .backup_lease import BackupLease
 from .checkpoint_lease import CriticalCheckpointEvidence, RestoreVerificationEvidence
 from .model import PreflightRequest
+
+ExecutionPrerequisiteCheckFactory = Callable[[BackupLease | None], RegisteredCheck]
 
 
 class RehearsalStore(Protocol):
@@ -41,6 +47,7 @@ class RehearsalLeaseAttestor:
     assessment: PreflightAssessment
     store: RehearsalStore
     now: Callable[[], datetime]
+    execution_prerequisite_check_factory: ExecutionPrerequisiteCheckFactory | None = None
 
     def _validate_request(
         self,
@@ -105,6 +112,13 @@ class RehearsalLeaseAttestor:
         ):
             raise ValueError("attestation lease binding drifted")
         rehearsal = self.store.read_preflight_rehearsal(request.request_id)
+        if self.execution_prerequisite_check_factory is None:
+            raise ValueError("execution prerequisite check authority is unavailable")
+        rehearsal = self.pipeline.complete_deferred_execution(
+            context=self.context,
+            rehearsal=rehearsal,
+            check=self.execution_prerequisite_check_factory(lease),
+        )
         bindings = derive_attestation_bindings(
             self.context,
             rehearsal.executions,
@@ -117,4 +131,8 @@ class RehearsalLeaseAttestor:
         return attestation.attestation_digest
 
 
-__all__ = ["RehearsalLeaseAttestor", "RehearsalStore"]
+__all__ = [
+    "ExecutionPrerequisiteCheckFactory",
+    "RehearsalLeaseAttestor",
+    "RehearsalStore",
+]

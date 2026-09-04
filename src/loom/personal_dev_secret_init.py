@@ -16,6 +16,7 @@ CredentialProfile = Literal[
     "activation-private",
     "native-builder-public",
     "protected-worker-runtime",
+    "staging-protected-worker-runtime",
 ]
 
 _PROFILE_FILES: dict[CredentialProfile, frozenset[str]] = {
@@ -36,6 +37,7 @@ _PROFILE_FILES: dict[CredentialProfile, frozenset[str]] = {
     "activation-private": frozenset({"private-key"}),
     "native-builder-public": frozenset({"public-key"}),
     "protected-worker-runtime": frozenset({"database-url"}),
+    "staging-protected-worker-runtime": frozenset({"ca.crt", "database-url"}),
 }
 _MAX_FILE_BYTES = 1024 * 1024
 _DIRECTORY_FLAGS = (

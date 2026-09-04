@@ -45,10 +45,15 @@ services:
     environment:
       LOOM_GW_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
       LOOM_GW_ANTHROPIC_API_KEY: stub-key
+      LOOM_GW_MINIO_ENDPOINT: http://minio:9000
+      LOOM_GW_MINIO_ACCESS_KEY: loomtest
+      LOOM_GW_MINIO_SECRET_KEY: loomtest
       # Test-only shared key. MUST match LOOM_CP_STEP_JWT_SIGNING_KEY.
       LOOM_GW_STEP_JWT_SIGNING_KEY: test-step-jwt-signing-key-do-not-use-in-prod
     depends_on:
       postgres:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     ports:
       - "59100:9100"

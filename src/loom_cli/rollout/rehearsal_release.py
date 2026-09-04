@@ -170,10 +170,7 @@ def _isolate_deployment(
     if any(template_labels.get(key) != item for key, item in selector.items()):
         raise ValueError("rehearsal deployment selector drifted")
     pod = _mapping(template.get("spec"), label="pod spec")
-    if pod.get("initContainers") not in (None, []) or pod.get("ephemeralContainers") not in (
-        None,
-        [],
-    ):
+    if pod.get("ephemeralContainers") not in (None, []):
         raise ValueError("rehearsal deployment auxiliary containers are forbidden")
     containers = pod.get("containers")
     if (
@@ -187,6 +184,34 @@ def _isolate_deployment(
     expected_image = rehearsal_image_reference(plan, image_name)
     if image != expected_image or plan.image_digests.get(image_name) is None:
         raise ValueError("rehearsal deployment image binding drifted")
+    environment = container.get("env")
+    if environment is None:
+        environment = []
+        container["env"] = environment
+    if not isinstance(environment, list) or any(not isinstance(item, dict) for item in environment):
+        raise ValueError("rehearsal deployment environment is invalid")
+    mounts = container.get("volumeMounts")
+    if mounts is None:
+        mounts = []
+        container["volumeMounts"] = mounts
+    if not isinstance(mounts, list) or any(not isinstance(item, dict) for item in mounts):
+        raise ValueError("rehearsal deployment volume authority is invalid")
+    volumes = pod.get("volumes")
+    if volumes is None:
+        volumes = []
+        pod["volumes"] = volumes
+    if not isinstance(volumes, list) or any(not isinstance(item, dict) for item in volumes):
+        raise ValueError("rehearsal deployment volume authority is invalid")
+    _strip_protected_worker_runtime_bootstrap(
+        pod,
+        environment=environment,
+        mounts=mounts,
+        volumes=volumes,
+        deployment_name=name,
+        expected_image=expected_image,
+    )
+    if pod.get("initContainers") not in (None, []):
+        raise ValueError("rehearsal deployment auxiliary containers are forbidden")
     run_as_user = 101 if name == "loom-web" else 10001
     container["securityContext"] = {
         "allowPrivilegeEscalation": False,
@@ -196,12 +221,6 @@ def _isolate_deployment(
         "runAsNonRoot": True,
         "runAsUser": run_as_user,
     }
-    environment = container.get("env")
-    if environment is None:
-        environment = []
-        container["env"] = environment
-    if not isinstance(environment, list) or any(not isinstance(item, dict) for item in environment):
-        raise ValueError("rehearsal deployment environment is invalid")
     _rewrite_environment(environment, plan=plan, deployment_name=name)
     environment.extend(
         (
@@ -212,13 +231,7 @@ def _isolate_deployment(
     )
     _canonicalize_environment(environment)
     _canonicalize_resource_quantities(container)
-    mounts = container.get("volumeMounts")
-    if mounts is None:
-        mounts = []
-        container["volumeMounts"] = mounts
-    if not isinstance(mounts, list) or any(
-        not isinstance(item, dict) or item.get("name") != "loom-admin-secret" for item in mounts
-    ):
+    if any(item.get("name") != "loom-admin-secret" for item in mounts):
         raise ValueError("rehearsal deployment volume authority is invalid")
     if name == "loom-service":
         mounts.append(
@@ -237,12 +250,6 @@ def _isolate_deployment(
                 "name": "loom-rehearsal-webroot",
             }
         )
-    volumes = pod.get("volumes")
-    if volumes is None:
-        volumes = []
-        pod["volumes"] = volumes
-    if not isinstance(volumes, list):
-        raise ValueError("rehearsal deployment volume authority is invalid")
     if volumes:
         if len(volumes) != 1 or not isinstance(volumes[0], dict):
             raise ValueError("rehearsal deployment volume authority is invalid")
@@ -329,8 +336,119 @@ def _isolate_deployment(
     template["spec"] = pod
     spec["template"] = template
     _drop_null_mapping_fields(value)
+    _reject_protected_worker_runtime_authority(value)
     _reject_unsafe_fields(value)
     return value, selector
+
+
+def _strip_protected_worker_runtime_bootstrap(
+    pod: dict[str, object],
+    *,
+    environment: list[dict[str, object]],
+    mounts: list[dict[str, object]],
+    volumes: list[dict[str, object]],
+    deployment_name: str,
+    expected_image: str,
+) -> None:
+    init_value = pod.get("initContainers")
+    if init_value is None:
+        init_containers: list[dict[str, object]] = []
+    elif not isinstance(init_value, list) or any(not isinstance(item, dict) for item in init_value):
+        raise ValueError("rehearsal deployment auxiliary containers are forbidden")
+    else:
+        init_containers = init_value
+    runtime_init = [
+        item for item in init_containers if item.get("name") == "protected-worker-runtime-init"
+    ]
+    runtime_environment = [
+        item
+        for item in environment
+        if item.get("name") == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
+    ]
+    runtime_mounts = [item for item in mounts if item.get("name") == "protected-worker-runtime"]
+    runtime_volumes = [
+        item
+        for item in volumes
+        if item.get("name") in {"protected-worker-runtime", "protected-worker-runtime-projected"}
+    ]
+    if not any((runtime_init, runtime_environment, runtime_mounts, runtime_volumes)):
+        return
+    expected_init = {
+        "command": [
+            "/bin/sh",
+            "-euc",
+            "install -d -m 0700 /run/loom/protected-worker-runtime; "
+            "chmod 0700 /run/loom/protected-worker-runtime; "
+            "chmod g-s /run/loom/protected-worker-runtime; "
+            "exec python -m loom.personal_dev_secret_init "
+            "--profile staging-protected-worker-runtime "
+            "--source /var/run/loom/protected-worker-runtime-projected "
+            "--destination /run/loom/protected-worker-runtime/files",
+        ],
+        "image": expected_image,
+        "name": "protected-worker-runtime-init",
+        "resources": {
+            "limits": {"cpu": "100m", "memory": "64Mi"},
+            "requests": {"cpu": "10m", "memory": "16Mi"},
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "readOnlyRootFilesystem": True,
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+        },
+        "volumeMounts": [
+            {
+                "mountPath": "/var/run/loom/protected-worker-runtime-projected",
+                "name": "protected-worker-runtime-projected",
+                "readOnly": True,
+            },
+            {
+                "mountPath": "/run/loom/protected-worker-runtime",
+                "name": "protected-worker-runtime",
+            },
+        ],
+    }
+    expected_environment = {
+        "name": "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
+        "value": "/run/loom/protected-worker-runtime/files/database-url",
+    }
+    expected_mount = {
+        "mountPath": "/run/loom/protected-worker-runtime",
+        "name": "protected-worker-runtime",
+        "readOnly": True,
+    }
+    expected_volumes = [
+        {
+            "name": "protected-worker-runtime-projected",
+            "secret": {
+                "defaultMode": 0o440,
+                "items": [
+                    {"key": "ca.crt", "path": "ca.crt"},
+                    {"key": "database-url", "path": "database-url"},
+                ],
+                "secretName": "loom-protected-worker-runtime",
+            },
+        },
+        {
+            "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"},
+            "name": "protected-worker-runtime",
+        },
+    ]
+    if (
+        deployment_name != "loom-control-plane"
+        or init_containers != [expected_init]
+        or runtime_environment != [expected_environment]
+        or runtime_mounts != [expected_mount]
+        or runtime_volumes != expected_volumes
+    ):
+        raise ValueError("rehearsal protected worker runtime bootstrap is invalid")
+    pod.pop("initContainers")
+    environment.remove(runtime_environment[0])
+    mounts.remove(runtime_mounts[0])
+    for volume in runtime_volumes:
+        volumes.remove(volume)
 
 
 def _isolate_service(
@@ -490,6 +608,18 @@ def _reject_unsafe_fields(value: object) -> None:
     elif isinstance(value, list):
         for item in value:
             _reject_unsafe_fields(item)
+
+
+def _reject_protected_worker_runtime_authority(value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _reject_protected_worker_runtime_authority(key)
+            _reject_protected_worker_runtime_authority(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_protected_worker_runtime_authority(item)
+    elif isinstance(value, str) and "protected-worker-runtime" in value.lower().replace("_", "-"):
+        raise ValueError("rehearsal protected worker runtime authority is forbidden")
 
 
 def _canonicalize_resource_quantities(container: dict[str, object]) -> None:

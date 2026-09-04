@@ -19,9 +19,19 @@ from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shado
 from loom_capacity_manager.contracts import (
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
+    ConfigurationRollbackV1,
+    DynamicDevelopmentSubjectProjectionV1,
     ObservedCommitmentV1,
     StaticCandidateProvenanceV1,
+    canonical_digest,
     canonical_digest_excluding,
+)
+from loom_capacity_manager.executable_contracts import (
+    ExecutionPreparationPolicyV2,
+    ExecutionPreparationV2,
+    LegacyWriterFenceV2,
+    PoolControllerAuthorityV2,
+    SubjectExecutionAcknowledgementV2,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
@@ -39,11 +49,14 @@ from loom_capacity_manager.models import (
     CapacityDevelopmentProjection,
     CapacityFairnessState,
     CapacityObservedCommitment,
+    CapacityPool,
+    CapacityPoolReporter,
     CapacitySubject,
     CapacityWorkerProfile,
 )
 from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import (
+    AuthorityRecoveryError,
     CapacityManagementStore,
     CapacityStoreError,
     ConfigurationConflictError,
@@ -54,11 +67,21 @@ from loom_capacity_manager.store import (
     WriterFence,
     _deduplicate_observed_commitments,
 )
+from tests.capacity_execution_fixtures import (
+    TRUSTED_RELEASE,
+    PreparedExecutionFixture,
+    executor_binding,
+    ready_execution_activation,
+    register_execution_executors,
+)
 from tests.capacity_fixtures import (
     ACTIVATION_KEY,
     AUTHORITY_ID,
     CONFIG_KEY_A,
     CONFIG_KEY_B,
+    DEMAND_REPORTER_ID,
+    SUBJECT_ID,
+    SUBJECT_INCARNATION,
     configuration_activation,
     demand_snapshot,
     development_projection,
@@ -114,6 +137,197 @@ async def _allocation_epoch_count(session: AsyncSession) -> int:
         (
             await session.execute(select(func.count()).select_from(CapacityAllocationEpoch))
         ).scalar_one()
+    )
+
+
+async def _configuration_epoch_row(
+    session: AsyncSession,
+    configuration_epoch: int,
+) -> CapacityConfigurationEpoch:
+    return (
+        await session.execute(
+            select(CapacityConfigurationEpoch).where(
+                CapacityConfigurationEpoch.configuration_epoch == configuration_epoch
+            )
+        )
+    ).scalar_one()
+
+
+async def _configuration_rollback(
+    session: AsyncSession,
+    *,
+    expected_configuration_epoch: int,
+    restore_configuration_epoch: int,
+    expected_configuration_digest: str | None = None,
+    restore_configuration_digest: str | None = None,
+    rollback_evidence_sha256: str = "7" * 64,
+) -> ConfigurationRollbackV1:
+    current = await _configuration_epoch_row(session, expected_configuration_epoch)
+    restore = await _configuration_epoch_row(session, restore_configuration_epoch)
+    return ConfigurationRollbackV1(
+        expected_configuration_epoch=expected_configuration_epoch,
+        expected_configuration_digest=(
+            current.canonical_digest
+            if expected_configuration_digest is None
+            else expected_configuration_digest
+        ),
+        restore_configuration_epoch=restore_configuration_epoch,
+        restore_configuration_digest=(
+            restore.canonical_digest
+            if restore_configuration_digest is None
+            else restore_configuration_digest
+        ),
+        rollback_evidence_sha256=rollback_evidence_sha256,
+    )
+
+
+async def _rollback_ready_projection(
+    session: AsyncSession,
+) -> tuple[CapacityManagementStore, object, object, DynamicDevelopmentSubjectProjectionV1]:
+    await session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(authority_incarnation=AUTHORITY_ID)
+    )
+    await session.flush()
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    projection = development_projection(expected_configuration_epoch=active.configuration_epoch)
+    projected = await store.project_development_subject(
+        session,
+        projection,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+    return store, active, projected, projection
+
+
+async def _rollback_execution_fixture(
+    session: AsyncSession,
+) -> PreparedExecutionFixture:
+    authority = (await session.execute(select(CapacityAuthorityState))).scalar_one()
+    configuration = (
+        (
+            await session.execute(
+                select(CapacityConfigurationEpoch).order_by(
+                    CapacityConfigurationEpoch.configuration_epoch.desc()
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if configuration is None:
+        raise RuntimeError("rollback execution fixture requires an active configuration")
+    subjects = (
+        (
+            await session.execute(
+                select(CapacitySubject)
+                .where(CapacitySubject.configuration_epoch == configuration.configuration_epoch)
+                .order_by(CapacitySubject.subject_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    subject_acknowledgements: list[SubjectExecutionAcknowledgementV2] = []
+    for index, subject_row in enumerate(subjects, start=1):
+        candidate = await CapacityExecutionStore._current_candidate(session, subject_row)
+        subject_acknowledgements.append(
+            SubjectExecutionAcknowledgementV2(
+                subject_id=subject_row.subject_id,
+                subject_incarnation=subject_row.subject_incarnation,
+                configuration_generation=subject_row.configuration_generation,
+                deployment_generation=subject_row.deployment_generation,
+                candidate=candidate,
+                reporter_incarnation=subject_row.demand_reporter_incarnation,
+                protected_admission_sha256=f"{index}" * 64,
+                legacy_writer_high_water=0,
+                acknowledgement_sha256=f"{index + 2}" * 64,
+            )
+        )
+    executors = tuple(executor_binding(pool_id) for pool_id in ("gb10", "oldlab"))
+    policy = ExecutionPreparationPolicyV2(
+        trusted_fleet_release_sha256=TRUSTED_RELEASE,
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+        executors=executors,
+        subject_acknowledgements=tuple(subject_acknowledgements),
+        rollback_evidence_sha256="6" * 64,
+        controller_authorities=tuple(
+            PoolControllerAuthorityV2(
+                pool_id=item.pool_id,
+                controller_authority_sha256=item.controller_authority_sha256,
+            )
+            for item in executors
+        ),
+        legacy_writer_fences=(
+            LegacyWriterFenceV2(
+                writer_id="global-dev-supervisor",
+                writer_kind="allocation",
+                scope_kind="global",
+                scope_id="development",
+                high_water=9,
+                freeze_evidence_sha256="5" * 64,
+                state="frozen",
+            ),
+        ),
+    )
+    store = CapacityManagementStore(execution_policy=policy)
+    writer = await store.register_writer(
+        session,
+        authority.authority_incarnation,
+        expected_epoch=authority.writer_epoch,
+    )
+    request = ExecutionPreparationV2(
+        authority_incarnation=authority.authority_incarnation,
+        expected_writer_epoch=writer.writer_epoch,
+        configuration_epoch=configuration.configuration_epoch,
+        fleet_generation=configuration.fleet_generation,
+        fleet_digest=configuration.fleet_digest,
+        trusted_fleet_release_sha256=policy.trusted_fleet_release_sha256,
+        requested_ceiling=policy.executable_new_capacity_ceiling,
+        requested_rate_per_minute=policy.executable_new_capacity_rate_per_minute,
+        executors=policy.executors,
+        subject_acknowledgements=policy.subject_acknowledgements,
+        legacy_writer_fences=policy.legacy_writer_fences,
+        rollback_evidence_sha256=policy.rollback_evidence_sha256,
+    )
+    return PreparedExecutionFixture(store=store, writer=writer, request=request)
+
+
+async def _enter_execution_state(
+    session: AsyncSession,
+    *,
+    target_state: str,
+) -> None:
+    fixture = await _rollback_execution_fixture(session)
+    prepared = await fixture.store.prepare_execution_epoch(
+        session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=uuid4(),
+    )
+    if target_state == "prepared":
+        return
+    if target_state != "active":
+        raise ValueError(f"unsupported execution state: {target_state}")
+    await register_execution_executors(session, fixture, prepared)
+    activation = await ready_execution_activation(
+        session,
+        fixture.store,
+        fixture.request,
+        prepared,
+    )
+    await fixture.store.activate_execution_epoch(
+        session,
+        activation,
+        actor="activation-operator",
+        idempotency_key=uuid4(),
     )
 
 
@@ -353,6 +567,237 @@ async def test_activation_idempotency_replays_before_epoch_conflict(
         )
 
 
+async def test_activation_can_add_attested_static_subject_without_removing_existing(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    existing = subject_configuration()
+    existing_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        existing,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    first = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=fleet_proposal,
+            subjects=(existing_proposal,),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    added = subject_configuration(
+        subject_id=UUID("00000000-0000-4000-8000-00000000f101"),
+        subject_incarnation=UUID("00000000-0000-4000-8000-00000000f102"),
+        demand_reporter_incarnation=UUID("00000000-0000-4000-8000-00000000f103"),
+        display_name="staging-added",
+    )
+    added_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        added,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    provenance = StaticCandidateProvenanceV1(
+        subject_id=added.subject_id,
+        subject_incarnation=added.subject_incarnation,
+        candidate_generation=added.candidate_generation,
+        algorithm="source-sha256",
+        identity="3" * 64,
+        publication_sha256="4" * 64,
+    )
+
+    activated = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=fleet_proposal,
+            subjects=(existing_proposal, added_proposal),
+            expected_configuration_epoch=first.configuration_epoch,
+            static_candidate_provenance=(provenance,),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    assert activated.configuration_epoch == 2
+    assert {reference.subject_id for reference in activated.snapshot.subjects} == {
+        existing.subject_id,
+        added.subject_id,
+    }
+    assert {
+        row.subject_id
+        for row in (await capacity_session.execute(select(CapacitySubject))).scalars()
+    } == {existing.subject_id, added.subject_id}
+
+
+async def test_activation_rejects_incomplete_existing_subject_manifest(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    retained = subject_configuration()
+    removed = subject_configuration(
+        subject_id=UUID("00000000-0000-4000-8000-00000000f301"),
+        subject_incarnation=UUID("00000000-0000-4000-8000-00000000f302"),
+        demand_reporter_incarnation=UUID("00000000-0000-4000-8000-00000000f303"),
+        display_name="must-remain",
+    )
+    retained_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        retained,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    removed_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        removed,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    first = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=fleet_proposal,
+            subjects=(retained_proposal, removed_proposal),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="deletion is unavailable"):
+        await store.activate_configuration(
+            capacity_session,
+            configuration_activation(
+                fleet=fleet_proposal,
+                subjects=(retained_proposal,),
+                expected_configuration_epoch=first.configuration_epoch,
+                static_candidate_provenance=(),
+            ),
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+
+async def test_activation_requires_exact_provenance_for_new_static_subject(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    existing = subject_configuration()
+    existing_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        existing,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    first = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(fleet=fleet_proposal, subjects=(existing_proposal,)),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    added = subject_configuration(
+        subject_id=UUID("00000000-0000-4000-8000-00000000f401"),
+        subject_incarnation=UUID("00000000-0000-4000-8000-00000000f402"),
+        demand_reporter_incarnation=UUID("00000000-0000-4000-8000-00000000f403"),
+        display_name="unattested-addition",
+    )
+    added_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        added,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="provenance is missing"):
+        await store.activate_configuration(
+            capacity_session,
+            configuration_activation(
+                fleet=fleet_proposal,
+                subjects=(existing_proposal, added_proposal),
+                expected_configuration_epoch=first.configuration_epoch,
+                static_candidate_provenance=(),
+            ),
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+
+async def test_activation_rejects_replacing_an_active_subject_incarnation(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    existing = subject_configuration()
+    existing_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        existing,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    first = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(fleet=fleet_proposal, subjects=(existing_proposal,)),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    replacement = subject_configuration(
+        subject_id=existing.subject_id,
+        subject_incarnation=UUID("00000000-0000-4000-8000-00000000f202"),
+        demand_reporter_incarnation=UUID("00000000-0000-4000-8000-00000000f203"),
+        display_name="replacement",
+    )
+    replacement_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        replacement,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    replacement_provenance = StaticCandidateProvenanceV1(
+        subject_id=replacement.subject_id,
+        subject_incarnation=replacement.subject_incarnation,
+        candidate_generation=replacement.candidate_generation,
+        algorithm="source-sha256",
+        identity="3" * 64,
+        publication_sha256="4" * 64,
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="deletion is unavailable"):
+        await store.activate_configuration(
+            capacity_session,
+            configuration_activation(
+                fleet=fleet_proposal,
+                subjects=(replacement_proposal,),
+                expected_configuration_epoch=first.configuration_epoch,
+                static_candidate_provenance=(replacement_provenance,),
+            ),
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+
 async def test_activation_materializes_exact_worker_profile_bindings(
     capacity_session: AsyncSession,
 ) -> None:
@@ -372,6 +817,184 @@ async def test_activation_materializes_exact_worker_profile_bindings(
     assert all(item.pool_generation == 1 for item in profiles)
     assert all(item.profile_generation == 1 for item in profiles)
     assert all(len(item.shape_catalog) == 1 for item in profiles)
+
+
+async def test_activation_accepts_changed_pool_digest_without_generation_bump(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    initial_fleet = fleet_with_development_template()
+    initial_subject = subject_configuration(initial_fleet)
+    initial_fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        initial_fleet,
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    initial_subject_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        initial_subject,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    first = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=initial_fleet_proposal,
+            subjects=(initial_subject_proposal,),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    initial_gb10 = next(pool for pool in initial_fleet.pools if pool.pool_id == "gb10")
+    changed_gb10 = initial_gb10.model_copy(
+        update={"max_slots": initial_gb10.max_slots - 1, "pool_digest": "0" * 64}
+    )
+    changed_gb10 = changed_gb10.model_copy(
+        update={"pool_digest": canonical_digest_excluding(changed_gb10, "pool_digest")}
+    )
+    assert changed_gb10.pool_generation == initial_gb10.pool_generation == 1
+    assert changed_gb10.pool_digest != initial_gb10.pool_digest
+
+    template = initial_fleet.development_subject_template
+    assert template is not None
+    initial_template_profile = next(
+        profile for profile in template.profiles if profile.pool_id == "gb10"
+    )
+    changed_template_profile = initial_template_profile.model_copy(
+        update={
+            "pool_digest": changed_gb10.pool_digest,
+            "profile_generation": 2,
+            "profile_digest": "0" * 64,
+        }
+    )
+    changed_template_profile = changed_template_profile.model_copy(
+        update={
+            "profile_digest": canonical_digest_excluding(
+                changed_template_profile,
+                "profile_digest",
+            )
+        }
+    )
+    changed_template = template.model_copy(
+        update={
+            "profiles": tuple(
+                changed_template_profile if profile.pool_id == "gb10" else profile
+                for profile in template.profiles
+            )
+        }
+    )
+    changed_fleet = initial_fleet.model_copy(
+        update={
+            "fleet_generation": 2,
+            "fleet_digest": "0" * 64,
+            "pools": tuple(
+                changed_gb10 if pool.pool_id == "gb10" else pool for pool in initial_fleet.pools
+            ),
+            "development_subject_template": changed_template,
+        }
+    )
+    changed_fleet = changed_fleet.model_copy(
+        update={"fleet_digest": canonical_digest_excluding(changed_fleet, "fleet_digest")}
+    )
+
+    initial_subject_profile = next(
+        profile for profile in initial_subject.profiles if profile.pool_id == "gb10"
+    )
+    changed_subject_profile = initial_subject_profile.model_copy(
+        update={
+            "pool_digest": changed_gb10.pool_digest,
+            "profile_generation": 2,
+            "profile_digest": "0" * 64,
+        }
+    )
+    changed_subject_profile = changed_subject_profile.model_copy(
+        update={
+            "profile_digest": canonical_digest_excluding(
+                changed_subject_profile,
+                "profile_digest",
+            )
+        }
+    )
+    changed_subject = initial_subject.model_copy(
+        update={
+            "configuration_generation": 2,
+            "profiles": tuple(
+                changed_subject_profile if profile.pool_id == "gb10" else profile
+                for profile in initial_subject.profiles
+            ),
+        }
+    )
+    changed_fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        changed_fleet,
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    changed_subject_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        changed_subject,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+
+    activated = await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=changed_fleet_proposal,
+            subjects=(changed_subject_proposal,),
+            expected_configuration_epoch=first.configuration_epoch,
+            static_candidate_provenance=(),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    assert first.configuration_epoch == 1
+    assert activated.configuration_epoch == 2
+    assert activated.snapshot.fleet.generation == 2
+    assert activated.snapshot.fleet.digest == changed_fleet_proposal.digest
+    materialized_pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == activated.configuration_epoch,
+                CapacityPool.pool_id == "gb10",
+            )
+        )
+    ).scalar_one()
+    assert materialized_pool.pool_generation == 1
+    assert materialized_pool.pool_digest == changed_gb10.pool_digest
+    materialized_profile = (
+        await capacity_session.execute(
+            select(CapacityWorkerProfile).where(
+                CapacityWorkerProfile.subject_id == changed_subject.subject_id,
+                CapacityWorkerProfile.subject_incarnation == changed_subject.subject_incarnation,
+                CapacityWorkerProfile.deployment_generation
+                == changed_subject.deployment_generation,
+                CapacityWorkerProfile.pool_id == "gb10",
+                CapacityWorkerProfile.profile_generation == 2,
+            )
+        )
+    ).scalar_one()
+    assert materialized_profile.pool_generation == 1
+    assert materialized_profile.profile_digest == changed_subject_profile.profile_digest
+    materialized_subject = (
+        await capacity_session.execute(
+            select(CapacitySubject).where(
+                CapacitySubject.configuration_epoch == activated.configuration_epoch,
+                CapacitySubject.subject_id == changed_subject.subject_id,
+            )
+        )
+    ).scalar_one()
+    materialized_gb10_profile = next(
+        profile
+        for profile in materialized_subject.payload["profiles"]
+        if profile["pool_id"] == "gb10"
+    )
+    assert materialized_gb10_profile["pool_generation"] == 1
+    assert materialized_gb10_profile["pool_digest"] == changed_gb10.pool_digest
+    assert materialized_gb10_profile["profile_generation"] == 2
 
 
 async def test_activation_seeds_static_candidate_provenance_for_executable_lookup(
@@ -852,6 +1475,442 @@ async def test_static_fleet_activation_rederives_existing_personal_owner_account
     ).scalar_one()
     assert derived.account_id == projected.account.account_id
     assert derived.payload == projected.account.model_dump(mode="json", exclude_none=False)
+
+
+async def test_configuration_rollback_clones_predecessor_monotonically_and_fences_removed_subject(
+    capacity_session: AsyncSession,
+) -> None:
+    store, active, projected, projection = await _rollback_ready_projection(capacity_session)
+    await store.ingest_demand_snapshot(
+        capacity_session,
+        demand_snapshot(sequence=2),
+        actor="development",
+    )
+    await store.ingest_pool_observation(
+        capacity_session,
+        pool_observation(sequence=2, pool_id="gb10"),
+        actor="gb10-reporter",
+    )
+    await store.ingest_pool_observation(
+        capacity_session,
+        pool_observation(sequence=2, pool_id="oldlab"),
+        actor="oldlab-reporter",
+    )
+    await store.ingest_demand_snapshot(
+        capacity_session,
+        demand_snapshot(
+            subject_id=projection.subject_id,
+            subject_incarnation=projection.subject_incarnation,
+            reporter_incarnation=projection.demand_reporter_incarnation,
+        ),
+        actor="personal-lifecycle",
+    )
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=projected.configuration_epoch,
+        restore_configuration_epoch=active.configuration_epoch,
+    )
+
+    rolled = await store.rollback_configuration(
+        capacity_session,
+        request,
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    assert rolled.configuration_epoch == projected.configuration_epoch + 1
+    assert canonical_digest(rolled.snapshot) == rolled.digest
+    assert rolled.snapshot.fleet.generation == 2
+    assert {reference.subject_id for reference in rolled.snapshot.subjects} == {SUBJECT_ID}
+    active_fleet = (
+        await capacity_session.execute(
+            select(CapacityConfigGeneration).where(
+                CapacityConfigGeneration.scope == "fleet",
+                CapacityConfigGeneration.state == "active",
+            )
+        )
+    ).scalar_one()
+    assert active_fleet.scope_generation == 2
+    active_subject = (
+        await capacity_session.execute(
+            select(CapacitySubject).where(
+                CapacitySubject.configuration_epoch == rolled.configuration_epoch,
+                CapacitySubject.subject_id == SUBJECT_ID,
+            )
+        )
+    ).scalar_one()
+    assert active_subject.configuration_generation == 2
+    assert active_subject.subject_incarnation == SUBJECT_INCARNATION
+    reporter = (
+        await capacity_session.execute(
+            select(CapacityDemandReporter).where(
+                CapacityDemandReporter.subject_id == SUBJECT_ID,
+                CapacityDemandReporter.reporter_incarnation == DEMAND_REPORTER_ID,
+            )
+        )
+    ).scalar_one()
+    assert reporter.state == "current"
+    assert reporter.high_water == 2
+    assert reporter.configuration_generation == 2
+    retired_projected_reporter = (
+        await capacity_session.execute(
+            select(CapacityDemandReporter).where(
+                CapacityDemandReporter.subject_id == projection.subject_id,
+                CapacityDemandReporter.reporter_incarnation
+                == projection.demand_reporter_incarnation,
+            )
+        )
+    ).scalar_one()
+    assert retired_projected_reporter.state == "fenced"
+    assert (
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityCandidate)
+            .where(CapacityCandidate.subject_id == projection.subject_id)
+        )
+    ).scalar_one() == 1
+    assert (
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityWorkerProfile)
+            .where(CapacityWorkerProfile.subject_id == SUBJECT_ID)
+        )
+    ).scalar_one() == 2
+    pool_reporters = (
+        await capacity_session.execute(
+            select(CapacityPoolReporter).order_by(CapacityPoolReporter.pool_id)
+        )
+    ).scalars()
+    assert [(item.pool_id, item.state, item.high_water) for item in pool_reporters] == [
+        ("gb10", "current", 2),
+        ("oldlab", "current", 2),
+    ]
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert authority.execution_state == "shadow"
+    assert authority.execution_epoch == 0
+    assert authority.executable_new_capacity_ceiling == 0
+    assert authority.increase_freeze is True
+    audit = (
+        (
+            await capacity_session.execute(
+                select(CapacityAuditEvent).order_by(CapacityAuditEvent.id.desc())
+            )
+        )
+        .scalars()
+        .first()
+    )
+    assert audit is not None
+    assert audit.event_kind == "capacity_configuration_rolled_back"
+
+
+async def test_configuration_rollback_replays_exactly_and_conflicts_on_mismatch(
+    capacity_session: AsyncSession,
+) -> None:
+    store, active, projected, _projection = await _rollback_ready_projection(capacity_session)
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=projected.configuration_epoch,
+        restore_configuration_epoch=active.configuration_epoch,
+    )
+    key = uuid4()
+
+    first = await store.rollback_configuration(
+        capacity_session,
+        request,
+        actor="fleet-operator",
+        idempotency_key=key,
+    )
+    replay = await store.rollback_configuration(
+        capacity_session,
+        request,
+        actor="fleet-operator",
+        idempotency_key=key,
+    )
+
+    assert replay == first
+    with pytest.raises(IdempotencyConflictError):
+        await store.rollback_configuration(
+            capacity_session,
+            request.model_copy(update={"rollback_evidence_sha256": "8" * 64}),
+            actor="fleet-operator",
+            idempotency_key=key,
+        )
+
+
+async def test_configuration_rollback_replay_conflicts_on_actor_mismatch(
+    capacity_session: AsyncSession,
+) -> None:
+    store, active, projected, _projection = await _rollback_ready_projection(capacity_session)
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=projected.configuration_epoch,
+        restore_configuration_epoch=active.configuration_epoch,
+    )
+    key = uuid4()
+
+    await store.rollback_configuration(
+        capacity_session,
+        request,
+        actor="fleet-operator",
+        idempotency_key=key,
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await store.rollback_configuration(
+            capacity_session,
+            request,
+            actor="different-rollback-operator",
+            idempotency_key=key,
+        )
+
+
+async def test_configuration_rollback_conflicts_with_activation_idempotency_key_reuse(
+    capacity_session: AsyncSession,
+) -> None:
+    store, active, projected, _projection = await _rollback_ready_projection(capacity_session)
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=projected.configuration_epoch,
+        restore_configuration_epoch=active.configuration_epoch,
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await store.rollback_configuration(
+            capacity_session,
+            request,
+            actor="fleet-operator",
+            idempotency_key=ACTIVATION_KEY,
+        )
+
+
+@pytest.mark.parametrize(
+    ("request_update", "authority_update", "authority_state", "error_type", "message"),
+    (
+        (
+            {"expected_configuration_digest": "0" * 64},
+            None,
+            None,
+            ConfigurationConflictError,
+            "expected active configuration",
+        ),
+        (
+            {"restore_configuration_digest": "0" * 64},
+            None,
+            None,
+            ConfigurationConflictError,
+            "restore configuration",
+        ),
+        (
+            {"restore_configuration_epoch": 2},
+            None,
+            None,
+            ConfigurationConflictError,
+            "immediate predecessor",
+        ),
+        (
+            None,
+            {"authority_incarnation": UUID("00000000-0000-4000-8000-00000000aa01")},
+            None,
+            ConfigurationConflictError,
+            "authority incarnation",
+        ),
+        (None, {"increase_freeze": False}, None, ConfigurationConflictError, "freeze"),
+        (
+            None,
+            None,
+            "prepared",
+            AuthorityRecoveryError,
+            "shadow-only",
+        ),
+        (
+            None,
+            None,
+            "active",
+            AuthorityRecoveryError,
+            "shadow-only",
+        ),
+    ),
+)
+async def test_configuration_rollback_rejects_stale_request_or_unfrozen_authority(
+    capacity_session: AsyncSession,
+    request_update: dict[str, object] | None,
+    authority_update: dict[str, object] | None,
+    authority_state: str | None,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    store, active, projected, _projection = await _rollback_ready_projection(capacity_session)
+    if authority_state is not None:
+        await _enter_execution_state(capacity_session, target_state=authority_state)
+    elif authority_update is not None:
+        await capacity_session.execute(
+            update(CapacityAuthorityState)
+            .where(CapacityAuthorityState.singleton_id == 1)
+            .values(**authority_update)
+        )
+        await capacity_session.flush()
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=projected.configuration_epoch,
+        restore_configuration_epoch=active.configuration_epoch,
+    )
+    if request_update is not None:
+        request = request.model_copy(update=request_update)
+
+    with pytest.raises(error_type, match=message):
+        await store.rollback_configuration(
+            capacity_session,
+            request,
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+
+async def test_configuration_rollback_refuses_to_reactivate_absent_subjects(
+    capacity_session: AsyncSession,
+) -> None:
+    store, _active, projected, projection = await _rollback_ready_projection(capacity_session)
+    retired = await store.project_development_subject(
+        capacity_session,
+        projection.model_copy(
+            update={
+                "expected_configuration_epoch": projected.configuration_epoch,
+                "operation_kind": "destroy",
+                "operation_id": uuid4(),
+                "operation_epoch": 2,
+                "configuration_generation": 2,
+            }
+        ),
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=retired.configuration_epoch,
+        restore_configuration_epoch=projected.configuration_epoch,
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="absent from current target"):
+        await store.rollback_configuration(
+            capacity_session,
+            request,
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate", "message"),
+    (
+        (
+            "pool_generation",
+            lambda session, epoch: session.execute(
+                update(CapacityPool)
+                .where(
+                    CapacityPool.configuration_epoch == epoch,
+                    CapacityPool.pool_id == "gb10",
+                )
+                .values(pool_generation=2)
+            ),
+            "pool generation",
+        ),
+        (
+            "pool_reporter",
+            lambda session, _epoch: session.execute(
+                update(CapacityPoolReporter)
+                .where(
+                    CapacityPoolReporter.pool_id == "gb10",
+                    CapacityPoolReporter.state == "current",
+                )
+                .values(reporter_incarnation=UUID("00000000-0000-4000-8000-00000000aa02"))
+            ),
+            "pool reporter",
+        ),
+        (
+            "protocol_generation",
+            lambda session, epoch: session.execute(
+                update(CapacityPool)
+                .where(
+                    CapacityPool.configuration_epoch == epoch,
+                    CapacityPool.pool_id == "gb10",
+                )
+                .values(protocol_generation=2, protocol_digest="8" * 64)
+            ),
+            "protocol",
+        ),
+        (
+            "subject_incarnation",
+            lambda session, epoch: session.execute(
+                update(CapacitySubject)
+                .where(
+                    CapacitySubject.configuration_epoch == epoch,
+                    CapacitySubject.subject_id == SUBJECT_ID,
+                )
+                .values(subject_incarnation=UUID("00000000-0000-4000-8000-00000000aa03"))
+            ),
+            "subject incarnation",
+        ),
+        (
+            "candidate_generation",
+            lambda session, epoch: session.execute(
+                update(CapacitySubject)
+                .where(
+                    CapacitySubject.configuration_epoch == epoch,
+                    CapacitySubject.subject_id == SUBJECT_ID,
+                )
+                .values(candidate_generation=2)
+            ),
+            "candidate generation",
+        ),
+        (
+            "deployment_generation",
+            lambda session, epoch: session.execute(
+                update(CapacitySubject)
+                .where(
+                    CapacitySubject.configuration_epoch == epoch,
+                    CapacitySubject.subject_id == SUBJECT_ID,
+                )
+                .values(deployment_generation=2)
+            ),
+            "deployment generation",
+        ),
+        (
+            "demand_reporter",
+            lambda session, epoch: session.execute(
+                update(CapacitySubject)
+                .where(
+                    CapacitySubject.configuration_epoch == epoch,
+                    CapacitySubject.subject_id == SUBJECT_ID,
+                )
+                .values(demand_reporter_incarnation=UUID("00000000-0000-4000-8000-00000000aa04"))
+            ),
+            "demand reporter",
+        ),
+    ),
+)
+async def test_configuration_rollback_rejects_identity_regressions(
+    capacity_session: AsyncSession,
+    label: str,
+    mutate,  # type: ignore[no-untyped-def]
+    message: str,
+) -> None:
+    del label
+    store, active, projected, _projection = await _rollback_ready_projection(capacity_session)
+    await mutate(capacity_session, projected.configuration_epoch)
+    await capacity_session.flush()
+    request = await _configuration_rollback(
+        capacity_session,
+        expected_configuration_epoch=projected.configuration_epoch,
+        restore_configuration_epoch=active.configuration_epoch,
+    )
+
+    with pytest.raises(ConfigurationConflictError, match=message):
+        await store.rollback_configuration(
+            capacity_session,
+            request,
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
 
 
 async def test_concurrent_personal_projections_serialize_and_both_converge_after_retry(

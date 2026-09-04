@@ -5,9 +5,11 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.rehearsal_action_source import (
     RehearsalPlan,
     RehearsalResources,
@@ -24,6 +26,19 @@ from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
 
 
 def _plan() -> RehearsalPlan:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0066",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
     return RehearsalPlan(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -37,6 +52,8 @@ def _plan() -> RehearsalPlan:
         object_inventory_root="f" * 64,
         schema_revision="0066",
         image_digests={
+            "loom-capacity-executor": "sha256:" + "e" * 64,
+            "loom-capacity-manager": "sha256:" + "d" * 64,
             "loom-control-plane": "sha256:" + "8" * 64,
             "loom-egress-xds": "sha256:" + "3" * 64,
             "loom-execution-actuator": "sha256:" + "b" * 64,
@@ -94,6 +111,25 @@ def _plan() -> RehearsalPlan:
             agent="oracle",
         ),
         gb10_authority=gb10_rehearsal_authority(),
+        checkpoint_schema_version=3,
+        checkpoint_component_sha256={
+            "database_authority": authority.digest,
+            "k8s_secrets": "7" * 64,
+            "object_inventory": "6" * 64,
+            "postgres": "e" * 64,
+        },
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
     )
 
 
@@ -109,6 +145,31 @@ def _write_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Rehear
         lambda value: root if value == "/var/lib/loom-staging-rollout/rehearsals" else Path(value),
     )
     return plan, path
+
+
+def _checkpoint_observation(plan: RehearsalPlan) -> SimpleNamespace:
+    return SimpleNamespace(
+        evidence_digest=plan.checkpoint_evidence_sha256,
+        manifest_path=plan.checkpoint_manifest_path,
+        manifest_sha256=plan.checkpoint_manifest_sha256,
+        component_sha256=plan.checkpoint_component_sha256,
+        mutation_epoch=plan.mutation_epoch,
+        db_snapshot_identity=plan.db_snapshot_identity,
+        object_inventory_root=plan.object_inventory_root,
+        schema_revision=plan.schema_revision,
+        database_authority_digest=plan.database_authority_digest,
+        public_schema_revision=plan.public_schema_revision,
+        capacity_guard_schema_revision=plan.capacity_guard_schema_revision,
+        manager_configuration_epoch=plan.manager_configuration_epoch,
+        manager_configuration_digest=plan.manager_configuration_digest,
+        manager_authority_incarnation=plan.manager_authority_incarnation,
+        manager_writer_epoch=plan.manager_writer_epoch,
+        manager_execution_state=plan.manager_execution_state,
+        manager_execution_epoch=plan.manager_execution_epoch,
+        manager_execution_manifest_sha256=plan.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(plan.manager_executable_new_capacity_ceiling),
+        manager_increase_freeze=plan.manager_increase_freeze,
+    )
 
 
 def test_helper_loads_exact_plan_and_returns_normalized_blocker(
@@ -234,15 +295,7 @@ def test_helper_revalidates_complete_checkpoint_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan = _plan()
-    checkpoint = SimpleNamespace(
-        evidence_digest=plan.checkpoint_evidence_sha256,
-        manifest_path=plan.checkpoint_manifest_path,
-        manifest_sha256=plan.checkpoint_manifest_sha256,
-        mutation_epoch=plan.mutation_epoch,
-        db_snapshot_identity=plan.db_snapshot_identity,
-        object_inventory_root=plan.object_inventory_root,
-        schema_revision=plan.schema_revision,
-    )
+    checkpoint = _checkpoint_observation(plan)
     calls: list[dict[str, object]] = []
 
     def inspect(backup, **kwargs):
@@ -262,6 +315,45 @@ def test_helper_revalidates_complete_checkpoint_identity(
     record["mutation_epoch"] = True
     with pytest.raises(ValueError, match="schema"):
         RehearsalPlan.from_record(record)
+
+
+@pytest.mark.parametrize(
+    ("field", "drifted"),
+    [
+        ("component_sha256", {"component": "drifted"}),
+        ("database_authority_digest", "0" * 64),
+        ("public_schema_revision", "0065"),
+        ("capacity_guard_schema_revision", "guard_0026"),
+        ("manager_configuration_epoch", 10),
+        ("manager_configuration_digest", "0" * 64),
+        ("manager_authority_incarnation", UUID("00000000-0000-4000-8000-0000000000bb")),
+        ("manager_writer_epoch", 5),
+        ("manager_execution_state", "active"),
+        ("manager_execution_epoch", 1),
+        ("manager_execution_manifest_sha256", "0" * 64),
+        ("manager_executable_new_capacity_ceiling", 1),
+        ("manager_increase_freeze", False),
+    ],
+)
+def test_helper_rejects_each_schema_3_checkpoint_binding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    drifted: object,
+) -> None:
+    plan = _plan()
+    checkpoint = _checkpoint_observation(plan)
+    if field == "component_sha256":
+        components = dict(plan.checkpoint_component_sha256 or {})
+        components["k8s_secrets"] = "0" * 64
+        drifted = components
+    setattr(checkpoint, field, drifted)
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper.inspect_critical_checkpoint",
+        lambda *_args, **_kwargs: checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint identity drifted"):
+        _verify_checkpoint(plan)
 
 
 def test_helper_rebuilds_and_binds_external_supervisor_before_action(

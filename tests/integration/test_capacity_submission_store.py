@@ -603,7 +603,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     finally:
         admin.dispose()
     assert dict(row) == {
-        "version_num": "guard_0026",
+        "version_num": "guard_0027",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -741,7 +741,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
         await agent_engine.dispose()
 
     assert dict(row) == {
-        "version_num": "guard_0026",
+        "version_num": "guard_0027",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -922,7 +922,7 @@ async def test_guard_0022_refuses_downgrade_with_protected_staging_submission(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0026"
+                == "guard_0027"
             )
             assert (
                 connection.execute(

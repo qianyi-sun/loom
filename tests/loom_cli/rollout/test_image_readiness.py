@@ -16,10 +16,22 @@ from loom_cli.rollout.image_readiness import (
     REHEARSAL_POSTGRES_ENTRYPOINT,
     REHEARSAL_POSTGRES_IMAGE,
     REVISION_LABEL,
+    ROLLOUT_IMAGES,
     ImageBuildSession,
     build_exact_images,
     verify_image_contract,
 )
+
+
+def test_rollout_builds_capacity_manager_for_protected_runtime_convergence() -> None:
+    assert ("loom-capacity-manager", "deploy/Dockerfile.capacity-manager") in ROLLOUT_IMAGES
+
+
+def test_rollout_builds_capacity_executor_for_protected_runtime_convergence() -> None:
+    assert (
+        "loom-capacity-executor",
+        "deploy/Dockerfile.capacity-executor",
+    ) in ROLLOUT_IMAGES
 
 
 def _inspect_payload(name: str, revision: str, *, image_id: str | None = None) -> str:
@@ -130,11 +142,9 @@ def test_registry_image_session_publishes_and_binds_every_manifest_digest(
     artifact = session.build()
 
     assert dict(artifact.registry_digests) == manifest_digests
-    assert {
-        command[-1]
-        for command in calls
-        if command[:2] == ("docker", "push")
-    } == {f"localhost:5000/{name}:{tag}" for name, _path in ALL_BUILD_IMAGES}
+    assert {command[-1] for command in calls if command[:2] == ("docker", "push")} == {
+        f"localhost:5000/{name}:{tag}" for name, _path in ALL_BUILD_IMAGES
+    }
 
     calls.clear()
     assert session.verify() == artifact

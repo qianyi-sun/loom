@@ -108,16 +108,20 @@ class TestBuildImagesCoverage:
         rendered = _locally_tagged_deployment_images()
         primary = {name for name, _, _ in rollout_images_from_worktree(_repo_root())}
 
-        # The execution runtime is consumed by short-lived Jobs. The actuator
-        # is a primary release image whose Nebius Deployment is deliberately
-        # outside the provider-neutral default cluster render.
+        # These four primary release images are deliberately outside the
+        # provider-neutral default cluster render: the manager and executor
+        # are installed by the protected capacity rollout, the execution
+        # runtime is consumed by short-lived Jobs, and the actuator is
+        # deployed only on Nebius.
         assert primary == rendered | {
+            "loom-capacity-executor",
+            "loom-capacity-manager",
             "loom-execution-actuator",
             "loom-execution-runtime",
         }
-        assert len(primary) == 10
+        assert len(primary) == 12
 
-    def test_candidate_roles_form_exact_ten_image_contract(self) -> None:
+    def test_candidate_roles_form_exact_fourteen_image_contract(self) -> None:
         primary = rollout_images_from_worktree(_repo_root())
         auxiliary = rollout_auxiliary_images_from_worktree(_repo_root())
 
@@ -447,7 +451,7 @@ def test_run_builds_exact_candidate_plan_and_persists_v2_identities(
     envelope = json.loads(step_dir.artifact_path("image-matrix.json").read_text())
     assert envelope["schema_version"] == 2
     assert envelope["image_ids"] == _image_ids()
-    assert len(envelope["primary_images"]) == 10
+    assert len(envelope["primary_images"]) == 12
     assert len(envelope["auxiliary_images"]) == 2
 
 

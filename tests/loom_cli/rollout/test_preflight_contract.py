@@ -1084,6 +1084,21 @@ def _bindings(**overrides: object) -> AttestationBindings:
     return AttestationBindings(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capacity_guard_schema_revision", "guard_0027"),
+        ("manager_execution_manifest_sha256", "f" * 64),
+    ],
+)
+def test_historical_attestation_constructor_rejects_schema_three_only_fields(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="historical attestation"):
+        replace(_bindings(), **{field: value})
+
+
 def test_attestation_rejects_incomplete_external_supervisor_controller_coverage() -> None:
     controller_bindings = {
         key: value

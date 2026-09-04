@@ -408,7 +408,6 @@ class CapacityPoolExecutorProfile(_StrictModel):
             "Slurm cluster": tuple(pool.slurm_cluster for pool in self.pools),
             "controller host": tuple(pool.controller_host for pool in self.pools),
             "inventory reporter": tuple(pool.inventory.reporter_incarnation for pool in self.pools),
-            "partition": tuple(pool.partition for pool in self.pools),
         }
         for label, values in unique_fields.items():
             if len(set(values)) != len(values):

@@ -22,7 +22,6 @@ from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import boto3
-import yaml  # type: ignore[import-untyped]
 from botocore.config import Config
 
 from loom_cli.cluster_backup_guard import (
@@ -44,6 +43,10 @@ from .backup_limits import (
     BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
     operator_backup_traversal_limits,
 )
+from .checkpoint_database_authority import (
+    DatabaseAuthorityEvidence,
+    capture_database_authority,
+)
 from .config import (
     APPROVED_BACKUP_MAX_ENTRIES,
     APPROVED_BACKUP_MAX_OBJECTS,
@@ -54,6 +57,11 @@ from .model import (
     BackupPublicReason,
     PreflightRequest,
     RolloutRequest,
+)
+from .protected_secret_inventory import (
+    PROTECTED_SECRET_SPECS,
+    build_secret_inventory,
+    canonical_secret_export,
 )
 from .readonly_database_client import ReadonlyDatabaseTunnelError
 from .rollout_checkpoint import ImmutableObjectInventory
@@ -200,6 +208,10 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "object_inventory_timeout": "backup_object_inventory_failed",
     "object_inventory_binding_failed": "backup_object_inventory_failed",
     "object_inventory_write_failed": "backup_object_inventory_failed",
+    "database_authority_failed": "backup_postgres_failed",
+    "database_authority_changed": "backup_postgres_failed",
+    "database_authority_binding_failed": "backup_postgres_failed",
+    "database_authority_write_failed": "backup_postgres_failed",
     "latest_publish_failed": "backup_manifest_failed",
     "backup_cleanup_failed": "backup_cleanup_failed",
     "backup_retirement_failed": "backup_retirement_failed",
@@ -2132,6 +2144,7 @@ class BackupCreator:
         capacity_provider: CapacityProvider = _capacity_snapshot,
         traversal_limits: BackupTraversalLimits | None = None,
         object_inventory_provider: Callable[[datetime], ImmutableObjectInventory] | None = None,
+        database_authority_provider: Callable[[], DatabaseAuthorityEvidence] | None = None,
         publish_latest: bool = True,
     ) -> None:
         self.config = config
@@ -2176,6 +2189,12 @@ class BackupCreator:
             max_total_bytes=max_total_bytes,
         )
         self._object_inventory_provider = object_inventory_provider
+        self._database_authority_provider = database_authority_provider or partial(
+            capture_database_authority,
+            self._runner,
+            env=self._env,
+            namespace=self.config.namespace,
+        )
         self._publish_latest = publish_latest
 
     def latest_points_to(self, bundle_name: str) -> bool:
@@ -2404,21 +2423,73 @@ class BackupCreator:
                 "get",
                 "secret",
                 name,
-                "-o",
-                "yaml",
+                "--output=json",
             ],
             env=self._env,
             timeout_seconds=_KUBECTL_READ_TIMEOUT_SECONDS,
         )
-        loaded = yaml.safe_load(payload.decode("utf-8"))
-        if not isinstance(loaded, dict) or loaded.get("kind") != "Secret":
-            raise ValueError("exported object is not a Secret")
-        metadata = loaded.get("metadata")
-        if not isinstance(metadata, dict) or metadata.get("name") != name:
-            raise ValueError("exported Secret name does not match")
+        canonical = canonical_secret_export(
+            payload,
+            namespace=self.config.namespace,
+            name=name,
+        )
         _write_private_bytes(
             destination / f"{name}.yaml",
-            payload,
+            canonical,
+            resources=resources,
+            component="k8s_secrets",
+        )
+
+    def _observe_protected_secret(self, namespace: str, name: str) -> bytes | None:
+        payload = self._runner.capture_stdout(
+            [
+                "kubectl",
+                "--namespace",
+                namespace,
+                "get",
+                "secret",
+                name,
+                "--ignore-not-found=true",
+                "--output=json",
+            ],
+            env=self._env,
+            timeout_seconds=_KUBECTL_READ_TIMEOUT_SECONDS,
+        )
+        return payload if payload.strip() else None
+
+    def _export_protected_secret_inventory(
+        self,
+        destination: Path,
+        *,
+        resources: _BackupResourceBudget,
+    ) -> None:
+        first = {
+            (spec.namespace, spec.name): self._observe_protected_secret(
+                spec.namespace,
+                spec.name,
+            )
+            for spec in PROTECTED_SECRET_SPECS
+        }
+        second = {
+            (spec.namespace, spec.name): self._observe_protected_secret(
+                spec.namespace,
+                spec.name,
+            )
+            for spec in PROTECTED_SECRET_SPECS
+        }
+        inventory = build_secret_inventory(
+            {identity: (first[identity], second[identity]) for identity in first}
+        )
+        for filename, payload in inventory.exported_objects.items():
+            _write_private_bytes(
+                destination / filename,
+                payload,
+                resources=resources,
+                component="k8s_secrets",
+            )
+        _write_private_bytes(
+            destination / "protected-capacity-secret-inventory.json",
+            inventory.inventory_payload,
             resources=resources,
             component="k8s_secrets",
         )
@@ -2497,6 +2568,7 @@ class BackupCreator:
         secrets_path: Path,
         resources: _BackupResourceBudget,
         object_inventory_path: Path | None = None,
+        database_authority_path: Path | None = None,
     ) -> None:
         components = {
             "postgres": postgres_path,
@@ -2505,9 +2577,13 @@ class BackupCreator:
         if object_inventory_path is None:
             components["minio"] = minio_path
             schema_version = 1
-        else:
+        elif database_authority_path is None:
             components["object_inventory"] = object_inventory_path
             schema_version = 2
+        else:
+            components["object_inventory"] = object_inventory_path
+            components["database_authority"] = database_authority_path
+            schema_version = 3
         write_backup_manifest(
             environment=self.config.environment,
             namespace=self.config.namespace,
@@ -2870,6 +2946,7 @@ class BackupCreator:
             )
 
         object_inventory_path: Path | None = None
+        database_authority_path: Path | None = None
         if self._object_inventory_provider is None:
             buckets = _stage("minio_bucket_config_invalid", self._load_buckets)
             transport_failed = False
@@ -2922,11 +2999,31 @@ class BackupCreator:
             if operation_failure is not None:
                 raise operation_failure
         else:
+            authority_before = _stage(
+                "database_authority_failed",
+                self._database_authority_provider,
+            )
             _stage(
                 "postgres_dump_failed",
                 lambda: self._dump_postgres(
                     postgres_dir / "loom.dump",
                     resources=resources,
+                ),
+            )
+            authority_after = _stage(
+                "database_authority_failed",
+                self._database_authority_provider,
+            )
+            if authority_before != authority_after:
+                raise BackupError("database_authority_changed")
+            database_authority_path = bundle_root / "database-authority.json"
+            _stage(
+                "database_authority_write_failed",
+                lambda: _write_private_bytes(
+                    database_authority_path,
+                    authority_before.payload,
+                    resources=resources,
+                    component="database_authority",
                 ),
             )
             inventory_provider = self._object_inventory_provider
@@ -2942,6 +3039,8 @@ class BackupCreator:
                 or inventory.created_at != created_at
             ):
                 raise BackupError("object_inventory_binding_failed")
+            if inventory.schema_revision != authority_before.public_schema_revision:
+                raise BackupError("database_authority_binding_failed")
             object_inventory_path = bundle_root / "object-inventory.json"
             payload = (
                 json.dumps(
@@ -2973,6 +3072,14 @@ class BackupCreator:
                     resources=resources,
                 ),
             )
+        if self._object_inventory_provider is not None:
+            _stage(
+                "secret_export_failed",
+                lambda: self._export_protected_secret_inventory(
+                    secrets_dir,
+                    resources=resources,
+                ),
+            )
         _stage("component_sync_failed", lambda: _fsync_private_tree(bundle_root))
         pending_manifest_path = bundle_root / f".backup-manifest.{uuid4().hex}.pending"
         manifest_path = bundle_root / "backup-manifest.json"
@@ -2987,6 +3094,7 @@ class BackupCreator:
                     secrets_path=secrets_dir,
                     resources=resources,
                     object_inventory_path=object_inventory_path,
+                    database_authority_path=database_authority_path,
                 ),
             )
             validation_time = _stage(

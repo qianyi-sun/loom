@@ -114,6 +114,23 @@ def test_single_key_profiles_copy_only_their_authorized_key(
     assert (destination / filename).read_bytes() == f"payload:{filename}".encode()
 
 
+def test_staging_protected_runtime_copies_only_database_url_and_ca_certificate(
+    tmp_path: Path,
+) -> None:
+    expected = {"ca.crt", "database-url"}
+    source = _projected_source(tmp_path, expected)
+    destination = _destination(tmp_path)
+
+    copy_projected_credentials(
+        source,
+        destination,
+        profile="staging-protected-worker-runtime",  # type: ignore[arg-type]
+    )
+
+    assert {item.name for item in destination.iterdir()} == expected
+    assert all(S_IMODE(item.stat().st_mode) == 0o600 for item in destination.iterdir())
+
+
 def test_identical_replay_is_idempotent_but_changed_replay_is_rejected(
     tmp_path: Path,
 ) -> None:

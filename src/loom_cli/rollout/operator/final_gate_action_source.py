@@ -37,6 +37,10 @@ from .final_gate_store import FinalGateExecutionStore
 from .model import CandidateBinding, DriverEnvelope
 from .protected_apply_baseline import ProtectedApplyBaseline
 from .protected_apply_recovery import find_advanced_epoch_attempt
+from .protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisitePublication,
+    ProtectedExecutionPrerequisiteStore,
+)
 
 
 class FinalGateRehearsalStore(Protocol):
@@ -57,6 +61,7 @@ class FinalGateActionSource:
     read_mutation_epoch: Callable[[], int]
     now: Callable[[], datetime]
     post_apply_plan_factory: Callable[[CandidateBinding, int], CandidatePreflightPlan]
+    execution_prerequisite_store: ProtectedExecutionPrerequisiteStore | None = None
     executable: Path = FINAL_GATE_HELPER_PATH
     executable_owner_uid: int = 0
     post_apply_drift_attempts: int = 13
@@ -116,6 +121,14 @@ class FinalGateActionSource:
             baseline,
             systemd_evidence,
             predecessor_evidence,
+            execution_prerequisite_publication=(
+                self._execution_prerequisite_publication(attestation)
+            ),
+            execution_prerequisite_store=(
+                self.execution_prerequisite_store
+                if attestation.bindings.execution_prerequisite_schema_version is not None
+                else None
+            ),
         )
         protected_apply_plan = (
             self._validate_resume_plan(envelope, plan) if envelope.resume else None
@@ -212,6 +225,24 @@ class FinalGateActionSource:
 
         actions["final.drift"] = verify_post_apply_drift
         return actions
+
+    def _execution_prerequisite_publication(
+        self,
+        attestation: PreflightAttestation,
+    ) -> ProtectedExecutionPrerequisitePublication | None:
+        bindings = attestation.bindings
+        if bindings.execution_prerequisite_schema_version is None:
+            return None
+        if self.execution_prerequisite_store is None:
+            raise ValueError("final gate execution prerequisite store is unavailable")
+        path = bindings.execution_prerequisite_artifact_path
+        digest = bindings.execution_prerequisite_artifact_sha256
+        if not isinstance(path, str) or not isinstance(digest, str):
+            raise ValueError("final gate execution prerequisite binding is incomplete")
+        return ProtectedExecutionPrerequisitePublication(
+            path=Path(path),
+            artifact_sha256=digest,
+        )
 
     def _validate_resume_plan(
         self,

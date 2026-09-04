@@ -14,6 +14,7 @@ import base64
 import binascii
 import ctypes
 import fcntl
+import hashlib
 import json
 import os
 import pwd
@@ -32,6 +33,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
+from uuid import UUID
 
 CONTROLLER = "gx10-01c7"
 CLUSTER = "trt-gb10"
@@ -63,12 +65,38 @@ _LOCK_NAME = ".loom-gb10-external-supervisor-broker.lock"
 _HELPER_MODULE = "loom_cli.rollout.operator.protected_gb10_external_supervisor_transport"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_EXECUTOR_IMAGE_RE = re.compile(
+    r"^(?P<registry>[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[1-9][0-9]{0,4})?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*)"
+    r"/loom-capacity-executor@sha256:(?P<digest>[0-9a-f]{64})$"
+)
 _JOB_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _PROBE_JOB_NAME_RE = re.compile(r"^loom-accept-[0-9a-f]{7}-[1-9][0-9]*-([0-9a-f]{24})$")
 _UNIT_NAME_RE = re.compile(r"^loom-gb10-capacity-([0-9a-f]{24})\.service$")
 _STALE_JOB_TEMP_RE = re.compile(r"^\.(?:active-job|broker-job)\.[a-z0-9_]{8}$")
-_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 _MAX_COMMAND_OUTPUT = 1024 * 1024
+_MAX_PREPARED_CONTROLLER_REQUEST_BYTES = 4 * 1024 * 1024
+_MAX_PREPARED_CONTROLLER_FILE_BYTES = 4 * 1024 * 1024
+_MAX_POOL_CREDENTIAL_FILE_BYTES = 1024 * 1024
+_POOL_CREDENTIAL_FILES = frozenset(
+    {
+        "bearer-token",
+        "client-certificate.pem",
+        "client-private-key.pem",
+        "manager-ca.pem",
+        "ownership-private-key",
+    }
+)
+_CAPACITY_EXECUTOR_UNITS = frozenset(
+    {
+        "loom-capacity-pool-executor.service",
+        "loom-capacity-pool-executor-prepared.service",
+        "loom-capacity-pool-executor-prepared.timer",
+        "loom-capacity-pool-executor-active.service",
+        "loom-capacity-pool-executor-active.timer",
+    }
+)
 _MAX_TREE_ENTRIES = 300_000
 _MAX_SYMLINK_HOPS = 40
 # Reserve cleanup inside the caller's hard timeout instead of extending it.
@@ -819,6 +847,16 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         "observe_credential": common,
         "publish_credential": common,
         "accept_capacity": common | {"nodes", "profile_sha256"},
+        "discover_controller": common | {"controller_discovery"},
+        "observe_controller_prerequisite": common | {"controller_prerequisite"},
+        "converge_controller_prerequisite": common | {"controller_prerequisite"},
+        "observe_pool_credential": common | {"pool_credential"},
+        "publish_pool_credential": common | {"pool_credential"},
+        "observe_prepared_controller": common | {"prepared_controller"},
+        "converge_prepared_files": common | {"prepared_controller"},
+        "enable_prepared_timer": common | {"prepared_controller"},
+        "run_prepared_tick": common | {"prepared_controller"},
+        "disable_prepared_timer": common | {"prepared_controller"},
     }
     if (
         type(value.get("schema_version")) is not int
@@ -843,7 +881,306 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         or _SHA256_RE.fullmatch(value["profile_sha256"]) is None
     ):
         raise BrokerError("GB10 capacity request authority is invalid")
+    if operation in {
+        "observe_controller_prerequisite",
+        "converge_controller_prerequisite",
+    }:
+        _validate_controller_prerequisite_request(
+            value.get("controller_prerequisite"),
+            candidate_sha=candidate_sha,
+        )
+    if operation == "discover_controller":
+        _validate_controller_discovery_request(value.get("controller_discovery"))
+    if operation in {"observe_pool_credential", "publish_pool_credential"}:
+        _validate_controller_pool_credential_request(value.get("pool_credential"))
+    if operation in {
+        "observe_prepared_controller",
+        "converge_prepared_files",
+        "enable_prepared_timer",
+        "run_prepared_tick",
+        "disable_prepared_timer",
+    }:
+        _validate_prepared_controller_request(
+            value.get("prepared_controller"),
+            candidate_sha=candidate_sha,
+        )
     return value
+
+
+def _validate_controller_discovery_request(value: object) -> None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"pool_id", "schema_version", "transport_authority_sha256"}
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("pool_id") != "gb10"
+        or type(value.get("transport_authority_sha256")) is not str
+        or _SHA256_RE.fullmatch(value["transport_authority_sha256"]) is None
+        or value["transport_authority_sha256"] == "0" * 64
+    ):
+        raise BrokerError("GB10 controller discovery authority is invalid")
+
+
+def _validate_controller_pool_credential_request(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "credential_metadata_sha256",
+        "files",
+        "pool_id",
+        "schema_version",
+    }:
+        raise BrokerError("GB10 controller pool credential authority is invalid")
+    metadata = value.get("credential_metadata_sha256")
+    files = value.get("files")
+    if (
+        type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("pool_id") != "gb10"
+        or not isinstance(metadata, dict)
+        or set(metadata) != {"pool-executor-gb10", "pool-ownership-gb10"}
+        or any(
+            type(name) is not str
+            or type(digest) is not str
+            or _SHA256_RE.fullmatch(digest) is None
+            or digest == "0" * 64
+            for name, digest in metadata.items()
+        )
+        or not isinstance(files, dict)
+        or set(files) != _POOL_CREDENTIAL_FILES
+    ):
+        raise BrokerError("GB10 controller pool credential authority is invalid")
+    for name, encoded in files.items():
+        if type(name) is not str or type(encoded) is not str:
+            raise BrokerError("GB10 controller pool credential authority is invalid")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise BrokerError("GB10 controller pool credential authority is invalid") from exc
+        if (
+            not 0 < len(decoded) <= _MAX_POOL_CREDENTIAL_FILE_BYTES
+            or base64.b64encode(decoded).decode("ascii") != encoded
+        ):
+            raise BrokerError("GB10 controller pool credential authority is invalid")
+
+
+def _valid_executor_image(value: object) -> bool:
+    matched = _EXECUTOR_IMAGE_RE.fullmatch(value) if type(value) is str else None
+    if matched is None or matched.group("digest") == "0" * 64:
+        return False
+    registry_host = matched.group("registry").split("/", 1)[0]
+    if ":" not in registry_host:
+        return True
+    _host, port = registry_host.rsplit(":", 1)
+    return port.isdigit() and int(port) <= 65535
+
+
+def _validate_controller_prerequisite_request(
+    value: object,
+    *,
+    candidate_sha: str,
+) -> None:
+    expected = {
+        "architecture",
+        "binding",
+        "credential_metadata_sha256",
+        "image",
+        "pool_id",
+        "schema_version",
+        "service_user",
+        "source_sha",
+        "transport_authority_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise BrokerError("GB10 controller prerequisite authority is invalid")
+    binding = value.get("binding")
+    credentials = value.get("credential_metadata_sha256")
+    if (
+        value.get("schema_version") != 1
+        or value.get("pool_id") != "gb10"
+        or value.get("source_sha") != candidate_sha
+        or value.get("architecture") != "arm64"
+        or value.get("service_user") != "loom_capacity_executor"
+        or not _valid_executor_image(value.get("image"))
+        or type(value.get("transport_authority_sha256")) is not str
+        or _SHA256_RE.fullmatch(value["transport_authority_sha256"]) is None
+        or not isinstance(binding, dict)
+        or not isinstance(credentials, dict)
+    ):
+        raise BrokerError("GB10 controller prerequisite authority is invalid")
+    if set(credentials) != {"pool-executor-gb10", "pool-ownership-gb10"} or any(
+        type(digest) is not str or _SHA256_RE.fullmatch(digest) is None
+        for digest in credentials.values()
+    ):
+        raise BrokerError("GB10 controller prerequisite authority is invalid")
+    inventory = binding.get("inventory")
+    executables = binding.get("slurm_executables")
+    expected_executables = {
+        name: f"/usr/bin/{name}"
+        for name in ("sacct", "sacctmgr", "sbatch", "scancel", "scontrol", "squeue")
+    }
+    if (
+        binding.get("pool_id") != "gb10"
+        or binding.get("controller_host") != CONTROLLER
+        or binding.get("slurm_cluster") != CLUSTER
+        or binding.get("partition") != "loom-staging"
+        or binding.get("state_directory") != "/var/lib/loom-capacity-executor/gb10"
+        or binding.get("config_file") != "/etc/loom-capacity-executor/gb10.json"
+        or type(binding.get("local_uid")) is not int
+        or binding["local_uid"] <= 0
+        or type(binding.get("controller_authority_sha256")) is not str
+        or _SHA256_RE.fullmatch(binding["controller_authority_sha256"]) is None
+        or type(binding.get("local_authority_sha256")) is not str
+        or _SHA256_RE.fullmatch(binding["local_authority_sha256"]) is None
+        or executables != expected_executables
+        or not isinstance(inventory, dict)
+    ):
+        raise BrokerError("GB10 controller prerequisite authority is invalid")
+    nodes = inventory.get("nodes")
+    if (
+        inventory.get("pool_id") != "gb10"
+        or inventory.get("controller_cluster") != CLUSTER
+        or inventory.get("query_uid") != binding["local_uid"]
+        or inventory.get("relevant_partitions") != ["loom-staging"]
+        or not isinstance(nodes, list)
+        or len(nodes) != len(_GB10_NODES)
+        or any(not isinstance(node, dict) for node in nodes)
+        or {node.get("node_id") for node in nodes} != set(_GB10_NODES)
+        or any(node.get("pool_id") != "gb10" for node in nodes)
+    ):
+        raise BrokerError("GB10 controller prerequisite authority is invalid")
+
+
+def _validate_prepared_controller_request(
+    value: object,
+    *,
+    candidate_sha: str,
+) -> None:
+    expected = {
+        "execution",
+        "files",
+        "pool_id",
+        "prerequisite",
+        "profile_sha256",
+        "schema_version",
+        "transport_authority_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or len(_canonical_json(value)) > _MAX_PREPARED_CONTROLLER_REQUEST_BYTES
+    ):
+        raise BrokerError("GB10 prepared controller authority is invalid")
+    prerequisite = value.get("prerequisite")
+    _validate_controller_prerequisite_request(prerequisite, candidate_sha=candidate_sha)
+    assert isinstance(prerequisite, dict)
+    execution = value.get("execution")
+    files = value.get("files")
+    transport = value.get("transport_authority_sha256")
+    profile_sha256 = value.get("profile_sha256")
+    if (
+        type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("pool_id") != "gb10"
+        or type(transport) is not str
+        or _SHA256_RE.fullmatch(transport) is None
+        or transport == "0" * 64
+        or transport != prerequisite.get("transport_authority_sha256")
+        or type(profile_sha256) is not str
+        or _SHA256_RE.fullmatch(profile_sha256) is None
+        or profile_sha256 == "0" * 64
+        or not isinstance(execution, dict)
+        or not isinstance(files, dict)
+    ):
+        raise BrokerError("GB10 prepared controller authority is invalid")
+    expected_execution = {
+        "authority_incarnation",
+        "configuration_epoch",
+        "executable_new_capacity_ceiling",
+        "executable_new_capacity_rate_per_minute",
+        "execution_epoch",
+        "execution_manifest_sha256",
+        "execution_state",
+        "schema_version",
+        "trusted_fleet_release_sha256",
+        "writer_epoch",
+    }
+    authority_incarnation = execution.get("authority_incarnation")
+    try:
+        authority_uuid = UUID(authority_incarnation) if type(authority_incarnation) is str else None
+    except ValueError as exc:
+        raise BrokerError("GB10 prepared controller authority is invalid") from exc
+    if (
+        set(execution) != expected_execution
+        or type(execution.get("schema_version")) is not int
+        or execution.get("schema_version") != 2
+        or authority_uuid is None
+        or authority_uuid.int == 0
+        or str(authority_uuid) != authority_incarnation
+        or any(
+            type(execution.get(name)) is not int or execution[name] <= 0
+            for name in ("writer_epoch", "configuration_epoch", "execution_epoch")
+        )
+        or execution.get("execution_state") != "prepared"
+        or type(execution.get("executable_new_capacity_ceiling")) is not int
+        or execution.get("executable_new_capacity_ceiling") != 0
+        or type(execution.get("executable_new_capacity_rate_per_minute")) is not int
+        or execution.get("executable_new_capacity_rate_per_minute") != 0
+        or any(
+            type(execution.get(name)) is not str or _SHA256_RE.fullmatch(execution[name]) is None
+            for name in (
+                "execution_manifest_sha256",
+                "trusted_fleet_release_sha256",
+            )
+        )
+    ):
+        raise BrokerError("GB10 prepared controller authority is invalid")
+    expected_files = {
+        "/etc/loom-capacity-executor/gb10.json",
+        "/etc/loom-capacity-executor/gb10-inventory-policy.json",
+        "/etc/loom-capacity-executor/service.env",
+    }
+    if set(files) != expected_files:
+        raise BrokerError("GB10 prepared controller authority is invalid")
+    decoded: dict[str, bytes] = {}
+    for path, encoded in files.items():
+        if type(path) is not str or type(encoded) is not str:
+            raise BrokerError("GB10 prepared controller authority is invalid")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise BrokerError("GB10 prepared controller authority is invalid") from exc
+        if (
+            not 0 < len(payload) <= _MAX_PREPARED_CONTROLLER_FILE_BYTES
+            or base64.b64encode(payload).decode("ascii") != encoded
+        ):
+            raise BrokerError("GB10 prepared controller authority is invalid")
+        decoded[path] = payload
+    config_path = "/etc/loom-capacity-executor/gb10.json"
+    try:
+        config = json.loads(decoded[config_path])
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 prepared controller authority is invalid") from exc
+    binding = prerequisite.get("binding")
+    assert isinstance(binding, dict)
+    if (
+        not isinstance(config, dict)
+        or _canonical_json(config) != decoded[config_path]
+        or config.get("pool_id") != "gb10"
+        or config.get("executor_id") != binding.get("executor_id")
+        or config.get("executor_incarnation") != binding.get("executor_incarnation")
+        or config.get("pool_generation") != binding.get("pool_generation")
+        or config.get("controller_authority_sha256") != binding.get("controller_authority_sha256")
+        or config.get("local_authority_sha256") != binding.get("local_authority_sha256")
+        or config.get("signing_key_sha256") != binding.get("signing_key_sha256")
+        or config.get("authority_incarnation") != authority_incarnation
+        or config.get("writer_epoch") != execution.get("writer_epoch")
+        or config.get("configuration_epoch") != execution.get("configuration_epoch")
+        or config.get("execution_epoch") != execution.get("execution_epoch")
+        or config.get("execution_manifest_sha256") != execution.get("execution_manifest_sha256")
+        or config.get("trusted_fleet_release_sha256")
+        != execution.get("trusted_fleet_release_sha256")
+        or config.get("approved_profiles_sha256") != "0" * 64
+    ):
+        raise BrokerError("GB10 prepared controller authority is invalid")
 
 
 def parse_request_identity(payload: bytes) -> tuple[str, str]:
@@ -1088,9 +1425,21 @@ def _run(
     timeout: float = 900,
     check: bool = True,
     run_as: tuple[int, int] | None = None,
+    input_payload: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     global _ACTIVE_PROCESS, _ACTIVE_PROCESS_TERMINATING
-    if not argv or any(not item or "\x00" in item for item in argv) or not 0 < timeout <= 1800:
+    if (
+        not argv
+        or any(not item or "\x00" in item for item in argv)
+        or not 0 < timeout <= 1800
+        or (
+            input_payload is not None
+            and (
+                type(input_payload) is not str
+                or len(input_payload.encode("utf-8")) > _MAX_REQUEST_BYTES
+            )
+        )
+    ):
         raise BrokerError("GB10 external supervisor command is invalid")
     env = (
         {
@@ -1125,6 +1474,7 @@ def _run(
                 process = subprocess.Popen(
                     argv,
                     cwd=cwd,
+                    stdin=subprocess.PIPE if input_payload is not None else None,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -1135,6 +1485,7 @@ def _run(
                 process = subprocess.Popen(
                     argv,
                     cwd=cwd,
+                    stdin=subprocess.PIPE if input_payload is not None else None,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -1148,7 +1499,7 @@ def _run(
             _ACTIVE_PROCESS_TERMINATING = False
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        stdout, stderr = process.communicate(timeout=execution_timeout)
+        stdout, stderr = process.communicate(input_payload, timeout=execution_timeout)
     except subprocess.TimeoutExpired:
         if process is not None:
             _terminate_and_reap(
@@ -2566,6 +2917,360 @@ def _exec_helper(candidate: Path, payload: bytes) -> NoReturn:
     os.execve(spec.argv[0], spec.argv, spec.environment)
 
 
+def run_controller_prerequisite(candidate: Path, payload: bytes) -> bytes:
+    """Run only the candidate's fixed inert installer operation as root."""
+
+    request = _parse_request(payload)
+    operations = {
+        "discover_controller": "discover-controller",
+        "observe_controller_prerequisite": "observe-prerequisite",
+        "converge_controller_prerequisite": "converge-prerequisite",
+    }
+    try:
+        operation = operations[str(request["operation"])]
+    except KeyError as exc:
+        raise BrokerError("GB10 controller prerequisite operation is invalid") from exc
+    candidate_sha = str(request["candidate_sha"])
+    if (
+        not candidate.is_absolute()
+        or candidate.parent != CANDIDATES_ROOT
+        or candidate.name != candidate_sha
+        or ".." in candidate.parts
+    ):
+        raise BrokerError("GB10 controller prerequisite candidate is invalid")
+    inner_request = request[
+        "controller_discovery"
+        if request["operation"] == "discover_controller"
+        else "controller_prerequisite"
+    ]
+    inner = _canonical_json(inner_request).decode("ascii")
+    python = candidate / "venv/bin/python"
+    installer = candidate / "repo/scripts/ops/install_capacity_executor.py"
+    result = _run(
+        [
+            str(python),
+            "-I",
+            "-B",
+            str(installer),
+            "--operation",
+            operation,
+        ],
+        cwd=candidate / "repo",
+        environment={
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        timeout=1200 if operation == "converge-prerequisite" else 180,
+        check=False,
+        input_payload=inner,
+    )
+    encoded = result.stdout.encode("utf-8")
+    if (
+        result.returncode != 0
+        or result.stderr
+        or not 0 < len(encoded) <= _MAX_COMMAND_OUTPUT
+        or not encoded.endswith(b"\n")
+    ):
+        raise BrokerError("GB10 controller prerequisite operation failed safely")
+    try:
+        response = json.loads(encoded)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 controller prerequisite response is invalid") from exc
+    if _canonical_json(response) != encoded or (
+        response is not None and not isinstance(response, dict)
+    ):
+        raise BrokerError("GB10 controller prerequisite response is invalid")
+    return encoded
+
+
+def run_controller_prepared(candidate: Path, payload: bytes) -> bytes:
+    """Run only the candidate installer's typed prepared-controller operation."""
+
+    request = _parse_request(payload)
+    operations = {
+        "observe_prepared_controller": "observe-prepared",
+        "converge_prepared_files": "converge-prepared-files",
+        "enable_prepared_timer": "enable-prepared-timer",
+        "run_prepared_tick": "run-prepared-tick",
+        "disable_prepared_timer": "disable-prepared-timer",
+    }
+    try:
+        operation = operations[str(request["operation"])]
+    except KeyError as exc:
+        raise BrokerError("GB10 prepared controller operation is invalid") from exc
+    candidate_sha = str(request["candidate_sha"])
+    if (
+        not candidate.is_absolute()
+        or candidate.parent != CANDIDATES_ROOT
+        or candidate.name != candidate_sha
+        or ".." in candidate.parts
+    ):
+        raise BrokerError("GB10 prepared controller candidate is invalid")
+    inner = _canonical_json(request["prepared_controller"]).decode("ascii")
+    python = candidate / "venv/bin/python"
+    installer = candidate / "repo/scripts/ops/install_capacity_executor.py"
+    result = _run(
+        [
+            str(python),
+            "-I",
+            "-B",
+            str(installer),
+            "--operation",
+            operation,
+        ],
+        cwd=candidate / "repo",
+        environment={
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        timeout=180,
+        check=False,
+        input_payload=inner,
+    )
+    encoded = result.stdout.encode("utf-8")
+    if (
+        result.returncode != 0
+        or result.stderr
+        or not 0 < len(encoded) <= _MAX_COMMAND_OUTPUT
+        or not encoded.endswith(b"\n")
+    ):
+        raise BrokerError("GB10 prepared controller operation failed safely")
+    try:
+        response = json.loads(encoded)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 prepared controller response is invalid") from exc
+    if (
+        _canonical_json(response) != encoded
+        or (response is None and operation != "observe-prepared")
+        or (response is not None and not isinstance(response, dict))
+    ):
+        raise BrokerError("GB10 prepared controller response is invalid")
+    if response is not None:
+        _validate_prepared_controller_response(
+            response,
+            request=request,
+            operation=operation,
+        )
+    return encoded
+
+
+def _validate_prepared_controller_response(
+    value: object,
+    *,
+    request: dict[str, object],
+    operation: str,
+) -> None:
+    expected = {
+        "file_sha256",
+        "pool_id",
+        "request_sha256",
+        "schema_version",
+        "successful_tick",
+        "tick_evidence_sha256",
+        "transport_authority_sha256",
+        "unit_active_state",
+        "unit_file_state",
+    }
+    prepared = request.get("prepared_controller")
+    if not isinstance(value, dict) or set(value) != expected or not isinstance(prepared, dict):
+        raise BrokerError("GB10 prepared controller response is invalid")
+    request_files = prepared.get("files")
+    file_sha256 = value.get("file_sha256")
+    active = value.get("unit_active_state")
+    enabled = value.get("unit_file_state")
+    tick_digest = value.get("tick_evidence_sha256")
+    if (
+        type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("pool_id") != "gb10"
+        or value.get("transport_authority_sha256") != prepared.get("transport_authority_sha256")
+        or value.get("request_sha256") != hashlib.sha256(_canonical_json(prepared)).hexdigest()
+        or not isinstance(request_files, dict)
+        or not isinstance(file_sha256, dict)
+        or set(file_sha256) != set(request_files)
+        or any(
+            type(path) is not str
+            or type(digest) is not str
+            or _SHA256_RE.fullmatch(digest) is None
+            or digest == "0" * 64
+            for path, digest in file_sha256.items()
+        )
+        or not isinstance(active, dict)
+        or not isinstance(enabled, dict)
+        or set(active) != _CAPACITY_EXECUTOR_UNITS
+        or set(enabled) != _CAPACITY_EXECUTOR_UNITS
+        or any(type(unit) is not str or type(state) is not str for unit, state in active.items())
+        or any(type(unit) is not str or type(state) is not str for unit, state in enabled.items())
+        or type(value.get("successful_tick")) is not bool
+        or (tick_digest is not None) != value.get("successful_tick")
+        or (
+            tick_digest is not None
+            and (
+                type(tick_digest) is not str
+                or _SHA256_RE.fullmatch(tick_digest) is None
+                or tick_digest == "0" * 64
+            )
+        )
+    ):
+        raise BrokerError("GB10 prepared controller response is invalid")
+    expected_files = {
+        path: hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest()
+        for path, encoded in request_files.items()
+    }
+    prepared_timer = "loom-capacity-pool-executor-prepared.timer"
+    active_timer = "loom-capacity-pool-executor-active.timer"
+    service_units = _CAPACITY_EXECUTOR_UNITS - {prepared_timer, active_timer}
+    prepared_timer_state = (active[prepared_timer], enabled[prepared_timer])
+    if (
+        file_sha256 != expected_files
+        or any(active[unit] != "inactive" for unit in service_units)
+        or any(enabled[unit] != "static" for unit in service_units)
+        or active[active_timer] != "inactive"
+        or enabled[active_timer] != "disabled"
+        or prepared_timer_state not in {("inactive", "disabled"), ("active", "enabled")}
+        or (value["successful_tick"] and prepared_timer_state != ("active", "enabled"))
+    ):
+        raise BrokerError("GB10 prepared controller response is invalid")
+    if operation in {"converge-prepared-files", "disable-prepared-timer"} and (
+        prepared_timer_state != ("inactive", "disabled") or value["successful_tick"]
+    ):
+        raise BrokerError("GB10 prepared controller response is invalid")
+    if operation == "enable-prepared-timer" and prepared_timer_state != (
+        "active",
+        "enabled",
+    ):
+        raise BrokerError("GB10 prepared controller response is invalid")
+    if operation == "run-prepared-tick" and (
+        prepared_timer_state != ("active", "enabled") or not value["successful_tick"]
+    ):
+        raise BrokerError("GB10 prepared controller response is invalid")
+
+
+def run_controller_pool_credential(candidate: Path, payload: bytes) -> bytes:
+    """Run only the candidate installer's typed pool-credential operation as root."""
+
+    request = _parse_request(payload)
+    operations = {
+        "observe_pool_credential": "observe-credential",
+        "publish_pool_credential": "publish-credential",
+    }
+    try:
+        operation = operations[str(request["operation"])]
+    except KeyError as exc:
+        raise BrokerError("GB10 controller pool credential operation is invalid") from exc
+    candidate_sha = str(request["candidate_sha"])
+    if (
+        not candidate.is_absolute()
+        or candidate.parent != CANDIDATES_ROOT
+        or candidate.name != candidate_sha
+        or ".." in candidate.parts
+    ):
+        raise BrokerError("GB10 controller pool credential candidate is invalid")
+    pool_credential = request["pool_credential"]
+    inner = _canonical_json(pool_credential).decode("ascii")
+    python = candidate / "venv/bin/python"
+    installer = candidate / "repo/scripts/ops/install_capacity_executor.py"
+    result = _run(
+        [
+            str(python),
+            "-I",
+            "-B",
+            str(installer),
+            "--operation",
+            operation,
+        ],
+        cwd=candidate / "repo",
+        environment={
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        timeout=180,
+        check=False,
+        input_payload=inner,
+    )
+    encoded = result.stdout.encode("utf-8")
+    if (
+        result.returncode != 0
+        or result.stderr
+        or not 0 < len(encoded) <= _MAX_COMMAND_OUTPUT
+        or not encoded.endswith(b"\n")
+    ):
+        raise BrokerError("GB10 controller pool credential operation failed safely")
+    try:
+        response = json.loads(encoded)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 controller pool credential response is invalid") from exc
+    if _canonical_json(response) != encoded:
+        raise BrokerError("GB10 controller pool credential response is invalid")
+    if response is None:
+        if operation != "observe-credential":
+            raise BrokerError("GB10 controller pool credential response is invalid")
+        return encoded
+    _validate_controller_pool_credential_evidence(response, pool_credential)
+    return encoded
+
+
+def _validate_controller_pool_credential_evidence(
+    value: object,
+    request: object,
+) -> None:
+    if (
+        not isinstance(value, dict)
+        or not isinstance(request, dict)
+        or set(value)
+        != {
+            "credential_metadata_sha256",
+            "directory_mode",
+            "file_mode",
+            "file_sha256",
+            "gid",
+            "pool_id",
+            "schema_version",
+            "uid",
+        }
+    ):
+        raise BrokerError("GB10 controller pool credential response is invalid")
+    file_sha256 = value.get("file_sha256")
+    metadata = value.get("credential_metadata_sha256")
+    request_files = request.get("files")
+    request_metadata = request.get("credential_metadata_sha256")
+    if (
+        type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("pool_id") != "gb10"
+        or type(value.get("uid")) is not int
+        or value["uid"] <= 0
+        or type(value.get("gid")) is not int
+        or value["gid"] <= 0
+        or value.get("directory_mode") != 0o700
+        or value.get("file_mode") != 0o600
+        or not isinstance(file_sha256, dict)
+        or set(file_sha256) != _POOL_CREDENTIAL_FILES
+        or any(
+            type(name) is not str or type(digest) is not str or _SHA256_RE.fullmatch(digest) is None
+            for name, digest in file_sha256.items()
+        )
+        or metadata != request_metadata
+        or not isinstance(request_files, dict)
+    ):
+        raise BrokerError("GB10 controller pool credential response is invalid")
+    expected = {
+        name: hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest()
+        for name, encoded in request_files.items()
+    }
+    if file_sha256 != expected:
+        raise BrokerError("GB10 controller pool credential response is invalid")
+
+
 def _main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     try:
@@ -2591,6 +3296,28 @@ def _main(argv: list[str] | None = None) -> int:
         _safe_executable(UV_BINARY, owner_uid=0, owner_gid=0, label="uv")
         _safe_executable(SYSTEM_PYTHON, owner_uid=0, owner_gid=0, label="system Python")
         candidate = ensure_candidate(CANDIDATES_ROOT, candidate_sha, candidate_tree)
+        if request.get("operation") in {
+            "discover_controller",
+            "observe_controller_prerequisite",
+            "converge_controller_prerequisite",
+        }:
+            sys.stdout.buffer.write(run_controller_prerequisite(candidate, payload))
+            return 0
+        if request.get("operation") in {
+            "observe_pool_credential",
+            "publish_pool_credential",
+        }:
+            sys.stdout.buffer.write(run_controller_pool_credential(candidate, payload))
+            return 0
+        if request.get("operation") in {
+            "observe_prepared_controller",
+            "converge_prepared_files",
+            "enable_prepared_timer",
+            "run_prepared_tick",
+            "disable_prepared_timer",
+        }:
+            sys.stdout.buffer.write(run_controller_prepared(candidate, payload))
+            return 0
         _exec_helper(candidate, payload)
     except BrokerCapacityFailureError as exc:
         try:

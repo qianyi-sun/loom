@@ -4,9 +4,11 @@ import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -55,6 +57,19 @@ def _dependency(check_id: str) -> RegisteredCheck:
 
 
 def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0067",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
     return CriticalCheckpointEvidence(
         request_id="req-restore001",
         manifest_path=tmp_path / "backup" / "backup-manifest.json",
@@ -63,6 +78,7 @@ def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
             "k8s_secrets": "2" * 64,
             "object_inventory": "3" * 64,
             "postgres": "4" * 64,
+            "database_authority": authority.digest,
         },
         environment="staging",
         namespace="loom-staging",
@@ -70,6 +86,18 @@ def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
         db_snapshot_identity="pgdump-sha256:" + "4" * 64,
         schema_revision="0067",
         object_inventory_root="5" * 64,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
         created_at=NOW,
     )
 
@@ -146,6 +174,10 @@ def test_restore_proof_binds_every_tier_three_action_and_cleanup(tmp_path: Path)
     assert evidence.request_id == checkpoint.request_id
     assert evidence.checkpoint_evidence_sha256 == checkpoint.evidence_digest
     assert evidence.db_snapshot_identity == checkpoint.db_snapshot_identity
+    assert evidence.checkpoint_schema_version == 3
+    assert evidence.component_sha256 == checkpoint.component_sha256
+    assert evidence.database_authority_digest == checkpoint.database_authority_digest
+    assert evidence.manager_configuration_digest == checkpoint.manager_configuration_digest
     assert len(evidence.report_sha256) == 64
     assert evidence.verification_id.startswith("restore-")
 

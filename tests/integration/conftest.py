@@ -55,6 +55,19 @@ from tests.integration.pipeline_orchestrator_fixtures import orchestrator_seed  
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def _disable_unrelated_service_execution_materializer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not launch production materializer workers in unrelated app tests.
+
+    Materializer integration tests construct ``ServiceExecutionMaterializer``
+    directly. Tests that need the app-managed loop can explicitly enable it.
+    """
+
+    monkeypatch.setenv("LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED", "false")
+
+
 @pytest.fixture(scope="session")
 def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, object]]:
     """Create a clean protected-schema template and its cluster-scoped roles."""
