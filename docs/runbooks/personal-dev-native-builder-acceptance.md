@@ -250,7 +250,8 @@ native_authority_request() {
   local request_id="$2"
   local output="$3"
   shift 3
-  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || return 1
   case "$operation" in
     status) ;;
     *) return 1 ;;

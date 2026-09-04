@@ -911,6 +911,13 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                         "SYSTEMD_UNIT_PATH": str(root),
                     }
                 result = self._run(*command, check=False, env=command_env)
+                if Path(command[0]).name == "dockerd":
+                    if result != NativeBuilderCommandResult(
+                        0,
+                        stderr="configuration OK\n",
+                    ):
+                        raise PersonalDevNativeBuilderRuntimeInstallError("generated_input_invalid")
+                    continue
                 permits_stdout = Path(command[0]).name == "systemd-sysusers"
                 if (
                     result.returncode != 0
