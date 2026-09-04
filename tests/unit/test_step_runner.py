@@ -162,7 +162,7 @@ async def test_run_step_applies_effective_timeout_before_agent_run(
         )
 
     assert result.error is None
-    assert agent.observed_step_token_ttl_sec == 9300
+    assert agent.observed_step_token_ttl_sec == 9301
 
 
 async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Path):
@@ -202,6 +202,110 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
     reader = TrajectoryReader(context.local_trajectory_path)
     kinds = [e.kind for e in reader.iter_all()]
     assert EventKind.STEP_END in kinds
+
+
+async def test_gateway_deadline_response_uses_timeout_supervisor_path(
+    context: TrialContext,
+) -> None:
+    """A signed Gateway cutoff is the same timeout as the local deadline."""
+    from loom.errors import AgentError
+
+    class _GatewayDeadlineAgent:
+        mode = "out-of-box"
+        name = "gateway-deadline"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AgentError(
+                "gateway 504: {'detail': {'code': 'agent_timeout', "
+                "'reason': 'attempt_deadline_reached'}}"
+            )
+
+    context.agent = _GatewayDeadlineAgent()  # type: ignore[assignment]
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    assert result.error is not None
+    assert result.error.reason == "timeout"
+    assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
+
+
+async def test_gateway_deadline_retry_records_timeout_before_retry(
+    context: TrialContext,
+) -> None:
+    from loom.errors import AgentError
+
+    class _RetryGatewayDeadlineAgent:
+        mode = "out-of-box"
+        name = "retry-gateway-deadline"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                raise AgentError(
+                    "gateway 504: {'detail': {'code': 'agent_timeout', "
+                    "'reason': 'attempt_deadline_reached'}}"
+                )
+
+    agent = _RetryGatewayDeadlineAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        skip_verifier=True,
+        retry=RetryPolicy(
+            max_attempts=2,
+            retry_on=frozenset({RetryReason.AGENT_TIMEOUT}),
+            backoff=BackoffSpec(base_sec=0.001, max_sec=0.001, jitter=0),
+        ),
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    events = list(TrajectoryReader(context.local_trajectory_path).iter_all())
+    timeout_index = next(
+        index for index, event in enumerate(events) if event.kind == EventKind.AGENT_TIMEOUT
+    )
+    retry_index = next(
+        index for index, event in enumerate(events) if event.kind == EventKind.AGENT_RETRY
+    )
+    assert result.error is None
+    assert agent.calls == 2
+    assert timeout_index < retry_index
+    assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
 
 
 async def test_run_step_retries_retryable_gateway_failure(context: TrialContext):

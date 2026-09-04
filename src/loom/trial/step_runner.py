@@ -18,6 +18,7 @@ from math import ceil
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from loom.attempt_deadline import AttemptDeadlineExceededError
 from loom.driver.base import Driver, StartOptions
 from loom.errors import AgentError, classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
@@ -47,7 +48,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_STEP_JWT_TTL_BUFFER_SEC = 300
+# JWT NumericDate claims have whole-second precision while an attempt deadline
+# retains sub-second precision.  Reserve the required five minutes plus one
+# encoding second so the signed token cannot end just before the attempt.
+_STEP_JWT_TTL_BUFFER_SEC = 301
 
 
 def _apply_step_token_ttl(agent: object, effective_agent_timeout_sec: float) -> None:
@@ -688,19 +692,34 @@ async def _run_agent_with_retry(
             async def run_attempt(
                 guarded_trajectory: TrajectoryWriter,
             ) -> None:
-                async with phase_network(
-                    ctx.driver,
-                    baseline=baseline_policy,
-                    phase=agent_phase,
-                ):
-                    await ctx.agent.run(
-                        instruction=instruction,
-                        env=ctx.driver,
-                        trajectory=guarded_trajectory,
-                        mcp=[],
-                        skills_dir=None,
-                        step_id=step.name,
-                    )
+                try:
+                    async with phase_network(
+                        ctx.driver,
+                        baseline=baseline_policy,
+                        phase=agent_phase,
+                    ):
+                        await ctx.agent.run(
+                            instruction=instruction,
+                            env=ctx.driver,
+                            trajectory=guarded_trajectory,
+                            mcp=[],
+                            skills_dir=None,
+                            step_id=step.name,
+                        )
+                except AgentError as exc:
+                    text_result = classify_failure_message(str(exc))
+                    if text_result is not None and text_result[0] == FailureReason.AGENT_TIMEOUT:
+                        raise AttemptDeadlineExceededError(
+                            text_result[1] or str(exc)
+                        ) from exc
+                    raise
+                except Exception as exc:
+                    failure_reason, failure_message = classify_failure(exc)
+                    if failure_reason == FailureReason.AGENT_TIMEOUT:
+                        raise AttemptDeadlineExceededError(
+                            failure_message or str(exc)
+                        ) from exc
+                    raise
 
             timeout_diagnostic = await supervise_agent_attempt(
                 agent=ctx.agent,
