@@ -1012,6 +1012,7 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
             "sacct_path": "/usr/bin/sacct",
             "scancel_path": "/usr/bin/scancel",
             "srun_path": "/usr/bin/srun",
+            "scontrol_path": "/usr/bin/scontrol",
             "command_timeout_seconds": 5.5,
             "probe_mem_available": True,
             "exclusive": False,
@@ -1031,6 +1032,7 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
     assert config.command_timeout_seconds == 5.5
     assert config.sbatch_path == "/usr/bin/sbatch"
     assert config.srun_path == "/usr/bin/srun"
+    assert config.scontrol_path == "/usr/bin/scontrol"
     assert config.probe_mem_available is True
 
     csv_row = _policy_row(

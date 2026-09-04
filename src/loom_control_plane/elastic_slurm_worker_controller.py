@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import re
@@ -85,6 +86,7 @@ class ElasticSlurmWorkerControllerConfig:
     slurm_qos: str = ""
     slurm_reservation: str = ""
     sinfo_path: str = "sinfo"
+    scontrol_path: str = "scontrol"
     srun_path: str = "srun"
     resource_aware: bool = False
     probe_mem_available: bool = False
@@ -269,6 +271,7 @@ def build_controller_config(
     slurm_qos: str = "",
     slurm_reservation: str = "",
     sinfo_path: str = "sinfo",
+    scontrol_path: str = "scontrol",
     srun_path: str = "srun",
     resource_aware: bool = False,
     probe_mem_available: bool = False,
@@ -399,6 +402,7 @@ def build_controller_config(
         slurm_qos=slurm_qos.strip(),
         slurm_reservation=slurm_reservation.strip(),
         sinfo_path=sinfo_path,
+        scontrol_path=scontrol_path,
         srun_path=srun_path,
         resource_aware=resource_aware,
         probe_mem_available=probe_mem_available,
@@ -421,18 +425,11 @@ def build_controller_config(
 
 def _normalize_node_state(state: str) -> str:
     normalized = state.strip().lower()
-    normalized = normalized.rstrip("*~#")
-    if normalized in {"mix", "mixed"}:
-        return "mixed"
-    if normalized.startswith("idle"):
-        return "idle"
-    if normalized.startswith("mix"):
-        return "mixed"
-    if normalized.startswith("alloc"):
-        return "allocated"
-    if normalized.startswith("drain"):
-        return "drain"
-    return normalized
+    # Slurm state modifiers carry scheduling restrictions. Neither compound
+    # flags (MIXED+RESERVED) nor display suffixes (idle*, idle~) may be erased
+    # before worker placement or the allocation-backed memory probe. Admit
+    # only reviewed base-state aliases; unknown modifiers remain fail-closed.
+    return {"mix": "mixed", "alloc": "allocated"}.get(normalized, normalized)
 
 
 def _is_safe_node_state(state: str) -> bool:
@@ -942,6 +939,22 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
         resources = parse_sinfo_node_resources(sinfo.stdout)
+        # sinfo %T can report only MIXED even when the controller records
+        # MIXED+RESERVED. Read the full controller flags before any srun probe
+        # or capacity decision; resource counts alone cannot establish access.
+        node_details = await _run_command(
+            (config.scontrol_path, "--json", "show", "nodes", ",".join(nodes)),
+            timeout=config.command_timeout_seconds,
+        )
+        node_states = _parse_scontrol_node_states(node_details.stdout, nodes=nodes)
+        if set(resources) != set(nodes):
+            raise RuntimeError("Slurm node resource snapshot is incomplete")
+        for node, resource in tuple(resources.items()):
+            # Either observation may carry a restriction, including a state
+            # transition between reads. Never replace an unsafe sinfo state
+            # with a permissive controller observation.
+            if not _is_safe_node_state(node_states[node]):
+                resources[node] = replace(resource, state=node_states[node])
         allocated = await _run_command(
             (
                 config.sinfo_path,
@@ -1164,6 +1177,46 @@ def _parse_idle_cpus(cpu_state: str) -> int | None:
     if len(parts) != 4:
         return None
     return _parse_optional_int(parts[1])
+
+
+def _parse_scontrol_node_states(output: str, *, nodes: tuple[str, ...]) -> dict[str, str]:
+    def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("duplicate Slurm node state JSON field")
+            fields[key] = value
+        return fields
+
+    try:
+        payload = json.loads(output, object_pairs_hook=unique_fields)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Slurm node state snapshot is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("errors") not in (None, []):
+        raise RuntimeError("Slurm node state snapshot failed")
+    records = payload.get("nodes")
+    if not isinstance(records, list):
+        raise RuntimeError("Slurm node state snapshot is invalid")
+    states: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError("Slurm node state record is invalid")
+        name, flags = record.get("name"), record.get("state")
+        if (
+            not isinstance(name, str)
+            or name not in nodes
+            or name in states
+            or not isinstance(flags, list)
+            or not flags
+            or any(not isinstance(flag, str) or not flag.strip() for flag in flags)
+        ):
+            raise RuntimeError("Slurm node state identity or flags are invalid")
+        if len(set(flags)) != len(flags):
+            raise RuntimeError("Slurm node state flags are ambiguous")
+        states[name] = "+".join(flags)
+    if set(states) != set(nodes):
+        raise RuntimeError("Slurm node state snapshot is incomplete")
+    return states
 
 
 def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
