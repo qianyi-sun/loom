@@ -5,6 +5,18 @@ The auth helper lives in `loom.auth` so every Loom HTTP service (Gateway
 imports (`from loom_llm_gateway.auth import …`) continue to work.
 """
 
-from loom.auth import AuthContext, verify_bearer_token
+from loom.auth import (
+    AuthContext,
+    BearerValidationReason,
+    BearerValidationResult,
+    validate_bearer_token,
+    verify_bearer_token,
+)
 
-__all__ = ["AuthContext", "verify_bearer_token"]
+__all__ = [
+    "AuthContext",
+    "BearerValidationReason",
+    "BearerValidationResult",
+    "validate_bearer_token",
+    "verify_bearer_token",
+]

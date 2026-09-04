@@ -14,8 +14,9 @@ import pytest
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from loom.auth import mint_step_jwt
 from loom.db.schema import Team, Token, User
-from loom_llm_gateway.auth import verify_bearer_token
+from loom_llm_gateway.auth import validate_bearer_token, verify_bearer_token
 from tests.integration.gateway_db import delete_teams_by_name_async
 
 
@@ -71,6 +72,11 @@ async def test_verify_valid_token(db_session: AsyncSession):
     assert ctx is not None
     assert ctx.team_id == team_id
     assert "submit" in ctx.scopes
+
+    result = await validate_bearer_token(db_session, f"Bearer {raw}")
+    assert result.reason == "valid"
+    assert result.context is not None
+    assert result.context.team_id == team_id
 
 
 async def test_verify_token_restores_created_by_user_id(db_session: AsyncSession):
@@ -283,20 +289,58 @@ async def test_family_orchestrator_rejects_authority_drift(
 async def test_missing_bearer_returns_none(db_session: AsyncSession):
     assert await verify_bearer_token(db_session, None) is None
     assert await verify_bearer_token(db_session, "") is None
+    assert (await validate_bearer_token(db_session, None)).reason == "missing"
+    assert (await validate_bearer_token(db_session, "  ")).reason == "missing"
 
 
 async def test_non_bearer_header_returns_none(db_session: AsyncSession):
     """Other auth schemes (Basic, Digest) must be rejected, not crash."""
     assert await verify_bearer_token(db_session, "Basic foo:bar") is None
+    assert (await validate_bearer_token(db_session, "Basic foo:bar")).reason == "malformed"
+    assert (await validate_bearer_token(db_session, "Bearer")).reason == "malformed"
+    assert (await validate_bearer_token(db_session, "Bearer token extra")).reason == "malformed"
+    assert (await validate_bearer_token(db_session, "Bearer token,")).reason == "malformed"
 
 
 async def test_unknown_token_returns_none(db_session: AsyncSession):
     assert await verify_bearer_token(db_session, "Bearer unknown") is None
+    assert (await validate_bearer_token(db_session, "Bearer unknown")).reason == "invalid"
 
 
 async def test_expired_token_rejected(db_session: AsyncSession):
     await _insert_token(db_session, raw="loom_team_exp", expires_in_sec=-1)
     assert await verify_bearer_token(db_session, "Bearer loom_team_exp") is None
+    assert (
+        await validate_bearer_token(db_session, "Bearer loom_team_exp")
+    ).reason == "expired"
+
+
+async def test_expired_step_jwt_has_bounded_reason(db_session: AsyncSession) -> None:
+    signing_key = "gateway-auth-test-signing-key-32b"
+    raw = mint_step_jwt(
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=-1,
+        signing_key=signing_key,
+    )
+
+    result = await validate_bearer_token(
+        db_session,
+        f"Bearer {raw}",
+        signing_key=signing_key,
+    )
+
+    assert result.context is None
+    assert result.reason == "expired"
+    assert (
+        await verify_bearer_token(
+            db_session,
+            f"Bearer {raw}",
+            signing_key=signing_key,
+        )
+        is None
+    )
 
 
 async def test_revoked_token_rejected(db_session: AsyncSession):

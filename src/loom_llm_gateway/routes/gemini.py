@@ -14,7 +14,6 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from loom.auth import verify_bearer_token
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
@@ -26,6 +25,7 @@ from loom_llm_gateway.rate_card import (
 )
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
+from loom_llm_gateway.routes._auth import require_llm_call_bearer
 from loom_llm_gateway.routes._facade_common import http_failure_category
 
 router = APIRouter()
@@ -48,15 +48,12 @@ async def gemini_generate_content(
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(
+        ctx = await require_llm_call_bearer(
             session,
             authorization,
             signing_key=signing_key,
         )
-        if ctx is not None:
-            await authorize_trial_execution_dispatch(session, ctx)
-    if ctx is None or "llm:call" not in ctx.scopes:
-        raise HTTPException(status_code=401, detail="not authorized")
+        await authorize_trial_execution_dispatch(session, ctx)
     if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:
         raise HTTPException(
             status_code=403,

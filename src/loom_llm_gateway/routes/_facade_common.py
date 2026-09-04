@@ -24,7 +24,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from loom.auth import AuthContext, verify_bearer_token
+from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection, ProviderConnectionShare
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
@@ -49,6 +49,7 @@ from loom_llm_gateway.rate_card import (
     lookup_entry,
 )
 from loom_llm_gateway.request_params import normalize_request_params
+from loom_llm_gateway.routes._auth import require_llm_call_bearer
 from loom_llm_gateway.yibuapi_pricing import (
     YIBUAPI_RATE_CARD_PROVIDER,
     normalize_yibuapi_model_name,
@@ -80,13 +81,11 @@ async def verify_facade_auth(
     Returns the validated AuthContext with non-None trial_id, step_id,
     and team_id. Raises 401 / 403 directly on auth failure.
     """
-    ctx = await verify_bearer_token(
+    ctx = await require_llm_call_bearer(
         session,
         authorization,
         signing_key=signing_key,
     )
-    if ctx is None or "llm:call" not in ctx.scopes:
-        raise HTTPException(status_code=401, detail="not authorized")
     if ctx.token_subject is None or ctx.step_id is None or ctx.team_id is None:
         raise HTTPException(
             status_code=403,

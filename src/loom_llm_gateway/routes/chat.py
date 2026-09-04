@@ -30,7 +30,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from loom.models.types import ModelSpec
 from loom_llm_gateway import litellm_wrapper
-from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
@@ -42,6 +41,7 @@ from loom_llm_gateway.rate_card import (
 )
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
+from loom_llm_gateway.routes._auth import require_llm_call_bearer
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_estimate,
     decrypt_facade_api_key,
@@ -162,18 +162,11 @@ async def chat_completions(
     byo_row = None
     byo_api_key: str | None = None
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(
+        ctx = await require_llm_call_bearer(
             session,
             authorization,
             signing_key=signing_key,
         )
-        if ctx is None:
-            raise HTTPException(
-                status_code=401,
-                detail="invalid bearer token",
-            )
-        if "llm:call" not in ctx.scopes:
-            raise HTTPException(status_code=401, detail="not authorized")
         if ctx.execution_attempt_id is not None:
             raise HTTPException(
                 status_code=403,

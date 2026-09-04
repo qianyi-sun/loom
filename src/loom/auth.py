@@ -36,6 +36,7 @@ _TOKEN_TOUCH_DEBOUNCE = timedelta(seconds=60)
 _SERVICE_EXECUTION_MAX_TTL_SEC = 600
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CANDIDATE_SHA = re.compile(r"^[0-9a-f]{40}$")
+_BEARER_CREDENTIAL = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
 
 _ROLE_SCOPES: dict[str, list[str]] = {
     "viewer": ["read:own"],
@@ -126,6 +127,29 @@ class AuthContext:
         if self.execution_attempt_id is not None and self.trial_id is None:
             return TokenSubject(kind="execution_attempt", id=self.execution_attempt_id)
         return None
+
+
+BearerValidationReason = Literal[
+    "valid",
+    "missing",
+    "malformed",
+    "invalid",
+    "expired",
+]
+
+
+@dataclass(frozen=True)
+class BearerValidationResult:
+    """Structured bearer validation result without credential material.
+
+    ``reason`` is deliberately low-cardinality so HTTP boundaries can record
+    useful diagnostics without ever retaining or logging the presented token.
+    Callers that only need the historical nullable-context contract should use
+    :func:`verify_bearer_token`.
+    """
+
+    context: AuthContext | None
+    reason: BearerValidationReason
 
 
 def is_admin(ctx: AuthContext) -> bool:
@@ -446,7 +470,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     )
 
 
-async def verify_bearer_token(
+async def validate_bearer_token(
     session: AsyncSession,
     header_value: str | None,
     *,
@@ -454,44 +478,55 @@ async def verify_bearer_token(
     admin_verifier: AdminSecretVerifier | None = None,
     allow_readonly_probe: bool = False,
     allow_family_orchestrator: bool = False,
-) -> AuthContext | None:
-    """Validate a Bearer token. Returns an AuthContext or None.
+) -> BearerValidationResult:
+    """Validate a Bearer token and return a credential-free reason code.
 
     `signing_key` enables the step-JWT branch; if None, JWTs always
-    return None (effectively disabling that path). DB-backed tokens
+    return ``invalid`` (effectively disabling that path). DB-backed tokens
     are unaffected by `signing_key`. `allow_family_orchestrator` is a
     narrow opt-in for the Control Plane step-token exchange; it remains
     false for every other bearer-token consumer.
     """
-    if not header_value or not header_value.lower().startswith("bearer "):
-        return None
-    raw = header_value.split(" ", 1)[1].strip()
-    if not raw:
-        return None
+    if header_value is None or not header_value.strip():
+        return BearerValidationResult(context=None, reason="missing")
+    parts = header_value.strip().split()
+    if (
+        len(parts) != 2
+        or parts[0].lower() != "bearer"
+        or _BEARER_CREDENTIAL.fullmatch(parts[1]) is None
+    ):
+        return BearerValidationResult(context=None, reason="malformed")
+    raw = parts[1]
 
     if admin_verifier is not None and admin_verifier.verify(raw):
-        return AuthContext(
-            token_hash=admin_verifier.token_hash,
-            type="admin",
-            scopes=[
-                "admin:tokens",
-                "admin:rate_cards",
-                "admin:slurm_workers",
-                "admin:gb10_workers",
-                "admin:worker_pools",
-            ],
-            team_id=None,
-            expires_at=None,
+        return BearerValidationResult(
+            context=AuthContext(
+                token_hash=admin_verifier.token_hash,
+                type="admin",
+                scopes=[
+                    "admin:tokens",
+                    "admin:rate_cards",
+                    "admin:slurm_workers",
+                    "admin:gb10_workers",
+                    "admin:worker_pools",
+                ],
+                team_id=None,
+                expires_at=None,
+            ),
+            reason="valid",
         )
 
     # JWT branch
     if raw.startswith(_STEP_JWT_PREFIX):
         if signing_key is None:
-            return None
+            return BearerValidationResult(context=None, reason="invalid")
         try:
-            return verify_step_jwt(raw, signing_key=signing_key)
+            context = verify_step_jwt(raw, signing_key=signing_key)
+        except jwt.ExpiredSignatureError:
+            return BearerValidationResult(context=None, reason="expired")
         except jwt.PyJWTError:
-            return None
+            return BearerValidationResult(context=None, reason="invalid")
+        return BearerValidationResult(context=context, reason="valid")
 
     # DB-backed branch for team/worker credentials plus narrowly opted-in
     # service principals. Admin credentials moved to the singleton secret
@@ -504,9 +539,9 @@ async def verify_bearer_token(
         )
     ).scalar_one_or_none()
     if row is None:
-        return None
+        return BearerValidationResult(context=None, reason="invalid")
     if row.type == "admin" or any(scope.startswith("admin:") for scope in row.scopes):
-        return None
+        return BearerValidationResult(context=None, reason="invalid")
     if row.type == "readonly_probe":
         if (
             not allow_readonly_probe
@@ -514,7 +549,7 @@ async def verify_bearer_token(
             or list(row.scopes) != ["read:own"]
             or row.created_by_user_id is not None
         ):
-            return None
+            return BearerValidationResult(context=None, reason="invalid")
     elif row.type == "family_orchestrator":
         if (
             not allow_family_orchestrator
@@ -522,13 +557,13 @@ async def verify_bearer_token(
             or list(row.scopes) != ["family:evolve"]
             or row.created_by_user_id is not None
         ):
-            return None
+            return BearerValidationResult(context=None, reason="invalid")
     elif row.type not in {"team", "worker"}:
-        return None
+        return BearerValidationResult(context=None, reason="invalid")
     if row.revoked_at is not None:
-        return None
+        return BearerValidationResult(context=None, reason="invalid")
     if row.expires_at is not None and row.expires_at < datetime.now(UTC):
-        return None
+        return BearerValidationResult(context=None, reason="expired")
 
     token_hash = row.token_hash
     token_type = row.type
@@ -560,13 +595,37 @@ async def verify_bearer_token(
         )
     await session.commit()
 
-    return AuthContext(
-        token_hash=token_hash,
-        type=token_type,
-        scopes=scopes,
-        team_id=team_id,
-        user_id=user_id,
-        role=role,
-        expires_at=expires_at,
-        auth_kind="readonly_probe" if token_type == "readonly_probe" else "bearer",
+    return BearerValidationResult(
+        context=AuthContext(
+            token_hash=token_hash,
+            type=token_type,
+            scopes=scopes,
+            team_id=team_id,
+            user_id=user_id,
+            role=role,
+            expires_at=expires_at,
+            auth_kind="readonly_probe" if token_type == "readonly_probe" else "bearer",
+        ),
+        reason="valid",
     )
+
+
+async def verify_bearer_token(
+    session: AsyncSession,
+    header_value: str | None,
+    *,
+    signing_key: str | None = None,
+    admin_verifier: AdminSecretVerifier | None = None,
+    allow_readonly_probe: bool = False,
+    allow_family_orchestrator: bool = False,
+) -> AuthContext | None:
+    """Compatibility wrapper returning the validated context or ``None``."""
+    result = await validate_bearer_token(
+        session,
+        header_value,
+        signing_key=signing_key,
+        admin_verifier=admin_verifier,
+        allow_readonly_probe=allow_readonly_probe,
+        allow_family_orchestrator=allow_family_orchestrator,
+    )
+    return result.context
