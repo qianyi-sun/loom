@@ -117,8 +117,15 @@ class VerifiedProviderRelease:
     members: tuple[VerifiedProviderMember, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedProviderRelease:
+    release_sha256: str
+    manifest_payload: bytes
+    manifest: dict[str, object]
+    members: tuple[_ReleaseMemberInput, ...]
+
+
 _FileIdentity = tuple[int, int, int, int, int, int, int, int, int]
-_DirectoryIdentity = tuple[int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,10 +228,6 @@ def _file_identity(metadata: os.stat_result) -> _FileIdentity:
         metadata.st_uid,
         metadata.st_gid,
     )
-
-
-def _directory_identity(metadata: os.stat_result) -> _DirectoryIdentity:
-    return (metadata.st_dev, metadata.st_ino, metadata.st_uid)
 
 
 def _inspect_regular(
@@ -886,56 +889,6 @@ def _seal_release_tree(candidate: Path) -> None:
     candidate.chmod(0o555)
 
 
-def _remove_temp_staging_tree(
-    staging: Path,
-    *,
-    output_root: Path,
-    expected_identity: _DirectoryIdentity,
-) -> None:
-    try:
-        metadata = staging.lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise ProviderReleaseError("release set staging cleanup failed") from exc
-    if (
-        staging.parent != output_root
-        or not staging.name.startswith(".provider-release-set.")
-        or stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or _directory_identity(metadata) != expected_identity
-    ):
-        raise ProviderReleaseError("release set staging cleanup target is invalid")
-    try:
-        for root_name, _dirnames, _filenames in os.walk(
-            staging,
-            topdown=False,
-            followlinks=False,
-        ):
-            root = Path(root_name)
-            root_metadata = root.lstat()
-            if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
-                raise ProviderReleaseError("release set staging cleanup target is invalid")
-            descriptor = os.open(
-                root,
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-            )
-            try:
-                if _directory_identity(os.fstat(descriptor)) != _directory_identity(root_metadata):
-                    raise ProviderReleaseError("release set staging cleanup target is invalid")
-                os.fchmod(descriptor, 0o755)
-            finally:
-                os.close(descriptor)
-        shutil.rmtree(staging)
-    except ProviderReleaseError:
-        raise
-    except OSError as exc:
-        raise ProviderReleaseError("release set staging cleanup failed") from exc
-
-
 def _rename_noreplace(source: Path, destination: Path) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
@@ -988,24 +941,16 @@ def _publish_sidecar(path: Path, payload: bytes) -> None:
                 pass
 
 
-def _copy_release_leaf(release: ProviderRelease, destination: Path, *, architecture: Architecture) -> None:
-    del architecture
-    try:
-        shutil.copytree(release.directory, destination, symlinks=False)
-    except OSError as exc:
-        raise ProviderReleaseError("release set leaf copy failed") from exc
-
-
-def _release_set_manifest(staged: Mapping[Architecture, ProviderRelease]) -> tuple[str, bytes, dict[str, object]]:
+def _release_set_manifest(
+    staged: Mapping[Architecture, _PreparedProviderRelease],
+) -> tuple[str, bytes, dict[str, object]]:
     identity: dict[str, object] = {
         "schema": _SET_SCHEMA,
         "architectures": {
             architecture: {
                 "architecture": architecture,
                 "path": release.release_sha256,
-                "release_manifest_sha256": _digest(
-                    _read_regular(release.manifest_path, maximum=_MAX_JSON_BYTES)
-                ),
+                "release_manifest_sha256": _digest(release.manifest_payload),
                 "release_sha256": release.release_sha256,
             }
             for architecture, release in sorted(staged.items())
@@ -1092,21 +1037,15 @@ def _build_deterministic_supervisor(
     return first
 
 
-def build_release(
+def _prepare_provider_release(
     source_root: Path,
-    output_root: Path,
     architecture: Architecture,
     *,
     guard_release_directory: Path | None = None,
     runtime_root: Path | None = None,
     build_supervisor: Callable[[Path, Architecture], bytes] | None = None,
-) -> ProviderRelease:
+) -> _PreparedProviderRelease:
     source_root = _validate_root(source_root, "source root")
-    if output_root.exists():
-        output_root = _validate_root(output_root, "output root")
-    else:
-        output_root.mkdir(parents=True, mode=0o755)
-        output_root = _validate_root(output_root, "output root")
     if architecture not in {"x86_64", "aarch64"}:
         raise ProviderReleaseError("release architecture is invalid")
     spec_payload = _read_regular(
@@ -1222,25 +1161,63 @@ def build_release(
     manifest = dict(identity)
     manifest["release_sha256"] = release_sha256
     manifest_payload = _canonical(manifest)
+    return _PreparedProviderRelease(
+        release_sha256=release_sha256,
+        manifest_payload=manifest_payload,
+        manifest=manifest,
+        members=tuple(members),
+    )
+
+
+def _write_release_tree(
+    candidate: Path,
+    prepared: _PreparedProviderRelease,
+) -> None:
+    for member in prepared.members:
+        target = candidate / member.path
+        if member.payload is not None and member.source is None:
+            _write_file(target, member.payload, member.mode)
+        elif member.payload is None and member.source is not None:
+            member.source.copy_to(target)
+        else:
+            raise ProviderReleaseError("release member source is invalid")
+    _write_file(candidate / _MANIFEST, prepared.manifest_payload, 0o444)
+
+
+def build_release(
+    source_root: Path,
+    output_root: Path,
+    architecture: Architecture,
+    *,
+    guard_release_directory: Path | None = None,
+    runtime_root: Path | None = None,
+    build_supervisor: Callable[[Path, Architecture], bytes] | None = None,
+) -> ProviderRelease:
+    if output_root.exists():
+        output_root = _validate_root(output_root, "output root")
+    else:
+        output_root.mkdir(parents=True, mode=0o755)
+        output_root = _validate_root(output_root, "output root")
+    prepared = _prepare_provider_release(
+        source_root,
+        architecture,
+        guard_release_directory=guard_release_directory,
+        runtime_root=runtime_root,
+        build_supervisor=build_supervisor,
+    )
+    release_sha256 = prepared.release_sha256
+    manifest_payload = prepared.manifest_payload
+    manifest = prepared.manifest
     directory = output_root / release_sha256
     if directory.exists() or directory.is_symlink():
         raise ProviderReleaseError("release destination collision")
     candidate = Path(tempfile.mkdtemp(prefix=".provider-release.", dir=output_root))
     try:
-        for member in members:
-            target = candidate / member.path
-            if member.payload is not None and member.source is None:
-                _write_file(target, member.payload, member.mode)
-            elif member.payload is None and member.source is not None:
-                member.source.copy_to(target)
-            else:
-                raise ProviderReleaseError("release member source is invalid")
-        _write_file(candidate / _MANIFEST, manifest_payload, 0o444)
+        _write_release_tree(candidate, prepared)
         _seal_release_tree(candidate)
         _rename_noreplace(candidate, directory)
-    except BaseException:
-        shutil.rmtree(candidate, ignore_errors=True)
-        raise
+    except OSError as exc:
+        raise ProviderReleaseError("release publication failed") from exc
     sidecar_path = output_root / f"{release_sha256}.manifest.json"
     _publish_sidecar(sidecar_path, manifest_payload)
     return ProviderRelease(
@@ -1267,45 +1244,34 @@ def build_certified_releases(
     else:
         output_root.mkdir(parents=True, mode=0o755)
         output_root = _validate_root(output_root, "output root")
-    staging = Path(tempfile.mkdtemp(prefix=".provider-release-set.", dir=output_root))
-    staging.chmod(0o755)
-    staging_identity = _directory_identity(staging.lstat())
-    final_candidate: Path | None = None
-    try:
-        staged: dict[Architecture, ProviderRelease] = {}
-        for architecture in _ARCHITECTURES:
-            staged[architecture] = build_release(
-                source_root,
-                staging,
-                architecture,
-                guard_release_directory=guard_release_directories[architecture],
-                runtime_root=runtime_roots[architecture],
-                build_supervisor=build_supervisor,
-            )
-        release_set_sha256, release_set_payload, _release_set = _release_set_manifest(staged)
-        release_set_directory = output_root / release_set_sha256
-        if release_set_directory.exists() or release_set_directory.is_symlink():
-            raise ProviderReleaseError("release destination collision")
-        for release in staged.values():
-            if (output_root / release.release_sha256).exists() or (
-                output_root / f"{release.release_sha256}.manifest.json"
-            ).exists():
-                raise ProviderReleaseError("release destination collision")
-        final_candidate = Path(
-            tempfile.mkdtemp(prefix=".provider-release-set-final.", dir=output_root)
+    prepared: dict[Architecture, _PreparedProviderRelease] = {}
+    for architecture in _ARCHITECTURES:
+        prepared[architecture] = _prepare_provider_release(
+            source_root,
+            architecture,
+            guard_release_directory=guard_release_directories[architecture],
+            runtime_root=runtime_roots[architecture],
+            build_supervisor=build_supervisor,
         )
-        final_candidate.chmod(0o755)
+    release_set_sha256, release_set_payload, _release_set = _release_set_manifest(prepared)
+    release_set_directory = output_root / release_set_sha256
+    if release_set_directory.exists() or release_set_directory.is_symlink():
+        raise ProviderReleaseError("release destination collision")
+    for release in prepared.values():
+        if (output_root / release.release_sha256).exists() or (
+            output_root / f"{release.release_sha256}.manifest.json"
+        ).exists():
+            raise ProviderReleaseError("release destination collision")
+    candidate = Path(tempfile.mkdtemp(prefix=".provider-release-set.", dir=output_root))
+    candidate.chmod(0o755)
+    try:
         for architecture in _ARCHITECTURES:
-            release = staged[architecture]
-            _copy_release_leaf(
-                release,
-                final_candidate / release.release_sha256,
-                architecture=architecture,
-            )
-        _write_file(final_candidate / _SET_MANIFEST, release_set_payload, 0o444)
-        _seal_release_tree(final_candidate)
+            release = prepared[architecture]
+            _write_release_tree(candidate / release.release_sha256, release)
+        _write_file(candidate / _SET_MANIFEST, release_set_payload, 0o444)
+        _seal_release_tree(candidate)
         try:
-            _rename_noreplace(final_candidate, release_set_directory)
+            _rename_noreplace(candidate, release_set_directory)
         except ProviderReleaseError as exc:
             raise ProviderReleaseError("release set publication failed") from exc
         return {
@@ -1316,20 +1282,12 @@ def build_certified_releases(
                 sidecar_path=release_set_directory / release.release_sha256 / _MANIFEST,
                 manifest=release.manifest,
             )
-            for architecture, release in staged.items()
+            for architecture, release in prepared.items()
         }
     except ProviderReleaseError:
         raise
     except OSError as exc:
         raise ProviderReleaseError("release set publication failed") from exc
-    except BaseException:
-        raise
-    finally:
-        _remove_temp_staging_tree(
-            staging,
-            output_root=output_root,
-            expected_identity=staging_identity,
-        )
 
 
 def _read_reviewed_spec(

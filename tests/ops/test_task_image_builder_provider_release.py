@@ -34,6 +34,11 @@ def _digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _directory_identity(path: Path) -> tuple[int, int, int]:
+    metadata = path.lstat()
+    return metadata.st_dev, metadata.st_ino, metadata.st_uid
+
+
 def _elf_payload(machine: int, label: str, *, elf_type: int = 3) -> bytes:
     ident = b"\x7fELF" + bytes((2, 1, 1, 0)) + bytes(8)
     return (
@@ -881,6 +886,54 @@ def test_release_rejects_nondeterministic_supervisor_builder(tmp_path: Path) -> 
     assert not any((tmp_path / "out").glob("*/release-manifest.json"))
 
 
+def test_release_failure_after_candidate_creation_preserves_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: standalone release failure recursively deletes the unique
+    # hidden candidate instead of preserving it as failure evidence.
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    original_write_file = release_module._write_file
+    candidates: list[Path] = []
+
+    def record_candidate_with_evidence(*, prefix: str, dir: Path | str | None = None) -> str:
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release." and Path(dir) == output_root:
+            candidates.append(path)
+            evidence_dir = path / "evidence-sentinel"
+            evidence_dir.mkdir()
+            evidence_dir.chmod(0o700)
+        return raw_path
+
+    def fail_first_candidate_write(path: Path, payload: bytes, mode: int) -> None:
+        if candidates and path.is_relative_to(candidates[0]):
+            raise release_module.ProviderReleaseError("injected candidate write failure")
+        original_write_file(path, payload, mode)
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_candidate_with_evidence)
+    monkeypatch.setattr(release_module, "_write_file", fail_first_candidate_write)
+
+    with pytest.raises(ProviderReleaseError):
+        build_release(
+            source,
+            output_root,
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
+
+    assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
+    assert len(candidates) == 1
+    assert candidates[0].exists()
+    evidence_dir = candidates[0] / "evidence-sentinel"
+    assert evidence_dir.is_dir()
+    assert stat.S_IMODE(evidence_dir.lstat().st_mode) == 0o700
+
+
 def test_certified_release_builds_both_architectures_twice_all_or_nothing(
     tmp_path: Path,
 ) -> None:
@@ -917,15 +970,15 @@ def test_certified_release_builds_both_architectures_twice_all_or_nothing(
     assert calls == ["x86_64", "x86_64", "aarch64", "aarch64"]
 
 
-def test_certified_release_success_removes_hidden_staging_directory(
+def test_certified_release_success_publishes_one_digest_set_without_hidden_candidate(
     tmp_path: Path,
 ) -> None:
-    # Mutation caught: cleanup that ignores rmtree failures leaves a sealed
-    # hidden .provider-release-set.* staging tree next to the final release set.
+    # Mutation caught: certified success keeps a post-publication staging/candidate
+    # directory or publishes more than the single content-addressed release set.
     source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
     output_root = tmp_path / "out"
 
-    build_certified_releases(
+    releases = build_certified_releases(
         source,
         output_root,
         guard_release_directories=guard_releases,
@@ -941,49 +994,207 @@ def test_certified_release_success_removes_hidden_staging_directory(
     [release_set] = entries
     assert release_set.is_dir()
     assert not release_set.name.startswith(".")
-    assert (release_set / "provider-release-set-manifest.json").is_file()
+    assert len(release_set.name) == 64
+    assert all(character in "0123456789abcdef" for character in release_set.name)
+    set_manifest = json.loads((release_set / "provider-release-set-manifest.json").read_bytes())
+    assert set_manifest["release_set_sha256"] == release_set.name
+    assert {
+        architecture: release.directory
+        for architecture, release in releases.items()
+    } == {
+        architecture: release_set / release.release_sha256
+        for architecture, release in releases.items()
+    }
 
 
-def test_certified_release_staging_cleanup_rejects_directory_symlink_swap(
+def test_certified_release_embedded_leaves_emit_no_per_leaf_sidecars(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Mutation caught: cleanup validates a staging child with lstat(), then
-    # chmods the path after an attacker swaps it to a symlink to the final set.
+    # Mutation caught: certified mode calls the standalone leaf publisher, which
+    # creates transient <leaf>.manifest.json sidecars in a hidden staging tree.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
     output_root = tmp_path / "out"
-    output_root.mkdir()
-    final_set = output_root / ("8" * 64)
-    final_set.mkdir()
-    final_set.chmod(0o555)
-    staging = output_root / ".provider-release-set.fixture"
-    child = staging / "sealed-child"
-    child.mkdir(parents=True)
-    child.chmod(0o555)
-    staging.chmod(0o755)
-    expected_identity = release_module._directory_identity(staging.lstat())
-    original_lstat = Path.lstat
-    swapped = False
+    observed_sidecars: list[list[str]] = []
+    original_seal_release_tree = release_module._seal_release_tree
 
-    def swap_after_child_lstat(path: Path) -> os.stat_result:
-        nonlocal swapped
-        metadata = original_lstat(path)
-        if path == child and not swapped:
-            swapped = True
-            child.rmdir()
-            child.symlink_to(final_set, target_is_directory=True)
-        return metadata
+    def observe_sidecars_before_set_seal(candidate: Path) -> None:
+        if candidate.parent == output_root and (candidate / "provider-release-set-manifest.json").exists():
+            observed_sidecars.append(
+                sorted(
+                    path.relative_to(output_root).as_posix()
+                    for path in output_root.rglob("*.manifest.json")
+                )
+            )
+        original_seal_release_tree(candidate)
 
-    monkeypatch.setattr(Path, "lstat", swap_after_child_lstat)
+    monkeypatch.setattr(release_module, "_seal_release_tree", observe_sidecars_before_set_seal)
 
-    with pytest.raises(ProviderReleaseError, match="staging cleanup"):
-        release_module._remove_temp_staging_tree(
-            staging,
-            output_root=output_root,
-            expected_identity=expected_identity,
+    build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    assert observed_sidecars == [[]]
+    assert [path for path in output_root.rglob("*.manifest.json")] == []
+
+
+def test_certified_release_publishes_original_candidate_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: certified success copies releases from one hidden staging
+    # tree into a second final candidate, making cleanup part of the design.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    candidate_identity: tuple[int, int, int] | None = None
+
+    def record_release_set_candidate(*, prefix: str, dir: Path | str | None = None) -> str:
+        nonlocal candidate_identity
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release-set." and Path(dir) == output_root:
+            candidate_identity = _directory_identity(path)
+        return raw_path
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_release_set_candidate)
+
+    build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    [release_set] = [item for item in output_root.iterdir() if not item.name.startswith(".")]
+    assert candidate_identity is not None
+    assert _directory_identity(release_set) == candidate_identity
+
+
+def test_certified_release_failure_after_candidate_creation_preserves_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: failure handling recursively chmods/deletes the unique
+    # release-set candidate instead of preserving it as failure evidence.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    original_write_file = release_module._write_file
+    candidates: list[Path] = []
+
+    def record_candidate_with_evidence(*, prefix: str, dir: Path | str | None = None) -> str:
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release-set." and Path(dir) == output_root:
+            candidates.append(path)
+            evidence_dir = path / "evidence-sentinel"
+            evidence_dir.mkdir()
+            evidence_dir.chmod(0o700)
+        return raw_path
+
+    def fail_first_candidate_write(path: Path, payload: bytes, mode: int) -> None:
+        if candidates and path.is_relative_to(candidates[0]):
+            raise release_module.ProviderReleaseError("injected candidate write failure")
+        original_write_file(path, payload, mode)
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_candidate_with_evidence)
+    monkeypatch.setattr(release_module, "_write_file", fail_first_candidate_write)
+
+    with pytest.raises(ProviderReleaseError):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
         )
 
-    assert swapped
-    assert stat.S_IMODE(final_set.lstat().st_mode) == 0o555
+    assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
+    assert len(candidates) == 1
+    assert candidates[0].exists()
+    evidence_dir = candidates[0] / "evidence-sentinel"
+    assert evidence_dir.is_dir()
+    assert stat.S_IMODE(evidence_dir.lstat().st_mode) == 0o700
+
+
+def test_certified_release_failure_never_deletes_swapped_external_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: failure cleanup validates a mutable hidden path, then a
+    # same-parent rename swaps an external directory under the recursive delete.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    external = output_root / "external-evidence"
+    external_file = external / "keep.txt"
+    external.mkdir()
+    external_file.write_text("do not delete or chmod\n", encoding="utf-8")
+    external_file.chmod(0o444)
+    external.chmod(0o555)
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    original_write_file = release_module._write_file
+    original_rmtree = release_module.shutil.rmtree
+    candidates: list[Path] = []
+    displaced: list[Path] = []
+
+    def record_candidate(*, prefix: str, dir: Path | str | None = None) -> str:
+        raw_path = original_mkdtemp(prefix=prefix, dir=dir)
+        path = Path(raw_path)
+        if prefix == ".provider-release-set." and Path(dir) == output_root:
+            candidates.append(path)
+        return raw_path
+
+    def fail_first_candidate_write(path: Path, payload: bytes, mode: int) -> None:
+        if candidates and path.is_relative_to(candidates[0]):
+            raise release_module.ProviderReleaseError("injected candidate write failure")
+        original_write_file(path, payload, mode)
+
+    def swap_external_before_recursive_delete(path: Path, *args: object, **kwargs: object) -> None:
+        target = Path(path)
+        if candidates and target == candidates[0] and external.exists():
+            hidden_displaced = target.with_name(target.name + ".displaced")
+            target.rename(hidden_displaced)
+            external.rename(target)
+            displaced.append(hidden_displaced)
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", record_candidate)
+    monkeypatch.setattr(release_module, "_write_file", fail_first_candidate_write)
+    monkeypatch.setattr(release_module.shutil, "rmtree", swap_external_before_recursive_delete)
+
+    with pytest.raises(ProviderReleaseError):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
+        )
+
+    assert external.is_dir()
+    assert external_file.read_text(encoding="utf-8") == "do not delete or chmod\n"
+    assert stat.S_IMODE(external.lstat().st_mode) == 0o555
+    assert stat.S_IMODE(external_file.lstat().st_mode) == 0o444
+    assert displaced == []
 
 
 def test_certified_release_refuses_whole_publication_when_any_architecture_drifts(
@@ -1011,18 +1222,18 @@ def test_certified_release_refuses_whole_publication_when_any_architecture_drift
     assert not list((tmp_path / "out").glob("*/release-manifest.json"))
 
 
-def test_certified_release_final_rename_failure_leaves_no_visible_publication(
+def test_certified_release_final_rename_failure_preserves_original_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from scripts.ops import task_image_builder_provider_release as release_module
-
+    # Mutation caught: final publication failure deletes the single assembled
+    # release-set candidate instead of preserving it as failure evidence.
     source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
     output_root = tmp_path / "out"
     original_rename = release_module._rename_noreplace
 
     def fail_final_publish(path: Path, target: Path) -> None:
-        if path.name.startswith(".provider-release-set-final."):
+        if path.name.startswith(".provider-release-set.") and target.parent == output_root:
             raise release_module.ProviderReleaseError("injected final publish failure")
         original_rename(path, target)
 
@@ -1041,9 +1252,10 @@ def test_certified_release_final_rename_failure_leaves_no_visible_publication(
         )
 
     assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
-    preserved = list(output_root.glob(".provider-release-set-final.*"))
+    preserved = list(output_root.glob(".provider-release-set.*"))
     assert len(preserved) == 1
-    assert list(preserved[0].rglob("release-manifest.json"))
+    assert (preserved[0] / "provider-release-set-manifest.json").is_file()
+    assert len(list(preserved[0].rglob("release-manifest.json"))) == 2
 
 
 def test_certified_release_never_exposes_architecture_siblings_at_output_root(
@@ -1069,86 +1281,6 @@ def test_certified_release_never_exposes_architecture_siblings_at_output_root(
     assert set(release.directory.parent for release in releases.values()) == {release_set}
     assert not any((output_root / release.release_sha256).exists() for release in releases.values())
     assert not any((output_root / f"{release.release_sha256}.manifest.json").exists() for release in releases.values())
-
-
-@pytest.mark.parametrize(
-    "failure_step",
-    (
-        "set-directory",
-        "x86-leaf-copy",
-        "aarch64-leaf-copy",
-        "set-manifest",
-        "seal-set",
-        "final-rename",
-    ),
-)
-def test_certified_release_failures_before_final_rename_leave_only_hidden_residue(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_step: str,
-) -> None:
-    from scripts.ops import task_image_builder_provider_release as release_module
-
-    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
-    output_root = tmp_path / "out"
-    original_copy_leaf = release_module._copy_release_leaf
-    original_write_file = release_module._write_file
-    original_seal_tree = release_module._seal_release_tree
-    original_rename = release_module._rename_noreplace
-
-    def fail_copy_leaf(
-        release: object,
-        target_path: Path,
-        *,
-        architecture: Architecture,
-    ) -> None:
-        if failure_step == "x86-leaf-copy" and architecture == "x86_64":
-            raise release_module.ProviderReleaseError("injected x86 leaf copy failure")
-        if failure_step == "aarch64-leaf-copy" and architecture == "aarch64":
-            raise release_module.ProviderReleaseError("injected aarch64 leaf copy failure")
-        original_copy_leaf(release, target_path, architecture=architecture)
-
-    def fail_mkdtemp(*, prefix: str, dir: Path | str | None = None) -> str:
-        if failure_step == "set-directory":
-            raise OSError("injected release set directory failure")
-        return original_mkdtemp(prefix=prefix, dir=dir)
-
-    def fail_write_file(path: Path, payload: bytes, mode: int) -> None:
-        if failure_step == "set-manifest" and path.name == "provider-release-set-manifest.json":
-            raise release_module.ProviderReleaseError("injected set manifest failure")
-        original_write_file(path, payload, mode)
-
-    def fail_seal_tree(path: Path) -> None:
-        if failure_step == "seal-set" and path.name.startswith(".provider-release-set-final."):
-            raise release_module.ProviderReleaseError("injected seal failure")
-        original_seal_tree(path)
-
-    def fail_rename(source_path: Path, destination_path: Path) -> None:
-        if failure_step == "final-rename" and source_path.name.startswith(".provider-release-set-final."):
-            raise release_module.ProviderReleaseError("injected final rename failure")
-        original_rename(source_path, destination_path)
-
-    original_mkdtemp = release_module.tempfile.mkdtemp
-    monkeypatch.setattr(release_module, "_copy_release_leaf", fail_copy_leaf)
-    monkeypatch.setattr(release_module.tempfile, "mkdtemp", fail_mkdtemp)
-    monkeypatch.setattr(release_module, "_write_file", fail_write_file)
-    monkeypatch.setattr(release_module, "_seal_release_tree", fail_seal_tree)
-    monkeypatch.setattr(release_module, "_rename_noreplace", fail_rename)
-
-    with pytest.raises((release_module.ProviderReleaseError, OSError)):
-        build_certified_releases(
-            source,
-            output_root,
-            guard_release_directories=guard_releases,
-            runtime_roots=runtime_roots,
-            build_supervisor=lambda _src, arch: _elf_payload(
-                62 if arch == "x86_64" else 183,
-                "supervisor",
-            ),
-        )
-
-    visible = [item for item in output_root.iterdir() if not item.name.startswith(".")]
-    assert visible == []
 
 
 def test_release_assembler_cli_requires_both_architecture_inputs() -> None:
