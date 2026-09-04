@@ -118,6 +118,7 @@ class VerifiedProviderRelease:
 
 
 _FileIdentity = tuple[int, int, int, int, int, int, int, int, int]
+_DirectoryIdentity = tuple[int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +221,10 @@ def _file_identity(metadata: os.stat_result) -> _FileIdentity:
         metadata.st_uid,
         metadata.st_gid,
     )
+
+
+def _directory_identity(metadata: os.stat_result) -> _DirectoryIdentity:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_uid)
 
 
 def _inspect_regular(
@@ -881,6 +886,44 @@ def _seal_release_tree(candidate: Path) -> None:
     candidate.chmod(0o555)
 
 
+def _remove_temp_staging_tree(
+    staging: Path,
+    *,
+    output_root: Path,
+    expected_identity: _DirectoryIdentity,
+) -> None:
+    try:
+        metadata = staging.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ProviderReleaseError("release set staging cleanup failed") from exc
+    if (
+        staging.parent != output_root
+        or not staging.name.startswith(".provider-release-set.")
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or _directory_identity(metadata) != expected_identity
+    ):
+        raise ProviderReleaseError("release set staging cleanup target is invalid")
+    try:
+        for root_name, _dirnames, _filenames in os.walk(
+            staging,
+            topdown=False,
+            followlinks=False,
+        ):
+            root = Path(root_name)
+            root_metadata = root.lstat()
+            if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+                raise ProviderReleaseError("release set staging cleanup target is invalid")
+            root.chmod(0o755)
+        shutil.rmtree(staging)
+    except ProviderReleaseError:
+        raise
+    except OSError as exc:
+        raise ProviderReleaseError("release set staging cleanup failed") from exc
+
+
 def _rename_noreplace(source: Path, destination: Path) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
@@ -1214,6 +1257,7 @@ def build_certified_releases(
         output_root = _validate_root(output_root, "output root")
     staging = Path(tempfile.mkdtemp(prefix=".provider-release-set.", dir=output_root))
     staging.chmod(0o755)
+    staging_identity = _directory_identity(staging.lstat())
     final_candidate: Path | None = None
     try:
         staged: dict[Architecture, ProviderRelease] = {}
@@ -1269,7 +1313,11 @@ def build_certified_releases(
     except BaseException:
         raise
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        _remove_temp_staging_tree(
+            staging,
+            output_root=output_root,
+            expected_identity=staging_identity,
+        )
 
 
 def _read_reviewed_spec(

@@ -916,6 +916,33 @@ def test_certified_release_builds_both_architectures_twice_all_or_nothing(
     assert calls == ["x86_64", "x86_64", "aarch64", "aarch64"]
 
 
+def test_certified_release_success_removes_hidden_staging_directory(
+    tmp_path: Path,
+) -> None:
+    # Mutation caught: cleanup that ignores rmtree failures leaves a sealed
+    # hidden .provider-release-set.* staging tree next to the final release set.
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+
+    build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    entries = sorted(output_root.iterdir(), key=lambda item: item.name)
+    assert len(entries) == 1
+    [release_set] = entries
+    assert release_set.is_dir()
+    assert not release_set.name.startswith(".")
+    assert (release_set / "provider-release-set-manifest.json").is_file()
+
+
 def test_certified_release_refuses_whole_publication_when_any_architecture_drifts(
     tmp_path: Path,
 ) -> None:
