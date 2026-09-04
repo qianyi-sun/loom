@@ -23,13 +23,19 @@ from loom.errors import AgentError, classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
 from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
 from loom.models.task import StepConfig
-from loom.models.trajectory import AgentRetryEvent, StepEndEvent, StepStartEvent
+from loom.models.trajectory import (
+    AgentRetryEvent,
+    AgentTimeoutEvent,
+    StepEndEvent,
+    StepStartEvent,
+)
 from loom.models.trial import RetryPolicy, RetryReason
 from loom.models.verifier import VerifierError, VerifierResult
 from loom.retry import next_attempt_at
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.artifacts import ArtifactCollector
+from loom.trial.attempt_supervisor import supervise_agent_attempt
 from loom.trial.phase_network import phase_network
 from loom.trial.stale_running import effective_agent_timeout_sec
 from loom.trial.workspace import materialize_workspace
@@ -125,6 +131,21 @@ async def _run_step_impl(
         )
     )
 
+    if getattr(ctx.agent, "_loom_worker_unhealthy", False):
+        return await _finish_unhealthy_step(
+            ctx=ctx,
+            step=step,
+            trajectory=trajectory,
+            seq=seq,
+            started_at=sr_started,
+            error=StepError(
+                phase="agent",
+                reason="timeout",
+                message="prior agent attempt remained active after cancellation drain",
+                occurred_at=datetime.now(UTC),
+            ),
+        )
+
     # Agent phase ──────────────────────────────────────────────────────────
     agent_timeout = _resolve_agent_timeout(ctx, step)
     _apply_step_token_ttl(ctx.agent, agent_timeout)
@@ -141,6 +162,20 @@ async def _run_step_impl(
         instruction=instruction,
         seq=seq,
     )
+
+    # A cancellation-resistant agent still owns and may mutate its workspace.
+    # Preserve the platform-owned timeout/step-end trajectory, but do not start
+    # verifier or artifact reads against that concurrently changing state. The
+    # worker layer observes this flag after terminal projection and restarts.
+    if getattr(ctx.agent, "_loom_worker_unhealthy", False):
+        return await _finish_unhealthy_step(
+            ctx=ctx,
+            step=step,
+            trajectory=trajectory,
+            seq=seq,
+            started_at=sr_started,
+            error=sr_error,
+        )
 
     artifacts_uri: str | None = None
     artifacts: list[ArtifactRef] = []
@@ -357,6 +392,39 @@ class _SeqCounter:
         v = self._n
         self._n += 1
         return v
+
+
+async def _finish_unhealthy_step(
+    *,
+    ctx: TrialContext,
+    step: StepConfig,
+    trajectory: TrajectoryWriter,
+    seq: _SeqCounter,
+    started_at: datetime,
+    error: StepError | None,
+) -> StepResult:
+    """Terminalize a step without reading a workspace still owned by an agent."""
+
+    result = StepResult(
+        step_name=step.name,
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        verifier_result=None,
+        error=error,
+        artifacts_uri=None,
+        artifacts=[],
+    )
+    await trajectory.append(
+        StepEndEvent(
+            emitted_at=datetime.now(UTC),
+            trial_id=ctx.trial_id,
+            step_id=step.name,
+            seq=seq.next(),
+            summary=None,
+            error_phase=error.phase if error else "agent",
+        )
+    )
+    return result
 
 
 def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
@@ -617,23 +685,72 @@ async def _run_agent_with_retry(
     attempt = 1
     while True:
         try:
-            async with phase_network(
-                ctx.driver,
-                baseline=baseline_policy,
-                phase=agent_phase,
-            ):
-                await asyncio.wait_for(
-                    ctx.agent.run(
+            async def run_attempt(
+                guarded_trajectory: TrajectoryWriter,
+            ) -> None:
+                async with phase_network(
+                    ctx.driver,
+                    baseline=baseline_policy,
+                    phase=agent_phase,
+                ):
+                    await ctx.agent.run(
                         instruction=instruction,
                         env=ctx.driver,
-                        trajectory=trajectory,
+                        trajectory=guarded_trajectory,
                         mcp=[],
                         skills_dir=None,
                         step_id=step.name,
+                    )
+
+            timeout_diagnostic = await supervise_agent_attempt(
+                agent=ctx.agent,
+                configured_timeout_sec=agent_timeout,
+                trajectory=trajectory,
+                run=run_attempt,
+            )
+            if timeout_diagnostic is None:
+                return None
+
+            message = f"agent run exceeded {agent_timeout}s"
+            await trajectory.append(
+                AgentTimeoutEvent(
+                    emitted_at=datetime.now(UTC),
+                    trial_id=ctx.trial_id,
+                    step_id=step.name,
+                    seq=seq.next(),
+                    configured_timeout_sec=(
+                        timeout_diagnostic.configured_timeout_sec
                     ),
-                    timeout=agent_timeout,
+                    elapsed_monotonic_sec=(
+                        timeout_diagnostic.elapsed_monotonic_sec
+                    ),
+                    cancellation_drain_sec=(
+                        timeout_diagnostic.cancellation_drain_sec
+                    ),
+                    transport_close_required=(
+                        timeout_diagnostic.transport_close_required
+                    ),
+                    task_stopped=timeout_diagnostic.task_stopped,
                 )
-            return None
+            )
+            if timeout_diagnostic.task_stopped and await _maybe_retry_agent_failure(
+                policy=policy,
+                retry_reason=RetryReason.AGENT_TIMEOUT,
+                failure_message=message,
+                attempt=attempt,
+                trajectory=trajectory,
+                ctx=ctx,
+                step=step,
+                seq=seq,
+            ):
+                attempt += 1
+                continue
+            return StepError(
+                phase="agent",
+                reason="timeout",
+                message=message,
+                occurred_at=datetime.now(UTC),
+            )
         except TimeoutError:
             message = f"agent run exceeded {agent_timeout}s"
             if await _maybe_retry_agent_failure(
