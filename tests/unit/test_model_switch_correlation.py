@@ -175,6 +175,56 @@ async def test_persist_beta_plan_accepts_episode_1_teacher() -> None:
     assert result["role"] == "teacher"
 
 
+def _turn_plan() -> SimpleNamespace:
+    return SimpleNamespace(
+        provider_connection_id=None,
+        student_model_snapshot={"name": "glm-5.2"},
+        teacher_model_snapshot={"name": "glm-5.2-urg"},
+        mix_mode="student_to_teacher_turns",
+        k1=2,
+        k2=3,
+        beta=None,
+        seed="turn-seed",
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_turn_plan_forces_teacher_at_step_end() -> None:
+    extras = _student_extras(requested_model="openai/glm-5.2-urg")
+    extras["loom_role"] = "teacher"
+    extras["loom_call_ordinal"] = 3
+    session = _FakeSession(_turn_plan())
+    result = await persist_correlated_intent(
+        session,  # type: ignore[arg-type]
+        trial_id=uuid4(),
+        step_id="agent",
+        extras=extras,
+        jwt_connection_id=None,
+        requested_model="glm-5.2-urg",
+    )
+    assert result["correlation_status"] == "correlated"
+    assert result["role"] == "teacher"
+
+
+@pytest.mark.asyncio
+async def test_persist_turn_plan_rejects_wrong_role_before_window() -> None:
+    extras = _student_extras(requested_model="openai/glm-5.2-urg")
+    extras["loom_role"] = "teacher"
+    extras["loom_call_ordinal"] = 1
+    session = _FakeSession(_turn_plan())
+    with pytest.raises(HTTPException) as exc:
+        await persist_correlated_intent(
+            session,  # type: ignore[arg-type]
+            trial_id=uuid4(),
+            step_id="agent",
+            extras=extras,
+            jwt_connection_id=None,
+            requested_model="glm-5.2-urg",
+        )
+    assert exc.value.status_code == 400
+    assert "does not match plan role" in str(exc.value.detail)
+
+
 @pytest.mark.asyncio
 async def test_persist_still_rejects_different_models() -> None:
     session = _FakeSession(_switch_plan())

@@ -18,13 +18,17 @@ from loom.models.types import ModelSpec
 
 def plan_snapshot_from_row(row: ModelSwitchPlan) -> ModelSwitchPlanSnapshot:
     mix_mode = row.mix_mode or "student_teacher_student"
-    if mix_mode not in {"student_teacher_student", "beta_mixture"}:
+    if mix_mode not in {
+        "student_teacher_student",
+        "beta_mixture",
+        "student_to_teacher_turns",
+    }:
         mix_mode = "student_teacher_student"
     return ModelSwitchPlanSnapshot(
         id=row.id,
         trial_id=row.trial_id,
         combination_idx=row.combination_idx,
-        mix_mode=mix_mode,
+        mix_mode=mix_mode,  # type: ignore[arg-type]
         k1=row.k1,
         k2=row.k2,
         teacher_episodes=row.teacher_episodes,
@@ -71,6 +75,13 @@ async def persist_model_switch_plan(
         k2 = None
         teacher_episodes = None
         beta = float(spec.beta)
+    elif mix_mode == "student_to_teacher_turns":
+        if spec.step_start is None or spec.step_end is None:
+            return None
+        k1 = int(spec.step_start)
+        k2 = int(spec.step_end)
+        teacher_episodes = None
+        beta = None
     else:
         if spec.switch_episode is None or spec.return_switch_episode is None:
             return None

@@ -537,10 +537,12 @@ class LoomTerminus2Runtime:
             enable_summarize=False,
             llm_kwargs={"api_key": step_token},
         )
-        # LiteLLM already received the step JWT via constructor kwargs copy.
-        # Strip it from Harbor's trajectory dump field for single- and
-        # multi-model runs (install_role_router also redacts; idempotent).
-        redact_agent_llm_kwargs(agent)
+        # Student LiteLLM already received the step JWT via constructor kwargs.
+        # Multi-model invariant (all policies): never redact agent._llm_kwargs
+        # before install_role_router. Teacher construction copies gateway auth
+        # from those kwargs (and can recover from student._llm_kwargs).
+        # install_role_router redacts the dump field only after the teacher
+        # LiteLLM exists. Single-model redacts here.
         model_switch = None
         if self.multi_model is not None and self.multi_model.enabled:
             if self.multi_model.secondary_model is None:
@@ -614,7 +616,9 @@ class LoomTerminus2Runtime:
                         trial_id=self.trial_id,
                         step_id=step_id,
                         seq=0,
+                        policy="beta_mixture",
                         beta=float(beta),
+                        grain="episode",
                         seed_fingerprint=seed_fingerprint(str(seed)),
                         student_model=student,
                         teacher_model=teacher,
@@ -623,6 +627,42 @@ class LoomTerminus2Runtime:
                 router_kwargs.update(
                     mix_mode="beta_mixture",
                     beta=float(beta),
+                    seed=str(seed),
+                    trial_id=self.trial_id,
+                )
+            elif mix_mode == "student_to_teacher_turns":
+                step_start = int(
+                    plan.get("k1") or self.multi_model.step_start or 0,
+                )
+                step_end = int(
+                    plan.get("k2") or self.multi_model.step_end or 0,
+                )
+                seed = plan.get("seed")
+                if step_start < 2 or step_end <= step_start or not seed:
+                    raise AgentError(
+                        "model_switch_plan step_start/step_end/seed must be "
+                        "materialized before terminus-2 run",
+                    )
+                await trajectory.append(
+                    Terminus2ModelMixPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        policy="student_to_teacher_turns",
+                        beta=None,
+                        grain="turn",
+                        step_start=step_start,
+                        step_end=step_end,
+                        seed_fingerprint=seed_fingerprint(str(seed)),
+                        student_model=student,
+                        teacher_model=teacher,
+                    ),
+                )
+                router_kwargs.update(
+                    mix_mode="student_to_teacher_turns",
+                    step_start=step_start,
+                    step_end=step_end,
                     seed=str(seed),
                     trial_id=self.trial_id,
                 )
@@ -678,6 +718,8 @@ class LoomTerminus2Runtime:
             )
             self._terminus_execution_id = recovery.get("agent_execution_id")
             self._terminus_run_attempt_id = recovery.get("agent_run_attempt_id")
+        else:
+            redact_agent_llm_kwargs(agent)
 
         context = agent_context_cls()
         trajectory_path = logs_root / "trajectory.json"

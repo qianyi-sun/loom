@@ -161,9 +161,11 @@ interface AdvancedState {
   multiModelEnabled: boolean;
   teacherModelName: string;
   teacherEpisodes: string;
-  multiModelPolicy: "student_teacher_student" | "beta_mixture";
+  multiModelPolicy: "student_teacher_student" | "beta_mixture" | "student_to_teacher_turns";
   multiModelBeta: string;
   multiModelSeed: string;
+  multiModelStepStart: string;
+  multiModelStepEnd: string;
 }
 
 const INITIAL_ADVANCED: AdvancedState = {
@@ -190,6 +192,8 @@ const INITIAL_ADVANCED: AdvancedState = {
   multiModelPolicy: "student_teacher_student",
   multiModelBeta: "0.6",
   multiModelSeed: "",
+  multiModelStepStart: "2",
+  multiModelStepEnd: "9",
 };
 
 function buildAdvancedConfig(
@@ -290,6 +294,29 @@ function buildAdvancedConfig(
         enabled: true,
         policy: "beta_mixture",
         beta,
+        secondary_model: {
+          provider: "openai",
+          name: teacher,
+          source: "api",
+        },
+      };
+      const mixSeed = s.multiModelSeed.trim();
+      if (mixSeed) {
+        (out.multi_model as Record<string, unknown>).mix_seed = mixSeed;
+      }
+    } else if (s.multiModelPolicy === "student_to_teacher_turns") {
+      const stepStart = numOrErr(s.multiModelStepStart, "Step start", { min: 2 });
+      if (typeof stepStart === "string") return { ok: false, error: stepStart };
+      const stepEnd = numOrErr(s.multiModelStepEnd, "Step end", { min: 3 });
+      if (typeof stepEnd === "string") return { ok: false, error: stepEnd };
+      if (stepEnd === undefined || stepStart === undefined || stepEnd <= stepStart) {
+        return { ok: false, error: "Step end must be greater than step start." };
+      }
+      out.multi_model = {
+        enabled: true,
+        policy: "student_to_teacher_turns",
+        step_start: stepStart,
+        step_end: stepEnd,
         secondary_model: {
           provider: "openai",
           name: teacher,
@@ -2080,6 +2107,19 @@ export default function NewBatch(): JSX.Element {
                           />
                           Per-episode beta coin
                         </label>
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input
+                            type="radio"
+                            name="multiModelPolicy"
+                            checked={
+                              advanced.multiModelPolicy === "student_to_teacher_turns"
+                            }
+                            onChange={() =>
+                              setAdv("multiModelPolicy", "student_to_teacher_turns")
+                            }
+                          />
+                          Turn schedule (rising beta + latch)
+                        </label>
                       </fieldset>
                       {advanced.multiModelPolicy === "beta_mixture" ? (
                         <>
@@ -2098,6 +2138,55 @@ export default function NewBatch(): JSX.Element {
                             <Help>
                               Teacher drives the episode when the replay-safe
                               hash is less than beta.
+                            </Help>
+                          </label>
+                          <label className="block max-w-md">
+                            <FieldLabel>Mix seed (optional)</FieldLabel>
+                            <Input
+                              value={advanced.multiModelSeed}
+                              onChange={(e) =>
+                                setAdv("multiModelSeed", e.target.value)
+                              }
+                              placeholder="Server generates one if empty"
+                            />
+                          </label>
+                        </>
+                      ) : advanced.multiModelPolicy === "student_to_teacher_turns" ? (
+                        <>
+                          <label className="block max-w-xs">
+                            <FieldLabel>Step start (call ordinal)</FieldLabel>
+                            <Input
+                              type="number"
+                              min={2}
+                              value={advanced.multiModelStepStart}
+                              onChange={(e) =>
+                                setAdv(
+                                  "multiModelStepStart",
+                                  clampInt(e.target.value, 2, 1000),
+                                )
+                              }
+                            />
+                            <Help>
+                              Always student before this turn. Rising teacher
+                              probability from here until step end.
+                            </Help>
+                          </label>
+                          <label className="block max-w-xs">
+                            <FieldLabel>Step end (force teacher)</FieldLabel>
+                            <Input
+                              type="number"
+                              min={3}
+                              value={advanced.multiModelStepEnd}
+                              onChange={(e) =>
+                                setAdv(
+                                  "multiModelStepEnd",
+                                  clampInt(e.target.value, 3, 1000),
+                                )
+                              }
+                            />
+                            <Help>
+                              Force teacher at this turn and latch for the rest
+                              of the trial.
                             </Help>
                           </label>
                           <label className="block max-w-md">

@@ -20,9 +20,12 @@ class ModelSwitchPlanSnapshot(BaseModel):
     id: UUID
     trial_id: UUID
     combination_idx: int = 0
-    mix_mode: Literal["student_teacher_student", "beta_mixture"] = (
-        "student_teacher_student"
-    )
+    mix_mode: Literal[
+        "student_teacher_student",
+        "beta_mixture",
+        "student_to_teacher_turns",
+    ] = "student_teacher_student"
+    # K1/K2 for STS; for student_to_teacher_turns these store step_start/step_end.
     k1: int | None = Field(default=None, ge=2)
     k2: int | None = Field(default=None, ge=3)
     teacher_episodes: int | None = Field(default=None, ge=1)

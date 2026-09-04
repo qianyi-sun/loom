@@ -15,7 +15,11 @@ from loom.models.skill import SkillRef
 from loom.models.types import ModelSpec, VerifierEnvMode
 from loom.request_params import sanitize_request_extras
 
-MixPolicy = Literal["student_teacher_student", "beta_mixture"]
+MixPolicy = Literal[
+    "student_teacher_student",
+    "beta_mixture",
+    "student_to_teacher_turns",
+]
 
 
 class MultiModelSwitchSpec(BaseModel):
@@ -24,13 +28,16 @@ class MultiModelSwitchSpec(BaseModel):
     Primary ``TrialConfig.agent_model`` is the student. ``secondary_model`` is
     the teacher. Same BYO provider connection.
 
-    Two policies share ``LoomRoleRouter``:
+    Policies share ``LoomRoleRouter``:
 
     * ``student_teacher_student`` — contiguous Harbor-episode blocks
       (K1 / teacher_episodes / K2). Default.
     * ``beta_mixture`` — per-episode coin: teacher if ``draw < beta``.
       Replay-safe hash of plan seed + trial id + episode. Not DAgger
       labels; only who drives the docker.
+    * ``student_to_teacher_turns`` — chat-completion turn grain: student
+      until ``step_start``, rising β until ``step_end``, then force teacher
+      with one-way latch. Not DAgger labels.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -46,6 +53,9 @@ class MultiModelSwitchSpec(BaseModel):
     episode_ceiling: int = Field(default=50, ge=2, le=1000)
     # Path B: P(teacher drives this episode). Forbidden on the K1/K2 policy.
     beta: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Turn schedule window (1-based call_ordinal). Stored as plan k1/k2.
+    step_start: int | None = Field(default=None, ge=2)
+    step_end: int | None = Field(default=None, ge=3)
     # Optional client seed copied onto model_switch_plans.seed. Not ``seed``.
     mix_seed: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -62,10 +72,39 @@ class MultiModelSwitchSpec(BaseModel):
                 raise ValueError("multi_model.beta is required when policy is beta_mixture")
             if self.switch_episode is not None or self.return_switch_episode is not None:
                 raise ValueError("beta_mixture cannot set K1/K2 switch episodes")
+            if self.step_start is not None or self.step_end is not None:
+                raise ValueError("beta_mixture cannot set step_start/step_end")
+            return self
+        if self.policy == "student_to_teacher_turns":
+            if not self.enabled:
+                return self
+            if self.beta is not None:
+                raise ValueError(
+                    "student_to_teacher_turns cannot set multi_model.beta",
+                )
+            if self.switch_episode is not None or self.return_switch_episode is not None:
+                raise ValueError(
+                    "student_to_teacher_turns cannot set K1/K2 switch episodes",
+                )
+            if self.step_start is None or self.step_end is None:
+                raise ValueError(
+                    "multi_model.step_start and step_end are required when "
+                    "policy is student_to_teacher_turns",
+                )
+            if self.step_end <= self.step_start:
+                raise ValueError(
+                    "multi_model.step_end must be > multi_model.step_start",
+                )
             return self
         if self.beta is not None or self.mix_seed is not None:
             raise ValueError(
-                "multi_model.beta and mix_seed require policy beta_mixture",
+                "multi_model.beta and mix_seed require policy beta_mixture "
+                "or student_to_teacher_turns",
+            )
+        if self.step_start is not None or self.step_end is not None:
+            raise ValueError(
+                "multi_model.step_start/step_end require policy "
+                "student_to_teacher_turns",
             )
         if (
             self.switch_episode is not None
@@ -107,7 +146,18 @@ def materialize_multi_model_switch_episode(
         data.pop("return_switch_episode", None)
         data.pop("teacher_episodes", None)
         data.pop("episode_ceiling", None)
+        data.pop("step_start", None)
+        data.pop("step_end", None)
         return data
+    if data["policy"] == "student_to_teacher_turns":
+        data.pop("switch_episode", None)
+        data.pop("return_switch_episode", None)
+        data.pop("teacher_episodes", None)
+        data.pop("episode_ceiling", None)
+        data.pop("beta", None)
+        return data
+    data.pop("step_start", None)
+    data.pop("step_end", None)
     teacher_episodes = int(data.get("teacher_episodes") or 2)
     if teacher_episodes < 1:
         teacher_episodes = 1
