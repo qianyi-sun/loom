@@ -175,9 +175,7 @@ func TestConfigRejectsTrailingJSONGarbage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", configPath, err)
 	}
-	if err := os.WriteFile(configPath, append(payload, []byte("\n{}")...), 0o444); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", configPath, err)
-	}
+	rewriteReadOnlyFixture(t, configPath, append(payload, []byte("\n{}")...))
 
 	if _, err := LoadConfig(configPath, release); err == nil {
 		t.Fatal("LoadConfig() succeeded, want trailing-document error")
@@ -348,6 +346,9 @@ func TestConfigRejectsExecutableMemberWithIntermediateSymlink(t *testing.T) {
 	if err := os.Chmod(releaseRoot, 0o755); err != nil {
 		t.Fatalf("Chmod(%q) error = %v", releaseRoot, err)
 	}
+	if err := os.Chmod(binDir, 0o755); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", binDir, err)
+	}
 	if err := os.RemoveAll(binDir); err != nil {
 		t.Fatalf("RemoveAll(%q) error = %v", binDir, err)
 	}
@@ -411,6 +412,13 @@ func makeReleaseTree(t *testing.T, root string, release string) releasePaths {
 			t.Fatalf("Chmod(%q) error = %v", dir, err)
 		}
 	}
+	t.Cleanup(func() {
+		for _, dir := range []string{binDir, runtimeDir, releaseRoot} {
+			if err := os.Chmod(dir, 0o755); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("Chmod(%q) cleanup error = %v", dir, err)
+			}
+		}
+	})
 
 	return releasePaths{
 		guardSocket:   filepath.Join(root, "run", "loom-task-image-builder-guard", "guard.sock"),
@@ -463,14 +471,22 @@ func replaceFileText(t *testing.T, path string, old string, new string) {
 		t.Fatalf("ReadFile(%q) error = %v", path, err)
 	}
 	updated := strings.ReplaceAll(string(payload), old, new)
-	if err := os.WriteFile(path, []byte(updated), 0o444); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", path, err)
-	}
+	rewriteReadOnlyFixture(t, path, []byte(updated))
 }
 
 func overwriteConfigValue(t *testing.T, path string, old string, new string) {
 	t.Helper()
 	replaceFileText(t, path, `"release_sha256":"`+old+`"`, `"release_sha256":"`+new+`"`)
+}
+
+func rewriteReadOnlyFixture(t *testing.T, path string, payload []byte) {
+	t.Helper()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", path, err)
+	}
+	if err := os.WriteFile(path, payload, 0o444); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
 }
 
 func useTestConfigPolicy(t *testing.T, root string) {
