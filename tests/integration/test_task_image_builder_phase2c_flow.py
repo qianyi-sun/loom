@@ -261,200 +261,203 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
     postgres_url: str,
 ) -> None:
     await _clear_authority_rows(postgres_url)
-    await _seed_released_grant(postgres_url)
-    materialization_id = await _seed_materialization(postgres_url)
-    settings = _settings(
-        tmp_path,
-        postgres_url,
-        principal_document=_principal_document(principal_id="gb10-trt-gb10-1"),
-        bundle_public_https_origin="https://objects.example",
-        bundle_expected_bucket="loom-bundles",
-        bundle_url_expiry_seconds=600,
-    )
-    bundle_backend = _FakeBundleBackend()
-    authority_events: list[str] = []
-    provider = TaskImageBundleCapabilityProvider(
-        backend=bundle_backend,
-        public_https_origin=settings.bundle_public_https_origin or "",
-        expected_bucket=settings.bundle_expected_bucket or "",
-        maximum_objects=settings.bundle_maximum_objects,
-        maximum_bytes=settings.bundle_maximum_bytes,
-        url_expiry_seconds=settings.bundle_url_expiry_seconds,
-    )
-
-    def flow_now() -> datetime:
-        if "authority_api_start" in authority_events:
-            return NOW + timedelta(seconds=61)
-        return NOW + timedelta(seconds=30)
-
-    app = create_app(
-        settings,
-        verifier=TaskImagePrincipalVerifier.from_file(settings.principals_file),
-        now_factory=flow_now,
-        bundle_capability_provider=provider,
-    )
-
-    with TestClient(app) as client:
-        service, ledger, _peer, _slurm, guard_events = _service(
-            tmp_path,
-            now_factory=flow_now,
-        )
-        service._uuid = _phase2c_uuid_factory().__next__  # type: ignore[method-assign]
-        _peer.executable_sha256 = SUPERVISOR_SHA256
-        service.config = replace(
-            service.config,
-            slurm=replace(
-                service.config.slurm,
-                request_sha256=canonical_request_sha256(_policy().request_identity()),
-            ),
-            containment=replace(
-                service.config.containment,
-                containment_policy_sha256="4" * 64,
-                resource_profile_sha256="5" * 64,
-                bpf_program_sha256="7" * 64,
-                bpf_map_schema_sha256="8" * 64,
-            ),
-        )
-        service.containment.containment_policy_sha256 = "4" * 64  # type: ignore[attr-defined]
-        service.containment.resource_limits_sha256 = "5" * 64  # type: ignore[attr-defined]
-        service.containment.bpf_program_sha256 = "7" * 64  # type: ignore[attr-defined]
-        service.containment.bpf_map_schema_sha256 = "8" * 64  # type: ignore[attr-defined]
-        service.containment.probe_sha256 = "9" * 64  # type: ignore[attr-defined]
-        local_build_egress_cgroup = service.containment.build_egress_cgroup  # type: ignore[attr-defined]
-        authority_build_egress_cgroup = (
-            "/sys/fs/cgroup/slurm/job_12345/step_batch/user/task_0"
-            "/loom-builder/build-egress"
-        )
-        service.containment.build_egress_cgroup = Path(authority_build_egress_cgroup)  # type: ignore[attr-defined]
-        open_directory_capability = service._open_directory_capability
-
-        def mapped_open_directory_capability(self: object, path: str):
-            del self
-            if str(path) == authority_build_egress_cgroup:
-                return open_directory_capability(local_build_egress_cgroup)
-            return open_directory_capability(path)
-
-        service._open_directory_capability = MethodType(  # type: ignore[method-assign]
-            mapped_open_directory_capability,
-            service,
-        )
-        service.authority = _FastAPIAuthorityAdapter(client, authority_events)  # type: ignore[assignment]
-
-        failure: list[BaseException] = []
-
-        def run_service() -> None:
-            try:
-                service.start()
-            except BaseException as exc:  # pragma: no cover - reported below
-                failure.append(exc)
-
-        thread = Thread(target=run_service)
-        thread.start()
-        deadline = time.monotonic() + 5
-        while not service.config.protocol.socket_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert service.config.protocol.socket_path.exists()
-
-        repo = Path(__file__).resolve().parents[2]
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--pid=host",
-                "--user",
-                f"{os.getuid()}:{os.getgid()}",
-                "-v",
-                f"{repo}:/src:ro",
-                "-v",
-                f"{tmp_path}:{tmp_path}",
-                "-e",
-                "GOCACHE=/tmp/loom-go-cache",
-                "-e",
-                "GOMODCACHE=/tmp/loom-go-mod-cache",
-                "-e",
-                "LOOM_PHASE2C_SOCKET",
-                "-e",
-                "LOOM_PHASE2C_GRANT_ID",
-                "-e",
-                "LOOM_PHASE2C_MATERIALIZATION_ID",
-                "-e",
-                "LOOM_PHASE2C_GOARCH_OVERRIDE",
-                "-w",
-                "/src",
-                "golang:1.23.4-bookworm",
-                "go",
-                "test",
-                "./cmd/loom-task-image-builder-supervisor",
-                "-run",
-                "^TestSupervisorExternalGuardFlow$",
-                "-count=1",
-                "-timeout=30s",
-                "-v",
-            ],
-            cwd=repo,
-            env={
-                **os.environ,
-                "LOOM_PHASE2C_SOCKET": str(service.config.protocol.socket_path),
-                "LOOM_PHASE2C_GRANT_ID": str(GRANT_ID),
-                "LOOM_PHASE2C_MATERIALIZATION_ID": str(materialization_id),
-                "LOOM_PHASE2C_GOARCH_OVERRIDE": "arm64",
-            },
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-
-        service.stop()
-        thread.join(timeout=5)
-        service.close()
-        ledger_entry = ledger.get(GRANT_ID)
-        ledger_document = None if ledger_entry is None else ledger_entry.document()
-        ledger.close()
-
-    assert failure == []
-    assert result.returncode == 0, (
-        result.stdout
-        + f"\nauthority_events={authority_events!r}"
-        + f"\nguard_events={guard_events!r}"
-        + f"\nledger={ledger_document!r}"
-    )
-    assert "PASS: TestSupervisorExternalGuardFlow" in result.stdout
-    assert "sentinel" not in result.stdout
-    assert "X-Amz-Signature" not in result.stdout
-    assert {"authority_api_challenge", "authority_api_attach", "authority_api_exchange", "authority_api_renew", "authority_api_claim", "authority_api_bundle", "authority_api_start", "authority_api_release"}.issubset(set(authority_events))
-    assert "storage_cleanup" not in guard_events
-
-    engine = create_async_engine(postgres_url)
     try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        async with factory() as session:
-            projection = await session.scalar(
-                select(TaskImageBuildProjection).where(
-                    TaskImageBuildProjection.grant_id == GRANT_ID
+        await _seed_released_grant(postgres_url)
+        materialization_id = await _seed_materialization(postgres_url)
+        settings = _settings(
+            tmp_path,
+            postgres_url,
+            principal_document=_principal_document(principal_id="gb10-trt-gb10-1"),
+            bundle_public_https_origin="https://objects.example",
+            bundle_expected_bucket="loom-bundles",
+            bundle_url_expiry_seconds=600,
+        )
+        bundle_backend = _FakeBundleBackend()
+        authority_events: list[str] = []
+        provider = TaskImageBundleCapabilityProvider(
+            backend=bundle_backend,
+            public_https_origin=settings.bundle_public_https_origin or "",
+            expected_bucket=settings.bundle_expected_bucket or "",
+            maximum_objects=settings.bundle_maximum_objects,
+            maximum_bytes=settings.bundle_maximum_bytes,
+            url_expiry_seconds=settings.bundle_url_expiry_seconds,
+        )
+
+        def flow_now() -> datetime:
+            if "authority_api_start" in authority_events:
+                return NOW + timedelta(seconds=61)
+            return NOW + timedelta(seconds=30)
+
+        app = create_app(
+            settings,
+            verifier=TaskImagePrincipalVerifier.from_file(settings.principals_file),
+            now_factory=flow_now,
+            bundle_capability_provider=provider,
+        )
+
+        with TestClient(app) as client:
+            service, ledger, _peer, _slurm, guard_events = _service(
+                tmp_path,
+                now_factory=flow_now,
+            )
+            service._uuid = _phase2c_uuid_factory().__next__  # type: ignore[method-assign]
+            _peer.executable_sha256 = SUPERVISOR_SHA256
+            service.config = replace(
+                service.config,
+                slurm=replace(
+                    service.config.slurm,
+                    request_sha256=canonical_request_sha256(_policy().request_identity()),
+                ),
+                containment=replace(
+                    service.config.containment,
+                    containment_policy_sha256="4" * 64,
+                    resource_profile_sha256="5" * 64,
+                    bpf_program_sha256="7" * 64,
+                    bpf_map_schema_sha256="8" * 64,
                 )
             )
-            materialization = await session.get(TaskImageMaterialization, materialization_id)
-            attempts = (
-                await session.execute(
-                    select(TaskImageMaterializationAttempt).where(
-                        TaskImageMaterializationAttempt.materialization_id == materialization_id
-                    )
-                )
-            ).scalars().all()
-            events = (
-                await session.execute(
-                    select(TaskImageMaterializationOperationEvent).where(
-                        TaskImageMaterializationOperationEvent.materialization_id == materialization_id
-                    )
-                )
-            ).scalars().all()
-    finally:
-        await engine.dispose()
+            service.containment.containment_policy_sha256 = "4" * 64  # type: ignore[attr-defined]
+            service.containment.resource_limits_sha256 = "5" * 64  # type: ignore[attr-defined]
+            service.containment.bpf_program_sha256 = "7" * 64  # type: ignore[attr-defined]
+            service.containment.bpf_map_schema_sha256 = "8" * 64  # type: ignore[attr-defined]
+            service.containment.probe_sha256 = "9" * 64  # type: ignore[attr-defined]
+            local_build_egress_cgroup = service.containment.build_egress_cgroup  # type: ignore[attr-defined]
+            authority_build_egress_cgroup = (
+                "/sys/fs/cgroup/slurm/job_12345/step_batch/user/task_0"
+                "/loom-builder/build-egress"
+            )
+            service.containment.build_egress_cgroup = Path(authority_build_egress_cgroup)  # type: ignore[attr-defined]
+            open_directory_capability = service._open_directory_capability
 
-    assert projection is not None
-    assert projection.state == "exchanged"
-    assert materialization is not None
-    assert attempts
-    assert {event.operation_type for event in events} >= {"bundle", "start", "release"}
+            def mapped_open_directory_capability(self: object, path: str):
+                del self
+                if str(path) == authority_build_egress_cgroup:
+                    return open_directory_capability(local_build_egress_cgroup)
+                return open_directory_capability(path)
+
+            service._open_directory_capability = MethodType(  # type: ignore[method-assign]
+                mapped_open_directory_capability,
+                service,
+            )
+            service.authority = _FastAPIAuthorityAdapter(client, authority_events)  # type: ignore[assignment]
+
+            failure: list[BaseException] = []
+
+            def run_service() -> None:
+                try:
+                    service.start()
+                except BaseException as exc:  # pragma: no cover - reported below
+                    failure.append(exc)
+
+            thread = Thread(target=run_service)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not service.config.protocol.socket_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert service.config.protocol.socket_path.exists()
+
+            repo = Path(__file__).resolve().parents[2]
+            result = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--pid=host",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "-v",
+                    f"{repo}:/src:ro",
+                    "-v",
+                    f"{tmp_path}:{tmp_path}",
+                    "-e",
+                    "GOCACHE=/tmp/loom-go-cache",
+                    "-e",
+                    "GOMODCACHE=/tmp/loom-go-mod-cache",
+                    "-e",
+                    "LOOM_PHASE2C_SOCKET",
+                    "-e",
+                    "LOOM_PHASE2C_GRANT_ID",
+                    "-e",
+                    "LOOM_PHASE2C_MATERIALIZATION_ID",
+                    "-e",
+                    "LOOM_PHASE2C_GOARCH_OVERRIDE",
+                    "-w",
+                    "/src",
+                    "golang:1.23.4-bookworm",
+                    "go",
+                    "test",
+                    "./cmd/loom-task-image-builder-supervisor",
+                    "-run",
+                    "^TestSupervisorExternalGuardFlow$",
+                    "-count=1",
+                    "-timeout=30s",
+                    "-v",
+                ],
+                cwd=repo,
+                env={
+                    **os.environ,
+                    "LOOM_PHASE2C_SOCKET": str(service.config.protocol.socket_path),
+                    "LOOM_PHASE2C_GRANT_ID": str(GRANT_ID),
+                    "LOOM_PHASE2C_MATERIALIZATION_ID": str(materialization_id),
+                    "LOOM_PHASE2C_GOARCH_OVERRIDE": "arm64",
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+
+            service.stop()
+            thread.join(timeout=5)
+            service.close()
+            ledger_entry = ledger.get(GRANT_ID)
+            ledger_document = None if ledger_entry is None else ledger_entry.document()
+            ledger.close()
+
+        assert failure == []
+        assert result.returncode == 0, (
+            result.stdout
+            + f"\nauthority_events={authority_events!r}"
+            + f"\nguard_events={guard_events!r}"
+            + f"\nledger={ledger_document!r}"
+        )
+        assert "PASS: TestSupervisorExternalGuardFlow" in result.stdout
+        assert "sentinel" not in result.stdout
+        assert "X-Amz-Signature" not in result.stdout
+        assert {"authority_api_challenge", "authority_api_attach", "authority_api_exchange", "authority_api_renew", "authority_api_claim", "authority_api_bundle", "authority_api_start", "authority_api_release"}.issubset(set(authority_events))
+        assert "storage_cleanup" not in guard_events
+
+        engine = create_async_engine(postgres_url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                projection = await session.scalar(
+                    select(TaskImageBuildProjection).where(
+                        TaskImageBuildProjection.grant_id == GRANT_ID
+                    )
+                )
+                materialization = await session.get(TaskImageMaterialization, materialization_id)
+                attempts = (
+                    await session.execute(
+                        select(TaskImageMaterializationAttempt).where(
+                            TaskImageMaterializationAttempt.materialization_id == materialization_id
+                        )
+                    )
+                ).scalars().all()
+                events = (
+                    await session.execute(
+                        select(TaskImageMaterializationOperationEvent).where(
+                            TaskImageMaterializationOperationEvent.materialization_id == materialization_id
+                        )
+                    )
+                ).scalars().all()
+        finally:
+            await engine.dispose()
+
+        assert projection is not None
+        assert projection.state == "exchanged"
+        assert materialization is not None
+        assert attempts
+        assert {event.operation_type for event in events} >= {"bundle", "start", "release"}
+    finally:
+        await _clear_authority_rows(postgres_url)
