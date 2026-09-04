@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import struct
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.ops.install_task_image_builder_provider_release import (
@@ -18,7 +20,23 @@ from scripts.ops.install_task_image_builder_provider_release import (
 from scripts.ops.task_image_builder_provider_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
+RUNBOOK = ROOT / "docs/runbooks/task-image-builder-phase2c-supervisor.md"
 _ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
+_REQUIRED_LIVE_CHECK_IDS = (
+    "live_cleanup",
+    "live_clone3_scratch_cgroup",
+    "live_fail_closed_guard_restart",
+    "live_native_static_supervisor",
+    "live_network_denial",
+    "live_no_cache_oci_fixture",
+    "live_no_slurm_or_foreign_cgroup",
+    "live_process_ancestry",
+    "live_project_quota_readback",
+    "live_rootlesskit_buildkit_flags",
+    "live_runtime_transitive_provenance",
+    "live_subuid_subgid",
+    "live_supervisor_module_metadata",
+)
 
 
 def _canonical(value: object) -> bytes:
@@ -64,7 +82,7 @@ def _write(path: Path, payload: bytes, mode: int) -> None:
 
 
 def _guard_release(root: Path) -> tuple[Path, str]:
-    release = root / "guard-release" / ("7" * 64)
+    release_root = root / "guard-release"
     files = {
         "loom-task-image-builder-guard.pyz": (
             _elf_payload(62, "guard", b"/run/loom-task-image-builder-guard/guard.sock"),
@@ -108,19 +126,21 @@ def _guard_release(root: Path) -> tuple[Path, str]:
         ),
         "loom-task-image-builder-node-guard.service": (b"[Unit]\n[Service]\n", 0o444),
     }
-    for name, (payload, mode) in files.items():
-        _write(release / name, payload, mode)
-    manifest = {
+    identity = {
         "schema": "loom.task-image-builder-guard-bundle/v1",
         "architecture": "x86_64",
-        "release_sha256": release.name,
         "files": [
             {"path": name, "mode": f"{mode:04o}", "sha256": _digest(payload)}
             for name, (payload, mode) in sorted(files.items())
         ],
     }
+    guard_digest = _digest(_canonical(identity))
+    release = release_root / guard_digest
+    for name, (payload, mode) in files.items():
+        _write(release / name, payload, mode)
+    manifest = {**identity, "release_sha256": guard_digest}
     _write(release / "release-manifest.json", _canonical(manifest), 0o444)
-    return release, release.name
+    return release, guard_digest
 
 
 def _runtime_tree(root: Path) -> Path:
@@ -451,6 +471,35 @@ def test_documented_conformance_cli_runs_without_ambient_pythonpath() -> None:
     assert completed.stderr == b""
 
 
+def test_runbook_conformance_flags_match_safe_cli() -> None:
+    completed = subprocess.run(
+        (
+            "/usr/bin/python3",
+            "scripts/ops/task_image_builder_provider_conformance.py",
+            "--help",
+        ),
+        cwd=ROOT,
+        env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    help_text = completed.stdout.decode("utf-8")
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    command = re.search(
+        r"python3 scripts/ops/task_image_builder_provider_conformance.py \\(?P<body>.*?)```",
+        runbook,
+        re.DOTALL,
+    )
+
+    assert completed.returncode == 0
+    assert command is not None
+    documented_flags = set(re.findall(r"--[a-z][a-z-]*", command.group("body")))
+    actual_flags = set(re.findall(r"--[a-z][a-z-]*", help_text)) - {"--help"}
+    assert documented_flags == actual_flags
+
+
 def test_offline_conformance_emits_nonproduction_evidence(tmp_path: Path) -> None:
     from scripts.ops.task_image_builder_provider_conformance import conform
 
@@ -658,3 +707,158 @@ def test_live_conformance_requires_explicit_empty_scratch_roots(tmp_path: Path) 
 
     with pytest.raises(ProviderConformanceError, match="storage"):
         conformance_module._validate_live_root(storage / "missing", label="storage")
+
+
+class _FakeLiveProbeRunner:
+    def __init__(self, emitted_ids: tuple[str, ...]) -> None:
+        self.emitted_ids = emitted_ids
+        self.requests: list[object] = []
+
+    def run(self, request: object) -> tuple[object, ...]:
+        from scripts.ops.task_image_builder_provider_conformance import ConformanceCheck
+
+        self.requests.append(request)
+        return tuple(
+            ConformanceCheck(item, "pass", _digest(item.encode("ascii")))
+            for item in self.emitted_ids
+        )
+
+
+def _patch_live_conformance_verifiers(monkeypatch: pytest.MonkeyPatch) -> Path:
+    from scripts.ops import task_image_builder_provider_conformance as conformance_module
+
+    release_sha256 = "a" * 64
+    release = SimpleNamespace(
+        architecture="x86_64",
+        manifest_payload=b"{}\n",
+        release_sha256=release_sha256,
+    )
+    monkeypatch.setattr(conformance_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(conformance_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(conformance_module, "_release_from_path", lambda _path, *, live: release)
+    monkeypatch.setattr(conformance_module, "_verify_authority", lambda _root: _digest(b"authority"))
+    monkeypatch.setattr(conformance_module, "_verify_host_release", lambda _root: _digest(b"host"))
+    monkeypatch.setattr(conformance_module, "_verify_inert_paths", lambda _root: _digest(b"inert"))
+    monkeypatch.setattr(conformance_module, "_verify_provider_policy", lambda _root: _digest(b"policy"))
+    monkeypatch.setattr(
+        conformance_module,
+        "_verify_release_binding",
+        lambda _root, _release: _digest(b"release"),
+    )
+    monkeypatch.setattr(
+        conformance_module,
+        "_verify_receipt",
+        lambda _root, _release: _digest(b"receipt"),
+    )
+    monkeypatch.setattr(conformance_module, "_verify_supervisor", lambda _release: _digest(b"supervisor"))
+    return Path("/opt/loom-task-image-builder-provider/releases") / release_sha256
+
+
+def test_live_conformance_requires_every_task7_probe_and_stays_nonproduction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import conform
+
+    staged_release = _patch_live_conformance_verifiers(monkeypatch)
+    scratch = tmp_path / "scratch"
+    storage = tmp_path / "storage"
+    scratch_cgroup = tmp_path / "scratch-cgroup"
+    scratch.mkdir()
+    storage.mkdir()
+    scratch_cgroup.mkdir()
+    runner = _FakeLiveProbeRunner(_REQUIRED_LIVE_CHECK_IDS)
+
+    report = conform(
+        staged_release,
+        live=True,
+        root=Path("/"),
+        source_root=ROOT,
+        scratch_root=scratch,
+        storage_root=storage,
+        scratch_cgroup_root=scratch_cgroup,
+        live_probe_runner=runner,
+    )
+    document = report.as_dict()
+
+    assert document["production_ready"] is False
+    assert document["blockers"] == ["phase2_guard_provider_release_missing"]
+    check_ids = {item["id"] for item in document["checks"]}
+    assert set(_REQUIRED_LIVE_CHECK_IDS) <= check_ids
+    assert len(runner.requests) == 1
+    request = runner.requests[0]
+    assert request.staged_release == staged_release
+    assert request.scratch_root == scratch
+    assert request.storage_root == storage
+    assert request.scratch_cgroup_root == scratch_cgroup
+
+
+@pytest.mark.parametrize("missing", _REQUIRED_LIVE_CHECK_IDS)
+def test_live_conformance_rejects_missing_task7_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import (
+        ProviderConformanceError,
+        conform,
+    )
+
+    staged_release = _patch_live_conformance_verifiers(monkeypatch)
+    scratch = tmp_path / "scratch"
+    storage = tmp_path / "storage"
+    scratch_cgroup = tmp_path / "scratch-cgroup"
+    scratch.mkdir()
+    storage.mkdir()
+    scratch_cgroup.mkdir()
+    runner = _FakeLiveProbeRunner(
+        tuple(item for item in _REQUIRED_LIVE_CHECK_IDS if item != missing)
+    )
+
+    with pytest.raises(ProviderConformanceError, match=missing):
+        conform(
+            staged_release,
+            live=True,
+            root=Path("/"),
+            source_root=ROOT,
+            scratch_root=scratch,
+            storage_root=storage,
+            scratch_cgroup_root=scratch_cgroup,
+            live_probe_runner=runner,
+        )
+
+
+@pytest.mark.parametrize(
+    "scratch_cgroup",
+    (
+        Path("/sys/fs/cgroup/slurm/uid_993/job_1"),
+        Path("/sys/fs/cgroup/user.slice/user-993.slice/foreign.scope"),
+    ),
+)
+def test_live_conformance_rejects_slurm_or_foreign_cgroup_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scratch_cgroup: Path,
+) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import (
+        ProviderConformanceError,
+        conform,
+    )
+
+    staged_release = _patch_live_conformance_verifiers(monkeypatch)
+    scratch = tmp_path / "scratch"
+    storage = tmp_path / "storage"
+    scratch.mkdir()
+    storage.mkdir()
+
+    with pytest.raises(ProviderConformanceError, match="scratch cgroup"):
+        conform(
+            staged_release,
+            live=True,
+            root=Path("/"),
+            source_root=ROOT,
+            scratch_root=scratch,
+            storage_root=storage,
+            scratch_cgroup_root=scratch_cgroup,
+            live_probe_runner=_FakeLiveProbeRunner(_REQUIRED_LIVE_CHECK_IDS),
+        )

@@ -281,6 +281,7 @@ def _existing_is_exact(target: Path, context: InstallContext) -> bool:
             expected_release_sha256=context.expected_release_sha256,
             expected_architecture=context.architecture,
             expected_uid=0 if context.live else os.geteuid(),
+            expected_gid=0 if context.live else os.getegid(),
         )
         return True
     except ProviderReleaseError:
@@ -414,6 +415,7 @@ def _verified_bundle(bundle: Path, context: InstallContext) -> VerifiedProviderR
             expected_release_sha256=context.expected_release_sha256,
             expected_architecture=context.architecture,
             expected_uid=0 if context.live else os.geteuid(),
+            expected_gid=0 if context.live else os.getegid(),
         )
     except ProviderReleaseError as exc:
         raise ProviderInstallError("provider release verification failed") from exc

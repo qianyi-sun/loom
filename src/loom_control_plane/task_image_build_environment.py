@@ -331,7 +331,10 @@ def _validate_grant_policy(
     policy: SlurmBuildEnvironmentPolicyV1,
     grant: SlurmBuildGrantV2,
 ) -> None:
-    if grant.request != policy.request_identity():
+    if not isinstance(grant.authority, TaskImageBuildGrantAuthorityV2):
+        raise ValueError("rootless builder grant requires V2 release authority")
+    expected = policy.request_identity(grant.authority.builder_release_sha256)
+    if grant.request != expected:
         raise ValueError("rootless builder grant differs from provider policy")
 
 

@@ -16,7 +16,7 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 _DIRECT_SCRIPT = Path(__file__).resolve(strict=True)
 _DIRECT_REPOSITORY = _DIRECT_SCRIPT.parents[2]
@@ -51,6 +51,21 @@ _MACHINES: dict[Architecture, int] = {"x86_64": 62, "aarch64": 183}
 _SYSTEMD_UNITS = (
     Path("etc/systemd/system/loom-task-image-builder-provider.service"),
     Path("etc/systemd/system/loom-task-image-builder-provider.socket"),
+)
+_REQUIRED_LIVE_CHECK_IDS = (
+    "live_cleanup",
+    "live_clone3_scratch_cgroup",
+    "live_fail_closed_guard_restart",
+    "live_native_static_supervisor",
+    "live_network_denial",
+    "live_no_cache_oci_fixture",
+    "live_no_slurm_or_foreign_cgroup",
+    "live_process_ancestry",
+    "live_project_quota_readback",
+    "live_rootlesskit_buildkit_flags",
+    "live_runtime_transitive_provenance",
+    "live_subuid_subgid",
+    "live_supervisor_module_metadata",
 )
 
 
@@ -91,6 +106,29 @@ class ConformanceReport:
             "release_sha256": self.release_sha256,
             "schema": _SCHEMA,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class LiveProbeRequest:
+    staged_release: Path
+    release_sha256: str
+    architecture: Architecture
+    source_root: Path
+    scratch_root: Path
+    storage_root: Path
+    scratch_cgroup_root: Path
+
+
+class LiveProbeRunner(Protocol):
+    def run(self, request: LiveProbeRequest) -> tuple[ConformanceCheck, ...]:
+        """Collect bounded live provider evidence for the explicit request."""
+
+
+class FailClosedLiveProbeRunner:
+    def run(self, request: LiveProbeRequest) -> tuple[ConformanceCheck, ...]:
+        raise ProviderConformanceError(
+            "live conformance requires an explicit Task 7 live probe runner"
+        )
 
 
 def _canonical(value: object) -> bytes:
@@ -345,6 +383,7 @@ def _release_from_path(path: Path, *, live: bool) -> VerifiedProviderRelease:
             expected_release_sha256=path.name,
             expected_architecture=cast(Architecture, architecture),
             expected_uid=0 if live else os.geteuid(),
+            expected_gid=0 if live else os.getegid(),
         )
     except ProviderReleaseError as exc:
         raise ProviderConformanceError("provider release verification failed") from exc
@@ -430,6 +469,39 @@ def _validate_live_root(path: Path, *, label: str) -> str:
     return _sha(_canonical({"label": label, "path": str(path)}))
 
 
+def _validate_scratch_cgroup_root(path: Path) -> str:
+    if not path.is_absolute():
+        raise ProviderConformanceError("scratch cgroup root must be absolute")
+    lowered = {part.lower() for part in path.parts}
+    if (
+        "slurm" in lowered
+        or any(part.startswith("job_") for part in lowered)
+        or any("foreign" in part for part in lowered)
+    ):
+        raise ProviderConformanceError("scratch cgroup root must not be Slurm or foreign")
+    if path.parts[:4] == ("/", "sys", "fs", "cgroup") and not path.name.startswith(
+        ".loom-task-image-builder-provider-conformance-"
+    ):
+        raise ProviderConformanceError("scratch cgroup root must be an explicit provider probe cgroup")
+    return _validate_live_root(path, label="scratch cgroup")
+
+
+def _validate_live_probe_checks(checks: Sequence[ConformanceCheck]) -> tuple[ConformanceCheck, ...]:
+    seen: dict[str, ConformanceCheck] = {}
+    for check in checks:
+        if not isinstance(check, ConformanceCheck) or check.status != "pass":
+            raise ProviderConformanceError("live conformance probe evidence is invalid")
+        if check.id not in _REQUIRED_LIVE_CHECK_IDS:
+            raise ProviderConformanceError(f"live conformance emitted unexpected probe {check.id}")
+        if check.id in seen:
+            raise ProviderConformanceError(f"live conformance duplicated probe {check.id}")
+        seen[check.id] = check
+    missing = sorted(set(_REQUIRED_LIVE_CHECK_IDS) - set(seen))
+    if missing:
+        raise ProviderConformanceError(f"live conformance missing probe {missing[0]}")
+    return tuple(seen[item] for item in _REQUIRED_LIVE_CHECK_IDS)
+
+
 def conform(
     staged_release: Path,
     *,
@@ -438,6 +510,8 @@ def conform(
     source_root: Path = ROOT,
     scratch_root: Path | None = None,
     storage_root: Path | None = None,
+    scratch_cgroup_root: Path | None = None,
+    live_probe_runner: LiveProbeRunner | None = None,
 ) -> ConformanceReport:
     """Return bounded public evidence only after every inert provider check passes."""
 
@@ -453,10 +527,13 @@ def conform(
             raise ProviderConformanceError("live conformance requires root authority")
         if platform.machine() not in {"x86_64", "aarch64"}:
             raise ProviderConformanceError("live conformance architecture is invalid")
-        if scratch_root is None or storage_root is None:
-            raise ProviderConformanceError("live conformance requires explicit scratch and storage roots")
+        if scratch_root is None or storage_root is None or scratch_cgroup_root is None:
+            raise ProviderConformanceError(
+                "live conformance requires explicit scratch, storage, and scratch cgroup roots"
+            )
         _validate_live_root(scratch_root, label="scratch")
         _validate_live_root(storage_root, label="storage")
+        _validate_scratch_cgroup_root(scratch_cgroup_root)
     release = _release_from_path(staged_release, live=live)
     checks = [
         ConformanceCheck("authority_inert", "pass", _verify_authority(source_root)),
@@ -467,6 +544,21 @@ def conform(
         ConformanceCheck("stage_receipt", "pass", _verify_receipt(root, release)),
         ConformanceCheck("supervisor_binary", "pass", _verify_supervisor(release)),
     ]
+    if live:
+        assert scratch_root is not None
+        assert storage_root is not None
+        assert scratch_cgroup_root is not None
+        request = LiveProbeRequest(
+            staged_release=staged_release,
+            release_sha256=release.release_sha256,
+            architecture=release.architecture,
+            source_root=source_root,
+            scratch_root=scratch_root,
+            storage_root=storage_root,
+            scratch_cgroup_root=scratch_cgroup_root,
+        )
+        runner = live_probe_runner if live_probe_runner is not None else FailClosedLiveProbeRunner()
+        checks.extend(_validate_live_probe_checks(runner.run(request)))
     checks.sort(key=lambda item: item.id)
     return ConformanceReport(
         release_sha256=release.release_sha256,
@@ -483,6 +575,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path("/"))
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--storage-root", type=Path)
+    parser.add_argument("--scratch-cgroup-root", type=Path)
     parser.add_argument("--live", action="store_true")
     arguments = parser.parse_args(argv)
     try:
@@ -493,6 +586,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_root=arguments.source_root,
             scratch_root=arguments.scratch_root,
             storage_root=arguments.storage_root,
+            scratch_cgroup_root=arguments.scratch_cgroup_root,
         )
     except ProviderConformanceError as exc:
         parser.error(str(exc))
@@ -505,10 +599,16 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "_REQUIRED_LIVE_CHECK_IDS",
     "ConformanceCheck",
     "ConformanceReport",
+    "FailClosedLiveProbeRunner",
+    "LiveProbeRequest",
+    "LiveProbeRunner",
     "ProviderConformanceError",
+    "_validate_live_probe_checks",
     "_validate_live_root",
+    "_validate_scratch_cgroup_root",
     "conform",
     "main",
 ]

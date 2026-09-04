@@ -12,6 +12,7 @@ import pytest
 from scripts.ops.task_image_builder_provider_release import (
     ProviderReleaseError,
     build_release,
+    verify_release_directory,
 )
 
 _ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -59,7 +60,7 @@ def _write(path: Path, payload: bytes, mode: int) -> None:
 
 
 def _guard_release(root: Path) -> tuple[Path, str]:
-    release = root / "guard-release" / ("7" * 64)
+    release_root = root / "guard-release"
     files = {
         "loom-task-image-builder-guard.pyz": (_elf_payload(62, "guard"), 0o555),
         "guard-network-v1.bpf.o": (_elf_payload(247, "bpf"), 0o444),
@@ -100,19 +101,21 @@ def _guard_release(root: Path) -> tuple[Path, str]:
         ),
         "loom-task-image-builder-node-guard.service": (b"[Unit]\n[Service]\n", 0o444),
     }
-    for name, (payload, mode) in files.items():
-        _write(release / name, payload, mode)
-    manifest = {
+    identity = {
         "schema": "loom.task-image-builder-guard-bundle/v1",
         "architecture": "x86_64",
-        "release_sha256": release.name,
         "files": [
             {"path": name, "mode": f"{mode:04o}", "sha256": _digest(payload)}
             for name, (payload, mode) in sorted(files.items())
         ],
     }
+    guard_digest = _digest(_canonical(identity))
+    release = release_root / guard_digest
+    for name, (payload, mode) in files.items():
+        _write(release / name, payload, mode)
+    manifest = {**identity, "release_sha256": guard_digest}
     _write(release / "release-manifest.json", _canonical(manifest), 0o444)
-    return release, release.name
+    return release, guard_digest
 
 
 def _runtime_tree(root: Path) -> Path:
@@ -291,7 +294,7 @@ def test_release_is_content_addressed_and_binds_expected_members(tmp_path: Path)
     assert result.directory.name == result.release_sha256
     assert manifest["architecture"] == "x86_64"
     assert manifest["authority_contract_version"] == 2
-    assert manifest["guard_release_sha256"] == "7" * 64
+    assert manifest["guard_release_sha256"] == guard_release.name
     assert manifest["runtime_release"] == "rootless-runtime-v2"
     assert manifest["runtime_x_crypto"] == "v0.55.0"
     assert manifest["provider_install_root"] == "/opt/loom-task-image-builder-provider/releases"
@@ -383,6 +386,128 @@ def test_release_is_deterministic_across_source_metadata_noise(tmp_path: Path) -
         for item in second.directory.rglob("*")
         if item.is_file()
     }
+
+
+def test_release_builds_supervisor_twice_before_publishing(tmp_path: Path) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    calls: list[tuple[Path, str]] = []
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda src, arch: calls.append((src, arch))
+        or _elf_payload(62, "supervisor"),
+    )
+
+    assert result.directory.exists()
+    assert calls == [(source, "x86_64"), (source, "x86_64")]
+
+
+def test_release_rejects_nondeterministic_supervisor_builder(tmp_path: Path) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    payloads = iter(
+        (
+            _elf_payload(62, "supervisor"),
+            _elf_payload(62, "supervisor-drift"),
+        )
+    )
+
+    with pytest.raises(ProviderReleaseError, match="deterministic"):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: next(payloads),
+        )
+
+    assert not any((tmp_path / "out").glob("*/release-manifest.json"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("wrong-gid", "writable-subdirectory", "foreign-directory"),
+)
+def test_verify_release_directory_rejects_directory_metadata_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+        build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+    )
+    expected_gid = os.getegid()
+    if mutation == "wrong-gid":
+        expected_gid += 1
+    elif mutation == "writable-subdirectory":
+        (result.directory / "configs").chmod(0o755)
+    else:
+        result.directory.chmod(0o755)
+        foreign = result.directory / "foreign"
+        foreign.mkdir()
+        foreign.chmod(0o555)
+        result.directory.chmod(0o555)
+
+    with pytest.raises(ProviderReleaseError, match=r"metadata|inventory"):
+        verify_release_directory(
+            result.directory,
+            expected_release_sha256=result.release_sha256,
+            expected_architecture="x86_64",
+            expected_uid=os.geteuid(),
+            expected_gid=expected_gid,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "tampered-guard-member",
+        "wrong-guard-member-mode",
+        "wrong-guard-directory-basename",
+    ),
+)
+def test_release_rejects_guard_bundle_identity_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    if mutation == "tampered-guard-member":
+        target = guard_release / "guard-network-map-schema-v1.json"
+        target.chmod(0o644)
+        target.write_bytes(
+            _canonical(
+                {
+                    "schema": "loom.task-image-builder-guard-bpf-maps/v1",
+                    "maps": [{"name": "drift"}],
+                }
+            )
+        )
+        target.chmod(0o444)
+    elif mutation == "wrong-guard-member-mode":
+        (guard_release / "guard-network-v1.bpf.o").chmod(0o555)
+    else:
+        renamed = guard_release.with_name("8" * 64)
+        guard_release.rename(renamed)
+        guard_release = renamed
+
+    with pytest.raises(ProviderReleaseError):
+        build_release(
+            source,
+            tmp_path / "out",
+            "x86_64",
+            guard_release_directory=guard_release,
+            runtime_root=runtime_root,
+            build_supervisor=lambda _src, _arch: _elf_payload(62, "supervisor"),
+        )
 
 
 @pytest.mark.parametrize(

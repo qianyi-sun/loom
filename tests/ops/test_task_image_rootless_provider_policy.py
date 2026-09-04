@@ -15,6 +15,7 @@ from loom_control_plane.task_image_build_environment import (
     SlurmBuildRequestIdentityV1,
     canonical_request_sha256,
     issue_slurm_build_grant,
+    render_rootless_builder_sbatch_request,
 )
 from loom_task_image_authority.contracts import TaskImageBuildGrantAuthorityV2
 
@@ -120,6 +121,45 @@ def test_loaded_policy_derives_content_addressed_supervisor_path_from_grant_rele
     )
 
     assert grant.request.supervisor_path == expected_request.supervisor_path
+
+
+def test_checked_in_policy_renders_grant_bound_content_addressed_supervisor_path() -> None:
+    policies = load_task_image_rootless_provider_policy(_POLICY_PATH)
+    policy = next(item for item in policies if item.slurm_cluster_id == "oldlab")
+    release_sha256 = "b" * 64
+    expected_request = policy.request_identity(release_sha256)
+    authority = TaskImageBuildGrantAuthorityV2(
+        schema_version=2,
+        purpose="production",
+        shadow_campaign_id=None,
+        environment="staging",
+        pool_id="staging-oldlab-task-image",
+        slurm_cluster_id=policy.slurm_cluster_id,
+        cpu_arch=policy.cpu_arch,
+        slurm_request_sha256=canonical_request_sha256(expected_request),
+        builder_release_sha256=release_sha256,
+        supervisor_executable_sha256="6" * 64,
+        build_policy_sha256="3" * 64,
+        containment_policy_sha256="4" * 64,
+        resource_profile_sha256="5" * 64,
+        issued_at=_NOW,
+        expires_at=_NOW + timedelta(hours=2),
+    )
+    grant = issue_slurm_build_grant(
+        policy,
+        grant_id=UUID("22222222-2222-4222-8222-222222222222"),
+        authority=authority,
+    )
+
+    request = render_rootless_builder_sbatch_request(policy, grant)
+
+    assert request.stdin == (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"exec /opt/loom-task-image-builder-provider/releases/{release_sha256}/"
+        "bin/loom-task-builder-supervisor "
+        "--grant-id 22222222-2222-4222-8222-222222222222\n"
+    )
 
 
 def _write_mutated_policy(tmp_path: Path, old: str, new: str) -> Path:

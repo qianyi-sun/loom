@@ -75,7 +75,7 @@ def _write(path: Path, payload: bytes, mode: int) -> None:
 
 
 def _guard_release(root: Path) -> tuple[Path, str]:
-    release = root / "guard-release" / ("7" * 64)
+    release_root = root / "guard-release"
     files = {
         "loom-task-image-builder-guard.pyz": (_elf_payload(62, "guard"), 0o555),
         "guard-network-v1.bpf.o": (_elf_payload(247, "bpf"), 0o444),
@@ -116,19 +116,21 @@ def _guard_release(root: Path) -> tuple[Path, str]:
         ),
         "loom-task-image-builder-node-guard.service": (b"[Unit]\n[Service]\n", 0o444),
     }
-    for name, (payload, mode) in files.items():
-        _write(release / name, payload, mode)
-    manifest = {
+    identity = {
         "schema": "loom.task-image-builder-guard-bundle/v1",
         "architecture": "x86_64",
-        "release_sha256": release.name,
         "files": [
             {"path": name, "mode": f"{mode:04o}", "sha256": _sha(payload)}
             for name, (payload, mode) in sorted(files.items())
         ],
     }
+    guard_digest = _sha(_canonical(identity))
+    release = release_root / guard_digest
+    for name, (payload, mode) in files.items():
+        _write(release / name, payload, mode)
+    manifest = {**identity, "release_sha256": guard_digest}
     _write(release / "release-manifest.json", _canonical(manifest), 0o444)
-    return release, release.name
+    return release, guard_digest
 
 
 def _runtime_tree(root: Path) -> Path:

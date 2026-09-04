@@ -236,6 +236,7 @@ verify_release_directory(
     expected_release_sha256=bundle.name,
     expected_architecture=architecture,
     expected_uid=os.geteuid(),
+    expected_gid=os.getegid(),
 )
 print(bundle.name)
 PY

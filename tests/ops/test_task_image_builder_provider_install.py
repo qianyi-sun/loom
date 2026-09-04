@@ -61,7 +61,7 @@ def _write(path: Path, payload: bytes, mode: int) -> None:
 
 
 def _guard_release(root: Path) -> tuple[Path, str]:
-    release = root / "guard-release" / ("7" * 64)
+    release_root = root / "guard-release"
     files = {
         "loom-task-image-builder-guard.pyz": (_elf_payload(62, "guard"), 0o555),
         "guard-network-v1.bpf.o": (_elf_payload(247, "bpf"), 0o444),
@@ -102,19 +102,21 @@ def _guard_release(root: Path) -> tuple[Path, str]:
         ),
         "loom-task-image-builder-node-guard.service": (b"[Unit]\n[Service]\n", 0o444),
     }
-    for name, (payload, mode) in files.items():
-        _write(release / name, payload, mode)
-    manifest = {
+    identity = {
         "schema": "loom.task-image-builder-guard-bundle/v1",
         "architecture": "x86_64",
-        "release_sha256": release.name,
         "files": [
             {"path": name, "mode": f"{mode:04o}", "sha256": _digest(payload)}
             for name, (payload, mode) in sorted(files.items())
         ],
     }
+    guard_digest = _digest(_canonical(identity))
+    release = release_root / guard_digest
+    for name, (payload, mode) in files.items():
+        _write(release / name, payload, mode)
+    manifest = {**identity, "release_sha256": guard_digest}
     _write(release / "release-manifest.json", _canonical(manifest), 0o444)
-    return release, release.name
+    return release, guard_digest
 
 
 def _runtime_tree(root: Path) -> Path:
@@ -389,6 +391,25 @@ def test_repeated_byte_identical_staging_is_exactly_idempotent(tmp_path: Path) -
     assert receipt_path.read_bytes() == before_receipt
 
 
+def test_idempotent_staging_rejects_writable_existing_release_directory(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path)
+    context = _context(tmp_path, bundle)
+    first = stage_provider_release(bundle, context)
+    installed = (
+        context.root
+        / "opt/loom-task-image-builder-provider/releases"
+        / first.release_sha256
+    )
+    (installed / "configs").chmod(0o755)
+
+    with pytest.raises(ProviderInstallError, match="collision"):
+        stage_provider_release(bundle, context)
+
+    assert stat.S_IMODE((installed / "configs").stat().st_mode) == 0o755
+
+
 def test_idempotent_staging_rejects_receipt_replacement_during_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -470,11 +491,15 @@ def test_staging_rejects_manifest_and_member_substitution(
         )
         manifest_path.chmod(0o444)
     elif mutation == "symlink":
+        member.parent.chmod(0o755)
         member.unlink()
         member.symlink_to("../release-manifest.json")
+        member.parent.chmod(0o555)
     else:
+        member.parent.chmod(0o755)
         member.unlink()
         os.link(bundle / "release-manifest.json", member)
+        member.parent.chmod(0o555)
     bundle.chmod(0o555)
 
     with pytest.raises(ProviderInstallError):

@@ -435,6 +435,13 @@ def _read_json_path(path: Path, *, label: str) -> dict[str, object]:
 
 
 def _load_guard_release(path: Path, *, architecture: Architecture, expected_release_sha256: str) -> dict[str, bytes]:
+    if (
+        path.name != expected_release_sha256
+        or len(expected_release_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_release_sha256)
+        or expected_release_sha256 == "0" * 64
+    ):
+        raise ProviderReleaseError("guard release directory identity is invalid")
     manifest_path = path / _MANIFEST
     manifest_payload = _read_regular(manifest_path, maximum=_MAX_JSON_BYTES)
     try:
@@ -444,27 +451,54 @@ def _load_guard_release(path: Path, *, architecture: Architecture, expected_rele
     if (
         not isinstance(manifest, dict)
         or manifest.get("schema") != "loom.task-image-builder-guard-bundle/v1"
+        or set(manifest) != {"architecture", "files", "release_sha256", "schema"}
+        or _canonical(manifest) != manifest_payload
         or manifest.get("architecture") != architecture
         or manifest.get("release_sha256") != expected_release_sha256
         or not isinstance(manifest.get("files"), list)
     ):
         raise ProviderReleaseError("guard release manifest is invalid")
+    identity = dict(manifest)
+    identity.pop("release_sha256", None)
+    if _digest(_canonical(identity)) != expected_release_sha256:
+        raise ProviderReleaseError("guard release digest is invalid")
     try:
         entries = sorted(path.iterdir(), key=lambda item: item.name)
     except OSError as exc:
         raise ProviderReleaseError("guard release directory is unavailable") from exc
     if {item.name for item in entries} != {*_GUARD_MEMBERS, _MANIFEST}:
         raise ProviderReleaseError("guard release inventory is invalid")
+    expected_files = cast(list[object], manifest["files"])
+    expected_names = tuple(sorted(_GUARD_MEMBERS))
+    if len(expected_files) != len(expected_names):
+        raise ProviderReleaseError("guard release file manifest is invalid")
     payloads: dict[str, bytes] = {}
-    for item in entries:
-        if item.name == _MANIFEST:
-            continue
+    for record, name in zip(expected_files, expected_names, strict=True):
+        mode = 0o555 if name.endswith(".pyz") else 0o444
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"mode", "path", "sha256"}
+            or record.get("path") != name
+            or record.get("mode") != f"{mode:04o}"
+            or not isinstance(record.get("sha256"), str)
+        ):
+            raise ProviderReleaseError("guard release file manifest is invalid")
+        item = path / name
         payload = _read_regular(
             item,
             maximum=_MAX_BYTES,
-            executable=item.name.endswith(".pyz"),
+            executable=mode == 0o555,
         )
-        payloads[item.name] = payload
+        try:
+            metadata = item.lstat()
+        except OSError as exc:
+            raise ProviderReleaseError("guard release member is unavailable") from exc
+        if (
+            stat.S_IMODE(metadata.st_mode) != mode
+            or _digest(payload) != record["sha256"]
+        ):
+            raise ProviderReleaseError("guard release member differs from manifest")
+        payloads[name] = payload
     return payloads
 
 
@@ -560,6 +594,17 @@ def _write_file(path: Path, payload: bytes, mode: int) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _seal_release_tree(candidate: Path) -> None:
+    directories = sorted(
+        (path for path in candidate.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        directory.chmod(0o555)
+    candidate.chmod(0o555)
 
 
 def _rename_noreplace(source: Path, destination: Path) -> None:
@@ -670,6 +715,24 @@ def _build_supervisor_in_container(
         shutil.rmtree(output_root, ignore_errors=True)
 
 
+def _build_deterministic_supervisor(
+    source_root: Path,
+    architecture: Architecture,
+    *,
+    expected_sha256: str,
+    builder: Callable[[Path, Architecture], bytes],
+) -> bytes:
+    first = builder(source_root, architecture)
+    second = builder(source_root, architecture)
+    for payload in (first, second):
+        _validate_elf(payload, architecture)
+    if first != second:
+        raise ProviderReleaseError("supervisor build is not deterministic")
+    if _digest(first) != expected_sha256:
+        raise ProviderReleaseError("supervisor digest differs from specification")
+    return first
+
+
 def build_release(
     source_root: Path,
     output_root: Path,
@@ -728,10 +791,12 @@ def build_release(
     builder = build_supervisor or (
         lambda src, arch: _build_supervisor_in_container(src, arch, image=toolchain_image)
     )
-    supervisor_payload = builder(source_root, architecture)
-    _validate_elf(supervisor_payload, architecture)
-    if _digest(supervisor_payload) != spec.supervisor_sha256[architecture]:
-        raise ProviderReleaseError("supervisor digest differs from specification")
+    supervisor_payload = _build_deterministic_supervisor(
+        source_root,
+        architecture,
+        expected_sha256=spec.supervisor_sha256[architecture],
+        builder=builder,
+    )
     members: list[tuple[str, int, bytes]] = []
     for item in spec.configs:
         members.append(
@@ -793,7 +858,7 @@ def build_release(
         for name, mode, payload in members:
             _write_file(candidate / name, payload, mode)
         _write_file(candidate / _MANIFEST, manifest_payload, 0o444)
-        candidate.chmod(0o555)
+        _seal_release_tree(candidate)
         _rename_noreplace(candidate, directory)
     except BaseException:
         shutil.rmtree(candidate, ignore_errors=True)
@@ -815,11 +880,26 @@ def verify_release_directory(
     expected_release_sha256: str,
     expected_architecture: Architecture,
     expected_uid: int,
+    expected_gid: int,
 ) -> VerifiedProviderRelease:
     path = _validate_root(path, "release directory")
     manifest_path = path / _MANIFEST
     manifest_payload = _read_regular(manifest_path, maximum=_MAX_JSON_BYTES)
     manifest = _read_json_path(manifest_path, label="release manifest")
+    root_metadata = path.lstat()
+    if (
+        root_metadata.st_uid != expected_uid
+        or root_metadata.st_gid != expected_gid
+        or stat.S_IMODE(root_metadata.st_mode) & 0o222
+    ):
+        raise ProviderReleaseError("release directory metadata is invalid")
+    manifest_metadata = manifest_path.lstat()
+    if (
+        stat.S_IMODE(manifest_metadata.st_mode) != 0o444
+        or manifest_metadata.st_uid != expected_uid
+        or manifest_metadata.st_gid != expected_gid
+    ):
+        raise ProviderReleaseError("release member metadata is invalid")
     if (
         manifest.get("schema") != _BUNDLE_SCHEMA
         or manifest.get("release_sha256") != expected_release_sha256
@@ -833,6 +913,7 @@ def verify_release_directory(
         raise ProviderReleaseError("release manifest digest is invalid")
     members: list[tuple[str, int, bytes]] = []
     seen = {_MANIFEST}
+    expected_directories: set[str] = set()
     for record in cast(list[object], manifest["files"]):
         if (
             not isinstance(record, dict)
@@ -846,22 +927,44 @@ def verify_release_directory(
         if relative.as_posix() in seen:
             raise ProviderReleaseError("release manifest is invalid")
         seen.add(relative.as_posix())
+        parent = relative.parent
+        while parent != PurePosixPath("."):
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
         member_path = _assert_safe_parents(path, relative)
         metadata = member_path.lstat()
         mode = int(record["mode"], 8)
         payload = _read_regular(member_path, maximum=_MAX_BYTES, executable=mode == 0o555)
-        if stat.S_IMODE(metadata.st_mode) != mode or metadata.st_uid != expected_uid:
+        if (
+            stat.S_IMODE(metadata.st_mode) != mode
+            or metadata.st_uid != expected_uid
+            or metadata.st_gid != expected_gid
+        ):
             raise ProviderReleaseError("release member metadata is invalid")
         if _digest(payload) != record["sha256"]:
             raise ProviderReleaseError("release member digest is invalid")
         members.append((relative.as_posix(), mode, payload))
-    actual = {
-        item.relative_to(path).as_posix()
-        for item in path.rglob("*")
-        if item != manifest_path and item.is_file()
-    }
-    expected = {name for name, _, _ in members}
-    if actual != expected:
+    actual_files: set[str] = set()
+    actual_directories: set[str] = set()
+    for item in path.rglob("*"):
+        metadata = item.lstat()
+        actual_relative = item.relative_to(path).as_posix()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ProviderReleaseError("release member inventory is invalid")
+        if stat.S_ISDIR(metadata.st_mode):
+            if (
+                metadata.st_uid != expected_uid
+                or metadata.st_gid != expected_gid
+                or stat.S_IMODE(metadata.st_mode) & 0o222
+            ):
+                raise ProviderReleaseError("release directory metadata is invalid")
+            actual_directories.add(actual_relative)
+        elif stat.S_ISREG(metadata.st_mode):
+            actual_files.add(actual_relative)
+        else:
+            raise ProviderReleaseError("release member inventory is invalid")
+    expected_files = {name for name, _, _ in members} | {_MANIFEST}
+    if actual_files != expected_files or actual_directories != expected_directories:
         raise ProviderReleaseError("release member inventory is invalid")
     return VerifiedProviderRelease(
         release_sha256=expected_release_sha256,

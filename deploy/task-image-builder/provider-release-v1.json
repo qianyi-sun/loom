@@ -151,13 +151,13 @@
   "scripts": [
     {
       "path": "scripts/ops/install_task_image_builder_provider_release.py",
-      "sha256": "df3f8f2b1e616db61b00e91035be832f89a6864e688457fc287d0b8fde7cd8e6",
+      "sha256": "22d73b594efdc5f025de9d29c902169ec758e4269bf11beac386f9d79844cdf3",
       "destination": "ops/install_task_image_builder_provider_release.py",
       "mode": "0555"
     },
     {
       "path": "scripts/ops/task_image_builder_provider_conformance.py",
-      "sha256": "db4a5f143078c730f54ca9c00722851049ec93f385f941542e9a266b937bafdf",
+      "sha256": "983ae671dde3a772f9e813092f937810c2c78e4bd0c74304be5ee4456d5273f0",
       "destination": "ops/task_image_builder_provider_conformance.py",
       "mode": "0555"
     }

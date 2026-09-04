@@ -67,11 +67,13 @@ empty scratch roots:
 
 ```bash
 python3 scripts/ops/task_image_builder_provider_conformance.py \
-  --source-root "$CANDIDATE_ROOT" \
-  --release-directory "$STAGED_RELEASE_DIR" \
-  --architecture x86_64 \
+  --staged-release "$STAGED_RELEASE_DIR" \
+  --source-root "$REVIEWED_SOURCE_ROOT" \
+  --root / \
+  --scratch-root "$EMPTY_SCRATCH_ROOT" \
   --storage-root "$EMPTY_STORAGE_ROOT" \
-  --cgroup-root "$EMPTY_CGROUP_ROOT"
+  --scratch-cgroup-root "$EMPTY_SCRATCH_CGROUP_ROOT" \
+  --live
 ```
 
 Expected output keeps:
