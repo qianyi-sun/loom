@@ -839,9 +839,11 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         try:
             cpus = int(cpu.stdout)
             memory_bytes = int(memory.stdout)
-            disk_lines = disk.stdout.splitlines()
-            disk_bytes = int(disk_lines[1])
-        except (IndexError, TypeError, ValueError) as exc:
+            disk_match = re.fullmatch(r" *Avail\n *([0-9]+)\n", disk.stdout)
+            if disk_match is None:
+                raise ValueError("invalid df output")
+            disk_bytes = int(disk_match.group(1))
+        except (TypeError, ValueError) as exc:
             raise PersonalDevNativeBuilderRuntimeInstallError("host_capacity_invalid") from exc
         if (
             cpu.returncode != 0
@@ -852,7 +854,6 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or memory.stdout != f"{memory_bytes}\n"
             or disk.returncode != 0
             or disk.stderr
-            or disk_lines != ["Avail", str(disk_bytes)]
             or cpus < self.profile.minimum_cpus
             or memory_bytes < self.profile.minimum_memory_bytes
             or disk_bytes < self.profile.minimum_disk_free_bytes

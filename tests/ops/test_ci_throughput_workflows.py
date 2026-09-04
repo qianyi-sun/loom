@@ -711,6 +711,7 @@ def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> 
         "capacity-executor",
         "capacity-manager",
         "control-plane",
+        "execution-runtime",
         "family-orchestrator",
         "pipeline-orchestrator",
         "llm-gateway",
