@@ -8,13 +8,16 @@ import os
 import stat
 import tarfile
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from scripts.ops import task_image_builder_host_release as host_release
 
 SIGNER = "F6ECB3762474EDA9D21B7022871920D1991BC93C"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _sha256(payload: bytes) -> str:
@@ -61,7 +64,7 @@ class FixtureRunner:
 
     def run(
         self,
-        args: tuple[str, ...] | list[str],
+        args: Sequence[str],
         *,
         input_bytes: bytes | None = None,
     ) -> host_release.CommandResult:
@@ -303,7 +306,7 @@ def _bundle_fixture(
     runtime_path.write_text(json.dumps(runtime_manifest), encoding="utf-8")
     runtime_path.chmod(0o644)
 
-    release = {
+    release: dict[str, object] = {
         "schema": "loom.task-image-builder-host-release/v2",
         "release": "host-release-v2",
         "runtime_manifest": runtime_path.name,
@@ -505,6 +508,31 @@ def _mutate_runtime_manifest(fixture: BundleFixture, mutation: str) -> None:
     fixture.runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
 
 
+def _checked_in_runtime_v2_document(
+    fixture: BundleFixture,
+) -> dict[str, object]:
+    runtime = cast(
+        dict[str, object],
+        json.loads(
+        (ROOT / "deploy/task-image-builder/rootless-runtime-v2.json").read_text(
+            encoding="utf-8"
+        )
+    ),
+    )
+    architectures = cast(dict[str, object], runtime["architectures"])
+    entry = cast(dict[str, object], architectures[fixture.debian_architecture])
+    entry["members"] = {
+        "buildctl": _sha256(b"static buildctl\n"),
+        "buildkitd": _sha256(b"static buildkitd\n"),
+        "buildkit-runc": _sha256(b"static buildkit-runc\n"),
+        "rootlesskit": _sha256(b"static rootlesskit\n"),
+        "rootlessctl": _sha256(b"static rootlessctl\n"),
+        "slirp4netns": _sha256(b"static slirp4netns\n"),
+        "fuse-overlayfs": _sha256(b"static fuse-overlayfs\n"),
+    }
+    return runtime
+
+
 def _add_package_description_continuation(fixture: BundleFixture) -> None:
     packages_path = fixture.bundle / "apt/noble-updates.Packages.xz"
     packages = lzma.decompress(packages_path.read_bytes()).decode("utf-8")
@@ -571,17 +599,19 @@ def test_snapshot_construction_cleanup_failure_is_visible(
 ) -> None:
     fixture = _bundle_fixture(tmp_path)
     real_mkdir = Path.mkdir
-    real_rmtree = host_release.shutil.rmtree
+    host_release_module = cast(Any, host_release)
+    real_rmtree = host_release_module.shutil.rmtree
     snapshot_paths: set[Path] = set()
 
     def fail_snapshot_directory_create(
         path: Path,
-        *args: object,
-        **kwargs: object,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
     ) -> None:
         if path.parent.name.startswith("loom-host-bundle-snapshot-"):
             raise OSError("injected snapshot construction failure")
-        real_mkdir(path, *args, **kwargs)
+        real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
 
     def fail_snapshot_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
         target = Path(path)
@@ -592,8 +622,8 @@ def test_snapshot_construction_cleanup_failure_is_visible(
             raise OSError("injected snapshot cleanup failure")
         real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(host_release.Path, "mkdir", fail_snapshot_directory_create)
-    monkeypatch.setattr(host_release.shutil, "rmtree", fail_snapshot_cleanup)
+    monkeypatch.setattr(host_release_module.Path, "mkdir", fail_snapshot_directory_create)
+    monkeypatch.setattr(host_release_module.shutil, "rmtree", fail_snapshot_cleanup)
     try:
         with pytest.raises(host_release.HostReleaseError, match="snapshot cleanup failed") as exc:
             _verify(fixture)
@@ -716,6 +746,50 @@ def test_exact_aarch64_bundle_is_accepted(tmp_path: Path) -> None:
         verified.close()
 
 
+def test_v2_runtime_manifest_is_accepted_for_verified_host_bundle(
+    tmp_path: Path,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    runtime = _checked_in_runtime_v2_document(fixture)
+    fixture.runtime_path = fixture.runtime_path.with_name("rootless-runtime-v2.json")
+    fixture.release_path = fixture.release_path.with_name("host-release-v2.json")
+    fixture.release["runtime_manifest"] = fixture.runtime_path.name
+    fixture.write_release()
+    fixture.runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+    fixture.runtime_path.chmod(0o644)
+
+    verified = _verify(fixture)
+    try:
+        assert verified.architecture == "x86_64"
+        assert [path.name for path in verified.runtime_paths] == [
+            "buildkit-v0.32.2.linux-amd64.tar.gz",
+            "rootlesskit-x86_64.tar.gz",
+            "slirp4netns-x86_64",
+            "fuse-overlayfs-x86_64",
+        ]
+    finally:
+        verified.close()
+
+
+def test_checked_in_v2_release_and_runtime_bind_expected_runtime_paths() -> None:
+    release = host_release.load_host_release(
+        ROOT / "deploy/task-image-builder/host-release-v2.json"
+    )
+    runtime = host_release.load_runtime_manifest(
+        ROOT / "deploy/task-image-builder/rootless-runtime-v2.json",
+        architecture="x86_64",
+        debian_architecture=release.architecture_map["x86_64"],
+    )
+
+    assert release.runtime_manifest == "rootless-runtime-v2.json"
+    assert [artifact.name for artifact in runtime.artifacts] == [
+        "buildkit-v0.32.2.linux-amd64.tar.gz",
+        "rootlesskit-x86_64.tar.gz",
+        "slirp4netns-x86_64",
+        "fuse-overlayfs-x86_64",
+    ]
+
+
 def test_release_reader_handles_short_regular_file_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -726,7 +800,7 @@ def test_release_reader_handles_short_regular_file_reads(
     def short_read(descriptor: int, count: int) -> bytes:
         return real_read(descriptor, min(count, 7))
 
-    monkeypatch.setattr(host_release.os, "read", short_read)
+    monkeypatch.setattr(cast(Any, host_release).os, "read", short_read)
 
     release = host_release.load_host_release(fixture.release_path)
 
@@ -783,7 +857,8 @@ def test_verification_failure_surfaces_snapshot_cleanup_error(
     fixture = _bundle_fixture(tmp_path)
     inrelease_path = fixture.bundle / "apt/noble.InRelease"
     inrelease_path.write_bytes(inrelease_path.read_bytes() + b"changed\n")
-    real_rmtree = host_release.shutil.rmtree
+    host_release_module = cast(Any, host_release)
+    real_rmtree = host_release_module.shutil.rmtree
     snapshot_paths: set[Path] = set()
 
     def fail_snapshot_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
@@ -795,7 +870,7 @@ def test_verification_failure_surfaces_snapshot_cleanup_error(
             raise OSError("injected snapshot cleanup failure")
         real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(host_release.shutil, "rmtree", fail_snapshot_cleanup)
+    monkeypatch.setattr(host_release_module.shutil, "rmtree", fail_snapshot_cleanup)
     try:
         with pytest.raises(host_release.HostReleaseError, match="snapshot cleanup failed") as exc:
             _verify(fixture)
