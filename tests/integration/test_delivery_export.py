@@ -52,6 +52,41 @@ def _assert_no_secret_patterns(text: str) -> None:
         assert match is None, f"unexpected secret pattern {pattern.pattern!r}: {match!r}"
 
 
+def _assert_complete_payload_checksums(tar: tarfile.TarFile) -> dict[str, str]:
+    checksum_lines = (
+        tar.extractfile("checksums/SHA256SUMS").read().decode().splitlines()  # type: ignore[union-attr]
+    )
+    entries: list[tuple[str, str]] = []
+    for line in checksum_lines:
+        digest, separator, path = line.partition("  ")
+        assert separator == "  "
+        assert len(digest) == 64
+        assert path
+        entries.append((path, digest))
+
+    paths = [path for path, _digest in entries]
+    assert len(paths) == len(set(paths)), "SHA256SUMS contains duplicate paths"
+    expected_paths = {
+        member.name
+        for member in tar.getmembers()
+        if member.isfile() and member.name != "checksums/SHA256SUMS"
+    }
+    assert set(paths) == expected_paths
+
+    checksums = dict(entries)
+    for path, expected_digest in checksums.items():
+        body = tar.extractfile(path).read()  # type: ignore[union-attr]
+        assert hashlib.sha256(body).hexdigest() == expected_digest
+
+    if "task_bundles/manifest.json" in expected_paths:
+        task_bundle_manifest = json.load(  # type: ignore[arg-type]
+            tar.extractfile("task_bundles/manifest.json")
+        )
+        for item in task_bundle_manifest["files"]:
+            assert checksums[item["archive_path"]] == item["sha256"]
+    return checksums
+
+
 class _FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
@@ -145,6 +180,7 @@ def test_complete_trial_bundle_archive_is_deterministic_and_integrity_checked() 
     assert first.sha256 == second.sha256
     assert first_bytes == second_bytes
     with tarfile.open(fileobj=io.BytesIO(first_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         assert tar.extractfile("files/output.txt").read() == payload  # type: ignore[union-attr]
         manifest = json.load(tar.extractfile("bundle.json"))  # type: ignore[arg-type]
         assert manifest["trial_id"] == str(trial_id)
@@ -535,6 +571,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
         "sha256:" + hashlib.sha256(bundle_response.content).hexdigest()
     )
     with tarfile.open(fileobj=io.BytesIO(bundle_response.content), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         assert tar.extractfile("files/artifacts/answer.txt").read() == b"complete answer\n"  # type: ignore[union-attr]
         assert "source/_manifest.json" in tar.getnames()
         assert "checksums/SHA256SUMS" in tar.getnames()
@@ -578,6 +615,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     assert hashlib.sha256(archive_bytes).hexdigest() == body["sha256"]
 
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = sorted(tar.getnames())
         assert "manifest.json" in names
         assert "summary.json" in names
@@ -909,6 +947,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
     first_task = task_ids[0]
     first_trial = selected_trials[first_task]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert "manifest.json" in names
         assert "summary.json" in names
@@ -1112,6 +1151,7 @@ async def test_raw_harbor_delivery_export_preserves_loom_native_trajectory(
     first_task = task_ids[0]
     first_trial = selected_trials[first_task]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert f"agent_runs/{first_task}/{first_trial}/trajectory.jsonl" in names
         assert f"agent_runs/{first_task}/{first_trial}/trajectory.json" not in names
@@ -1841,6 +1881,7 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
     first_trial = selected_trials[first_task]
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert "derived/sft_messages.jsonl" not in names
         assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
@@ -2054,6 +2095,7 @@ async def test_openhands_export_from_typed_events(
     first_trial = selected_trials[first_task]
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert "derived/sft_messages.jsonl" not in names
         assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
@@ -2241,6 +2283,7 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
 
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         log_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log"
         meta_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json"
         output_member = f"agent_runs/{first_task}/{first_trial}/verifier/output.json"
