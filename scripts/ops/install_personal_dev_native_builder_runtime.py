@@ -941,21 +941,27 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 ("/usr/bin/systemd-sysusers", "--dry-run", str(sysusers)),
             )
             for command in commands:
+                command_name = Path(command[0]).name
                 command_env = _ROOT_ENV
-                if Path(command[0]).name == "systemd-analyze":
+                if command_name == "systemd-analyze":
                     command_env = {
                         **_ROOT_ENV,
                         "SYSTEMD_UNIT_PATH": str(root),
                     }
+                elif command_name == "systemd-sysusers":
+                    command_env = {
+                        **_ROOT_ENV,
+                        "SYSTEMD_LOG_LEVEL": "warning",
+                    }
                 result = self._run(*command, check=False, env=command_env)
-                if Path(command[0]).name == "dockerd":
+                if command_name == "dockerd":
                     if result != NativeBuilderCommandResult(
                         0,
                         stderr="configuration OK\n",
                     ):
                         raise PersonalDevNativeBuilderRuntimeInstallError("generated_input_invalid")
                     continue
-                permits_stdout = Path(command[0]).name == "systemd-sysusers"
+                permits_stdout = command_name == "systemd-sysusers"
                 if (
                     result.returncode != 0
                     or (result.stdout and not permits_stdout)
