@@ -117,6 +117,24 @@ def app(
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
+def _set_trial_state(
+    postgres_url: str,
+    trial_id: UUID,
+    state: str,
+) -> None:
+    engine = create_engine(postgres_url)
+    values: dict[str, object] = {"state": state}
+    if state == "succeeded":
+        values["result"] = {"state": "succeeded"}
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                update(Trial).where(Trial.id == trial_id).values(**values),
+            )
+    finally:
+        engine.dispose()
+
+
 def test_index_patch(app, traj_seed, postgres_url: str):  # type: ignore[no-untyped-def]
     trial_id, team_id, worker_id, raw = traj_seed
     with TestClient(app) as client:
@@ -145,6 +163,79 @@ def test_index_patch(app, traj_seed, postgres_url: str):  # type: ignore[no-unty
                 )
             ).one()
         assert lifecycle_object.version_id is None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("state", ["claimed", "running", "materializing"])
+def test_index_patch_allows_worker_owned_non_terminal_states(
+    app,
+    traj_seed,
+    postgres_url: str,
+    state: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, _team_id, worker_id, raw = traj_seed
+    _set_trial_state(postgres_url, trial_id, state)
+
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "events_count": 1,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.state == state
+            assert trial.trajectory_index == {"events_count": 1}
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("terminal_state", ["succeeded", "failed", "cancelled"])
+def test_index_patch_rejects_same_worker_after_terminal_state(
+    app,
+    traj_seed,
+    postgres_url: str,
+    terminal_state: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, _team_id, worker_id, raw = traj_seed
+    with TestClient(app) as client:
+        accepted = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "events_count": 1,
+            },
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        _set_trial_state(postgres_url, trial_id, terminal_state)
+        late = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "events_count": 2,
+            },
+        )
+
+    assert late.status_code == 409
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.state == terminal_state
+            assert trial.trajectory_index == {"events_count": 1}
     finally:
         engine.dispose()
 
