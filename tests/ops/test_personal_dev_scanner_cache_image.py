@@ -87,7 +87,7 @@ def test_scanner_cache_image_has_one_exact_component_owner() -> None:
 def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_builds() -> None:
     jobs = _workflow()["jobs"]
     assets = jobs["personal-dev-scanner-cache-assets"]
-    build = jobs["build"]
+    build = jobs["scanner-cache-build"]
     publish = jobs["publish"]
 
     assert assets["needs"] == ["plan", "trivy-binary"]
@@ -109,7 +109,6 @@ def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_b
         "retention-days": 1,
     }
     assert set(build["needs"]) == {
-        "image-route",
         "personal-dev-scanner-cache-assets",
         "plan",
         "trivy-binary",
@@ -119,7 +118,8 @@ def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_b
         "plan",
         "trivy-binary",
     }
-    assert "matrix.image == 'personal-dev-scanner-cache'" in build["runs-on"]
+    assert "ubuntu-24.04-arm" in build["runs-on"]
+    assert "ubuntu-24.04" in build["runs-on"]
     for job in (build, publish):
         download = next(
             step

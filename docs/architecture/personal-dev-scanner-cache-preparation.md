@@ -137,6 +137,26 @@ the pinned Trivy 0.74.0 binary with `--download-db-only` and
 repositories. The download occurs once per workflow, and its exact output is a
 short-lived workflow artifact consumed by both cache-image platform builds.
 
+For untrusted image admission, only the native AMD64 and ARM64
+`scanner-cache-build` jobs wait for that asset preparation. The ordinary
+`build` matrix starts after the verified Trivy binaries and its runner routes
+are ready. Both matrices consume a disjoint partition of the original
+ownership-selected native builds and share the same build, input verification,
+and vulnerability scan steps. If the cache image is not selected, admission
+and trusted publication skip asset preparation entirely. The `images-gate`
+requires success
+from each selected matrix and requires unselected matrices to be skipped;
+failed or skipped cache builds cannot be hidden by successful ordinary builds.
+
+Trusted publication requires the asset job to succeed when the cache image is
+selected, permits its skipped result only when that image is absent, and always
+requires the plan and verified binary preparation to succeed. It rebuilds from
+the protected commit and retains the same scan, SBOM, and release evidence
+contracts. This scheduling change adds neither a writable cache nor registry
+authority to untrusted jobs. Measure ordinary build start times against asset
+completion, then compare the complete `images` critical path on equivalent
+selected images before claiming a latency improvement.
+
 The personal trusted-release schema advances to version 2. Its image set adds
 `personal_dev_scanner_cache`. It also adds this exact `scanner` object:
 

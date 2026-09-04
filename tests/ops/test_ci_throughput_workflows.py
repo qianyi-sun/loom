@@ -493,7 +493,6 @@ def test_images_builds_use_planner_selection() -> None:
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     }
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
@@ -564,10 +563,9 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     }
     assert build["strategy"]["matrix"]["include"] == (
-        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
+        "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
     )
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
@@ -880,7 +878,6 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
     assert publish["needs"] == [
         "plan",
@@ -1337,6 +1334,7 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
             {
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
+                "SCANNER_BUILD_RESULT": "skipped",
                 "PUBLISH_RESULT": "skipped",
             },
         ),
@@ -1453,6 +1451,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
         },
@@ -1501,6 +1500,7 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "SCANNER_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
             "PUBLISH_RESULT": "success" if protected_publish else "skipped",
             "MANIFEST_RESULT": "success" if protected_publish else "skipped",
             "PERSONAL_DEV_RELEASE_RESULT": release_result,
@@ -1539,6 +1539,7 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
         },
         check=False,
@@ -1729,6 +1730,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             "images-gate",
             {
                 "build": "BUILD_RESULT",
+                "scanner-cache-build": "SCANNER_BUILD_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
                 "personal-dev-trusted-release": "PERSONAL_DEV_RELEASE_RESULT",
