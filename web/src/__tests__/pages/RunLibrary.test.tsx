@@ -516,6 +516,9 @@ function mockRunLibrary({
       ) {
         return Promise.resolve(new Response("report", { status: 200 }));
       }
+      if (url.endsWith("/api/v1/trials/trial-alpha/bundle/download")) {
+        return Promise.resolve(new Response("complete-bundle", { status: 200 }));
+      }
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
 }
@@ -892,6 +895,48 @@ describe("RunLibraryBatchDetail", () => {
     expect(exportUrl.searchParams.get("scope")).toBe("all");
     expect(exportUrl.searchParams.get("source_batch_id")).toBe("batch-alpha");
     expect(exportUrl.searchParams.get("format")).toBe("jsonl");
+  });
+
+  it("exposes complete canonical Trial bundles to the owner", async () => {
+    const fetchMock = mockRunLibrary({
+      platformAdmin: true,
+      detailOverride: {
+        ...detailBatch,
+        trial_bundles: [
+          {
+            trial_id: "trial-alpha",
+            task_id: "mbpp/1",
+            trial_state: "succeeded",
+            materialization_state: "committed",
+            attempts: 1,
+            canonical_ready: true,
+            file_count: 7,
+            size_bytes: 4096,
+            manifest_sha256: `sha256:${"a".repeat(64)}`,
+            content_sha256: `sha256:${"b".repeat(64)}`,
+            download_url: "/api/v1/trials/trial-alpha/bundle/download",
+          },
+        ],
+      },
+    });
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:bundle");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    renderWithProviders(
+      <Routes>
+        <Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} />
+      </Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+
+    expect(await screen.findByText("Complete Trial bundles")).toBeInTheDocument();
+    expect(screen.getByText(/7 files · 4.00 KB/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Download complete bundle" }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/trials/trial-alpha/bundle/download",
+      expect.objectContaining({ credentials: "include" }),
+    );
   });
 
   it("warns when clone-config source RetryPolicy diverges from cluster defaults (#401)", async () => {

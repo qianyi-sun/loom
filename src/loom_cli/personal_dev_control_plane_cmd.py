@@ -280,14 +280,25 @@ def _render_backup_restore_evidence(args: argparse.Namespace) -> int:
 def _render_schema_transition(args: argparse.Namespace) -> int:
     try:
         source_root = args.source_root.resolve(strict=True)
+        checkout_profile = source_root / "deploy/dev-fleet/personal-dev-control-plane.toml"
+        external_profile = args.file != checkout_profile
         if (
             args.source_root != source_root
-            or args.file != source_root / "deploy/dev-fleet/personal-dev-control-plane.toml"
+            or (
+                external_profile
+                and (
+                    args.profile_sha256 is None
+                    or _owner_only_file_identity(args.file) is None
+                )
+            )
             or Path(__file__).resolve(strict=True)
             != source_root / "src/loom_cli/personal_dev_control_plane_cmd.py"
         ):
             raise ValueError
-        profile = load_personal_dev_control_plane_profile(args.file)
+        profile = load_personal_dev_control_plane_profile(
+            args.file,
+            expected_sha256=args.profile_sha256,
+        )
         current_release = load_personal_dev_trusted_release(
             args.trusted_release_file,
             args.trusted_release_sha256,
@@ -1960,6 +1971,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         help="Bind an exact migration Job to a proven predecessor restore boundary.",
     )
     transition.add_argument("--file", type=Path, required=True)
+    transition.add_argument("--profile-sha256")
     transition.add_argument("--trusted-release-file", type=Path, required=True)
     transition.add_argument("--trusted-release-sha256", required=True)
     transition.add_argument("--source-root", type=Path, required=True)

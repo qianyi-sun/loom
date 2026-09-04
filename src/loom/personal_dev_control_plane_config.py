@@ -1806,10 +1806,20 @@ def _read_profile(path: Path) -> bytes:
             os.close(descriptor)
 
 
-def load_personal_dev_control_plane_profile(path: Path) -> PersonalDevControlPlaneProfile:
+def load_personal_dev_control_plane_profile(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> PersonalDevControlPlaneProfile:
     """Load the strict non-secret shadow profile."""
 
     payload = _read_profile(path)
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or _DIGEST.fullmatch(expected_sha256) is None
+        or not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), expected_sha256)
+    ):
+        raise ValueError("personal-dev control-plane profile is invalid")
     try:
         document = tomllib.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):

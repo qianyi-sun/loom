@@ -1468,13 +1468,16 @@ def _management_resource_admission(
         "'networkpolicies','rolebindings']"
     )
     personal_application_secret_names = "['loom-secrets','loom-admin-secret']"
+    personal_control_plane_secret_names = (
+        "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime']"
+    )
     personal_capacity_secret_names = "['loom-capacity-agent']"
     personal_capacity_resource_secret_names = (
         "['loom-capacity-agent','loom-capacity-agent-credentials']"
     )
     personal_secret_names = (
-        "['loom-secrets','loom-admin-secret','loom-capacity-agent',"
-        "'loom-capacity-agent-credentials']"
+        "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime',"
+        "'loom-capacity-agent','loom-capacity-agent-credentials']"
     )
     capacity_owned_resource = (
         "((request.resource.resource == 'secrets' && "
@@ -1559,6 +1562,9 @@ def _management_resource_admission(
 
     application_workload_secret_references = personal_workload_secret_references(
         personal_application_secret_names
+    )
+    control_plane_workload_secret_references = personal_workload_secret_references(
+        personal_control_plane_secret_names
     )
     capacity_workload_secret_references = personal_workload_secret_references(
         personal_capacity_secret_names
@@ -1663,7 +1669,12 @@ def _management_resource_admission(
                         "((request.resource.resource == 'deployments' && "
                         f"{target}.metadata.name == 'loom-capacity-agent' && "
                         f"{capacity_workload_secret_references}) || "
+                        f"({target}.metadata.name.matches("
+                        "'^loom-control-plane-g[1-9][0-9]*$') && "
+                        f"{control_plane_workload_secret_references}) || "
                         f"({target}.metadata.name != 'loom-capacity-agent' && "
+                        f"!{target}.metadata.name.matches("
+                        "'^loom-control-plane-g[1-9][0-9]*$') && "
                         f"{application_workload_secret_references}))) || "
                         f"({builder_namespace} && request.resource.resource == 'jobs' && "
                         f"{builder_workload_secret_references})"

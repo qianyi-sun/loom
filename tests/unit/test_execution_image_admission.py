@@ -80,12 +80,30 @@ def test_image_admission_rejects_tamper_missing_image_and_unknown_key() -> None:
         )
 
 
-def test_image_admission_rejects_high_severity_but_not_immutable_evidence_age() -> None:
+def test_image_admission_matches_release_severity_policy_and_ignores_evidence_age() -> None:
     now = datetime.now(UTC)
     high = signed_image_admission_bundle((_TASK, _RUNTIME), now=now, severity="high")
+    verify_execution_image_admission(
+        high,
+        required_image_refs=(_TASK, _RUNTIME),
+        keyring=IMAGE_ADMISSION_KEYRING,
+        now=now,
+    )
+    unrated = signed_image_admission_bundle(
+        (_TASK, _RUNTIME), now=now, severity="unknown"
+    )
+    verify_execution_image_admission(
+        unrated,
+        required_image_refs=(_TASK, _RUNTIME),
+        keyring=IMAGE_ADMISSION_KEYRING,
+        now=now,
+    )
+    critical = signed_image_admission_bundle(
+        (_TASK, _RUNTIME), now=now, severity="critical"
+    )
     with pytest.raises(ImageAdmissionError, match="vulnerability"):
         verify_execution_image_admission(
-            high,
+            critical,
             required_image_refs=(_TASK, _RUNTIME),
             keyring=IMAGE_ADMISSION_KEYRING,
             now=now,

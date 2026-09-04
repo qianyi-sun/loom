@@ -17,6 +17,10 @@ import rfc8785
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom_control_plane.elastic_slurm_worker_controller import SbatchRequest
+from loom_task_image_authority.contracts import (
+    TaskImageBuildGrantAuthorityV1,
+    canonical_authority_sha256,
+)
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SAFE_FEATURE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -166,9 +170,11 @@ class SlurmBuildGrantV1(_StrictFrozenModel):
     grant_id: UUID
     request: SlurmBuildRequestIdentityV1
     request_sha256: str
+    authority: TaskImageBuildGrantAuthorityV1
+    authority_sha256: str
     comment: str
 
-    @field_validator("request_sha256")
+    @field_validator("request_sha256", "authority_sha256")
     @classmethod
     def _digest_shape(cls, value: str) -> str:
         if _DIGEST_RE.fullmatch(value) is None:
@@ -179,6 +185,14 @@ class SlurmBuildGrantV1(_StrictFrozenModel):
     def _exact_bindings(self) -> SlurmBuildGrantV1:
         if self.request_sha256 != canonical_request_sha256(self.request):
             raise ValueError("rootless builder request digest changed")
+        if self.authority.slurm_cluster_id != self.request.slurm_cluster_id:
+            raise ValueError("rootless builder authority cluster changed")
+        if self.authority.cpu_arch != self.request.cpu_arch:
+            raise ValueError("rootless builder authority architecture changed")
+        if self.authority.slurm_request_sha256 != self.request_sha256:
+            raise ValueError("rootless builder authority request digest changed")
+        if self.authority_sha256 != canonical_authority_sha256(self.authority):
+            raise ValueError("rootless builder authority digest changed")
         if self.comment != f"{_COMMENT_PREFIX}{self.grant_id}":
             raise ValueError("rootless builder grant comment changed")
         return self
@@ -188,6 +202,7 @@ def issue_slurm_build_grant(
     policy: SlurmBuildEnvironmentPolicyV1,
     *,
     grant_id: UUID,
+    authority: TaskImageBuildGrantAuthorityV1,
 ) -> SlurmBuildGrantV1:
     request = policy.request_identity()
     return SlurmBuildGrantV1(
@@ -195,6 +210,8 @@ def issue_slurm_build_grant(
         grant_id=grant_id,
         request=request,
         request_sha256=canonical_request_sha256(request),
+        authority=authority,
+        authority_sha256=canonical_authority_sha256(authority),
         comment=f"{_COMMENT_PREFIX}{grant_id}",
     )
 

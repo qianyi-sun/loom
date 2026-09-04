@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from loom.agent.litellm import _render_artifact_body
+from loom.request_params import sanitize_request_extras
 
 
 class ServiceExecutionTaskError(RuntimeError):
@@ -61,6 +64,84 @@ def _completion_content(response: dict[str, Any]) -> tuple[str, str]:
     return content, finish_reason
 
 
+_USAGE_COUNTERS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "thinking_tokens",
+)
+
+
+def _loom_usage(response: dict[str, Any], *, finish_reason: str) -> dict[str, Any]:
+    raw = response.get("loom")
+    if not isinstance(raw, dict):
+        raise ServiceExecutionTaskError("gateway response has no Loom accounting block")
+    usage: dict[str, Any] = {}
+    for name in _USAGE_COUNTERS:
+        value = raw.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ServiceExecutionTaskError(f"gateway accounting field {name} is invalid")
+        usage[name] = value
+    for name in ("cost_usd", "duration_sec"):
+        value = raw.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value < 0
+            or not math.isfinite(float(value))
+        ):
+            raise ServiceExecutionTaskError(f"gateway accounting field {name} is invalid")
+        usage[name] = float(value)
+    for name in ("rate_card_hash", "gateway_request_id"):
+        value = raw.get(name)
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 512:
+            raise ServiceExecutionTaskError(f"gateway accounting field {name} is invalid")
+        usage[name] = value
+    if raw.get("finish_reason") != finish_reason:
+        raise ServiceExecutionTaskError("gateway accounting finish reason drifted")
+    usage["finish_reason"] = finish_reason
+    streamed = raw.get("streamed")
+    if not isinstance(streamed, bool):
+        raise ServiceExecutionTaskError("gateway accounting streamed field is invalid")
+    usage["streamed"] = streamed
+    first_token = raw.get("time_to_first_token_sec")
+    if first_token is not None and (
+        isinstance(first_token, bool)
+        or not isinstance(first_token, (int, float))
+        or first_token < 0
+        or not math.isfinite(float(first_token))
+    ):
+        raise ServiceExecutionTaskError("gateway first-token timing is invalid")
+    usage["time_to_first_token_sec"] = None if first_token is None else float(first_token)
+    provider_extras = raw.get("provider_extras")
+    if not isinstance(provider_extras, dict) or any(
+        not isinstance(key, str)
+        or isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        for key, value in provider_extras.items()
+    ):
+        raise ServiceExecutionTaskError("gateway provider accounting is invalid")
+    usage["provider_extras"] = provider_extras
+    attempt = raw.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise ServiceExecutionTaskError("gateway retry accounting is invalid")
+    usage["attempt"] = attempt
+    return usage
+
+
+def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(path.name + ".tmp")
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    with temporary.open("x", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
 def run_direct_completion(*, workspace: Path = Path("/workspace")) -> None:
     instruction_path = _safe_workspace_path(
         workspace,
@@ -68,46 +149,91 @@ def run_direct_completion(*, workspace: Path = Path("/workspace")) -> None:
     )
     instruction = instruction_path.read_text(encoding="utf-8")
     artifact_paths = _json_environment("LOOM_TASK_ARTIFACTS_JSON", list)
-    request_params = _json_environment("LOOM_TASK_REQUEST_PARAMS_JSON", dict)
+    request_params = sanitize_request_extras(
+        _json_environment("LOOM_TASK_REQUEST_PARAMS_JSON", dict)
+    )
     model = _required_environment("LOOM_TASK_MODEL")
     gateway = _required_environment("LOOM_GATEWAY_URL").rstrip("/")
     messages: list[dict[str, str]] = [{"role": "user", "content": instruction}]
     final = ""
-    for _turn in range(8):
-        payload = {
-            **request_params,
+    calls: list[dict[str, Any]] = []
+    trajectory_path = workspace / ".loom" / "agent" / "trajectory.jsonl"
+    trajectory_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with trajectory_path.open("xb") as trajectory:
+        for turn in range(8):
+            payload = {
+                **request_params,
+                "model": model,
+                "messages": messages,
+                "stream": False,
+            }
+            request = urllib.request.Request(
+                gateway + "/v1/chat/completions",
+                data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            started_at = datetime.now(UTC)
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    raw = response.read(16 * 1024 * 1024 + 1)
+            except urllib.error.HTTPError as exc:
+                detail = exc.read(4096).decode("utf-8", errors="replace")
+                raise ServiceExecutionTaskError(
+                    f"gateway completion failed with HTTP {exc.code}: {detail}"
+                ) from exc
+            finished_at = datetime.now(UTC)
+            if len(raw) > 16 * 1024 * 1024:
+                raise ServiceExecutionTaskError("gateway response exceeds 16 MiB")
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ServiceExecutionTaskError("gateway response is not JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ServiceExecutionTaskError("gateway response has the wrong shape")
+            final, finish_reason = _completion_content(parsed)
+            usage = _loom_usage(parsed, finish_reason=finish_reason)
+            response_message = {"role": "assistant", "content": final}
+            call = {
+                "schema_version": "loom.service-execution-llm-call.v1",
+                "turn": turn,
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "model": model,
+                "request": {
+                    "messages": list(messages),
+                    "request_params": request_params,
+                },
+                "response": response_message,
+                "usage": usage,
+            }
+            trajectory.write(
+                (json.dumps(call, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            )
+            trajectory.flush()
+            os.fsync(trajectory.fileno())
+            calls.append(call)
+            messages.append(response_message)
+            if finish_reason == "stop":
+                break
+        else:
+            raise ServiceExecutionTaskError("direct completion exhausted eight turns")
+
+    totals: dict[str, int | float] = {
+        name: sum(int(call["usage"][name]) for call in calls) for name in _USAGE_COUNTERS
+    }
+    totals["cost_usd"] = sum(float(call["usage"]["cost_usd"]) for call in calls)
+    totals["duration_sec"] = sum(float(call["usage"]["duration_sec"]) for call in calls)
+    _write_json_atomic(
+        workspace / ".loom" / "agent" / "usage.json",
+        {
+            "schema_version": "loom.service-execution-usage.v1",
             "model": model,
-            "messages": messages,
-            "stream": False,
-        }
-        request = urllib.request.Request(
-            gateway + "/v1/chat/completions",
-            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                raw = response.read(16 * 1024 * 1024 + 1)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read(4096).decode("utf-8", errors="replace")
-            raise ServiceExecutionTaskError(
-                f"gateway completion failed with HTTP {exc.code}: {detail}"
-            ) from exc
-        if len(raw) > 16 * 1024 * 1024:
-            raise ServiceExecutionTaskError("gateway response exceeds 16 MiB")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ServiceExecutionTaskError("gateway response is not JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ServiceExecutionTaskError("gateway response has the wrong shape")
-        final, finish_reason = _completion_content(parsed)
-        messages.append({"role": "assistant", "content": final})
-        if finish_reason == "stop":
-            break
-    else:
-        raise ServiceExecutionTaskError("direct completion exhausted eight turns")
+            "call_count": len(calls),
+            "totals": totals,
+            "calls": [call["usage"] for call in calls],
+        },
+    )
 
     for raw_path in artifact_paths:
         if not isinstance(raw_path, str):

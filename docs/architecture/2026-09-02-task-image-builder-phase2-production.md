@@ -132,6 +132,15 @@ scopes. Possession of only a certificate or only a bearer token grants nothing.
 The certificate private key and bearer file are root-owned and never cross the
 Unix socket.
 
+The inert example registry at
+`deploy/task-image-builder/authority-principals-v1.example.json` demonstrates
+the on-disk digest format using the public, non-secret bearer strings
+`example-only-oldlab-node-bearer-do-not-use` and
+`example-only-gb10-node-bearer-do-not-use`. The JSON deliberately contains only
+their SHA-256 digests, never these raw example strings. Production activation
+must provision independently generated node credentials through the later
+credential ceremony; neither example value is usable production authority.
+
 The guard is implemented as an isolated CPython program installed from the
 verified Loom host release and started with `/usr/bin/python3 -I -B`. Its local
 protocol is bounded and uses only fixed system calls and precompiled,
@@ -255,6 +264,13 @@ and verifies inherited CPU, memory, swap, and device limits. Failure to delegate
 the required controllers removes the node feature and prevents claims.
 
 Network attachment uses pinned cgroup `bpf_link` objects and root-only maps.
+Each independently loaded scope has a singleton subject map; the pinned link
+readback, rather than the currently executing task, binds that map instance to
+the exact attachment cgroup. This keeps ingress attribution and nested
+BuildKit descendants correct.
+The endpoint and limiter inputs come only from a canonical root-owned policy
+artifact whose byte digest is the grant's containment-policy identity; they are
+never supplied by the allocation or an authority response.
 Both IPv4 and IPv6 default deny. Connect, UDP send, socket lifecycle, ingress,
 and egress hooks cover destination policy plus byte, packet, flow, and DNS
 limits. `trusted-service` receives only authority/object-store/registry
@@ -368,11 +384,15 @@ before its successor starts.
    attachment-proof, exchange, session, and attestation contracts; add locked
    durable state transitions with encrypted exact-replay receipts. No HTTP
    route, daemon, secret provisioning, or provider activation is included.
-2. **Phase 2B — authority service and node guard release.** Add the dedicated
-   mTLS service, node principal registry, bounded APIs, root-owned guard, Unix
+2. **Phase 2B — authority service and node guard release.** Deliver this as two
+   protected, inert sub-increments so the network authority and root/kernel
+   authority are reviewed independently. **Phase 2B1** adds the dedicated mTLS
+   service, node principal registry, bounded guard-mediated APIs, and disabled
+   deployment composition. **Phase 2B2** adds the root-owned guard, Unix
    peer/pidfd/cgroup verification, pinned BPF policy/ledger, sealed-memfd
-   transfer, systemd/install/conformance artifacts, and disabled deployment
-   composition.
+   transfer, and systemd/install/conformance artifacts. The node guard is the
+   only mTLS client and mediates bootstrap exchange; no client private key or
+   node bearer enters the allocation.
 3. **Phase 2C — allocation supervisor and rootless executor.** Add session-bound
    claim/heartbeat, release validation, quota-backed storage, RootlessKit and
    BuildKit startup, native component builds, typed cleanup, and no-cache

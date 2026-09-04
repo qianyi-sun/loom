@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -18,6 +20,17 @@ _CANDIDATE = re.compile(r"^[0-9a-f]{40}$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _SECRET_ENV = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)")
+
+
+def _confined_relative_path(value: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError("runtime output path must be a confined relative POSIX path")
+    return value
 
 
 class _Strict(BaseModel):
@@ -133,6 +146,56 @@ class RuntimeTaskInputV1(_Strict):
     total_bytes: int = Field(ge=0, le=10 * 1024**3)
 
 
+class RuntimeOutputDeclarationV1(_Strict):
+    """One immutable workspace file expected in the complete Trial bundle."""
+
+    source_path: str = Field(min_length=1, max_length=4096)
+    relative_path: str = Field(min_length=1, max_length=4096)
+    kind: Literal[
+        "task_artifact",
+        "trajectory",
+        "agent_native",
+        "verifier",
+        "usage",
+        "diagnostic",
+        "checkpoint",
+    ]
+    required: bool
+
+    @field_validator("source_path", "relative_path")
+    @classmethod
+    def _safe_path(cls, value: str) -> str:
+        return _confined_relative_path(value)
+
+    @model_validator(mode="after")
+    def _bundle_namespace(self) -> RuntimeOutputDeclarationV1:
+        namespace = self.relative_path.split("/", 1)[0]
+        if namespace not in {
+            "artifacts",
+            "trajectory",
+            "agent",
+            "verifier",
+            "accounting",
+            "diagnostics",
+            "checkpoints",
+        }:
+            raise ValueError("runtime output has an unknown bundle namespace")
+        return self
+
+
+class RuntimeOutputEvidenceV1(RuntimeOutputDeclarationV1):
+    state: Literal["captured", "missing"]
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = Field(default=None, pattern=_SHA256.pattern)
+
+    @model_validator(mode="after")
+    def _state_matches_evidence(self) -> RuntimeOutputEvidenceV1:
+        populated = self.size_bytes is not None and self.sha256 is not None
+        if populated != (self.state == "captured"):
+            raise ValueError("runtime output state does not match its evidence")
+        return self
+
+
 class ExecutionRuntimePlanV1(_Strict):
     schema_version: Literal["loom.execution-runtime-plan.v1"] = "loom.execution-runtime-plan.v1"
     candidate_sha: str = Field(pattern=_CANDIDATE.pattern)
@@ -160,6 +223,10 @@ class ExecutionRuntimePlanV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
     task_input: RuntimeTaskInputV1 | None = None
+    output_declarations: tuple[RuntimeOutputDeclarationV1, ...] = Field(
+        default=(),
+        max_length=10_000,
+    )
 
     @field_validator("task_image_ref", "runtime_image_ref")
     @classmethod
@@ -196,6 +263,12 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        source_paths = [item.source_path for item in self.output_declarations]
+        bundle_paths = [item.relative_path for item in self.output_declarations]
+        if len(source_paths) != len(set(source_paths)) or len(bundle_paths) != len(
+            set(bundle_paths)
+        ):
+            raise ValueError("runtime output declarations must be unique")
         return self
 
     def canonical_payload(self) -> dict[str, object]:
@@ -256,10 +329,15 @@ class ExecutionRuntimeResultV1(_Strict):
         "timed_out",
         "cancelled",
         "runtime_error",
+        "artifact_upload_failed",
+        "missing_required_artifacts",
+        "trajectory_flush_failed",
     ]
     started_at: datetime
     finished_at: datetime
     phases: tuple[RuntimePhaseEvidenceV1, ...] = Field(max_length=64)
+    outputs: tuple[RuntimeOutputEvidenceV1, ...] = Field(default=(), max_length=10_000)
+    verifier_rewards: dict[str, float] | None = None
     partial_evidence: bool
 
     @field_validator("task_image_ref", "runtime_image_ref")
@@ -277,6 +355,20 @@ class ExecutionRuntimeResultV1(_Strict):
             raise ValueError("runtime partial-evidence flag does not match status")
         if [phase.ordinal for phase in self.phases] != list(range(1, len(self.phases) + 1)):
             raise ValueError("runtime phase ordinals are not contiguous")
+        sources = [item.source_path for item in self.outputs]
+        paths = [item.relative_path for item in self.outputs]
+        if len(sources) != len(set(sources)) or len(paths) != len(set(paths)):
+            raise ValueError("runtime output evidence must be unique")
+        if self.status == "succeeded" and any(
+            item.required and item.state != "captured" for item in self.outputs
+        ):
+            raise ValueError("successful runtime result is missing required output")
+        if self.verifier_rewards is not None:
+            if not self.verifier_rewards or any(
+                not key or len(key.encode("utf-8")) > 256 or not math.isfinite(value)
+                for key, value in self.verifier_rewards.items()
+            ):
+                raise ValueError("runtime verifier rewards are invalid")
         return self
 
 
@@ -321,6 +413,8 @@ __all__ = [
     "ProbeV1",
     "ProcessPhaseV1",
     "RuntimeComposition",
+    "RuntimeOutputDeclarationV1",
+    "RuntimeOutputEvidenceV1",
     "RuntimePhaseEvidenceV1",
     "RuntimeStreamEvidenceV1",
     "RuntimeTaskInputV1",

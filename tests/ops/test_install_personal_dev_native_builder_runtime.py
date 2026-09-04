@@ -8,7 +8,7 @@ import os
 import stat
 import tarfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -77,6 +77,7 @@ class HostRunner:
     cpus: int = 20
     memory_bytes: int = 125_513_936 * 1024
     disk_bytes: int = 183_255_265_280
+    disk_stdout: str | None = None
     routes: tuple[str, ...] = (
         "10.42.0.0/24",
         "172.17.0.0/16",
@@ -93,7 +94,20 @@ class HostRunner:
     runsc_version: str = "release-20260810.0"
     runsc_spec_version: str = "1.2.1"
     nft_table_output: str = ""
+    nft_check_result: NativeBuilderCommandResult = field(
+        default_factory=lambda: NativeBuilderCommandResult(0)
+    )
     sysusers_dry_run_stdout: str = ""
+    sysusers_dry_run_stderr: str = ""
+    dockerd_validate_result: NativeBuilderCommandResult = field(
+        default_factory=lambda: NativeBuilderCommandResult(
+            0,
+            stderr="configuration OK\n",
+        )
+    )
+    systemd_analyze_result: NativeBuilderCommandResult = field(
+        default_factory=lambda: NativeBuilderCommandResult(0)
+    )
     calls: list[tuple[str, ...]] | None = None
     environments: list[dict[str, str]] | None = None
 
@@ -153,7 +167,10 @@ class HostRunner:
         elif executable == "awk":
             result = NativeBuilderCommandResult(0, f"{self.memory_bytes}\n")
         elif executable == "df":
-            result = NativeBuilderCommandResult(0, f"Avail\n{self.disk_bytes}\n")
+            result = NativeBuilderCommandResult(
+                0,
+                (f"Avail\n{self.disk_bytes}\n" if self.disk_stdout is None else self.disk_stdout),
+            )
         elif executable == "ip":
             result = NativeBuilderCommandResult(
                 0,
@@ -183,14 +200,18 @@ class HostRunner:
             result = NativeBuilderCommandResult(
                 0,
                 self.sysusers_dry_run_stdout if "--dry-run" in call else "",
+                self.sysusers_dry_run_stderr if "--dry-run" in call else "",
             )
         elif executable == "nft":
-            result = NativeBuilderCommandResult(
-                0,
-                self.nft_table_output if "list" in call else "",
+            result = (
+                NativeBuilderCommandResult(0, self.nft_table_output)
+                if "list" in call
+                else self.nft_check_result
             )
-        elif executable in {"dockerd", "systemd-analyze"}:
-            result = NativeBuilderCommandResult(0)
+        elif executable == "dockerd":
+            result = self.dockerd_validate_result
+        elif executable == "systemd-analyze":
+            result = self.systemd_analyze_result
         elif executable == "runsc" and call[1:] == ("--version",):
             result = NativeBuilderCommandResult(
                 0,
@@ -330,6 +351,139 @@ def test_preflight_verifies_archive_and_publishes_nothing(tmp_path: Path) -> Non
     }
     assert not _mapped(installer, profile.release_root).exists()
     assert not _mapped(installer, profile.profile_path).exists()
+
+
+def test_preflight_accepts_nonempty_cgroup_controller_pseudofile_with_zero_stat_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    controllers = _mapped(installer, Path("/sys/fs/cgroup/cgroup.controllers"))
+    controller_identity = (controllers.stat().st_dev, controllers.stat().st_ino)
+    real_fstat = os.fstat
+
+    def zero_sized_controller(descriptor: int) -> os.stat_result:
+        observed = real_fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) != controller_identity:
+            return observed
+        values = list(observed)
+        values[6] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", zero_sized_controller)
+
+    receipt = installer.preflight(archive)
+
+    assert receipt["operation"] == "preflight"
+    assert not _mapped(installer, profile.release_root).exists()
+
+
+def test_preflight_accepts_gnu_df_right_aligned_available_header(tmp_path: Path) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(
+        disk_bytes=profile.minimum_disk_free_bytes,
+        disk_stdout=f"       Avail\n  {profile.minimum_disk_free_bytes}\n",
+    )
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    receipt = installer.preflight(archive)
+
+    assert receipt["operation"] == "preflight"
+    assert not _mapped(installer, profile.release_root).exists()
+
+
+@pytest.mark.parametrize(
+    "disk_template",
+    (
+        "\tAvail\n{disk_bytes}\n",
+        "Avail \n{disk_bytes}\n",
+        "Avail\n\t{disk_bytes}\n",
+        "Avail\n{disk_bytes} \n",
+        "Avail\n{disk_bytes}bytes\n",
+        "Avail\n\n",
+        "Avail\n+{disk_bytes}\n",
+        "Avail\n-{disk_bytes}\n",
+        "Avail\n{disk_bytes}\nextra\n",
+        "Avail\n{disk_bytes}",
+    ),
+)
+def test_preflight_rejects_malformed_df_available_output(
+    tmp_path: Path,
+    disk_template: str,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(
+        disk_stdout=disk_template.format(
+            disk_bytes=profile.minimum_disk_free_bytes,
+        )
+    )
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="host_capacity_invalid",
+    ):
+        installer.preflight(archive)
+
+    assert not _mapped(installer, profile.release_root).exists()
+
+
+def test_kernel_pseudofile_reader_rejects_payload_larger_than_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controllers = tmp_path / "cgroup.controllers"
+    controllers.write_bytes(b"x" * 4097)
+    controller_identity = (controllers.stat().st_dev, controllers.stat().st_ino)
+    real_fstat = os.fstat
+
+    def zero_sized_controller(descriptor: int) -> os.stat_result:
+        observed = real_fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) != controller_identity:
+            return observed
+        values = list(observed)
+        values[6] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", zero_sized_controller)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="managed_file_invalid",
+    ):
+        runtime_installer._read_kernel_regular(controllers, maximum=4096)
+
+
+def test_kernel_pseudofile_reader_rejects_identity_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controllers = tmp_path / "cgroup.controllers"
+    controllers.write_bytes(b"cpu memory pids\n")
+    controller_identity = (controllers.stat().st_dev, controllers.stat().st_ino)
+    target_observations = 0
+    real_fstat = os.fstat
+
+    def changed_controller(descriptor: int) -> os.stat_result:
+        nonlocal target_observations
+        observed = real_fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) != controller_identity:
+            return observed
+        target_observations += 1
+        values = list(observed)
+        values[6] = 0
+        if target_observations == 2:
+            values[1] += 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", changed_controller)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="managed_file_invalid",
+    ):
+        runtime_installer._read_kernel_regular(controllers, maximum=4096)
 
 
 def _traversal(entries: list[ArchiveEntry]) -> None:
@@ -526,6 +680,74 @@ def test_preflight_accepts_safe_sysusers_dry_run_plan_output(tmp_path: Path) -> 
     assert installer.preflight(archive)["operation"] == "preflight"
 
 
+def test_preflight_accepts_exact_dockerd_validation_success(tmp_path: Path) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile, runner=HostRunner())
+
+    assert installer.preflight(archive)["operation"] == "preflight"
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        NativeBuilderCommandResult(0),
+        NativeBuilderCommandResult(0, stderr="Configuration OK\n"),
+        NativeBuilderCommandResult(0, stderr="configuration OK\nwarning\n"),
+        NativeBuilderCommandResult(
+            0,
+            stdout="configuration OK\n",
+            stderr="configuration OK\n",
+        ),
+        NativeBuilderCommandResult(1, stderr="configuration OK\n"),
+    ),
+    ids=("empty-stderr", "wrong-text", "extra-line", "stdout", "nonzero"),
+)
+def test_preflight_rejects_noncanonical_dockerd_validation_result(
+    tmp_path: Path,
+    result: NativeBuilderCommandResult,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(dockerd_validate_result=result)
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="generated_input_invalid",
+    ):
+        installer.preflight(archive)
+
+
+@pytest.mark.parametrize(
+    "runner",
+    (
+        HostRunner(nft_check_result=NativeBuilderCommandResult(0, stdout="unexpected\n")),
+        HostRunner(nft_check_result=NativeBuilderCommandResult(0, stderr="unexpected\n")),
+        HostRunner(systemd_analyze_result=NativeBuilderCommandResult(0, stdout="unexpected\n")),
+        HostRunner(systemd_analyze_result=NativeBuilderCommandResult(0, stderr="unexpected\n")),
+        HostRunner(sysusers_dry_run_stderr="unexpected\n"),
+    ),
+    ids=(
+        "nft-stdout",
+        "nft-stderr",
+        "systemd-analyze-stdout",
+        "systemd-analyze-stderr",
+        "systemd-sysusers-stderr",
+    ),
+)
+def test_preflight_rejects_output_from_other_strict_generated_input_validators(
+    tmp_path: Path,
+    runner: HostRunner,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="generated_input_invalid",
+    ):
+        installer.preflight(archive)
+
+
 def test_preflight_isolates_systemd_unit_validation_from_host_units(
     tmp_path: Path,
 ) -> None:
@@ -590,8 +812,7 @@ def _mutated_test_certificate(original: bytes, replacement: bytes) -> bytes:
     assert invalid != der
     invalid_encoded = base64.b64encode(invalid)
     body = b"\n".join(
-        invalid_encoded[index : index + 64]
-        for index in range(0, len(invalid_encoded), 64)
+        invalid_encoded[index : index + 64] for index in range(0, len(invalid_encoded), 64)
     )
     return b"-----BEGIN CERTIFICATE-----\n" + body + b"\n-----END CERTIFICATE-----\n"
 

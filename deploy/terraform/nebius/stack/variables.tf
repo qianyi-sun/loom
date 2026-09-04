@@ -34,6 +34,7 @@ variable "target" {
     system_node_count          = number
     execution_min_nodes        = number
     execution_max_nodes        = number
+    execution_max_pods         = number
     system_preset              = string
     execution_preset           = string
     system_disk_gib            = number

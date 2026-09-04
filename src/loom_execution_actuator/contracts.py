@@ -17,7 +17,11 @@ class ExecutionTerminationSummaryV1(BaseModel):
     command_identity_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     execution_role: str = Field(pattern=r"^(attempt|verifier)$")
     status: str = Field(
-        pattern=r"^(succeeded|setup_error|task_error|verifier_error|timed_out|cancelled|runtime_error)$"
+        pattern=(
+            r"^(succeeded|setup_error|task_error|verifier_error|timed_out|cancelled|"
+            r"runtime_error|artifact_upload_failed|missing_required_artifacts|"
+            r"trajectory_flush_failed)$"
+        )
     )
     partial_evidence: bool
     phase_count: int = Field(ge=0, le=64)

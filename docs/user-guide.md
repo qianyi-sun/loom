@@ -322,6 +322,8 @@ loom eval usage --start 2026-06-01 --end 2026-06-30 \
 loom eval trial show <trial-id>
 loom eval diagnose trial <trial-id>
 loom eval trial debug <trial-id> --format json
+loom eval trial download <trial-id> --kind bundle \
+  --output complete-trial-bundle.tar.gz
 loom eval trial download <trial-id> --kind atif --output atif.json
 loom eval trial download <trial-id> --kind trajectory --output events.jsonl
 loom eval trial download <trial-id> --kind artifact \
@@ -337,6 +339,11 @@ MinIO/S3 URLs. Reconstructed downloads use clean trial-wide sequence numbers and
 preserve synthetic LLM usage summaries even when the original object copy is
 missing. If ATIF projection metadata is missing, the ATIF download returns a
 structured conflict while trajectory download remains available for debugging.
+Nebius-backed trials additionally expose the complete canonical bundle only
+after compute output has been copied, verified, and committed. The bundle
+contains every declared output, trajectory/ATIF, source evidence, manifest, and
+checksum ledger; Loom never treats an individual `answer.txt` as the complete
+deliverable.
 
 For a self-hosted inference service, register the final reachable `/v1` URL the
 same way:

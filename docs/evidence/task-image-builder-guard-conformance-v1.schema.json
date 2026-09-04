@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.qianyi.dev/schemas/task-image-builder-guard-conformance-v1.schema.json",
+  "title": "Loom task-image builder node guard conformance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "release_sha256",
+    "architecture",
+    "live",
+    "production_ready",
+    "blockers",
+    "checks"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.task-image-builder-guard-conformance/v1"
+    },
+    "release_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "architecture": {
+      "enum": ["x86_64", "aarch64"]
+    },
+    "live": {
+      "type": "boolean"
+    },
+    "production_ready": {
+      "const": false
+    },
+    "blockers": {
+      "const": ["phase2_guard_provider_release_missing"]
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 11,
+      "items": {
+        "$ref": "#/$defs/check"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "evidence_sha256"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{2,63}$"
+        },
+        "status": {
+          "const": "pass"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

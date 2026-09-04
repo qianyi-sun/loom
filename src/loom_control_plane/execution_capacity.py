@@ -96,6 +96,32 @@ def _normalized_pending_reasons(value: dict[str, int]) -> dict[str, int]:
     return dict(sorted(normalized.items()))
 
 
+def _normalized_node_states(
+    value: dict[str, int] | None,
+    *,
+    active_nodes: int,
+    autoscaler_state: str,
+) -> dict[str, int]:
+    keys = ("desired", "creating", "ready", "failed", "deleting")
+    if value is None:
+        ready = active_nodes if autoscaler_state == "ready" else 0
+        return {
+            "desired": active_nodes,
+            "creating": active_nodes - ready,
+            "ready": ready,
+            "failed": 0,
+            "deleting": 0,
+        }
+    if set(value) != set(keys):
+        raise ValueError(
+            "node_states must contain desired, creating, ready, failed, deleting"
+        )
+    return {
+        key: _non_negative_int(value[key], name=f"node_states.{key}")
+        for key in keys
+    }
+
+
 async def create_execution_capacity_observation(
     session: AsyncSession,
     *,
@@ -129,6 +155,7 @@ async def create_execution_capacity_observation(
     unschedulable_jobs: int,
     image_pull_backoff_jobs: int,
     pending_reasons: dict[str, int],
+    node_states: dict[str, int] | None = None,
 ) -> tuple[ExecutionCapacityObservation, bool]:
     target_id = _clean_text(target_id, name="target_id", max_length=120)
     source = _clean_text(source, name="source", max_length=120)
@@ -172,6 +199,11 @@ async def create_execution_capacity_observation(
     if autoscaler_state not in {"ready", "scaling", "stalled", "unknown"}:
         raise ValueError("autoscaler_state is invalid")
     reasons = _normalized_pending_reasons(pending_reasons)
+    normalized_node_states = _normalized_node_states(
+        node_states,
+        active_nodes=active_nodes,
+        autoscaler_state=autoscaler_state,
+    )
     await session.execute(_CAPACITY_MUTATION_LOCK)
     target = await session.get(ServiceExecutionTarget, target_id)
     if target is None or target.provider != "nebius":
@@ -190,6 +222,7 @@ async def create_execution_capacity_observation(
         **positive_values,
         **non_negative_values,
         "pending_reasons": reasons,
+        "node_states": normalized_node_states,
     }
     digest = canonical_digest(payload)
     existing = (
@@ -766,6 +799,11 @@ async def fetch_execution_capacity_status(
                             - observation.provider_used_storage_mib,
                         ),
                         "active_nodes": observation.active_nodes,
+                        "node_states": (
+                            observation.observation_json.get("node_states")
+                            if isinstance(observation.observation_json, dict)
+                            else None
+                        ),
                         "policy_nodes_headroom": (
                             max(0, policy.max_nodes - observation.active_nodes)
                             if policy is not None

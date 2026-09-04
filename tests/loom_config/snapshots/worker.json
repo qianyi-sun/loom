@@ -74,6 +74,11 @@
     "default": "False",
     "required": false
   },
+  "executor_worker_credential": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
   "family_state_download_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "120.0",

@@ -83,7 +83,9 @@ function deliveryObjectText(delivery: DeliveryExport | undefined): string | null
   if (!counts) return null;
   const trajectories = counts.trajectory ?? 0;
   const atif = counts.atif ?? 0;
-  return `${trajectories} trajectories / ${atif} ATIF`;
+  const bundles = counts.trial_bundles ?? 0;
+  const bundleFiles = counts.trial_bundle_files ?? 0;
+  return `${trajectories} trajectories / ${atif} ATIF / ${bundles} complete Trial bundles (${bundleFiles} files)`;
 }
 
 type ReadyDeliveryExport = DeliveryExport & {
@@ -660,7 +662,8 @@ export default function BatchDetail(): JSX.Element {
                     const running =
                       (row.trial_summary.queued ?? 0) +
                       (row.trial_summary.claimed ?? 0) +
-                      (row.trial_summary.running ?? 0);
+                      (row.trial_summary.running ?? 0) +
+                      (row.trial_summary.materializing ?? 0);
                     return (
                       <tr key={row.benchmark_id ?? row.display_name}>
                         <td className="px-4 py-3">
@@ -698,6 +701,38 @@ export default function BatchDetail(): JSX.Element {
                 </tbody>
               </table>
             </div>
+          </Card.Body>
+        </Card>
+      ) : null}
+
+      {c.backend === "nebius" && c.service_execution_summary ? (
+        <Card>
+          <Card.Header
+            title="Nebius execution lifecycle"
+            description="Durable execution, output commit, and canonical materialization state for this batch."
+          />
+          <Card.Body className="space-y-3">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <StatCard label="Execution leases" value={c.service_execution_summary.lease_count} />
+              <StatCard label="Canonical bundles ready" value={c.service_execution_summary.canonical_ready_count} />
+              <StatCard label="Output committed" value={c.service_execution_summary.output_commit_states.committed ?? 0} />
+              <StatCard label="Materializing" value={c.service_execution_summary.lifecycle_stages.materializing ?? 0} />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(c.service_execution_summary.lifecycle_stages)
+                .filter(([, count]) => count > 0)
+                .map(([stage, count]) => (
+                  <StatusPill key={stage} variant={trialStateVariant(stage)}>
+                    {stage} {count}
+                  </StatusPill>
+                ))}
+            </div>
+            <Link
+              to={`/monitor?view=trials&batch_id=${c.id}`}
+              className="inline-block text-sm font-medium text-accent hover:text-accent-hover"
+            >
+              Follow live capacity, retries, and scale-to-zero →
+            </Link>
           </Card.Body>
         </Card>
       ) : null}

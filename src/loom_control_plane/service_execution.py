@@ -1332,12 +1332,50 @@ async def record_execution_event(
             payload.get("resource_version"), 128, "resource_version"
         )
         lease.node_name = _bounded_optional_text(payload.get("node_name"), 253, "node_name")
-        lease.pod_scheduled_at = _optional_datetime(payload.get("scheduled_at"), "scheduled_at")
-        lease.pod_started_at = _optional_datetime(payload.get("started_at"), "started_at")
-        lease.pod_terminated_at = _optional_datetime(payload.get("terminated_at"), "terminated_at")
+        incoming_scheduled_at = _optional_datetime(payload.get("scheduled_at"), "scheduled_at")
+        incoming_started_at = _optional_datetime(payload.get("started_at"), "started_at")
+        incoming_terminated_at = _optional_datetime(payload.get("terminated_at"), "terminated_at")
+        if incoming_scheduled_at is not None:
+            lease.pod_scheduled_at = (
+                min(lease.pod_scheduled_at, incoming_scheduled_at)
+                if lease.pod_scheduled_at is not None
+                else incoming_scheduled_at
+            )
+        if incoming_started_at is not None:
+            lease.pod_started_at = (
+                min(lease.pod_started_at, incoming_started_at)
+                if lease.pod_started_at is not None
+                else incoming_started_at
+            )
+        if incoming_terminated_at is not None:
+            lease.pod_terminated_at = (
+                max(lease.pod_terminated_at, incoming_terminated_at)
+                if lease.pod_terminated_at is not None
+                else incoming_terminated_at
+            )
+        if (
+            lease.pod_scheduled_at is not None
+            and lease.pod_started_at is not None
+            and lease.pod_scheduled_at > lease.pod_started_at
+        ):
+            lease.pod_scheduled_at = lease.pod_started_at
+        if (
+            lease.pod_started_at is not None
+            and lease.pod_terminated_at is not None
+            and lease.pod_started_at > lease.pod_terminated_at
+        ):
+            lease.pod_terminated_at = lease.pod_started_at
         lease.last_reconciled_at = observed_at
-        lease.observed_state = observed_states[normalized_state]
-        if normalized_state in {
+        projected_state = observed_states[normalized_state]
+        if lease.finalized_at is not None:
+            if lease.observed_state == "deleted" or normalized_state == "deleted":
+                projected_state = "deleted"
+            elif lease.observed_state == "delete_pending" or normalized_state == "terminating":
+                projected_state = "delete_pending"
+            else:
+                projected_state = "finalized"
+        lease.observed_state = projected_state
+        if lease.finalized_at is None and normalized_state in {
             "unschedulable",
             "missing",
             "image_pull_backoff",
@@ -1354,7 +1392,7 @@ async def record_execution_event(
             )
             lease.error_code = normalized_state
             lease.error_message = _bounded_optional_text(payload.get("message"), 2000, "message")
-        else:
+        elif lease.finalized_at is None:
             lease.error_class = None
             lease.error_code = None
             lease.error_message = None
@@ -1371,10 +1409,17 @@ async def record_execution_event(
         lease.finalized_at = observed_at
         trial = await session.get(Trial, lease.trial_id)
         trial_state = payload.get("trial_state")
-        if trial is None or trial_state not in {"succeeded", "failed", "cancelled"}:
+        if trial is None or trial_state not in {
+            "materializing",
+            "succeeded",
+            "failed",
+            "cancelled",
+        }:
             raise ServiceExecutionConflict("finalized event lacks a valid trial state")
-        if trial_state == "succeeded" and not isinstance(payload.get("result"), dict):
-            raise ServiceExecutionConflict("successful finalization requires a result")
+        if trial_state in {"materializing", "succeeded"} and not isinstance(
+            payload.get("result"), dict
+        ):
+            raise ServiceExecutionConflict("successful compute finalization requires a result")
         trial.state = trial_state
         trial.result = payload.get("result") if isinstance(payload.get("result"), dict) else None
         trial.failure_reason = (
@@ -1387,7 +1432,7 @@ async def record_execution_event(
             if isinstance(payload.get("failure_message"), str)
             else None
         )
-        trial.finished_at = observed_at
+        trial.finished_at = None if trial_state == "materializing" else observed_at
     elif event_kind == "deleted" and advances_projection:
         lease.desired_state = "deleted"
         lease.deleted_at = observed_at
@@ -1550,19 +1595,19 @@ async def finalize_committed_service_execution(
     if result_event is None:
         raise ServiceExecutionConflict("finalizing execution has no committed runtime result")
     runtime_result = ExecutionRuntimeResultV1.model_validate(result_event.payload_json)
+    result: dict[str, Any] = {
+        "schema_version": "loom.service-execution-trial-result.v1",
+        "runtime_result": runtime_result.model_dump(mode="json"),
+        "reward": runtime_result.verifier_rewards,
+        "output_manifest_sha256": lease.output_manifest_sha256,
+        "output_marker_sha256": lease.output_marker_sha256,
+    }
     if runtime_result.status == "succeeded":
-        trial_state = "succeeded"
-        result: dict[str, Any] | None = {
-            "schema_version": "loom.service-execution-trial-result.v1",
-            "runtime_result": runtime_result.model_dump(mode="json"),
-            "output_manifest_sha256": lease.output_manifest_sha256,
-            "output_marker_sha256": lease.output_marker_sha256,
-        }
+        trial_state = "materializing"
         failure_reason = None
         failure_message = None
     else:
         trial_state = "cancelled" if runtime_result.status == "cancelled" else "failed"
-        result = None
         failure_reason = runtime_result.status
         failure_message = f"service execution runtime reported {runtime_result.status}"
     await record_execution_event(
@@ -1724,6 +1769,39 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
             lease.output_committed_at.isoformat() if lease.output_committed_at else None
         ),
         "output_unavailable_reason": lease.output_unavailable_reason,
+        "materialization_state": lease.materialization_state,
+        "materialization_attempts": lease.materialization_attempts,
+        "materialization_next_attempt_at": (
+            lease.materialization_next_attempt_at.isoformat()
+            if lease.materialization_next_attempt_at
+            else None
+        ),
+        "materialization_started_at": (
+            lease.materialization_started_at.isoformat()
+            if lease.materialization_started_at
+            else None
+        ),
+        "materialization_committed_at": (
+            lease.materialization_committed_at.isoformat()
+            if lease.materialization_committed_at
+            else None
+        ),
+        "materialization_error": (
+            {
+                "code": lease.materialization_error_code,
+                "message": lease.materialization_error_message,
+            }
+            if lease.materialization_error_code is not None
+            else None
+        ),
+        "canonical_trajectory_sha256": lease.canonical_trajectory_sha256,
+        "canonical_atif_sha256": lease.canonical_atif_sha256,
+        "source_cleanup_state": lease.source_cleanup_state,
+        "source_retain_until": (
+            lease.source_retain_until.isoformat() if lease.source_retain_until else None
+        ),
+        "source_cleanup_attempts": lease.source_cleanup_attempts,
+        "source_cleanup_error_message": lease.source_cleanup_error_message,
         "deleted_at": lease.deleted_at.isoformat() if lease.deleted_at else None,
         "error": (
             {

@@ -10,9 +10,11 @@ from loom_control_plane.task_image_build_environment import (
     SlurmBuildEnvironmentPolicyV1,
     SlurmBuildInventoryV1,
     SlurmBuildJobObservationV1,
+    canonical_request_sha256,
     issue_slurm_build_grant,
 )
 from loom_control_plane.task_image_build_grants import classify_task_image_build_inventory
+from loom_task_image_authority.contracts import TaskImageBuildGrantAuthorityV1
 
 _NOW = datetime(2026, 8, 22, 2, 0, tzinfo=UTC)
 _GRANT_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -45,7 +47,27 @@ def _policy() -> SlurmBuildEnvironmentPolicyV1:
 
 
 def _grant():
-    return issue_slurm_build_grant(_policy(), grant_id=_GRANT_ID)
+    policy = _policy()
+    authority = TaskImageBuildGrantAuthorityV1(
+        purpose="production",
+        shadow_campaign_id=None,
+        environment="staging",
+        pool_id="staging-gb10-task-image",
+        slurm_cluster_id="gb10",
+        cpu_arch="arm64",
+        slurm_request_sha256=canonical_request_sha256(policy.request_identity()),
+        builder_release_sha256="2" * 64,
+        build_policy_sha256="3" * 64,
+        containment_policy_sha256="4" * 64,
+        resource_profile_sha256="5" * 64,
+        issued_at=_NOW - timedelta(minutes=1),
+        expires_at=_NOW + timedelta(hours=2),
+    )
+    return issue_slurm_build_grant(
+        policy,
+        grant_id=_GRANT_ID,
+        authority=authority,
+    )
 
 
 def _job(

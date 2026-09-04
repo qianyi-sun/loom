@@ -31,6 +31,8 @@ class ReleaseClient(Protocol):
 
     def list_image_runs(self, branch: str) -> Sequence[Mapping[str, Any]]: ...
 
+    def has_trusted_release_artifact(self, run: Mapping[str, Any]) -> bool: ...
+
     def dispatch_images(self, *, branch: str, base_sha: str) -> None: ...
 
 
@@ -121,16 +123,89 @@ class GitHubReleaseClient:
 
     def list_image_runs(self, branch: str) -> Sequence[Mapping[str, Any]]:
         collected: list[Mapping[str, Any]] = []
-        for event in ("push", "workflow_dispatch"):
-            query = urlencode({"branch": branch, "event": event, "per_page": "100"})
+        expected_total: int | None = None
+        run_ids: set[int] = set()
+        page = 1
+        while True:
+            query = urlencode({"per_page": "100", "page": str(page)})
             payload = self._json(
                 f"/repos/{self._repo}/actions/workflows/{IMAGES_WORKFLOW_ID}/runs?{query}"
             )
+            total_count = payload.get("total_count")
             runs = payload.get("workflow_runs")
-            if not isinstance(runs, list) or not all(isinstance(run, Mapping) for run in runs):
+            if (
+                not isinstance(total_count, int)
+                or isinstance(total_count, bool)
+                or total_count < 0
+                or not isinstance(runs, list)
+                or not all(isinstance(run, Mapping) for run in runs)
+            ):
                 raise ReconcileError("GitHub returned an invalid workflow run list")
-            collected.extend(runs)
+            if expected_total is None:
+                expected_total = total_count
+            elif total_count != expected_total:
+                raise ReconcileError("GitHub workflow run list changed during pagination")
+
+            for run in runs:
+                run_id = _require_positive_int(run.get("id"), "workflow run id")
+                if run_id in run_ids:
+                    raise ReconcileError("GitHub workflow run pagination contained duplicates")
+                run_ids.add(run_id)
+                if run.get("head_branch") == branch and run.get("event") in {
+                    "push",
+                    "workflow_dispatch",
+                }:
+                    collected.append(run)
+
+            if len(run_ids) == expected_total:
+                break
+            if not runs or len(run_ids) > expected_total:
+                raise ReconcileError("GitHub returned a truncated workflow run list")
+            page += 1
         return collected
+
+    def has_trusted_release_artifact(self, run: Mapping[str, Any]) -> bool:
+        run_id = _require_positive_int(run.get("id"), "workflow run id")
+        run_attempt = _require_positive_int(run.get("run_attempt"), "workflow run attempt")
+        head_sha = _require_sha(run.get("head_sha"), "workflow run head")
+        artifact_name = (
+            f"personal-dev-trusted-release-run-{run_id}-attempt-{run_attempt}"
+        )
+        query = urlencode({"name": artifact_name, "per_page": "100"})
+        payload = self._json(
+            f"/repos/{self._repo}/actions/runs/{run_id}/artifacts?{query}"
+        )
+        total_count = payload.get("total_count")
+        artifacts = payload.get("artifacts")
+        if (
+            not isinstance(total_count, int)
+            or isinstance(total_count, bool)
+            or total_count < 0
+            or not isinstance(artifacts, list)
+            or not all(isinstance(artifact, Mapping) for artifact in artifacts)
+        ):
+            raise ReconcileError("GitHub returned an invalid trusted release artifact list")
+        if total_count == 0 and not artifacts:
+            return False
+        if total_count != 1 or len(artifacts) != 1:
+            raise ReconcileError("trusted release artifact lookup was ambiguous")
+
+        artifact = artifacts[0]
+        workflow_run = artifact.get("workflow_run")
+        size_in_bytes = artifact.get("size_in_bytes")
+        if (
+            artifact.get("name") != artifact_name
+            or artifact.get("expired") is not False
+            or not isinstance(size_in_bytes, int)
+            or isinstance(size_in_bytes, bool)
+            or size_in_bytes <= 0
+            or not isinstance(workflow_run, Mapping)
+            or type(workflow_run.get("id")) is not int
+            or workflow_run.get("id") != run_id
+            or workflow_run.get("head_sha") != head_sha
+        ):
+            raise ReconcileError("trusted release artifact is invalid or unbound")
+        return True
 
     def dispatch_images(self, *, branch: str, base_sha: str) -> None:
         self._request(
@@ -156,6 +231,12 @@ class ReconcileRequest:
 def _require_sha(value: object, label: str) -> str:
     if not isinstance(value, str) or _SHA_RE.fullmatch(value) is None:
         raise ReconcileError(f"{label} is not a lowercase commit SHA")
+    return value
+
+
+def _require_positive_int(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ReconcileError(f"{label} is not a positive integer")
     return value
 
 
@@ -198,7 +279,11 @@ def reconcile_release(
                 "head_sha": branch_head,
                 "run_id": run.get("id"),
             }
-        if status == "completed" and conclusion == "success":
+        if (
+            status == "completed"
+            and conclusion == "success"
+            and client.has_trusted_release_artifact(run)
+        ):
             return {
                 "schema": "loom-trusted-image-release-reconcile-v1",
                 "decision": "already_published",
@@ -206,7 +291,7 @@ def reconcile_release(
                 "head_sha": branch_head,
                 "run_id": run.get("id"),
             }
-        if status == "completed":
+        if status == "completed" and conclusion != "success":
             return {
                 "schema": "loom-trusted-image-release-reconcile-v1",
                 "decision": "blocked_failed_release",
@@ -216,7 +301,7 @@ def reconcile_release(
                 "conclusion": conclusion,
             }
 
-    baselines: list[tuple[int, str, object]] = []
+    candidates: list[tuple[int, str, Mapping[str, Any]]] = []
     for run in trusted_runs:
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             continue
@@ -225,11 +310,17 @@ def reconcile_release(
             continue
         if candidate == branch_head or not history.is_ancestor(candidate, branch_head):
             continue
-        baselines.append((history.distance(candidate, branch_head), candidate, run.get("id")))
-    if not baselines:
+        candidates.append((history.distance(candidate, branch_head), candidate, run))
+
+    baseline: tuple[int, str, Mapping[str, Any]] | None = None
+    for candidate in sorted(candidates, key=lambda item: (item[0], item[1])):
+        if client.has_trusted_release_artifact(candidate[2]):
+            baseline = candidate
+            break
+    if baseline is None:
         raise ReconcileError("no successful trusted ancestor image release exists")
 
-    distance, base_sha, base_run_id = min(baselines, key=lambda item: (item[0], item[1]))
+    distance, base_sha, base_run = baseline
     if distance < 1:
         raise ReconcileError("trusted release range must contain at least one commit")
     client.dispatch_images(branch=request.branch, base_sha=base_sha)
@@ -239,7 +330,7 @@ def reconcile_release(
         "branch": request.branch,
         "head_sha": branch_head,
         "base_sha": base_sha,
-        "base_run_id": base_run_id,
+        "base_run_id": base_run.get("id"),
         "commit_distance": distance,
     }
 

@@ -11,6 +11,7 @@ from loom_execution_capacity_collector.config import ExecutionCapacityCollectorS
 from loom_execution_capacity_collector.contracts import (
     CapacityObservationReceipt,
     CapacityObservationV1,
+    NodeStateCounts,
 )
 from loom_execution_capacity_collector.control_plane import CapacityControlPlaneClient
 from loom_execution_capacity_collector.kubernetes import InClusterKubernetesCapacityReader
@@ -56,28 +57,22 @@ async def collect_capacity_observation(
                 node_label_selector=settings.node_label_selector,
             ),
         )
-        if provider_snapshot.node_count > provider_snapshot.used_nodes:
-            raise CapacityCollectionError("provider node usage is below node-group usage")
-        minimum_provider_usage = (
-            (
-                provider_snapshot.used_vcpu_millis,
-                provider_snapshot.node_count * policy.node_cpu_millis,
-                "vCPU",
-            ),
-            (
-                provider_snapshot.used_memory_mib,
-                provider_snapshot.node_count * policy.node_memory_mib,
-                "memory",
-            ),
-            (
-                provider_snapshot.used_storage_mib,
-                provider_snapshot.node_count * policy.node_storage_mib,
-                "storage",
-            ),
+        # Nebius quota usage can lag node-group inventory while autoscaling. Use
+        # the complete node-group snapshot as a conservative floor so the
+        # observation never overstates headroom during that convergence window.
+        provider_used_nodes = max(provider_snapshot.used_nodes, provider_snapshot.node_count)
+        provider_used_vcpu_millis = max(
+            provider_snapshot.used_vcpu_millis,
+            provider_snapshot.node_count * policy.node_cpu_millis,
         )
-        for provider_used, group_used, label in minimum_provider_usage:
-            if provider_used < group_used:
-                raise CapacityCollectionError(f"provider {label} usage is below node-group usage")
+        provider_used_memory_mib = max(
+            provider_snapshot.used_memory_mib,
+            provider_snapshot.node_count * policy.node_memory_mib,
+        )
+        provider_used_storage_mib = max(
+            provider_snapshot.used_storage_mib,
+            provider_snapshot.node_count * policy.node_storage_mib,
+        )
         if provider_snapshot.autoscaler_state == "ready" and (
             kubernetes_snapshot.active_nodes != provider_snapshot.node_count
             or kubernetes_snapshot.ready_nodes != provider_snapshot.ready_node_count
@@ -92,6 +87,28 @@ async def collect_capacity_observation(
             provider_snapshot.target_node_count,
         )
         missing_nodes = max(0, active_nodes - kubernetes_snapshot.active_nodes)
+        deleting_nodes = max(
+            0,
+            kubernetes_snapshot.active_nodes - provider_snapshot.target_node_count,
+        )
+        non_ready_nodes = max(
+            0,
+            kubernetes_snapshot.active_nodes
+            - kubernetes_snapshot.ready_nodes
+            - deleting_nodes,
+        )
+        missing_desired_nodes = max(
+            0,
+            provider_snapshot.target_node_count - kubernetes_snapshot.active_nodes,
+        )
+        stalled = provider_snapshot.autoscaler_state == "stalled"
+        node_states = NodeStateCounts(
+            desired=provider_snapshot.target_node_count,
+            creating=missing_desired_nodes + (0 if stalled else non_ready_nodes),
+            ready=kubernetes_snapshot.ready_nodes,
+            failed=non_ready_nodes if stalled else 0,
+            deleting=deleting_nodes,
+        )
         provisioned_cpu = (
             kubernetes_snapshot.provisioned.cpu_millis + missing_nodes * policy.node_cpu_millis
         )
@@ -122,11 +139,12 @@ async def collect_capacity_observation(
             provider_quota_vcpu_millis=provider_snapshot.quota_vcpu_millis,
             provider_quota_memory_mib=provider_snapshot.quota_memory_mib,
             provider_quota_storage_mib=provider_snapshot.quota_storage_mib,
-            provider_used_nodes=provider_snapshot.used_nodes,
-            provider_used_vcpu_millis=provider_snapshot.used_vcpu_millis,
-            provider_used_memory_mib=provider_snapshot.used_memory_mib,
-            provider_used_storage_mib=provider_snapshot.used_storage_mib,
+            provider_used_nodes=provider_used_nodes,
+            provider_used_vcpu_millis=provider_used_vcpu_millis,
+            provider_used_memory_mib=provider_used_memory_mib,
+            provider_used_storage_mib=provider_used_storage_mib,
             active_nodes=active_nodes,
+            node_states=node_states,
             provisioned_vcpu_millis=provisioned_cpu,
             provisioned_memory_mib=provisioned_memory,
             provisioned_storage_mib=provisioned_storage,

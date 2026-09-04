@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 import yaml
 from scripts.ops.trusted_image_release_controller import (
+    GitHubReleaseClient,
     ReconcileError,
     ReconcileRequest,
     reconcile_release,
@@ -22,6 +23,8 @@ OLDER = "d" * 40
 class FakeClient:
     head: str = HEAD
     runs: list[dict[str, Any]] = field(default_factory=list)
+    release_artifact_run_ids: set[int] = field(default_factory=set)
+    artifact_checks: list[int] = field(default_factory=list)
     dispatches: list[tuple[str, str]] = field(default_factory=list)
 
     def get_branch_head(self, branch: str) -> str:
@@ -31,6 +34,11 @@ class FakeClient:
     def list_image_runs(self, branch: str) -> list[dict[str, Any]]:
         assert branch == "dev"
         return self.runs
+
+    def has_trusted_release_artifact(self, run: dict[str, Any]) -> bool:
+        run_id = run["id"]
+        self.artifact_checks.append(run_id)
+        return run_id in self.release_artifact_run_ids
 
     def dispatch_images(self, *, branch: str, base_sha: str) -> None:
         self.dispatches.append((branch, base_sha))
@@ -71,6 +79,7 @@ def _run(
 ) -> dict[str, Any]:
     return {
         "id": run_id,
+        "run_attempt": 1,
         "head_sha": sha,
         "event": event,
         "status": status,
@@ -80,8 +89,203 @@ def _run(
     }
 
 
+def test_github_client_binds_exact_nonexpired_release_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubReleaseClient(
+        repository="qianyi-sun/loom",
+        token="test-token",
+        api_url="https://api.github.test",
+    )
+    observed_paths: list[str] = []
+
+    def artifact_response(path: str) -> dict[str, Any]:
+        observed_paths.append(path)
+        return {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 99,
+                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "expired": False,
+                    "size_in_bytes": 3745,
+                    "workflow_run": {"id": 11, "head_sha": HEAD},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(client, "_json", artifact_response)
+
+    assert client.has_trusted_release_artifact(_run(sha=HEAD, run_id=11)) is True
+    assert observed_paths == [
+        "/repos/qianyi-sun/loom/actions/runs/11/artifacts?"
+        "name=personal-dev-trusted-release-run-11-attempt-1&per_page=100"
+    ]
+
+
+def test_github_client_paginates_all_image_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubReleaseClient(
+        repository="qianyi-sun/loom",
+        token="test-token",
+        api_url="https://api.github.test",
+    )
+    first_page = [
+        {"id": run_id, "head_branch": "dev", "event": "push"}
+        for run_id in range(1, 101)
+    ]
+    matching_dispatch = {
+        "id": 101,
+        "head_branch": "dev",
+        "event": "workflow_dispatch",
+    }
+    observed_paths: list[str] = []
+
+    def runs_response(path: str) -> dict[str, Any]:
+        observed_paths.append(path)
+        if "page=2" in path:
+            return {
+                "total_count": 103,
+                "workflow_runs": [
+                    matching_dispatch,
+                    {"id": 102, "head_branch": "feature", "event": "push"},
+                    {"id": 103, "head_branch": "dev", "event": "pull_request"},
+                ],
+            }
+        return {"total_count": 103, "workflow_runs": first_page}
+
+    monkeypatch.setattr(client, "_json", runs_response)
+
+    assert client.list_image_runs("dev") == [*first_page, matching_dispatch]
+    assert observed_paths == [
+        "/repos/qianyi-sun/loom/actions/workflows/302898384/runs?"
+        "per_page=100&page=1",
+        "/repos/qianyi-sun/loom/actions/workflows/302898384/runs?"
+        "per_page=100&page=2",
+    ]
+
+
+def test_github_client_reports_missing_release_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubReleaseClient(
+        repository="qianyi-sun/loom",
+        token="test-token",
+        api_url="https://api.github.test",
+    )
+    monkeypatch.setattr(
+        client,
+        "_json",
+        lambda _path: {"total_count": 0, "artifacts": []},
+    )
+
+    assert client.has_trusted_release_artifact(_run(sha=HEAD, run_id=11)) is False
+
+
+def test_github_client_rejects_boolean_artifact_workflow_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubReleaseClient(
+        repository="qianyi-sun/loom",
+        token="test-token",
+        api_url="https://api.github.test",
+    )
+    monkeypatch.setattr(
+        client,
+        "_json",
+        lambda _path: {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 99,
+                    "name": "personal-dev-trusted-release-run-1-attempt-1",
+                    "expired": False,
+                    "size_in_bytes": 3745,
+                    "workflow_run": {"id": True, "head_sha": HEAD},
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ReconcileError, match="trusted release artifact"):
+        client.has_trusted_release_artifact(_run(sha=HEAD, run_id=1))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"total_count": 2, "artifacts": []},
+        {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 99,
+                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "expired": True,
+                    "size_in_bytes": 3745,
+                    "workflow_run": {"id": 11, "head_sha": HEAD},
+                }
+            ],
+        },
+        {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 99,
+                    "name": "personal-dev-trusted-release-run-12-attempt-1",
+                    "expired": False,
+                    "size_in_bytes": 3745,
+                    "workflow_run": {"id": 11, "head_sha": HEAD},
+                }
+            ],
+        },
+        {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 99,
+                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "expired": False,
+                    "size_in_bytes": 0,
+                    "workflow_run": {"id": 11, "head_sha": HEAD},
+                }
+            ],
+        },
+        {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 99,
+                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "expired": False,
+                    "size_in_bytes": 3745,
+                    "workflow_run": {"id": 12, "head_sha": HEAD},
+                }
+            ],
+        },
+    ],
+)
+def test_github_client_rejects_ambiguous_or_unbound_release_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    client = GitHubReleaseClient(
+        repository="qianyi-sun/loom",
+        token="test-token",
+        api_url="https://api.github.test",
+    )
+    monkeypatch.setattr(client, "_json", lambda _path: payload)
+
+    with pytest.raises(ReconcileError, match="trusted release artifact"):
+        client.has_trusted_release_artifact(_run(sha=HEAD, run_id=11))
+
+
 def test_dispatches_from_nearest_successful_trusted_ancestor() -> None:
-    client = FakeClient(runs=[_run(sha=OLDER, run_id=3), _run(sha=PARENT, run_id=7)])
+    client = FakeClient(
+        runs=[_run(sha=OLDER, run_id=3), _run(sha=PARENT, run_id=7)],
+        release_artifact_run_ids={3, 7},
+    )
 
     record = reconcile_release(_request(), client, FakeHistory())
 
@@ -95,6 +299,52 @@ def test_dispatches_from_nearest_successful_trusted_ancestor() -> None:
         "commit_distance": 1,
     }
     assert client.dispatches == [("dev", PARENT)]
+
+
+def test_completed_success_without_release_artifact_reconciles_from_published_ancestor() -> None:
+    client = FakeClient(
+        runs=[_run(sha=HEAD, run_id=11), _run(sha=PARENT, run_id=7)],
+        release_artifact_run_ids={7},
+    )
+
+    record = reconcile_release(_request(), client, FakeHistory())
+
+    assert record == {
+        "schema": "loom-trusted-image-release-reconcile-v1",
+        "decision": "dispatch_requested",
+        "branch": "dev",
+        "head_sha": HEAD,
+        "base_sha": PARENT,
+        "base_run_id": 7,
+        "commit_distance": 1,
+    }
+    assert client.dispatches == [("dev", PARENT)]
+
+
+def test_skips_unpublished_nearer_ancestor_for_published_older_ancestor() -> None:
+    client = FakeClient(
+        runs=[_run(sha=PARENT, run_id=7), _run(sha=OLDER, run_id=3)],
+        release_artifact_run_ids={3},
+    )
+
+    record = reconcile_release(_request(), client, FakeHistory())
+
+    assert record["base_sha"] == OLDER
+    assert record["base_run_id"] == 3
+    assert record["commit_distance"] == 4
+    assert client.dispatches == [("dev", OLDER)]
+
+
+def test_checks_ancestor_artifacts_in_distance_order_and_stops_at_nearest() -> None:
+    client = FakeClient(
+        runs=[_run(sha=OLDER, run_id=3), _run(sha=PARENT, run_id=7)],
+        release_artifact_run_ids={3, 7},
+    )
+
+    record = reconcile_release(_request(), client, FakeHistory())
+
+    assert record["base_run_id"] == 7
+    assert client.artifact_checks == [7]
 
 
 @pytest.mark.parametrize(
@@ -116,7 +366,10 @@ def test_dispatches_from_nearest_successful_trusted_ancestor() -> None:
 def test_exact_head_active_or_successful_release_is_idempotent(
     run: dict[str, Any], decision: str
 ) -> None:
-    client = FakeClient(runs=[run])
+    client = FakeClient(
+        runs=[run],
+        release_artifact_run_ids={run["id"]} if decision == "already_published" else set(),
+    )
 
     record = reconcile_release(_request(), client, FakeHistory())
 
@@ -133,7 +386,8 @@ def test_ordinary_manual_dispatch_is_not_trusted_release_evidence() -> None:
                 title="gate=manual / head=exact",
             ),
             _run(sha=PARENT),
-        ]
+        ],
+        release_artifact_run_ids={1},
     )
 
     record = reconcile_release(_request(), client, FakeHistory())
@@ -154,7 +408,8 @@ def test_human_cannot_block_reconciliation_with_trusted_run_name() -> None:
                 actor="qianyi-sun",
             ),
             _run(sha=PARENT),
-        ]
+        ],
+        release_artifact_run_ids={1},
     )
 
     record = reconcile_release(_request(), client, FakeHistory())

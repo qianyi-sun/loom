@@ -28,7 +28,8 @@ umask 077
 repo="$(pwd -P)"
 loom_cli="<absolute-reviewed-target-compatible-loom-cli>"
 python_cli="<absolute-reviewed-python-cli>"
-profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"
+profile="<absolute-reviewed-owner-only-operational-profile.toml>"
+profile_sha256="<reviewed-operational-profile-sha256>"
 trusted_release="<absolute-target-trusted-release.json>"
 trusted_release_sha256="<target-trusted-release-sha256>"
 predecessor_repo="<absolute-clean-predecessor-checkout>"
@@ -57,7 +58,7 @@ for reviewed_cli in "$loom_cli" "$python_cli" "$predecessor_loom_cli"; do
   case "$reviewed_cli" in /*) ;; *) false ;; esac
   test "$(/usr/bin/realpath -e -- "$reviewed_cli")" = "$reviewed_cli"
 done
-for reviewed in "$trusted_release" "$predecessor_release" \
+for reviewed in "$profile" "$trusted_release" "$predecessor_release" \
   "$predecessor_shadow" "$backup_evidence" "$postgres_dump" \
   "$postgres_source_state" "$kubeconfig"; do
   test -f "$reviewed" && test ! -L "$reviewed"
@@ -67,6 +68,7 @@ for reviewed in "$trusted_release" "$predecessor_release" \
   test "$(stat -c %h "$reviewed")" = 1
   test "$(stat -c %s "$reviewed")" -gt 0
 done
+test "$(sha256sum "$profile" | awk '{print $1}')" = "$profile_sha256"
 test "$(sha256sum "$trusted_release" | awk '{print $1}')" = \
   "$trusted_release_sha256"
 test "$(sha256sum "$predecessor_release" | awk '{print $1}')" = \
@@ -161,6 +163,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/dev/null \
   PYTHONPATH="$repo/src" "$loom_cli" admin personal-dev-control-plane \
   render-schema-transition \
   --file "$profile" \
+  --profile-sha256 "$profile_sha256" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   --source-root "$repo" \

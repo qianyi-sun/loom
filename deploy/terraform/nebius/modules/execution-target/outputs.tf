@@ -33,9 +33,11 @@ output "node_groups" {
       desired_nodes = var.system_node_count
     }
     execution = {
-      id        = nebius_mk8s_v1_node_group.execution.id
-      min_nodes = var.execution_min_nodes
-      max_nodes = var.execution_max_nodes
+      id         = nebius_mk8s_v1_node_group.execution.id
+      min_nodes  = var.execution_min_nodes
+      max_nodes  = var.execution_max_nodes
+      max_pods   = var.execution_max_pods
+      node_shape = var.execution_preset
     }
   }
 }

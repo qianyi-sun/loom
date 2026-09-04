@@ -13,6 +13,7 @@ import pytest
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
 from loom.db.schema import Trial
 from loom.models.trajectory import (
+    AgentRetryEvent,
     AgentThoughtEvent,
     ChatMessage,
     EventKind,
@@ -22,13 +23,16 @@ from loom.models.trajectory import (
     Terminus2RuntimeProvenanceEvent,
     Terminus2TerminalObservationEvent,
     Terminus2TurnEvent,
+    Terminus2UserPromptEvent,
 )
 from loom.models.types import ModelSpec
 from loom_service.delivery_export_tb2_v2 import (
     SECRET_PATTERNS,
     Tb2V2ExportError,
+    build_execution_trajectory,
     build_per_trial_v2_bundle,
     build_terminal_transcript,
+    events_after_last_agent_retry,
     parse_trajectory_events,
     resolve_native_artifacts,
     scan_execution_trajectory_for_private_path_keystrokes,
@@ -86,12 +90,19 @@ def _provenance_event(**kwargs: object) -> Terminus2RuntimeProvenanceEvent:
     )
 
 
-def _typed_turn_chain(*, trial_id: UUID, gw_id: str = "gw-1") -> list[object]:
-    turn_id = "turn-1"
+def _typed_turn_chain(
+    *,
+    trial_id: UUID,
+    gw_id: str = "gw-1",
+    turn_id: str = "turn-1",
+    obs_text: str = "output\n",
+    seq_start: int = 1,
+) -> list[object]:
+    seq = seq_start
     return [
-        _provenance_event(trial_id=trial_id, seq=1),
+        _provenance_event(trial_id=trial_id, seq=seq),
         LLMCallEvent(
-            **_base(trial_id=trial_id, seq=2),
+            **_base(trial_id=trial_id, seq=seq + 1),
             kind=EventKind.LLM_CALL,
             model=ModelSpec(provider="openai", name="gpt-4"),
             rate_card_hash="h",
@@ -114,7 +125,7 @@ def _typed_turn_chain(*, trial_id: UUID, gw_id: str = "gw-1") -> list[object]:
             gateway_request_id=gw_id,
         ),
         Terminus2TurnEvent(
-            **_base(trial_id=trial_id, seq=3),
+            **_base(trial_id=trial_id, seq=seq + 2),
             kind=EventKind.TERMINUS2_TURN,
             turn_id=turn_id,
             turn_index=0,
@@ -123,24 +134,24 @@ def _typed_turn_chain(*, trial_id: UUID, gw_id: str = "gw-1") -> list[object]:
             completion_state="continue",
         ),
         Terminus2CommandEvent(
-            **_base(trial_id=trial_id, seq=4),
+            **_base(trial_id=trial_id, seq=seq + 3),
             kind=EventKind.TERMINUS2_COMMAND,
             turn_id=turn_id,
-            command_batch_id="batch-1",
-            command_id="cmd-1",
+            command_batch_id=f"batch-{turn_id}",
+            command_id=f"cmd-{turn_id}",
             index=0,
             keystrokes="ls\n",
             duration_sec=0.1,
         ),
         Terminus2TerminalObservationEvent(
-            **_base(trial_id=trial_id, seq=5),
+            **_base(trial_id=trial_id, seq=seq + 4),
             kind=EventKind.TERMINUS2_TERMINAL_OBSERVATION,
             turn_id=turn_id,
-            command_batch_id="batch-1",
-            observation_id="obs-1",
-            text="output\n",
+            command_batch_id=f"batch-{turn_id}",
+            observation_id=f"obs-{turn_id}",
+            text=obs_text,
             capture_source="incremental",
-            byte_len=7,
+            byte_len=len(obs_text),
             truncated=False,
             completeness="full",
             content_hash="abc",
@@ -148,7 +159,7 @@ def _typed_turn_chain(*, trial_id: UUID, gw_id: str = "gw-1") -> list[object]:
             is_aggregate=False,
         ),
         Terminus2ArtifactRefEvent(
-            **_base(trial_id=trial_id, seq=6),
+            **_base(trial_id=trial_id, seq=seq + 5),
             kind=EventKind.TERMINUS2_ARTIFACT_REF,
             artifact_kind="terminus_2.pane",
             sandbox_path="/app/.loom/agent/trajectory.json",
@@ -157,6 +168,42 @@ def _typed_turn_chain(*, trial_id: UUID, gw_id: str = "gw-1") -> list[object]:
             share_policy="restricted",
         ),
     ]
+
+
+def _user_prompt(
+    *,
+    trial_id: UUID,
+    seq: int,
+    prompt_id: str,
+    message: str,
+    harbor_step_id: int = 1,
+) -> Terminus2UserPromptEvent:
+    return Terminus2UserPromptEvent(
+        **_base(trial_id=trial_id, seq=seq),
+        kind=EventKind.TERMINUS2_USER_PROMPT,
+        prompt_id=prompt_id,
+        harbor_step_id=harbor_step_id,
+        message=message,
+        is_initial=True,
+    )
+
+
+def _agent_retry(
+    *,
+    trial_id: UUID,
+    seq: int,
+    attempt: int,
+    max_attempts: int = 3,
+) -> AgentRetryEvent:
+    return AgentRetryEvent(
+        **_base(trial_id=trial_id, seq=seq),
+        kind=EventKind.AGENT_RETRY,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        failure_reason="gateway_error",
+        failure_message="upstream timeout",
+        retry_after_sec=0.0,
+    )
 
 
 def _messages_from_raw_log(raw_log: dict[str, object], *, normalize_tb2: bool = False) -> list[dict[str, object]]:
@@ -359,6 +406,171 @@ def test_build_per_trial_v2_bundle_happy_path() -> None:
     assert bundle.native_artifacts["native/harbor_trajectory.json"] == native
 
 
+def test_events_after_last_agent_retry_passthrough_without_retries() -> None:
+    trial_id = uuid4()
+    events = _typed_turn_chain(trial_id=trial_id)
+    assert events_after_last_agent_retry(events) is events
+
+
+def test_events_after_last_agent_retry_keeps_final_segment_only() -> None:
+    trial_id = uuid4()
+    attempt1 = [
+        _user_prompt(
+            trial_id=trial_id,
+            seq=1,
+            prompt_id="prompt-1",
+            message="initial-attempt-1",
+        ),
+        *_typed_turn_chain(
+            trial_id=trial_id,
+            gw_id="gw-dead-1",
+            turn_id="turn-dead-1",
+            obs_text="dead-1\n",
+            seq_start=2,
+        ),
+    ]
+    retry1 = _agent_retry(trial_id=trial_id, seq=20, attempt=1)
+    attempt2 = [
+        _user_prompt(
+            trial_id=trial_id,
+            seq=21,
+            prompt_id="prompt-2",
+            message="initial-attempt-2",
+        ),
+        *_typed_turn_chain(
+            trial_id=trial_id,
+            gw_id="gw-dead-2",
+            turn_id="turn-dead-2",
+            obs_text="dead-2\n",
+            seq_start=22,
+        ),
+    ]
+    retry2 = _agent_retry(trial_id=trial_id, seq=40, attempt=2)
+    attempt3 = [
+        _user_prompt(
+            trial_id=trial_id,
+            seq=41,
+            prompt_id="prompt-3",
+            message="initial-attempt-3",
+        ),
+        *_typed_turn_chain(
+            trial_id=trial_id,
+            gw_id="gw-final",
+            turn_id="turn-final",
+            obs_text="final-output\n",
+            seq_start=42,
+        ),
+    ]
+    full_events = [*attempt1, retry1, *attempt2, retry2, *attempt3]
+    assert sum(1 for e in full_events if isinstance(e, AgentRetryEvent)) == 2
+
+    delivery_events = events_after_last_agent_retry(full_events)
+    assert delivery_events == attempt3
+    assert retry1 in full_events and retry2 in full_events
+    assert retry1 not in delivery_events and retry2 not in delivery_events
+
+    trajectory = build_execution_trajectory(
+        delivery_events,
+        task_id="task-1",
+        agent_name="terminus-2",
+        agent_version="1.0",
+    )
+    user_steps = [
+        step
+        for step in trajectory["steps"]
+        if isinstance(step, dict) and step.get("source") == "user"
+    ]
+    assert len(user_steps) == 1
+    assert user_steps[0]["message"] == "initial-attempt-3"
+    assert user_steps[0]["is_initial_prompt"] is True
+    agent_steps = [
+        step
+        for step in trajectory["steps"]
+        if isinstance(step, dict) and step.get("source") == "agent"
+    ]
+    assert len(agent_steps) == 1
+    assert agent_steps[0]["turn_id"] == "turn-final"
+
+    transcript_rows = [
+        json.loads(line)
+        for line in build_terminal_transcript(delivery_events).decode().splitlines()
+    ]
+    assert len(transcript_rows) == 1
+    assert transcript_rows[0]["turn_id"] == "turn-final"
+    assert transcript_rows[0]["text"] == "final-output\n"
+
+
+def test_build_per_trial_v2_bundle_projects_last_attempt_only() -> None:
+    trial = _trial()
+    native = b"{}"
+    digest = hashlib.sha256(native).hexdigest()
+    key = trial.trajectory_index["artifacts"][0]["key"]
+    trial.trajectory_index["artifacts"][0]["content_hash"] = f"sha256:{digest}"
+
+    def _pane_ref(*, seq: int) -> Terminus2ArtifactRefEvent:
+        return Terminus2ArtifactRefEvent(
+            **_base(trial_id=trial.id, seq=seq),
+            kind=EventKind.TERMINUS2_ARTIFACT_REF,
+            artifact_kind="terminus_2.pane",
+            sandbox_path="/app/.loom/agent/trajectory.json",
+            content_hash=digest,
+            size_bytes=len(native),
+            share_policy="restricted",
+        )
+
+    attempt1 = _typed_turn_chain(
+        trial_id=trial.id,
+        gw_id="gw-dead",
+        turn_id="turn-dead",
+        obs_text="dead\n",
+        seq_start=1,
+    )
+    attempt1[-1] = _pane_ref(seq=6)
+    retry = _agent_retry(trial_id=trial.id, seq=20, attempt=1)
+    attempt2 = [
+        _user_prompt(
+            trial_id=trial.id,
+            seq=21,
+            prompt_id="prompt-final",
+            message="final-initial-prompt",
+        ),
+        *_typed_turn_chain(
+            trial_id=trial.id,
+            gw_id="gw-final",
+            turn_id="turn-final",
+            obs_text="final\n",
+            seq_start=22,
+        ),
+    ]
+    attempt2[-1] = _pane_ref(seq=27)
+    events = [*attempt1, retry, *attempt2]
+    client = _FakeS3({("artifacts", key): native})
+    bundle = build_per_trial_v2_bundle(
+        trial=trial,
+        events=events,
+        calls=[],
+        client=client,
+        artifacts_bucket="artifacts",
+        messages_from_raw_log=_messages_from_raw_log,
+    )
+
+    user_steps = [
+        step
+        for step in bundle.execution_trajectory["steps"]
+        if isinstance(step, dict) and step.get("source") == "user"
+    ]
+    assert len(user_steps) == 1
+    assert user_steps[0]["message"] == "final-initial-prompt"
+    transcript_rows = [
+        json.loads(line)
+        for line in bundle.terminal_transcript.decode().splitlines()
+    ]
+    assert len(transcript_rows) == 1
+    assert transcript_rows[0]["text"] == "final\n"
+    # Full audit spine is still the caller's event list (retries preserved).
+    assert any(isinstance(event, AgentRetryEvent) for event in events)
+
+
 def test_secret_patterns_ignore_task_id_substrings() -> None:
     task_json = '{"task_id": "source-useful-5003/task-0001"}'
     assert "sk-" in task_json
@@ -521,6 +733,7 @@ def test_private_path_keystroke_scan_detects_relative_tests_path() -> None:
         )
     assert exc_info.value.code == "forbidden_path_keystrokes"
     assert exc_info.value.detail["matches"][0]["matched_path"] == "tests"
+
 
 
 def test_build_per_trial_v2_bundle_rejects_private_path_keystrokes(

@@ -31,12 +31,22 @@ class _RegistrationSettings:
     candidate_sha = "a" * 40
     slurm_job_id = "40740"
     compose_project = "loom-production-aaaaaaaaaaaa-40740"
+    executor_worker_credential = None
 
 
 class _LegacyRegistrationSettings:
     hostname = "worker-host"
     max_concurrent = 3
     pool_name = "oldlab"
+    executor_worker_credential = None
+
+
+class _ProtectedRegistrationSettings(_LegacyRegistrationSettings):
+    class _Secret:
+        def get_secret_value(self) -> str:
+            return "launcher-bound-credential"
+
+    executor_worker_credential = _Secret()
 
 
 class _ObjectStoreSettings:
@@ -299,6 +309,22 @@ async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
         raise AssertionError("expected HTTPStatusError")
 
     assert attempts == 1
+
+
+async def test_register_worker_with_retry_forwards_launcher_credential() -> None:
+    recorded: dict[str, object] = {}
+
+    class _FakeCPClient:
+        async def register(self, **kwargs: object) -> dict[str, object]:
+            recorded.update(kwargs)
+            return {"worker_id": str(uuid4())}
+
+    await ml._register_worker_with_retry(  # type: ignore[attr-defined]
+        cp_client=_FakeCPClient(),
+        settings=_ProtectedRegistrationSettings(),
+    )
+
+    assert recorded["executor_worker_credential"] == "launcher-bound-credential"
 
 
 async def test_pipeline_registration_advertises_both_work_kinds(monkeypatch) -> None:  # type: ignore[no-untyped-def]

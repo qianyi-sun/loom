@@ -74,6 +74,11 @@ func main() {
 		cleanOutput,
 		trustedGatewayEnvironment(proxyURL),
 	)
+	captureErr := captureDeclaredOutputs(p, filepath.Clean(*workspace), cleanOutput, &result)
+	if captureErr != nil {
+		result.FinishedAt = time.Now().UTC()
+		fmt.Fprintln(os.Stderr, "capture complete trial bundle:", captureErr)
+	}
 	if err := writeResult(filepath.Join(cleanOutput, "result.json"), result); err != nil {
 		fmt.Fprintln(os.Stderr, "write result:", err)
 		os.Exit(3)
@@ -108,6 +113,9 @@ func main() {
 	}
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, runErr)
+		os.Exit(1)
+	}
+	if captureErr != nil {
 		os.Exit(1)
 	}
 }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,7 +11,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from loom_execution_actuator.__main__ import ActuatorRuntimeHealth, _health_app
-from loom_execution_actuator.contracts import NormalizedJobState
+from loom_execution_actuator.contracts import ExecutionTerminationSummaryV1, NormalizedJobState
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _normalize
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -172,6 +172,50 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.resource_version == "42"
 
 
+def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
+    job_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    job = _job()
+    job.status.start_time = job_started
+    observation = _normalize(
+        job,
+        [
+            _pod(
+                scheduled=_ns(
+                    type="PodScheduled",
+                    status="False",
+                    reason="Unschedulable",
+                    message="insufficient cpu",
+                    last_transition_time=datetime(2026, 9, 3, 5, 19, tzinfo=UTC),
+                )
+            )
+        ],
+    )
+
+    assert observation.normalized_state is NormalizedJobState.UNSCHEDULABLE
+    assert observation.scheduled_at is None
+    assert observation.started_at == job_started
+
+
+def test_scheduled_transition_is_clamped_to_pod_start_time() -> None:
+    pod_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    pod = _pod(
+        phase="Running",
+        scheduled=_ns(
+            type="PodScheduled",
+            status="True",
+            reason=None,
+            message=None,
+            last_transition_time=pod_started + timedelta(seconds=1),
+        ),
+    )
+    pod.status.start_time = pod_started
+
+    observation = _normalize(_job(), [pod])
+
+    assert observation.scheduled_at == pod_started
+    assert observation.started_at == pod_started
+
+
 def test_termination_summary_is_identity_bound_and_retained() -> None:
     job = _job(conditions=[_ns(type="Complete", reason=None, message=None)])
     observation = _normalize(job, [_pod(phase="Succeeded")])
@@ -183,6 +227,36 @@ def test_termination_summary_is_identity_bound_and_retained() -> None:
     rejected = _normalize(job, [_pod(phase="Succeeded")])
     assert rejected.normalized_state is NormalizedJobState.FAILED
     assert rejected.reason == "TerminationSummaryIdentityMismatch"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "artifact_upload_failed",
+        "missing_required_artifacts",
+        "trajectory_flush_failed",
+    ],
+)
+def test_termination_summary_accepts_complete_bundle_failures(status: str) -> None:
+    payload = {
+        "schema_version": "loom.execution-termination-summary.v1",
+        "runtime_contract_sha256": "sha256:" + "1" * 64,
+        "command_identity_sha256": "sha256:" + "2" * 64,
+        "execution_role": "attempt",
+        "status": status,
+        "partial_evidence": True,
+        "phase_count": 2,
+        "finished_at": datetime.now(UTC).isoformat(),
+        "result_path": "result.json",
+        "output_committed": True,
+        "output_upload_session_id": "0194d739-8bec-7b7b-88f5-62f7cbd42cb3",
+        "output_manifest_sha256": "sha256:" + "3" * 64,
+        "output_marker_sha256": "sha256:" + "4" * 64,
+    }
+
+    summary = ExecutionTerminationSummaryV1.model_validate(payload)
+
+    assert summary.status == status
 
 
 def test_kubernetes_error_translation_handles_non_integer_status() -> None:
@@ -231,6 +305,13 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
     kinds = [document["kind"] for document in documents]
     assert "ClusterRole" not in kinds
     assert "ClusterRoleBinding" not in kinds
+    quota = next(document for document in documents if document["kind"] == "ResourceQuota")
+    assert quota["metadata"]["namespace"] == "loom-nebius-development"
+    assert quota["spec"]["hard"] == {
+        "pods": "72",
+        "requests.cpu": "128",
+        "requests.memory": "512Gi",
+    }
     role = next(document for document in documents if document["kind"] == "Role")
     assert role["metadata"]["namespace"] == "loom-nebius-development"
     assert role["rules"] == [
@@ -280,6 +361,11 @@ def test_development_patch_persists_service_execution_scheduler_identity() -> No
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "True"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "development"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"] == "nebius-cpu"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED"]["value"] == "True"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_INTERVAL_SEC"]["value"] == "2.0"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_CLAIM_TTL_SEC"]["value"] == "300.0"
+    assert env["LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_CONCURRENCY"]["value"] == "8"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC"]["value"] == "86400"
     assert env["LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON"]["valueFrom"] == {
         "secretKeyRef": {"name": "loom-image-admission", "key": "keyring-json"}
     }
@@ -287,9 +373,7 @@ def test_development_patch_persists_service_execution_scheduler_identity() -> No
 
 def test_development_service_patch_persists_backend_environment_identity() -> None:
     patch = yaml.safe_load(
-        (_ROOT / "deploy/k8s/nebius-service-development-patch.yaml").read_text(
-            encoding="utf-8"
-        )
+        (_ROOT / "deploy/k8s/nebius-service-development-patch.yaml").read_text(encoding="utf-8")
     )
     container = patch["spec"]["template"]["spec"]["containers"][0]
     assert container["name"] == "service"
@@ -305,9 +389,7 @@ def test_development_service_patch_persists_backend_environment_identity() -> No
 
 def test_development_gateway_patch_persists_model_provider_identity() -> None:
     patch = yaml.safe_load(
-        (_ROOT / "deploy/k8s/nebius-gateway-development-patch.yaml").read_text(
-            encoding="utf-8"
-        )
+        (_ROOT / "deploy/k8s/nebius-gateway-development-patch.yaml").read_text(encoding="utf-8")
     )
     container = patch["spec"]["template"]["spec"]["containers"][0]
     assert container["name"] == "gateway"
@@ -373,7 +455,9 @@ def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> Non
     assert actual == expected
 
 
-def test_platform_network_policies_admit_only_execution_units_from_nebius_namespace() -> None:
+def test_platform_network_policies_admit_only_execution_units_from_known_nebius_namespaces() -> (
+    None
+):
     documents = list(
         yaml.safe_load_all((_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8"))
     )
@@ -390,15 +474,23 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
         nebius_peers = [
             peer
             for peer in ingress["from"]
-            if peer.get("namespaceSelector", {})
-            .get("matchLabels", {})
-            .get("kubernetes.io/metadata.name")
-            == "loom-nebius-development"
+            if peer.get("namespaceSelector", {}).get("matchExpressions", [{}])[0].get("key")
+            == "kubernetes.io/metadata.name"
         ]
         assert nebius_peers == [
             {
                 "namespaceSelector": {
-                    "matchLabels": {"kubernetes.io/metadata.name": "loom-nebius-development"}
+                    "matchExpressions": [
+                        {
+                            "key": "kubernetes.io/metadata.name",
+                            "operator": "In",
+                            "values": [
+                                "loom-nebius-development",
+                                "loom-nebius-staging",
+                                "loom-nebius-production",
+                            ],
+                        }
+                    ]
                 },
                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "execution-unit"}},
             }

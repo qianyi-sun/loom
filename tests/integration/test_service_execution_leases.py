@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from loom.db.schema import (
     AdminAuditEvent,
     Artifact,
     Batch,
+    DataLifecycleAuthority,
+    DataLifecycleObject,
     ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
@@ -31,6 +34,7 @@ from loom.db.schema import (
     ExecutionPriceSnapshot,
     ExecutionProvisioningAuthorization,
     ExecutionTargetPriceBinding,
+    ServiceExecutionClass,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
     ServiceExecutionLease,
@@ -40,6 +44,7 @@ from loom.db.schema import (
     Team,
     TeamQuota,
     Trial,
+    TrialEvent,
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
@@ -59,6 +64,7 @@ from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
+    RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
@@ -90,6 +96,7 @@ from loom_control_plane.service_execution import (
     claim_execution_commands,
     enqueue_execution_transition,
     execution_lease_projection,
+    finalize_committed_service_execution,
     persist_execution_catalog,
     record_execution_event,
     refresh_execution_target_health,
@@ -98,6 +105,7 @@ from loom_control_plane.service_execution import (
     set_execution_target_health,
     verify_trial_execution_fence,
 )
+from loom_control_plane.service_execution_materializer import ServiceExecutionMaterializer
 from loom_control_plane.service_execution_output import (
     ServiceExecutionBrokerError,
     ServiceExecutionOutputFileV1,
@@ -134,6 +142,15 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with sessions() as session, session.begin():
+            owned_team_ids = select(Team.id).where(Team.name.like("service-execution-%"))
+            owned_authority_ids = select(DataLifecycleAuthority.id).where(
+                DataLifecycleAuthority.team_id.in_(owned_team_ids)
+            )
+            await session.execute(
+                delete(DataLifecycleObject).where(
+                    DataLifecycleObject.authority_id.in_(owned_authority_ids)
+                )
+            )
             await session.execute(
                 delete(Artifact).where(Artifact.control_producer_kind == "service_execution")
             )
@@ -214,6 +231,11 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                 )
             )
             await session.execute(
+                delete(ServiceExecutionClass).where(
+                    ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id
+                )
+            )
+            await session.execute(
                 delete(ExecutionPriceSnapshot).where(
                     ExecutionPriceSnapshot.source == "service-execution-test"
                 )
@@ -223,6 +245,11 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                     TeamQuota.team_id.in_(
                         select(Team.id).where(Team.name.like("service-execution-%"))
                     )
+                )
+            )
+            await session.execute(
+                delete(DataLifecycleAuthority).where(
+                    DataLifecycleAuthority.team_id.in_(owned_team_ids)
                 )
             )
             await session.execute(delete(Team).where(Team.name.like("service-execution-%")))
@@ -402,6 +429,39 @@ def _runtime_contract(
             if verifier_execution == "in_attempt"
             else None
         ),
+    )
+
+
+def _complete_output_contract(*, now: datetime) -> ExecutionRuntimePlanV1:
+    return _runtime_contract(now=now).model_copy(
+        update={
+            "output_declarations": (
+                RuntimeOutputDeclarationV1(
+                    source_path="answer.txt",
+                    relative_path="artifacts/answer.txt",
+                    kind="task_artifact",
+                    required=True,
+                ),
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/agent/trajectory.jsonl",
+                    relative_path="trajectory/events.jsonl",
+                    kind="trajectory",
+                    required=True,
+                ),
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/agent/usage.json",
+                    relative_path="accounting/usage.json",
+                    kind="usage",
+                    required=True,
+                ),
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/verifier/output.json",
+                    relative_path="verifier/output.json",
+                    kind="verifier",
+                    required=True,
+                ),
+            )
+        }
     )
 
 
@@ -623,7 +683,7 @@ async def _reserve(
     )
 
 
-async def test_actuator_refreshes_target_health_without_reenabling_operator_state(
+async def test_actuator_refreshes_target_health_during_drift_without_reenabling_operator_state(
     postgres_url: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
@@ -642,9 +702,21 @@ async def test_actuator_refreshes_target_health_without_reenabling_operator_stat
             )
             await session.commit()
 
+        kubernetes = _FakeKubernetesJobApi()
+        kubernetes.jobs["foreign-managed-job"] = KubernetesJobObservation(
+            namespace=target.namespace_name,
+            job_name="foreign-managed-job",
+            lease_id=str(uuid4()),
+            resource_generation=1,
+            target_id=target.target_id,
+            execution_unit_key=str(uuid4()),
+            normalized_state=NormalizedJobState.PENDING,
+            job_uid="foreign-uid",
+            resource_version="1",
+        )
         actuator = ExecutionActuator(
             sessions=sessions,
-            kubernetes=_FakeKubernetesJobApi(),
+            kubernetes=kubernetes,
             target=ExecutionTargetRuntime(
                 target_id=target.target_id,
                 namespace=target.namespace_name,
@@ -652,7 +724,7 @@ async def test_actuator_refreshes_target_health_without_reenabling_operator_stat
             controller_id="target-health-refresh-test",
         )
         refreshed_at = now + timedelta(seconds=2)
-        assert await actuator.reconcile_full_once(now=refreshed_at) == 0
+        assert await actuator.reconcile_full_once(now=refreshed_at) == 1
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionTarget, target.target_id)
@@ -2477,7 +2549,8 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
                 step_id="agent",
                 ttl_sec=600,
             ),
-            authorization="Bearer ignored",
+            principal=auth,
+            protected_worker_session=None,
             execution_lease_id=lease.id,
             execution_generation=lease.generation,
         )
@@ -2517,10 +2590,17 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
     now = datetime.now(UTC)
     signing_key = "b" * 64
     pod_ip = "10.24.7.19"
+    runtime_contract = _complete_output_contract(now=now)
     try:
         async with sessions() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
-            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            lease = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now,
+                runtime_contract=runtime_contract,
+            )
             await enqueue_execution_transition(
                 session,
                 lease_id=lease.id,
@@ -2570,8 +2650,28 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
         assert token_context.service_execution_lease_id == lease.id
         assert token_context.service_execution_generation == 1
 
+        bundle_payloads = {
+            "artifacts/answer.txt": b"42\n",
+            "trajectory/events.jsonl": b'{"turn":0}\n',
+            "accounting/usage.json": b'{"call_count":1}\n',
+            "verifier/output.json": b'{"rewards":{"passed":1}}\n',
+        }
         result_document = _runtime_result_payload(authorized, started_at=now)
-        result_document.update(status="runtime_error", partial_evidence=True, phases=[])
+        result_document.update(
+            status="runtime_error",
+            partial_evidence=True,
+            phases=[],
+            outputs=[
+                {
+                    **declaration.model_dump(mode="json"),
+                    "state": "captured",
+                    "size_bytes": len(bundle_payloads[declaration.relative_path]),
+                    "sha256": digest_bytes(bundle_payloads[declaration.relative_path]),
+                }
+                for declaration in runtime_contract.output_declarations
+            ],
+            verifier_rewards={"passed": 1.0},
+        )
         result_payload = canonical_document(result_document)
         store = FakeObjectStore()
         repository = SqlArtifactCommitRepository(
@@ -2591,41 +2691,54 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             schema_version="loom.service-execution-output-prepare.v1",
             request_id=uuid4(),
             **identity.model_dump(),
-            files=(
+            files=tuple(
                 ServiceExecutionOutputFileV1(
-                    relative_path="result.json",
-                    media_type="application/json",
-                    size_bytes=len(result_payload),
-                    sha256=digest_bytes(result_payload),
-                ),
+                    relative_path=path,
+                    media_type=(
+                        "application/json"
+                        if path.endswith(".json")
+                        else "application/x-ndjson"
+                        if path.endswith(".jsonl")
+                        else "text/plain; charset=utf-8"
+                    ),
+                    size_bytes=len(payload),
+                    sha256=digest_bytes(payload),
+                )
+                for path, payload in {
+                    "result.json": result_payload,
+                    **dict(sorted(bundle_payloads.items())),
+                }.items()
             ),
         )
         grant = await route.prepare(lease=authorized, request=prepare)
         upload_session_id = UUID(grant["upload_session_id"])
         upload_token = str(grant["upload_token"])
 
-        async def body():  # type: ignore[no-untyped-def]
-            yield result_payload
+        ordered_payloads = [result_payload, *[body for _, body in sorted(bundle_payloads.items())]]
+        for file_index, payload in enumerate(ordered_payloads):
 
-        receipt = PartReceiptV1.model_validate(
-            await route.put_part(
+            async def body(payload: bytes = payload):  # type: ignore[no-untyped-def]
+                yield payload
+
+            receipt = PartReceiptV1.model_validate(
+                await route.put_part(
+                    lease=authorized,
+                    session_id=upload_session_id,
+                    file_index=file_index,
+                    part_number=1,
+                    content_length=len(payload),
+                    content_sha256=digest_bytes(payload),
+                    upload_token=upload_token,
+                    body=body(),
+                )
+            )
+            await route.complete_file(
                 lease=authorized,
                 session_id=upload_session_id,
-                file_index=0,
-                part_number=1,
-                content_length=len(result_payload),
-                content_sha256=digest_bytes(result_payload),
+                file_index=file_index,
+                ordered_parts=(receipt,),
                 upload_token=upload_token,
-                body=body(),
             )
-        )
-        await route.complete_file(
-            lease=authorized,
-            session_id=upload_session_id,
-            file_index=0,
-            ordered_parts=(receipt,),
-            upload_token=upload_token,
-        )
         committed = await route.commit(
             lease=authorized,
             session_id=upload_session_id,
@@ -2657,6 +2770,14 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert persisted.output_upload_session_id == upload_session_id
             assert persisted.desired_state == "finalize"
             assert artifact.content_hash == digest_bytes(result_payload)
+            assert artifact.name == "trial_bundle"
+            assert artifact.artifact_type == "loom.trial-artifact-bundle.v1"
+            assert artifact.file_count == 5
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.trajectory_index is not None
+            assert trial.trajectory_index["artifact_bundle_id"] == str(artifact.id)
+            assert trial.trajectory_index["verifier_rewards"] == {"passed": 1.0}
             assert (
                 await session.scalar(
                     select(func.count(ServiceExecutionEvent.id)).where(
@@ -2727,6 +2848,20 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 )
                 == 1
             )
+
+        # A completed Job remains observable between durable finalization and
+        # deletion. Replaying that Kubernetes state must not regress the lease
+        # from ``finalized`` or erase its terminal timestamp.
+        kubernetes.jobs[lease.job_name] = terminal_observation.model_copy(
+            update={"resource_version": "9", "terminated_at": None}
+        )
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 0
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            assert persisted.observed_state == "finalized"
+            assert persisted.pod_terminated_at == now + timedelta(seconds=3)
+
         assert await actuator.run_commands_once(now=now + timedelta(seconds=5)) == 1
         assert kubernetes.delete_count == 1
         assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 1
@@ -2745,6 +2880,389 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                     identity=identity,
                     purpose="output",
                 )
+    finally:
+        await engine.dispose()
+
+
+async def test_materializer_commits_complete_bundle_after_execution_cleanup(
+    postgres_url: str,
+) -> None:
+    class FailOnceSourceStore(FakeObjectStore):
+        fail_next_delete: bool = True
+
+        async def delete_object(self, *, bucket, key):  # type: ignore[no-untyped-def]
+            if self.fail_next_delete:
+                self.fail_next_delete = False
+                raise OSError("temporary source object-store outage")
+            await super().delete_object(bucket=bucket, key=key)
+
+    class FailOnceCanonicalStore(FakeObjectStore):
+        fail_next_copy: bool = True
+
+        async def put_object_stream(self, *, bucket, key, body):  # type: ignore[no-untyped-def]
+            if self.fail_next_copy and key.startswith("trials/"):
+                self.fail_next_copy = False
+                raise OSError("temporary canonical object-store outage")
+            return await super().put_object_stream(bucket=bucket, key=key, body=body)
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    runtime_contract = _complete_output_contract(now=now)
+    store = FailOnceSourceStore()
+    canonical_store = FailOnceCanonicalStore()
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            task = None if trial is None else await session.get(Task, trial.task_id)
+            assert trial is not None and task is not None
+            task.config = {
+                "schema_version": "1",
+                "task": {"id": task.id, "name": "Canonical materialization"},
+                "environment": {
+                    "os": "linux",
+                    "cpu_arch": "x86_64",
+                    "gpu_vendor": "none",
+                    "docker_image": runtime_contract.task_image_ref,
+                    "network_policies_supported": ["gateway-only"],
+                    "baseline_network_policy": {"kind": "gateway-only"},
+                },
+                "agent": {"name": "direct-completion", "version": "1.0"},
+                "verifier": {"name": "script", "env_mode": "shared"},
+                "steps": [{"name": "main", "artifacts": ["answer.txt"]}],
+            }
+            trial.config = {
+                "schema_version": "1",
+                "agent_name": "direct-completion",
+                "agent_model": {"provider": "openai", "name": "gpt-5"},
+            }
+            lease = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now,
+                runtime_contract=runtime_contract,
+            )
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="start",
+                now=now,
+            )
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={
+                    "normalized_state": "running",
+                    "job_uid": "job-materialize",
+                    "pod_uid": "pod-materialize",
+                    "pod_ip": "10.24.7.21",
+                    "resource_version": "1",
+                },
+                observed_at=now,
+            )
+            await session.commit()
+            session.expunge(lease)
+
+        trace = (
+            json.dumps(
+                {
+                    "schema_version": "loom.service-execution-llm-call.v1",
+                    "turn": 0,
+                    "started_at": now.isoformat(),
+                    "finished_at": (now + timedelta(seconds=1)).isoformat(),
+                    "model": "openai/gpt-5",
+                    "request": {
+                        "messages": [{"role": "user", "content": "answer"}],
+                        "request_params": {},
+                    },
+                    "response": {"role": "assistant", "content": "42"},
+                    "usage": {
+                        "rate_card_hash": "rate-v1",
+                        "gateway_request_id": "gateway-1",
+                        "finish_reason": "stop",
+                        "input_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 1,
+                        "thinking_tokens": 0,
+                        "provider_extras": {},
+                        "cost_usd": 0.01,
+                        "duration_sec": 1.0,
+                        "streamed": False,
+                        "time_to_first_token_sec": None,
+                        "attempt": 1,
+                    },
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+        trace_usage = json.loads(trace)["usage"]
+        bundle_payloads = {
+            "01-agent.stdout": b"42\n",
+            "01-agent.stderr": b"",
+            "02-verifier.stdout": b"passed\n",
+            "02-verifier.stderr": b"",
+            "artifacts/answer.txt": b"42\n",
+            "trajectory/events.jsonl": trace,
+            "accounting/usage.json": canonical_document(
+                {
+                    "schema_version": "loom.service-execution-usage.v1",
+                    "model": "openai/gpt-5",
+                    "call_count": 1,
+                    "totals": {
+                        "input_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 1,
+                        "thinking_tokens": 0,
+                        "cost_usd": 0.01,
+                        "duration_sec": 1.0,
+                    },
+                    "calls": [trace_usage],
+                }
+            ),
+            "verifier/output.json": b'{"rewards":{"passed":1.0}}',
+        }
+        result_document = _runtime_result_payload(lease, started_at=now)
+        result_document.update(
+            outputs=[
+                {
+                    **declaration.model_dump(mode="json"),
+                    "state": "captured",
+                    "size_bytes": len(bundle_payloads[declaration.relative_path]),
+                    "sha256": digest_bytes(bundle_payloads[declaration.relative_path]),
+                }
+                for declaration in runtime_contract.output_declarations
+            ],
+            verifier_rewards={"passed": 1.0},
+        )
+        result_payload = canonical_document(result_document)
+        repository = SqlArtifactCommitRepository(
+            session_factory=sessions,
+            store=store,
+            bucket="artifacts",
+        )
+        route = ServiceExecutionOutputRouteService(
+            service=ArtifactCommitService(
+                store=store,
+                bucket="artifacts",
+                repository=repository,
+            ),
+            session_factory=sessions,
+        )
+        identity = ServiceExecutionPeerV1(
+            lease_id=lease.id,
+            generation=1,
+            execution_role="attempt",
+        )
+        payloads = {"result.json": result_payload, **dict(sorted(bundle_payloads.items()))}
+        prepare = ServiceExecutionOutputPrepareV1(
+            schema_version="loom.service-execution-output-prepare.v1",
+            request_id=uuid4(),
+            **identity.model_dump(),
+            files=tuple(
+                ServiceExecutionOutputFileV1(
+                    relative_path=path,
+                    media_type=(
+                        "application/json"
+                        if path.endswith(".json")
+                        else "application/x-ndjson"
+                        if path.endswith(".jsonl")
+                        else "text/plain; charset=utf-8"
+                    ),
+                    size_bytes=len(payload),
+                    sha256=digest_bytes(payload),
+                )
+                for path, payload in payloads.items()
+            ),
+        )
+        grant = await route.prepare(lease=lease, request=prepare)
+        upload_session_id = UUID(grant["upload_session_id"])
+        upload_token = str(grant["upload_token"])
+        for file_index, payload in enumerate(payloads.values()):
+
+            async def body(payload: bytes = payload):  # type: ignore[no-untyped-def]
+                yield payload
+
+            receipt = PartReceiptV1.model_validate(
+                await route.put_part(
+                    lease=lease,
+                    session_id=upload_session_id,
+                    file_index=file_index,
+                    part_number=1,
+                    content_length=len(payload),
+                    content_sha256=digest_bytes(payload),
+                    upload_token=upload_token,
+                    body=body(),
+                )
+            )
+            await route.complete_file(
+                lease=lease,
+                session_id=upload_session_id,
+                file_index=file_index,
+                ordered_parts=(receipt,),
+                upload_token=upload_token,
+            )
+        await route.commit(
+            lease=lease,
+            session_id=upload_session_id,
+            upload_token=upload_token,
+        )
+
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+            assert current is not None
+            current.observed_state = "finalizing"
+            assert await finalize_committed_service_execution(
+                session,
+                lease_id=current.id,
+                observed_at=now + timedelta(seconds=4),
+            )
+            await session.commit()
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+            trial = await session.get(Trial, trial_id)
+            assert current is not None and trial is not None
+            assert trial.state == "materializing"
+            current.desired_state = "deleted"
+            current.observed_state = "deleted"
+            current.cleanup_state = "complete"
+            current.deleted_at = now + timedelta(seconds=5)
+            await session.commit()
+
+        materializer = ServiceExecutionMaterializer(
+            session_factory=sessions,
+            source_store=store,
+            source_bucket="artifacts",
+            canonical_store=canonical_store,
+            artifacts_bucket="artifacts",
+            trajectories_bucket="trajectories",
+            source_retention_seconds=0,
+        )
+        assert await materializer.run_once()
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+            trial = await session.get(Trial, trial_id)
+            assert current is not None and trial is not None
+            assert current.materialization_state == "pending"
+            assert current.materialization_error_code == "transient_materialization_error"
+            assert trial.state == "materializing"
+            current.materialization_next_attempt_at = now
+            await session.commit()
+        materializer = ServiceExecutionMaterializer(
+            session_factory=sessions,
+            source_store=store,
+            source_bucket="artifacts",
+            canonical_store=canonical_store,
+            artifacts_bucket="artifacts",
+            trajectories_bucket="trajectories",
+            source_retention_seconds=0,
+        )
+        assert await materializer.run_once()
+        assert not await materializer.run_once()
+        assert await materializer.cleanup_source_once()
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+            assert current is not None
+            assert current.source_cleanup_state == "retained"
+            assert current.source_cleanup_attempts == 1
+            assert current.source_cleanup_error_message == (
+                "temporary source object-store outage"
+            )
+            current.source_retain_until = now
+            await session.commit()
+        assert await materializer.cleanup_source_once()
+        assert not await materializer.cleanup_source_once()
+
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            artifact = (
+                await session.execute(
+                    select(Artifact).where(Artifact.control_producer_id == lease.id)
+                )
+            ).scalar_one()
+            events = list(
+                (
+                    await session.execute(
+                        select(TrialEvent)
+                        .where(TrialEvent.trial_id == trial_id)
+                        .order_by(TrialEvent.seq)
+                    )
+                ).scalars()
+            )
+            lifecycle_objects = list(
+                (
+                    await session.execute(
+                        select(DataLifecycleObject).where(
+                            DataLifecycleObject.authority_id
+                            == artifact.lifecycle_authority_id
+                        )
+                    )
+                ).scalars()
+            )
+            assert current is not None and trial is not None
+            assert current.deleted_at is not None
+            assert current.materialization_state == "committed", (
+                current.materialization_error_code,
+                current.materialization_error_message,
+            )
+            assert current.canonical_trajectory_sha256 is not None
+            assert current.source_cleanup_state == "complete"
+            assert current.source_cleanup_attempts == 2
+            assert trial.state == "succeeded"
+            assert trial.trajectory_index is not None
+            assert artifact.lifecycle_authority_id is not None
+            assert len(lifecycle_objects) == len(artifact.storage["files"]) + 5
+            assert all(event.lifecycle_authority_id is not None for event in events)
+            assert trial.trajectory_index["atif_schema_version"] == "1.7"
+            assert [event.kind for event in events] == [
+                "trial_start",
+                "step_start",
+                "llm_call",
+                "step_end",
+                "verifier_start",
+                "verifier_end",
+                "trial_end",
+            ]
+            storage_files = artifact.storage["files"]
+            source_evidence = artifact.storage["source_evidence"]
+            assert [item["relative_path"] for item in source_evidence] == [
+                "source/_manifest.json",
+                "source/_COMMITTED",
+                "source/_artifact_manifest.json",
+            ]
+            assert all(
+                (item["bucket"], item["key"]) in canonical_store.objects
+                for item in source_evidence
+            )
+            answer = next(
+                item for item in storage_files if item["relative_path"] == "artifacts/answer.txt"
+            )
+            assert answer["key"].startswith(f"trials/{trial.team_id}/{trial.id}/attempts/1/")
+            assert canonical_store.objects[("artifacts", answer["key"])] == b"42\n"
+            trajectory_key = trial.trajectory_index["trajectory_uri"].removeprefix(
+                "s3://trajectories/"
+            )
+            atif_key = trial.trajectory_index["atif_uri"].removeprefix("s3://trajectories/")
+            assert b'"kind":"llm_call"' in canonical_store.objects[
+                ("trajectories", trajectory_key)
+            ]
+            assert json.loads(canonical_store.objects[("trajectories", atif_key)])[
+                "schema_version"
+            ] == "1.7"
+            source_prefix = f"service-executions/{trial.team_id}/{lease.id}/1/output/"
+            assert not any(
+                bucket == "artifacts" and key.startswith(source_prefix)
+                for bucket, key in store.objects
+            )
     finally:
         await engine.dispose()
 

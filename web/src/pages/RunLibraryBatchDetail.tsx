@@ -366,6 +366,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     batch.debug_evidence ?? diagnosticsQuery.data?.debug_evidence ?? null;
   const hasDiagnostics = Boolean(diagnosis || debugEvidence);
   const artifactInventoryTruncated = batch.artifact_inventory_truncated === true;
+  const trialBundles = batch.trial_bundles ?? [];
   const effectiveCombinationSummary = batch.effective_combination_summary ?? [];
   const combinationSummary =
     effectiveCombinationSummary.length > 0
@@ -588,6 +589,39 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           description="Shared files are downloadable through Loom API URLs; blocked files stay owner-team diagnostics."
         />
         <Card.Body className="space-y-5">
+          {trialBundles.length > 0 ? (
+            <section className="space-y-2">
+              <div>
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  Complete Trial bundles
+                </h2>
+                <p className="mt-1 text-xs text-slate-600">
+                  Canonical packages include the full trajectory, ATIF, outputs, source evidence, manifest, and checksums.
+                </p>
+              </div>
+              {trialBundles.map((bundle) => (
+                <div key={bundle.trial_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2">
+                  <div className="min-w-0">
+                    <Link to={`/trials/${bundle.trial_id}`} className="font-mono text-xs font-medium text-accent hover:text-accent-hover">
+                      {bundle.trial_id}
+                    </Link>
+                    <p className="mt-1 truncate text-xs text-slate-600">
+                      {bundle.task_id} · {bundle.materialization_state} · {bundle.file_count} files · {formatBytes(bundle.size_bytes)}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!bundle.canonical_ready}
+                    title={bundle.canonical_ready ? "Download this complete canonical Trial bundle." : "Canonical transfer has not completed."}
+                    onClick={() => void api.downloadTrialBundle(bundle.trial_id)}
+                  >
+                    {bundle.canonical_ready ? "Download complete bundle" : "Bundle pending"}
+                  </Button>
+                </div>
+              ))}
+            </section>
+          ) : null}
           <div className="flex justify-end">
             <Button
               size="sm"

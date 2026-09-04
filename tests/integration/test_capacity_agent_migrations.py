@@ -43,6 +43,7 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
     os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
     os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(database, "observer_role")
+    os.environ["LOOM_CAPACITY_GUARD_RUNTIME_ROLE"] = _value(database, "runtime_role")
     return cfg
 
 

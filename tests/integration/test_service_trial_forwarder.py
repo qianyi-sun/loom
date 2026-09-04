@@ -488,13 +488,18 @@ async def test_cancel_trial_forwards(
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected_forward_count"),
-    [("nebius", 1), ("docker", 0)],
+    ("backend", "task_config", "expected_forward_count"),
+    [
+        ("nebius", {"service_execution": {"logical_pool_id": "nebius-cpu"}}, 1),
+        ("nebius", {}, 1),
+        ("docker", {"service_execution": {"logical_pool_id": "nebius-cpu"}}, 0),
+    ],
 )
 async def test_cancel_batch_respects_explicit_backend_fence(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,
     backend: str,
+    task_config: dict[str, object],
     expected_forward_count: int,
 ) -> None:
     app, raw, team_id, captured = fwd_setup
@@ -508,7 +513,7 @@ async def test_cancel_batch_respects_explicit_backend_fence(
             insert(Task).values(
                 id=task_id,
                 checksum="c" * 64,
-                config={"service_execution": {"logical_pool_id": "nebius-cpu"}},
+                config=task_config,
                 source="local",
             )
         )

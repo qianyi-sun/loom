@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from botocore.exceptions import ClientError
-from sqlalchemy import create_engine, delete, insert, select, update
+from sqlalchemy import create_engine, delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -35,6 +35,13 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.delivery_export import (
+    CanonicalTrialBundle,
+    CanonicalTrialBundleFile,
+    CorruptDeliveryObjectsError,
+    ObjectRef,
+    build_canonical_trial_bundle_archive,
+)
 from loom_service.delivery_export_tb2_v2 import SECRET_PATTERNS
 
 
@@ -43,6 +50,41 @@ def _assert_no_secret_patterns(text: str) -> None:
     for pattern in SECRET_PATTERNS:
         match = pattern.search(text)
         assert match is None, f"unexpected secret pattern {pattern.pattern!r}: {match!r}"
+
+
+def _assert_complete_payload_checksums(tar: tarfile.TarFile) -> dict[str, str]:
+    checksum_lines = (
+        tar.extractfile("checksums/SHA256SUMS").read().decode().splitlines()  # type: ignore[union-attr]
+    )
+    entries: list[tuple[str, str]] = []
+    for line in checksum_lines:
+        digest, separator, path = line.partition("  ")
+        assert separator == "  "
+        assert len(digest) == 64
+        assert path
+        entries.append((path, digest))
+
+    paths = [path for path, _digest in entries]
+    assert len(paths) == len(set(paths)), "SHA256SUMS contains duplicate paths"
+    expected_paths = {
+        member.name
+        for member in tar.getmembers()
+        if member.isfile() and member.name != "checksums/SHA256SUMS"
+    }
+    assert set(paths) == expected_paths
+
+    checksums = dict(entries)
+    for path, expected_digest in checksums.items():
+        body = tar.extractfile(path).read()  # type: ignore[union-attr]
+        assert hashlib.sha256(body).hexdigest() == expected_digest
+
+    if "task_bundles/manifest.json" in expected_paths:
+        task_bundle_manifest = json.load(  # type: ignore[arg-type]
+            tar.extractfile("task_bundles/manifest.json")
+        )
+        for item in task_bundle_manifest["files"]:
+            assert checksums[item["archive_path"]] == item["sha256"]
+    return checksums
 
 
 class _FakeS3Client:
@@ -97,6 +139,56 @@ class _FakeS3Client:
             data = read()
         self.objects[(Bucket, Key)] = bytes(data)
         return {"ETag": hashlib.md5(bytes(data), usedforsecurity=False).hexdigest()}
+
+
+def test_complete_trial_bundle_archive_is_deterministic_and_integrity_checked() -> None:
+    client = _FakeS3Client()
+    trial_id = uuid4()
+    artifact_id = uuid4()
+    payload = b"complete output\n"
+    client.objects[("artifacts", "canonical/output.txt")] = payload
+    bundle = CanonicalTrialBundle(
+        artifact_id=artifact_id,
+        trial_id=trial_id,
+        task_id="benchmark/task-1",
+        attempt=1,
+        manifest_sha256="sha256:" + "a" * 64,
+        content_sha256="sha256:" + "b" * 64,
+        files=(
+            CanonicalTrialBundleFile(
+                relative_path="files/output.txt",
+                ref=ObjectRef(
+                    kind="trial_bundle",
+                    trial_id=trial_id,
+                    bucket="artifacts",
+                    key="canonical/output.txt",
+                ),
+                size_bytes=len(payload),
+                sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
+                media_type="text/plain",
+            ),
+        ),
+    )
+
+    first = build_canonical_trial_bundle_archive(client=client, bundle=bundle)
+    first_bytes = first.body.read()
+    first.body.close()
+    second = build_canonical_trial_bundle_archive(client=client, bundle=bundle)
+    second_bytes = second.body.read()
+    second.body.close()
+
+    assert first.sha256 == second.sha256
+    assert first_bytes == second_bytes
+    with tarfile.open(fileobj=io.BytesIO(first_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
+        assert tar.extractfile("files/output.txt").read() == payload  # type: ignore[union-attr]
+        manifest = json.load(tar.extractfile("bundle.json"))  # type: ignore[arg-type]
+        assert manifest["trial_id"] == str(trial_id)
+        assert "checksums/SHA256SUMS" in tar.getnames()
+
+    client.objects[("artifacts", "canonical/output.txt")] = b"tampered output\n"
+    with pytest.raises(CorruptDeliveryObjectsError):
+        build_canonical_trial_bundle_archive(client=client, bundle=bundle)
 
 
 @pytest.fixture
@@ -243,10 +335,33 @@ async def delivery_setup(
                 }
                 app.state.minio_client.objects[
                     (settings.trajectories_bucket, f"{prefix}/events.jsonl")
-                ] = (json.dumps({"trial_id": str(trial_id), "task_id": task_id}) + "\n").encode()
+                ] = (
+                    json.dumps(
+                        {
+                            "kind": "trial_end",
+                            "seq": 1,
+                            "emitted_at": now.isoformat(),
+                            "trial_id": str(trial_id),
+                            "step_id": "__trial__",
+                            "final_state": "succeeded",
+                            "reward": {"score": reward},
+                            "failure_reason": None,
+                        }
+                    )
+                    + "\n"
+                ).encode()
                 app.state.minio_client.objects[
                     (settings.trajectories_bucket, f"{prefix}/atif.json")
-                ] = json.dumps({"version": "1.7", "trial_id": str(trial_id)}).encode()
+                ] = json.dumps(
+                    {
+                        "version": "1.7",
+                        "trial_id": str(trial_id),
+                        "metadata": {
+                            "final_state": "succeeded",
+                            "reward": {"score": reward},
+                        },
+                    }
+                ).encode()
             s.execute(
                 insert(Trial).values(
                     id=trial_id,
@@ -377,6 +492,60 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     selected_trials = delivery_setup["selected_trials"]
     task_ids = delivery_setup["task_ids"]
     fake_s3 = delivery_setup["fake_s3"]
+    bundle_task_id = task_ids[0]  # type: ignore[index]
+    bundle_trial_id = selected_trials[bundle_task_id]  # type: ignore[index]
+    bundle_artifact_id = uuid4()
+    bundle_objects = {
+        (
+            "artifacts",
+            f"trials/{bundle_trial_id}/bundles/{bundle_artifact_id}/files/artifacts/answer.txt",
+        ): b"complete answer\n",
+        (
+            "artifacts",
+            f"trials/{bundle_trial_id}/bundles/{bundle_artifact_id}/source/_manifest.json",
+        ): b'{"schema_version":"loom.artifact-commit.v1"}',
+    }
+    fake_s3.objects.update(bundle_objects)  # type: ignore[attr-defined]
+    sync_engine = create_engine(postgres_url)
+    with sessionmaker(sync_engine)() as s:
+        source_rows = []
+        for index, ((bucket, key), payload) in enumerate(bundle_objects.items()):
+            row = {
+                "relative_path": (
+                    "artifacts/answer.txt" if index == 0 else "source/_manifest.json"
+                ),
+                "size_bytes": len(payload),
+                "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                "media_type": "application/json" if index else "text/plain",
+                "bucket": bucket,
+                "key": key,
+            }
+            source_rows.append(row)
+        s.execute(
+            insert(Artifact).values(
+                id=bundle_artifact_id,
+                artifact_type="loom.trial-artifact-bundle.v1",
+                name="trial_bundle",
+                team_id=delivery_setup["team_id"],
+                trial_id=bundle_trial_id,
+                control_producer_kind="service_execution",
+                control_producer_id=uuid4(),
+                content_hash="sha256:" + "1" * 64,
+                storage={
+                    "schema_version": "loom.canonical-trial-bundle-storage.v1",
+                    "attempt": 0,
+                    "files": [source_rows[0]],
+                    "source_evidence": [source_rows[1]],
+                },
+                artifact_metadata={"materialization_state": "committed"},
+                visibility="team",
+                share_status="shared",
+                safety_state="verified_internal",
+                access_class="team_runtime",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
@@ -390,7 +559,22 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
                 ]
             },
         )
+        bundle_response = await ac.get(
+            f"/api/v1/trials/{bundle_trial_id}/bundle/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
     assert response.status_code == 201, response.text
+    assert bundle_response.status_code == 200, bundle_response.text
+    assert bundle_response.headers["content-type"] == "application/gzip"
+    assert bundle_response.headers["cache-control"] == "private, no-store"
+    assert bundle_response.headers["x-content-sha256"] == (
+        "sha256:" + hashlib.sha256(bundle_response.content).hexdigest()
+    )
+    with tarfile.open(fileobj=io.BytesIO(bundle_response.content), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
+        assert tar.extractfile("files/artifacts/answer.txt").read() == b"complete answer\n"  # type: ignore[union-attr]
+        assert "source/_manifest.json" in tar.getnames()
+        assert "checksums/SHA256SUMS" in tar.getnames()
     body = response.json()
     assert body["status"] == "ready"
     assert len(body["sha256"]) == 64
@@ -413,12 +597,17 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     assert body["manifest"]["reward_distribution"] == {"0.0": 2, "1.0": 2}
     assert body["manifest"]["model_provider"] == "yibu"
     assert body["manifest"]["model_name"] == "glm-5.1-thinking"
-    assert body["manifest"]["object_counts"] == {"atif": 4, "trajectory": 4}
+    assert body["manifest"]["object_counts"] == {
+        "atif": 4,
+        "trajectory": 4,
+        "trial_bundles": 1,
+        "trial_bundle_files": 2,
+    }
     assert body["manifest"]["archive_sha256"] == body["sha256"]
 
     # HEAD validation must happen before the export is declared ready.
-    assert len(fake_s3.heads) == 8  # type: ignore[attr-defined]
-    assert body["object_validation"]["checked"] == 8
+    assert len(fake_s3.heads) == 10  # type: ignore[attr-defined]
+    assert body["object_validation"]["checked"] == 10
     assert body["object_validation"]["missing"] == []
 
     archive_key = body["storage"]["key"]
@@ -426,6 +615,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     assert hashlib.sha256(archive_bytes).hexdigest() == body["sha256"]
 
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = sorted(tar.getnames())
         assert "manifest.json" in names
         assert "summary.json" in names
@@ -435,6 +625,20 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
         assert "checksums/SHA256SUMS" in names
         assert sum(name.startswith("trajectories/") for name in names) == 4
         assert sum(name.startswith("atif/") for name in names) == 4
+        bundle_prefix = (
+            f"trial_bundles/source-useful-5003-task-0001/{bundle_trial_id}"
+        )
+        assert tar.extractfile(f"{bundle_prefix}/files/artifacts/answer.txt").read() == (  # type: ignore[union-attr]
+            b"complete answer\n"
+        )
+        bundle_manifest = json.load(  # type: ignore[arg-type]
+            tar.extractfile(f"{bundle_prefix}/bundle.json")
+        )
+        assert bundle_manifest["artifact_id"] == str(bundle_artifact_id)
+        assert [item["relative_path"] for item in bundle_manifest["files"]] == [
+            "files/artifacts/answer.txt",
+            "source/_manifest.json",
+        ]
         manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
         assert manifest["task_count"] == 4
         assert "archive_sha256" not in manifest
@@ -516,6 +720,53 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
             batch = s.get(Batch, main_batch_id)
             assert batch is not None
             assert batch.lifecycle_authority_id is not None
+    finally:
+        sync_engine.dispose()
+
+
+async def test_delivery_export_rejects_selected_trial_result_state_drift(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    inconsistent_trial_id = next(iter(selected_trials.values()))
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(sync_engine)() as session:
+            trial = session.get(Trial, inconsistent_trial_id)
+            assert trial is not None
+            trial.result = {
+                "state": "succeeded",
+                "failure_reason": "verifier_error",
+                "aggregate_reward": 1.0,
+            }
+            session.commit()
+
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            response = await ac.post(
+                f"/api/v1/batches/{main_batch_id}/delivery-export",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "supplemental_batch_ids": [
+                        str(supplemental_batch_id),
+                        str(targeted_batch_id),
+                    ]
+                },
+            )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["code"] == "delivery_export_terminal_state_mismatch"
+        assert detail["inconsistent_trials"][0]["trial_id"] == str(inconsistent_trial_id)
+        with sessionmaker(sync_engine)() as session:
+            assert session.scalar(select(func.count()).select_from(Artifact)) == 0
     finally:
         sync_engine.dispose()
 
@@ -696,6 +947,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
     first_task = task_ids[0]
     first_trial = selected_trials[first_task]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert "manifest.json" in names
         assert "summary.json" in names
@@ -899,6 +1151,7 @@ async def test_raw_harbor_delivery_export_preserves_loom_native_trajectory(
     first_task = task_ids[0]
     first_trial = selected_trials[first_task]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert f"agent_runs/{first_task}/{first_trial}/trajectory.jsonl" in names
         assert f"agent_runs/{first_task}/{first_trial}/trajectory.json" not in names
@@ -1191,7 +1444,12 @@ async def test_delivery_export_rejects_unresolved_platform_failures(
     assert body["detail"]["unresolved_trials"][0]["task_id"].startswith("source-useful-5003/")
 
 
-def _tb2_v2_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
+def _tb2_v2_events_jsonl(
+    *,
+    trial_id: UUID,
+    artifact_hash: str,
+    terminal_state: str = "succeeded",
+) -> bytes:
     emitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     common = {
         "trial_id": str(trial_id),
@@ -1288,6 +1546,15 @@ def _tb2_v2_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
             "size_bytes": 42,
             "share_policy": "restricted",
         },
+        {
+            "seq": 7,
+            "kind": "trial_end",
+            **common,
+            "step_id": "__trial__",
+            "final_state": terminal_state,
+            "reward": {"passed": 1.0} if terminal_state == "succeeded" else None,
+            "failure_reason": (None if terminal_state == "succeeded" else "verifier_error"),
+        },
     ]
     return b"".join((json.dumps(line) + "\n").encode() for line in lines)
 
@@ -1300,6 +1567,8 @@ def _seed_tb2_v2_trial(
     team_id: UUID,
     trial_id: UUID,
     task_id: str,
+    terminal_state: str = "succeeded",
+    atif_final_state: str = "succeeded",
 ) -> bytes:
     native = json.dumps(
         {
@@ -1330,8 +1599,27 @@ def _seed_tb2_v2_trial(
     verifier_output = b'{"rewards":{"passed":1.0}}'
     verifier_output_key = f"{prefix}/main/.loom/verifier/output.json"
     fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
-        _tb2_v2_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
+        _tb2_v2_events_jsonl(
+            trial_id=trial_id,
+            artifact_hash=artifact_hash,
+            terminal_state=terminal_state,
+        )
     )
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/atif.json")] = json.dumps(
+        {
+            "schema_version": "ATIF-v1.7",
+            "steps": [],
+            "metadata": {
+                "final_state": atif_final_state,
+                "reward": ({"passed": 1.0} if atif_final_state == "succeeded" else None),
+                "error": (
+                    None
+                    if atif_final_state == "succeeded"
+                    else {"failure_reason": "verifier_error"}
+                ),
+            },
+        }
+    ).encode()
     fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
     fake_s3.objects[(settings.artifacts_bucket, verifier_log_key)] = verifier_log
     fake_s3.objects[(settings.artifacts_bucket, verifier_meta_key)] = verifier_meta
@@ -1433,6 +1721,19 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
                             "trial_id": str(trial_id),
                             "emitted_at": emitted_at,
                             "content": "legacy subprocess thought",
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "seq": 3,
+                            "kind": "trial_end",
+                            "step_id": "__trial__",
+                            "trial_id": str(trial_id),
+                            "emitted_at": emitted_at,
+                            "final_state": "succeeded",
+                            "reward": {"score": 0.0},
+                            "failure_reason": None,
                         }
                     )
                     + "\n"
@@ -1580,6 +1881,7 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
     first_trial = selected_trials[first_task]
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert "derived/sft_messages.jsonl" not in names
         assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
@@ -1655,6 +1957,15 @@ def _openhands_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
             "content_hash": artifact_hash,
             "size_bytes": 128,
             "share_policy": "restricted",
+        },
+        {
+            "seq": 3,
+            "kind": "trial_end",
+            **common,
+            "step_id": "__trial__",
+            "final_state": "succeeded",
+            "reward": {"score": 1.0},
+            "failure_reason": None,
         },
     ]
     return b"".join((json.dumps(line) + "\n").encode() for line in lines)
@@ -1784,6 +2095,7 @@ async def test_openhands_export_from_typed_events(
     first_trial = selected_trials[first_task]
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         names = set(tar.getnames())
         assert "derived/sft_messages.jsonl" not in names
         assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
@@ -1844,6 +2156,29 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
     try:
         with sync_engine.begin() as conn:
             prefix = f"{team_id}/{first_trial}"
+            terminal_event = {
+                "kind": "trial_end",
+                "seq": 1,
+                "emitted_at": datetime.now(UTC).isoformat(),
+                "trial_id": str(first_trial),
+                "step_id": "__trial__",
+                "final_state": "succeeded",
+                "reward": {"passed": 1.0},
+                "failure_reason": None,
+            }
+            fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
+                json.dumps(terminal_event) + "\n"
+            ).encode()
+            fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/atif.json")] = json.dumps(
+                {
+                    "version": "1.7",
+                    "trial_id": str(first_trial),
+                    "metadata": {
+                        "final_state": "succeeded",
+                        "reward": {"passed": 1.0},
+                    },
+                }
+            ).encode()
             conn.execute(
                 update(Trial)
                 .where(Trial.id == first_trial)
@@ -1948,6 +2283,7 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
     archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
 
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
         log_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log"
         meta_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json"
         output_member = f"agent_runs/{first_task}/{first_trial}/verifier/output.json"

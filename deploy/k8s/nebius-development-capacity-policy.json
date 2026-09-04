@@ -1,0 +1,45 @@
+{
+  "schema_version": "loom.nebius-development-capacity.v1",
+  "target_id": "nebius-eu-north1-development",
+  "provider_current_quota_nodes": 12,
+  "provider_current_quota_vcpu_millis": 200000,
+  "provider_required_quota_nodes": 16,
+  "provider_required_quota_vcpu_millis": 512000,
+  "target_execution_max_nodes": 10,
+  "target_execution_preset": "48vcpu-192gb",
+  "target_concurrency": 200,
+  "accepted_concurrency": 56,
+  "task_cpu_millis": 2000,
+  "admission_policies": [
+    {
+      "scope_kind": "global",
+      "scope_key": "*",
+      "max_concurrent": 56,
+      "enabled": true,
+      "reason": "Current-inventory Nebius acceptance permits 56 concurrent service-execution leases."
+    },
+    {
+      "scope_kind": "pool",
+      "scope_key": "nebius-cpu",
+      "max_concurrent": 56,
+      "enabled": true,
+      "reason": "Current-inventory Nebius CPU pool permits 56 concurrent 2-vCPU tasks."
+    }
+  ],
+  "policy": {
+    "enabled": true,
+    "max_nodes": 8,
+    "max_vcpu_millis": 128000,
+    "max_memory_mib": 524288,
+    "max_storage_mib": 524288,
+    "node_cpu_millis": 16000,
+    "node_memory_mib": 65536,
+    "node_storage_mib": 65536,
+    "max_pending_jobs": 56,
+    "max_unschedulable_jobs": 56,
+    "max_image_pull_backoff_jobs": 0,
+    "max_create_per_minute": 56,
+    "observation_max_age_seconds": 300,
+    "reason": "Current-inventory deployment: eight 16-vCPU execution nodes support 56 concurrent 2-vCPU tasks with 2 vCPUs and 8 GiB reserved per node; scale-to-zero remains enabled while larger regional CPU shapes are unavailable and the 512-vCPU quota request for the 200-task 48-vCPU target is pending."
+  }
+}

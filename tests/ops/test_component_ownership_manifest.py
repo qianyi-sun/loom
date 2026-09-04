@@ -986,6 +986,21 @@ def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> No
     )
 
 
+def test_execution_actuator_image_owns_capacity_collector_source() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    owners = manifest.component_owners_for_path(
+        "src/loom_execution_capacity_collector/nebius.py"
+    )
+    assert "execution-actuator" in {component.id for component in owners}
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("src/loom_execution_capacity_collector/nebius.py",),
+        force_all=False,
+    )
+    assert any(item["image"] == "execution-actuator" for item in selected)
+
+
 def test_native_builder_agent_image_has_authority_minimal_release_ownership() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     component = next(
@@ -1160,7 +1175,7 @@ def test_release_image_selection_fails_safe_for_authority_changes() -> None:
     assert matrix == component_ownership.release_image_matrix(manifest)
 
 
-def test_each_release_dockerfile_selects_only_its_owned_build() -> None:
+def test_each_release_dockerfile_selects_its_owned_build_and_required_companions() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
     for component in manifest.release_components():
@@ -1170,7 +1185,24 @@ def test_each_release_dockerfile_selects_only_its_owned_build() -> None:
             force_all=False,
         )
 
-        assert [entry["image"] for entry in matrix] == [component.id]
+        expected = {component.id}
+        if component.id == "service":
+            expected.add("execution-runtime")
+        assert {entry["image"] for entry in matrix} == expected
+
+
+def test_service_release_selects_exact_nebius_runtime_companion() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    matrix = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("migrations/versions/0129_service_execution_materialization.py",),
+        force_all=False,
+    )
+
+    selected = {entry["image"] for entry in matrix}
+    assert "service" in selected
+    assert "execution-runtime" in selected
 
 
 def test_release_image_pair_rejects_matrix_tampering() -> None:
@@ -1364,6 +1396,8 @@ def test_manifest_integration_shard_pins_are_exact_and_target_second_shard() -> 
     assert policy is not None
     assert policy.strategy == "contiguous"
     assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
+        ("tests/integration/test_cp_step_tokens.py", 1),
+        ("tests/integration/test_executable_global_capacity_bridge.py", 1),
         ("tests/integration/test_capacity_manager_migrate.py", 1),
         ("tests/integration/test_migration_task_set_materialization_jobs.py", 1),
     }

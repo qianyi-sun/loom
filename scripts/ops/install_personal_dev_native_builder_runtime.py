@@ -461,6 +461,42 @@ def _read_regular(
             os.close(descriptor)
 
 
+def _read_kernel_regular(path: Path, *, maximum: int) -> bytes:
+    """Read a bounded kernfs file whose reported size may be zero."""
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 0 <= before.st_size <= maximum
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid")
+        payload = bytearray()
+        while chunk := os.read(
+            descriptor,
+            min(64 * 1024, maximum + 1 - len(payload)),
+        ):
+            payload.extend(chunk)
+            if len(payload) > maximum:
+                raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid")
+        after = os.fstat(descriptor)
+        if _identity(before) != _identity(after):
+            raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid")
+        return bytes(payload)
+    except PersonalDevNativeBuilderRuntimeInstallError:
+        raise
+    except OSError as exc:
+        raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _normalized_nftables(payload: str) -> tuple[str, ...]:
     if not isinstance(payload, str) or "\x00" in payload:
         raise PersonalDevNativeBuilderRuntimeInstallError("nftables_state_invalid")
@@ -742,7 +778,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         )
         if cgroup != NativeBuilderCommandResult(0):
             raise PersonalDevNativeBuilderRuntimeInstallError("cgroup_v2_invalid")
-        controllers = _read_regular(controllers_path, maximum=4096)
+        controllers = _read_kernel_regular(controllers_path, maximum=4096)
         try:
             controller_names = set(controllers.decode("ascii").split())
         except UnicodeDecodeError as exc:
@@ -803,9 +839,11 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         try:
             cpus = int(cpu.stdout)
             memory_bytes = int(memory.stdout)
-            disk_lines = disk.stdout.splitlines()
-            disk_bytes = int(disk_lines[1])
-        except (IndexError, TypeError, ValueError) as exc:
+            disk_match = re.fullmatch(r" *Avail\n *([0-9]+)\n", disk.stdout)
+            if disk_match is None:
+                raise ValueError("invalid df output")
+            disk_bytes = int(disk_match.group(1))
+        except (TypeError, ValueError) as exc:
             raise PersonalDevNativeBuilderRuntimeInstallError("host_capacity_invalid") from exc
         if (
             cpu.returncode != 0
@@ -816,7 +854,6 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or memory.stdout != f"{memory_bytes}\n"
             or disk.returncode != 0
             or disk.stderr
-            or disk_lines != ["Avail", str(disk_bytes)]
             or cpus < self.profile.minimum_cpus
             or memory_bytes < self.profile.minimum_memory_bytes
             or disk_bytes < self.profile.minimum_disk_free_bytes
@@ -911,6 +948,13 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                         "SYSTEMD_UNIT_PATH": str(root),
                     }
                 result = self._run(*command, check=False, env=command_env)
+                if Path(command[0]).name == "dockerd":
+                    if result != NativeBuilderCommandResult(
+                        0,
+                        stderr="configuration OK\n",
+                    ):
+                        raise PersonalDevNativeBuilderRuntimeInstallError("generated_input_invalid")
+                    continue
                 permits_stdout = Path(command[0]).name == "systemd-sysusers"
                 if (
                     result.returncode != 0

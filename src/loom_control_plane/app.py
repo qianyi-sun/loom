@@ -37,6 +37,10 @@ from loom_control_plane.input_materialization_evidence import (
 )
 from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
+from loom_control_plane.protected_worker_session import (
+    ProtectedWorkerSessionStore,
+    load_protected_worker_runtime_db_url,
+)
 from loom_control_plane.retry_exhausted_sweeper import (
     run_retry_exhausted_sweeper_loop,
 )
@@ -58,6 +62,10 @@ from loom_control_plane.routes import (
     workers,
 )
 from loom_control_plane.scheduler.crash_detector import run_crash_detector_loop
+from loom_control_plane.service_execution_materializer import (
+    ServiceExecutionMaterializer,
+    run_service_execution_materializer_loop,
+)
 from loom_control_plane.service_execution_scheduler import (
     run_service_execution_scheduler_loop,
 )
@@ -96,6 +104,26 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
+        protected_worker_runtime_engine: AsyncEngine | None = None
+        protected_worker_session_store: ProtectedWorkerSessionStore | None = None
+        if settings.protected_worker_runtime_db_url_file is not None:
+            protected_worker_runtime_engine = create_async_engine(
+                load_protected_worker_runtime_db_url(
+                    settings.protected_worker_runtime_db_url_file
+                ),
+                isolation_level="SERIALIZABLE",
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=5,
+                pool_timeout=settings.db_pool_timeout_sec,
+            )
+            protected_worker_session_store = ProtectedWorkerSessionStore(
+                async_sessionmaker(
+                    protected_worker_runtime_engine,
+                    expire_on_commit=False,
+                )
+            )
+
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
             auth_kind=settings.storage_auth_kind,
@@ -108,6 +136,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
+        app.state.protected_worker_session_store = protected_worker_session_store
 
         artifact_store = MinioObjectStore(
             endpoint_url=settings.minio_endpoint,
@@ -254,6 +283,29 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 ),
                 name="loom-cp-service-execution-scheduler",
             )
+        service_execution_materializer_task: asyncio.Task[None] | None = None
+        if settings.service_execution_materializer_enabled:
+            service_execution_materializer_task = asyncio.create_task(
+                run_service_execution_materializer_loop(
+                    materializer=ServiceExecutionMaterializer(
+                        session_factory=session_factory,
+                        source_store=artifact_store,
+                        source_bucket=settings.artifacts_bucket,
+                        canonical_store=artifact_store,
+                        artifacts_bucket=settings.artifacts_bucket,
+                        trajectories_bucket=settings.trajectories_bucket,
+                        claim_ttl_seconds=(
+                            settings.service_execution_materializer_claim_ttl_sec
+                        ),
+                        source_retention_seconds=(
+                            settings.service_execution_source_retention_sec
+                        ),
+                    ),
+                    interval_seconds=settings.service_execution_materializer_interval_sec,
+                    concurrency=settings.service_execution_materializer_concurrency,
+                ),
+                name="loom-cp-service-execution-materializer",
+            )
         try:
             yield
         finally:
@@ -266,6 +318,8 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 slurm_controller_task.cancel()
             if service_execution_scheduler_task is not None:
                 service_execution_scheduler_task.cancel()
+            if service_execution_materializer_task is not None:
+                service_execution_materializer_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
             # cancellation arrives, asyncpg connection takes a moment
             # to release) doesn't block the entire lifespan shutdown —
@@ -280,6 +334,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 live_preview_reconciler_task,
                 slurm_controller_task,
                 service_execution_scheduler_task,
+                service_execution_materializer_task,
             ):
                 if t is None:
                     continue
@@ -289,6 +344,8 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 ):
                     await asyncio.wait_for(t, timeout=5.0)
             await engine.dispose()
+            if protected_worker_runtime_engine is not None:
+                await protected_worker_runtime_engine.dispose()
 
     app = FastAPI(
         title="Loom Control Plane",

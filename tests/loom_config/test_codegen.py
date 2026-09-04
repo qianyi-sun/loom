@@ -28,13 +28,26 @@ def test_renders_gateway_includes_optional_provider_keys() -> None:
     assert "bind_port: int = 9100" in src
 
 
-def test_renders_worker_includes_optional_paths() -> None:
+def test_renders_worker_includes_optional_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     schema = load_schema(_REPO_SCHEMA)
     src = render_service_settings(schema, "worker")
     assert "fixtures_root: Path | None = None" in src
     assert "benchmark_cache: Path | None = None" in src
     assert "docker_socket: Path = Path(\"/var/run/docker.sock\")" in src
     assert "pool_name: str = \"default\"" in src
+    namespace: dict[str, object] = {}
+    exec(compile(src, "<worker>", "exec"), namespace)
+    settings_type = namespace["WorkerSettings"]
+    monkeypatch.setenv("LOOM_EXECUTOR_WORKER_CREDENTIAL", "launcher-bound-credential")
+    settings = settings_type(  # type: ignore[operator]
+        _env_file=None,
+        minio_access_key="access",
+        minio_secret_key="secret",
+        token="worker-token",
+    )
+    assert settings.executor_worker_credential.get_secret_value() == (
+        "launcher-bound-credential"
+    )
 
 
 def test_rendered_settings_compiles_and_matches_snapshot(tmp_path: Path) -> None:

@@ -7,6 +7,17 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
 ---
 apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: loom-execution-runtime-capacity
+  namespace: loom-nebius-development
+spec:
+  hard:
+    pods: "72"
+    requests.cpu: "128"
+    requests.memory: 512Gi
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: loom-execution-actuator

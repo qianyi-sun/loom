@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -14,14 +15,20 @@ from loom_control_plane.task_image_build_environment import (
     SlurmBuildEnvironmentPolicyV1,
     SlurmBuildInventoryV1,
     SlurmBuildJobObservationV1,
+    canonical_request_sha256,
     issue_slurm_build_grant,
 )
 from loom_control_plane.task_image_build_grants import (
     TaskImageBuildGrantConflictError,
+    _stored_grant,
     begin_task_image_build_submission,
     issue_task_image_build_grant,
     reconcile_task_image_build_submission,
     record_task_image_build_release,
+)
+from loom_task_image_authority.contracts import (
+    TaskImageBuildGrantAuthorityV1,
+    canonical_authority_sha256,
 )
 
 _NOW = datetime(2026, 8, 22, 2, 0, tzinfo=UTC)
@@ -53,8 +60,36 @@ def _policy() -> SlurmBuildEnvironmentPolicyV1:
     )
 
 
-def _grant(grant_id: UUID | None = None):
-    return issue_slurm_build_grant(_policy(), grant_id=grant_id or uuid4())
+def _authority(
+    policy: SlurmBuildEnvironmentPolicyV1,
+    **changes: object,
+) -> TaskImageBuildGrantAuthorityV1:
+    values: dict[str, object] = {
+        "purpose": "production",
+        "shadow_campaign_id": None,
+        "environment": "staging",
+        "pool_id": "staging-gb10-task-image",
+        "slurm_cluster_id": policy.slurm_cluster_id,
+        "cpu_arch": policy.cpu_arch,
+        "slurm_request_sha256": canonical_request_sha256(policy.request_identity()),
+        "builder_release_sha256": "2" * 64,
+        "build_policy_sha256": "3" * 64,
+        "containment_policy_sha256": "4" * 64,
+        "resource_profile_sha256": "5" * 64,
+        "issued_at": _NOW - timedelta(minutes=1),
+        "expires_at": _NOW + timedelta(hours=2),
+    }
+    values.update(changes)
+    return TaskImageBuildGrantAuthorityV1.model_validate(values)
+
+
+def _grant(grant_id: UUID | None = None, **authority_changes: object):
+    policy = _policy()
+    return issue_slurm_build_grant(
+        policy,
+        grant_id=grant_id or uuid4(),
+        authority=_authority(policy, **authority_changes),
+    )
 
 
 def _inventory(
@@ -113,6 +148,11 @@ async def test_submission_invocation_is_journaled_exactly_once_before_external_c
         await session.commit()
         assert row.state == "issued"
         assert row.journal_sequence == 1
+        assert row.authority_spec == grant.authority.model_dump(
+            mode="json", exclude_none=False
+        )
+        assert row.authority_sha256 == canonical_authority_sha256(grant.authority)
+        assert row.grant_expires_at == grant.authority.expires_at
 
         begun = await begin_task_image_build_submission(session, grant_id=grant.grant_id, now=_NOW)
         invocation_started_at = begun.invocation_started_at
@@ -142,6 +182,154 @@ async def test_submission_invocation_is_journaled_exactly_once_before_external_c
             (1, "issued"),
             (2, "submission_started"),
         ]
+
+
+async def test_issuance_rejects_environment_expiry_or_stored_authority_drift(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    async with grant_session() as session:
+        with pytest.raises(ValueError, match="environment"):
+            await issue_task_image_build_grant(
+                session,
+                environment="production",
+                grant=grant,
+                ambiguity_settle_seconds=30,
+                now=_NOW,
+            )
+
+        expired = _grant(
+            issued_at=_NOW - timedelta(hours=2),
+            expires_at=_NOW,
+        )
+        with pytest.raises(ValueError, match="expired"):
+            await issue_task_image_build_grant(
+                session,
+                environment="staging",
+                grant=expired,
+                ambiguity_settle_seconds=30,
+                now=_NOW,
+            )
+
+        row = await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=30,
+            now=_NOW,
+        )
+        row.authority_spec = {
+            **row.authority_spec,
+            "pool_id": "staging-gb10-other",
+        }
+        with pytest.raises(ValidationError, match="authority digest"):
+            _stored_grant(row)
+        row.authority_spec = grant.authority.model_dump(mode="json", exclude_none=False)
+        row.grant_expires_at = grant.authority.expires_at + timedelta(seconds=1)
+        with pytest.raises(ValueError, match="authority changed"):
+            _stored_grant(row)
+
+
+async def test_issuance_revalidates_unchecked_grant_copies_before_persistence(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    forged = grant.model_copy(
+        update={
+            "authority": grant.authority.model_copy(
+                update={"pool_id": "staging-gb10-other"}
+            )
+        }
+    )
+    async with grant_session() as session:
+        with pytest.raises(ValidationError, match="authority digest"):
+            await issue_task_image_build_grant(
+                session,
+                environment="staging",
+                grant=forged,
+                ambiguity_settle_seconds=30,
+                now=_NOW,
+            )
+
+
+async def test_expired_authority_cannot_start_submission_or_release_held_job(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant(expires_at=_NOW + timedelta(seconds=2))
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=30,
+            now=_NOW,
+        )
+        await session.commit()
+        with pytest.raises(TaskImageBuildGrantConflictError, match="expired"):
+            await begin_task_image_build_submission(
+                session,
+                grant_id=grant.grant_id,
+                now=grant.authority.expires_at,
+            )
+        await session.rollback()
+
+        await begin_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            now=_NOW,
+        )
+        await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=_inventory(
+                grant,
+                job_id="12345",
+                state="pending",
+                held=True,
+            ),
+            now=_NOW + timedelta(seconds=1),
+        )
+        with pytest.raises(TaskImageBuildGrantConflictError, match="expired"):
+            await record_task_image_build_release(
+                session,
+                grant_id=grant.grant_id,
+                job_id="12345",
+                now=grant.authority.expires_at,
+            )
+
+
+async def test_expired_authority_cannot_reconcile_a_submission(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant(expires_at=_NOW + timedelta(seconds=2))
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=30,
+            now=_NOW,
+        )
+        await begin_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            now=_NOW,
+        )
+        await session.commit()
+
+        with pytest.raises(TaskImageBuildGrantConflictError, match="expired"):
+            await reconcile_task_image_build_submission(
+                session,
+                grant_id=grant.grant_id,
+                inventory=_inventory(
+                    grant,
+                    job_id="12345",
+                    state="pending",
+                    held=True,
+                    observed_at=grant.authority.expires_at,
+                ),
+                now=grant.authority.expires_at,
+            )
 
 
 async def test_ambiguity_settle_window_starts_with_the_submission_invocation(

@@ -21,9 +21,15 @@ from loom.data_lifecycle_registry import (
 )
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch
 from loom.db.schema import Trial as TrialRow
+from loom.terminal_result_semantics import projected_result_conflicts
 from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
+)
+from loom_control_plane.protected_worker_session import (
+    ProtectedBodyWorkerSession,
+    ProtectedPrincipalTrialSession,
+    ProtectedWorkerPrincipal,
 )
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
@@ -639,6 +645,7 @@ async def patch_trajectory_index(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -657,6 +664,18 @@ async def patch_trajectory_index(
         ) from exc
     result_payload = payload.get("result")
     index_payload = {k: v for k, v in payload.items() if k not in {"worker_id", "result"}}
+    if result_payload is not None:
+        conflicts = projected_result_conflicts(result_payload)
+        if conflicts:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "trial_terminal_result_inconsistent",
+                    "message": "projected trial result has contradictory terminal semantics",
+                    "trial_id": str(trial_id),
+                    "conflicts": conflicts,
+                },
+            )
 
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(
@@ -710,10 +729,10 @@ async def patch_trajectory_index(
 async def get_trajectory_url(
     trial_id: UUID,
     request: Request,
-    authorization: str | None = Header(default=None),
+    principal: ProtectedWorkerPrincipal,
+    protected_worker_session: ProtectedPrincipalTrialSession,
 ) -> RedirectResponse:
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     async with request.app.state.session_factory() as session:
@@ -764,6 +783,7 @@ async def append_events(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,

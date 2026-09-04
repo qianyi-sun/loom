@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -572,6 +572,10 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
         "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
         _value(capacity_guard_database, "observer_role"),
     )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_RUNTIME_ROLE",
+        _value(capacity_guard_database, "runtime_role"),
+    )
     with pytest.raises(DBAPIError, match="atomic trial submissions exist"):
         command.downgrade(config, "guard_0010")
 
@@ -599,7 +603,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     finally:
         admin.dispose()
     assert dict(row) == {
-        "version_num": "guard_0021",
+        "version_num": "guard_0026",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -649,6 +653,10 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
         _value(capacity_guard_database, "observer_role"),
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_RUNTIME_ROLE",
+        _value(capacity_guard_database, "runtime_role"),
     )
 
     agent_engine = create_async_engine(
@@ -733,7 +741,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
         await agent_engine.dispose()
 
     assert dict(row) == {
-        "version_num": "guard_0021",
+        "version_num": "guard_0026",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -789,7 +797,7 @@ async def test_atomic_submission_uses_generated_lifecycle_scope(
 
 
 @pytest.mark.asyncio
-async def test_atomic_submission_rejects_staging_until_protected_retention_exists(
+async def test_atomic_submission_seals_staging_retention_and_protected_attempt(
     capacity_guard_database: dict[str, object],
 ) -> None:
     fence = _fence(environment_id="staging")
@@ -805,32 +813,129 @@ async def test_atomic_submission_rejects_staging_until_protected_retention_exist
             expected_owner_role=_value(capacity_guard_database, "owner_role"),
             expected_agent_role=_value(capacity_guard_database, "agent_role"),
         ).register_agent(registration)
-    with pytest.raises(DBAPIError, match="protected retention is unavailable"):
-        async with _agent_session(capacity_guard_database) as session:
-            await CapacityTrialSubmissionStore(
-                session, registration=registration
-            ).create_initial_submission(submission)
+    async with _agent_session(capacity_guard_database) as session:
+        receipt = await CapacityTrialSubmissionStore(
+            session, registration=registration
+        ).create_initial_submission(submission)
 
     admin = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with admin.connect() as connection:
-            counts = (
+            row = (
                 connection.execute(
                     text(
-                        "SELECT (SELECT count(*) FROM public.trials WHERE id = :trial_id) "
-                        "AS trials, (SELECT count(*) FROM public.data_lifecycle_authorities "
-                        "WHERE owner_kind = 'trial' AND owner_id = :owner_id) AS authorities, "
-                        "(SELECT count(*) FROM loom_capacity_guard.trial_attempts "
-                        "WHERE trial_id = :trial_id) AS attempts"
+                        "SELECT t.state, t.lifecycle_authority_id, a.environment, a.namespace, "
+                        "a.owner_kind, a.owner_id, a.created_at, a.expires_at, a.pinned, "
+                        "a.state AS lifecycle_authority_state, p.protected_attempt_id, "
+                        "h.lifecycle_state AS protected_lifecycle_state, h.executable "
+                        "FROM public.trials AS t "
+                        "JOIN public.data_lifecycle_authorities AS a "
+                        "ON a.id = t.lifecycle_authority_id "
+                        "JOIN loom_capacity_guard.trial_attempts AS p ON p.trial_id = t.id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS h "
+                        "ON h.protected_attempt_id = p.protected_attempt_id "
+                        "WHERE t.id = :trial_id"
                     ),
-                    {"trial_id": submission.trial_id, "owner_id": str(submission.trial_id)},
+                    {"trial_id": submission.trial_id},
                 )
                 .mappings()
                 .one()
             )
     finally:
         admin.dispose()
-    assert dict(counts) == {"trials": 0, "authorities": 0, "attempts": 0}
+    assert receipt.trial_id == submission.trial_id
+    assert receipt.protected_attempt_id == submission.protected_attempt_id
+    assert receipt.lifecycle_authority_id == row["lifecycle_authority_id"]
+    assert row["state"] == "protected-pending"
+    assert row["environment"] == "staging"
+    assert row["namespace"] == "loom-staging"
+    assert row["owner_kind"] == "trial"
+    assert row["owner_id"] == str(submission.trial_id)
+    assert row["expires_at"] - row["created_at"] == timedelta(days=7)
+    assert row["pinned"] is False
+    assert row["lifecycle_authority_state"] == "active"
+    assert row["protected_attempt_id"] == submission.protected_attempt_id
+    assert row["protected_lifecycle_state"] == "pending-unassigned"
+    assert row["executable"] is False
+
+
+@pytest.mark.asyncio
+async def test_guard_0022_refuses_downgrade_with_protected_staging_submission(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fence = _fence(environment_id="staging")
+    registration = _registration(fence)
+    team_id, task_id = _seed_trial_inputs(capacity_guard_database)
+    submission = _atomic_submission(registration, team_id=team_id, task_id=task_id)
+    async with _owner_session(capacity_guard_database) as session:
+        await CapacityGuardStore(
+            session, expected_owner_role=_value(capacity_guard_database, "owner_role")
+        ).initialize_disabled_authority(fence)
+        await CapacityAgentStore(
+            session,
+            expected_owner_role=_value(capacity_guard_database, "owner_role"),
+            expected_agent_role=_value(capacity_guard_database, "agent_role"),
+        ).register_agent(registration)
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityTrialSubmissionStore(
+            session, registration=registration
+        ).create_initial_submission(submission)
+
+    root = Path(__file__).resolve().parents[2]
+    config = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_DB_URL", _value(capacity_guard_database, "migrator_url")
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_OWNER_ROLE", _value(capacity_guard_database, "owner_role")
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
+        _value(capacity_guard_database, "observer_role"),
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_RUNTIME_ROLE",
+        _value(capacity_guard_database, "runtime_role"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="cannot downgrade guard_0022 while protected staging submissions exist",
+    ):
+        command.downgrade(config, "guard_0021")
+
+    admin = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with admin.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM loom_capacity_guard.atomic_trial_submissions "
+                        "WHERE trial_id = :trial_id AND lifecycle_environment = 'staging'"
+                    ),
+                    {"trial_id": submission.trial_id},
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        admin.dispose()
 
 
 @pytest.mark.asyncio

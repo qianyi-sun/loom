@@ -323,6 +323,7 @@ class _ExecutionCapacityObservationPayload(BaseModel):
     provider_used_memory_mib: int = Field(ge=0)
     provider_used_storage_mib: int = Field(ge=0)
     active_nodes: int = Field(ge=0)
+    node_states: dict[str, int] | None = None
     provisioned_vcpu_millis: int = Field(ge=0)
     provisioned_memory_mib: int = Field(ge=0)
     provisioned_storage_mib: int = Field(ge=0)

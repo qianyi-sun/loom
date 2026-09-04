@@ -202,7 +202,11 @@ def validate_execution_image_admission_bundle(
         raise ImageAdmissionError("image admission coverage does not match runtime images")
     for admission in bundle.admissions:
         statement = admission.statement
-        if statement.highest_vulnerability_severity in {"high", "critical", "unknown"}:
+        # Runtime admission follows the protected release policy: HIGH and
+        # vendor-unrated findings remain explicit evidence, while CRITICAL
+        # findings fail closed. Missing or malformed evidence is rejected by
+        # the signed statement and bundle validation before this threshold.
+        if statement.highest_vulnerability_severity == "critical":
             raise ImageAdmissionError("image admission vulnerability policy failed")
         if statement.issued_at.astimezone(UTC) > current_time + _MAX_CLOCK_SKEW:
             raise ImageAdmissionError("image admission was issued in the future")

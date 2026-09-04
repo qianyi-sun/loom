@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Trial as TrialRow
+from loom_control_plane.protected_worker_session import (
+    ProtectedPrincipalBodyTrialSession,
+    ProtectedWorkerPrincipal,
+)
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -48,12 +51,12 @@ def _validate_key(key: str) -> None:
 async def mint_artifact_upload_url(
     request: Request,
     payload: dict[str, Any],
-    authorization: str | None = Header(default=None),
+    principal: ProtectedWorkerPrincipal,
+    protected_worker_session: ProtectedPrincipalBodyTrialSession,
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None or ("submit" not in ctx.scopes and "worker:index" not in ctx.scopes):
         raise HTTPException(status_code=401, detail="not authorized")
 

@@ -434,16 +434,19 @@ resource "nebius_mk8s_v1_node_group" "execution" {
   strategy = {
     drain_timeout = "20m"
     max_surge = {
-      count = 1
+      # The provider envelope is sized for the complete execution pool plus
+      # persistent infrastructure, not an extra replacement node. Replace one
+      # drained node at a time without exceeding provider quota.
+      count = 0
     }
     max_unavailable = {
-      count = 0
+      count = 1
     }
   }
 
   template = {
     service_account_id = nebius_iam_v1_service_account.node_registry_pull.id
-    max_pods           = 16
+    max_pods           = var.execution_max_pods
     metadata = {
       labels = {
         "loom.nebius/node-role"        = "execution"

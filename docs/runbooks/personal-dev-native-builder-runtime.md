@@ -264,10 +264,11 @@ native_authority_request() {
   local request_id="$2"
   local output="$3"
   shift 3
-  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || return 1
   case "$operation" in
     status|prepare|stage-agent|activate|remove) ;;
-    *) exit 1 ;;
+    *) return 1 ;;
   esac
   if ! {
     {
@@ -320,13 +321,39 @@ native_authority_stage_archive() {
     local source="$2"
     local local_dir="$native_authority_local_archive_root/$request_id"
     local local_archive="$local_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
-    local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
+    local remote_parent="/var/tmp/loom-personal-dev-native-builder"
+    local remote_dir="$remote_parent/$request_id"
     local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
-    local operation_status
-    [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
-    test -f "$source" && test ! -L "$source"
-    test "$(stat -c %u "$source")" = "$(id -u)"
-    test "$(stat -c %a "$source")" = 600
+    local operation_status parent_transcript parent_created parent_existing
+    local archive_size stage_transcript
+    local -a sftp_command=(
+      sudo -n -- /usr/bin/sftp -b - -F /dev/null
+      -o HostName=207.35.188.227
+      -o Port=2221
+      -o User=qianyi
+      -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519
+      -o IdentitiesOnly=yes
+      -o PubkeyAuthentication=yes
+      -o PreferredAuthentications=publickey
+      -o GSSAPIAuthentication=no
+      -o HostbasedAuthentication=no
+      -o PasswordAuthentication=no
+      -o KbdInteractiveAuthentication=no
+      -o BatchMode=yes
+      -o StrictHostKeyChecking=yes
+      -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts
+      -o GlobalKnownHostsFile=/dev/null
+      -o UpdateHostKeys=no
+      -o ServerAliveInterval=30
+      -o ServerAliveCountMax=3
+      -o ConnectTimeout=10
+      trt-gb10-1
+    )
+    [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+      || exit $?
+    { test -f "$source" && test ! -L "$source"; } || exit $?
+    test "$(stat -c %u "$source")" = "$(id -u)" || exit $?
+    test "$(stat -c %a "$source")" = 600 || exit $?
     cleanup_native_authority_local_archive() {
       local primary_status=$?
       local file_status=0
@@ -355,8 +382,8 @@ native_authority_stage_archive() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    sudo -n -- /usr/bin/install -d -m 0700 "$local_dir"
-    test ! -e "$local_archive"
+    sudo -n -- /usr/bin/install -d -m 0700 "$local_dir" || exit $?
+    test ! -e "$local_archive" || exit $?
     if /bin/cat -- "$source" \
       | sudo -n -- /usr/bin/install -m 0600 /dev/stdin "$local_archive"; then
       :
@@ -365,48 +392,143 @@ native_authority_stage_archive() {
       exit "$operation_status"
     fi
     test "$(sudo -n -- /usr/bin/sha512sum "$local_archive" | awk '{print $1}')" \
-      = "$archive_sha512"
-    if {
-      printf 'mkdir %s\n' "$remote_dir"
-      printf 'chmod 700 %s\n' "$remote_dir"
-      printf 'put %s %s\n' "$local_archive" "$remote_archive"
-      printf 'chmod 600 %s\n' "$remote_archive"
-    } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
-      -o HostName=207.35.188.227 \
-      -o Port=2221 \
-      -o User=qianyi \
-      -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
-      -o IdentitiesOnly=yes \
-      -o PubkeyAuthentication=yes \
-      -o PreferredAuthentications=publickey \
-      -o GSSAPIAuthentication=no \
-      -o HostbasedAuthentication=no \
-      -o PasswordAuthentication=no \
-      -o KbdInteractiveAuthentication=no \
-      -o BatchMode=yes \
-      -o StrictHostKeyChecking=yes \
-      -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
-      -o GlobalKnownHostsFile=/dev/null \
-      -o UpdateHostKeys=no \
-      -o ServerAliveInterval=30 \
-      -o ServerAliveCountMax=3 \
-      -o ConnectTimeout=10 \
-      trt-gb10-1; then
+      = "$archive_sha512" || exit $?
+    archive_size="$(sudo -n -- /usr/bin/stat -c %s "$local_archive")" || exit $?
+    [[ "$archive_size" =~ ^[1-9][0-9]*$ ]] || exit $?
+    if parent_transcript="$({
+      printf -- '-mkdir %s\n' "$remote_parent"
+      printf 'chmod 700 %s\n' "$remote_parent"
+      printf 'cd %s\n' "$remote_parent"
+      printf '%s\n' 'pwd'
+    } | "${sftp_command[@]}" 2>&1 | tr -d '\r' | head -c 4097)"; then
       :
     else
       operation_status=$?
       exit "$operation_status"
     fi
+    test "${#parent_transcript}" -le 4096 || exit $?
+    parent_created="$(printf '%s\n' \
+      "sftp> -mkdir $remote_parent" \
+      "sftp> chmod 700 $remote_parent" \
+      "sftp> cd $remote_parent" \
+      'sftp> pwd' \
+      "Remote working directory: $remote_parent")"
+    parent_existing="$(printf '%s\n' \
+      "sftp> -mkdir $remote_parent" \
+      "remote mkdir \"$remote_parent\": Failure" \
+      "sftp> chmod 700 $remote_parent" \
+      "sftp> cd $remote_parent" \
+      'sftp> pwd' \
+      "Remote working directory: $remote_parent")"
+    { test "$parent_transcript" = "$parent_created" \
+      || test "$parent_transcript" = "$parent_existing"; } || exit $?
+    if stage_transcript="$({
+      printf -- '-mkdir %s\n' "$remote_dir"
+      printf 'chmod 700 %s\n' "$remote_dir"
+      printf 'put -f %s %s\n' "$local_archive" "$remote_archive"
+      printf 'chmod 600 %s\n' "$remote_archive"
+      printf 'cd %s\n' "$remote_dir"
+      printf '%s\n' 'pwd'
+      printf '%s\n' 'ls -lan .'
+    } | "${sftp_command[@]}" 2>&1 | tr -d '\r' | head -c 16385)"; then
+      :
+    else
+      operation_status=$?
+      exit "$operation_status"
+    fi
+    test "${#stage_transcript}" -le 16384 || exit $?
+    /usr/bin/python3 -I -S - "$request_id" "$local_archive" "$archive_size" \
+      "$stage_transcript" <<'PY' || exit $?
+import re
+import sys
+
+request_id, local_archive, expected_size, observed = sys.argv[1:]
+try:
+    observed.encode("ascii")
+except UnicodeEncodeError:
+    raise SystemExit(1)
+if "\r" in observed or "\x00" in observed:
+    raise SystemExit(1)
+remote_parent = "/var/tmp/loom-personal-dev-native-builder"
+remote_dir = f"{remote_parent}/{request_id}"
+archive_name = "gvisor-release-20260810.0-aarch64.tar.bz2"
+remote_archive = f"{remote_dir}/{archive_name}"
+expected_commands = [
+    f"sftp> -mkdir {remote_dir}",
+    f"sftp> chmod 700 {remote_dir}",
+    f"sftp> put -f {local_archive} {remote_archive}",
+    f"sftp> chmod 600 {remote_archive}",
+    f"sftp> cd {remote_dir}",
+    "sftp> pwd",
+    f"Remote working directory: {remote_dir}",
+    "sftp> ls -lan .",
+]
+lines = observed.splitlines()
+mkdir_failure = f'remote mkdir "{remote_dir}": Failure'
+if len(lines) == 12 and lines[1] == mkdir_failure:
+    del lines[1]
+if len(lines) != 11 or lines[:8] != expected_commands:
+    raise SystemExit(1)
+
+safe_identity = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+clock_or_year = re.compile(r"^(?:(?:[01][0-9]|2[0-3]):[0-5][0-9]|[0-9]{4})$")
+months = frozenset((
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+))
+
+def parse_listing(line: str) -> tuple[str, str, str, int, str]:
+    fields = line.split()
+    if len(fields) != 9 or fields[1] != "?":
+        raise SystemExit(1)
+    permissions, owner, group, raw_size, month, day, when, path = (
+        fields[0], fields[2], fields[3], fields[4], fields[5],
+        fields[6], fields[7], fields[8],
+    )
+    if (
+        safe_identity.fullmatch(owner) is None
+        or safe_identity.fullmatch(group) is None
+        or not raw_size.isascii()
+        or not raw_size.isdigit()
+        or len(raw_size) > 10
+        or month not in months
+        or not day.isascii()
+        or not day.isdigit()
+        or not 1 <= int(day) <= 31
+        or clock_or_year.fullmatch(when) is None
+    ):
+        raise SystemExit(1)
+    return permissions, owner, group, int(raw_size), path
+
+directory = parse_listing(lines[8])
+parent = parse_listing(lines[9])
+archive = parse_listing(lines[10])
+if directory[:3] != ("drwx------", "qianyi", "qianyi"):
+    raise SystemExit(1)
+if directory[3] <= 0 or directory[4] != "./.":
+    raise SystemExit(1)
+if parent[:3] != ("drwx------", "qianyi", "qianyi"):
+    raise SystemExit(1)
+if parent[3] <= 0 or parent[4] != "./..":
+    raise SystemExit(1)
+if archive != (
+    "-rw-------", "qianyi", "qianyi", int(expected_size), f"./{archive_name}"
+):
+    raise SystemExit(1)
+PY
   )
 }
 native_authority_remove_staged_archive() {
   local request_id="$1"
   local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
   local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
-  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
-  {
-    printf 'rm %s\n' "$remote_archive"
-    printf 'rmdir %s\n' "$remote_dir"
+  local operation_status cleanup_transcript
+  local file_command directory_command file_absent directory_absent
+  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || return 1
+  if cleanup_transcript="$({
+    printf -- '-rm %s\n' "$remote_archive"
+    printf -- '-rmdir %s\n' "$remote_dir"
   } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
     -o HostName=207.35.188.227 \
     -o Port=2221 \
@@ -427,13 +549,33 @@ native_authority_remove_staged_archive() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    trt-gb10-1
+    trt-gb10-1 2>&1 | tr -d '\r' | head -c 16385)"; then
+    :
+  else
+    operation_status=$?
+    return "$operation_status"
+  fi
+  test "${#cleanup_transcript}" -le 16384 || return 1
+  file_command="sftp> -rm $remote_archive"
+  directory_command="sftp> -rmdir $remote_dir"
+  file_absent="remote delete $remote_archive: No such file or directory"
+  directory_absent="remote rmdir \"$remote_dir\": No such file or directory"
+  case "$cleanup_transcript" in
+    "$file_command"$'\n'"$directory_command"|\
+    "$file_command"$'\n'"$file_absent"$'\n'"$directory_command"|\
+    "$file_command"$'\n'"$directory_command"$'\n'"$directory_absent"|\
+    "$file_command"$'\n'"$file_absent"$'\n'"$directory_command"$'\n'"$directory_absent")
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
 }
 native_authority_prepare() {
   (
     local request_id="$1"
     local source="$2"
     local output="$3"
+    local operation_status
     shift 3
     cleanup_native_authority_remote_archive() {
       local primary_status=$?
@@ -454,7 +596,12 @@ native_authority_prepare() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    native_authority_stage_archive "$request_id" "$source"
+    if native_authority_stage_archive "$request_id" "$source"; then
+      :
+    else
+      operation_status=$?
+      exit "$operation_status"
+    fi
     native_authority_request prepare "$request_id" "$output" "$@"
   )
 }
@@ -930,10 +1077,17 @@ rm -f "$dns_raw"
 Download the public gVisor archive without privilege. An unprivileged read feeds
 a fixed root-private local copy whose digest is checked before root SFTP opens
 it; root never reopens the operator pathname. The data-only upload authenticates
-as `qianyi` and creates no remote shell. The fixed broker opens the resulting
-owner-only remote file, copies it into its root-private state directory,
-verifies the digest, and performs preflight, installation, release convergence,
-the fixed two-container conformance asset, and compensation back to inert state.
+as `qianyi` and creates no remote shell. A separate SFTP transaction first
+establishes or revalidates the stable mode-`0700` parent. The request-scoped
+transaction then accepts only canonical `pwd` and long-list evidence for the
+mode-`0700` `qianyi:qianyi` request directory, its same-owner parent, and the
+exact mode-`0600` archive size; an existing request directory is safe to resume.
+Cleanup tolerates only the exact already-absent archive/directory results, so a
+partial upload cannot block request-directory removal or conceal other drift.
+The fixed broker opens the resulting owner-only remote file, copies it into its
+root-private state directory, verifies the digest, and performs preflight,
+installation, release convergence, the fixed two-container conformance asset,
+and compensation back to inert state.
 
 ```bash
 archive="$evidence_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
@@ -1081,9 +1235,18 @@ removes only the exact nft table, and removes only byte-identical managed
 runtime files. The dedicated image cache and system identities are retained as
 inert state: removal never recursively deletes Docker data or accounts. Its
 canonical receipt reports the resulting inert public state and never restarts
-or alters the primary Docker daemon.
+or alters the primary Docker daemon. Validate the restored shadow against the
+previous trusted release when one exists; a first installation with no
+predecessor validates against the current trusted release.
 
 ```bash
+rollback_trusted_release="$trusted_release"
+rollback_trusted_release_sha256="$trusted_release_sha256"
+if test -n "$previous_trusted_release"; then
+  rollback_trusted_release="$previous_trusted_release"
+  rollback_trusted_release_sha256="$previous_trusted_release_sha256"
+fi
+
 rollback_shadow_recheck="$evidence_dir/rollback-shadow.recheck.yaml"
 install -m 0600 "$rollback_shadow_manifest" "$rollback_shadow_recheck"
 cmp -s "$rollback_shadow_recheck" "$rollback_shadow_manifest"
@@ -1121,8 +1284,8 @@ jq -e '.phase == "inert" and .agent_service == "inactive" and
 loom_cli admin personal-dev-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig" \
   --file deploy/dev-fleet/personal-dev-control-plane.toml \
-  --trusted-release-file "$trusted_release" \
-  --trusted-release-sha256 "$trusted_release_sha256" \
+  --trusted-release-file "$rollback_trusted_release" \
+  --trusted-release-sha256 "$rollback_trusted_release_sha256" \
   > "$evidence_dir/rollback-shadow.status.json"
 chmod 0600 "$evidence_dir"/rollback-*
 ```

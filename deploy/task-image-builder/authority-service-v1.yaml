@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loom-task-image-authority
+  namespace: loom
+  labels:
+    app.kubernetes.io/name: loom-task-image-authority
+    app.kubernetes.io/part-of: loom
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-task-image-authority
+  namespace: loom
+  labels:
+    app.kubernetes.io/name: loom-task-image-authority
+    app.kubernetes.io/part-of: loom
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: loom-task-image-authority
+  ports:
+    - name: https
+      protocol: TCP
+      port: 8445
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-task-image-authority
+  namespace: loom
+  labels:
+    app.kubernetes.io/name: loom-task-image-authority
+    app.kubernetes.io/part-of: loom
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loom-task-image-authority
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loom-task-image-authority
+        app.kubernetes.io/part-of: loom
+      annotations:
+        loom.qianyi.dev/activation: disabled-phase2b1
+        loom.qianyi.dev/required-pids-max: "256"
+    spec:
+      serviceAccountName: loom-task-image-authority
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: authority
+          image: ghcr.io/qianyi-sun/loom-control-plane:${IMAGE_TAG}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "loom_task_image_authority"]
+          env:
+            - name: LOOM_TASK_IMAGE_AUTHORITY_PRINCIPALS_FILE
+              value: /run/loom-task-image-authority/runtime/principals.json
+            - name: LOOM_TASK_IMAGE_AUTHORITY_DB_URL_FILE
+              value: /run/loom-task-image-authority/runtime/db-url
+            - name: LOOM_TASK_IMAGE_AUTHORITY_SECRET_STORE_KEYRING_FILE
+              value: /run/loom-task-image-authority/runtime/secret-store-keyring.json
+            - name: LOOM_TASK_IMAGE_AUTHORITY_TLS_CERT_FILE
+              value: /run/loom-task-image-authority/tls/tls.crt
+            - name: LOOM_TASK_IMAGE_AUTHORITY_TLS_KEY_FILE
+              value: /run/loom-task-image-authority/tls/tls.key
+            - name: LOOM_TASK_IMAGE_AUTHORITY_TLS_CLIENT_CA_FILE
+              value: /run/loom-task-image-authority/tls/client-ca.crt
+            - name: LOOM_TASK_IMAGE_AUTHORITY_HOST
+              value: 0.0.0.0
+            - name: LOOM_TASK_IMAGE_AUTHORITY_PORT
+              value: "8445"
+          ports:
+            - name: https
+              containerPort: 8445
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 32Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+              ephemeral-storage: 128Mi
+          volumeMounts:
+            - name: runtime
+              mountPath: /run/loom-task-image-authority/runtime
+              readOnly: true
+            - name: tls
+              mountPath: /run/loom-task-image-authority/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+              readOnly: false
+      volumes:
+        - name: runtime
+          secret:
+            secretName: loom-task-image-authority-runtime
+            defaultMode: 384
+        - name: tls
+          secret:
+            secretName: loom-task-image-authority-tls
+            defaultMode: 384
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-task-image-authority-default-deny
+  namespace: loom
+  labels:
+    app.kubernetes.io/name: loom-task-image-authority
+    app.kubernetes.io/part-of: loom
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loom-task-image-authority
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []

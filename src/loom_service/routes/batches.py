@@ -35,6 +35,7 @@ from loom.db.schema import (
     LlmCall,
     ProviderConnection,
     ProviderModelCache,
+    ServiceExecutionLease,
     Task,
     Team,
     TeamMembership,
@@ -99,6 +100,10 @@ from loom_service.multi_model import (
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.service_execution_status import (
+    SERVICE_EXECUTION_LIFECYCLE_STAGES,
+    service_execution_lifecycle_case,
+)
 from loom_service.stale_running_debug import batch_stale_running_decisions
 from loom_service.submission_compat import (
     AgentTaskIncompatibilityError,
@@ -2049,10 +2054,62 @@ def _empty_trial_summary() -> dict[str, int]:
             "queued",
             "claimed",
             "running",
+            "materializing",
             "succeeded",
             "failed",
             "cancelled",
         )
+    }
+
+
+async def _batch_service_execution_summary(
+    session: Any,
+    trial_ids: Sequence[UUID],
+) -> dict[str, Any] | None:
+    if not trial_ids:
+        return None
+    lifecycle_expr = service_execution_lifecycle_case()
+    rows = (
+        await session.execute(
+            select(
+                lifecycle_expr.label("lifecycle_stage"),
+                ServiceExecutionLease.output_commit_state,
+                ServiceExecutionLease.materialization_state,
+                func.count(),
+            )
+            .select_from(ServiceExecutionLease)
+            .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+            .where(
+                ServiceExecutionLease.trial_id.in_(trial_ids),
+                ServiceExecutionLease.execution_role == "attempt",
+            )
+            .group_by(
+                lifecycle_expr,
+                ServiceExecutionLease.output_commit_state,
+                ServiceExecutionLease.materialization_state,
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    lifecycle = {state: 0 for state in SERVICE_EXECUTION_LIFECYCLE_STAGES}
+    output_commit: dict[str, int] = {}
+    materialization: dict[str, int] = {}
+    lease_count = 0
+    for lifecycle_stage, output_state, materialization_state, count in rows:
+        value = int(count)
+        lease_count += value
+        lifecycle[str(lifecycle_stage)] = lifecycle.get(str(lifecycle_stage), 0) + value
+        output_commit[str(output_state)] = output_commit.get(str(output_state), 0) + value
+        materialization[str(materialization_state)] = (
+            materialization.get(str(materialization_state), 0) + value
+        )
+    return {
+        "lease_count": lease_count,
+        "lifecycle_stages": lifecycle,
+        "output_commit_states": output_commit,
+        "materialization_states": materialization,
+        "canonical_ready_count": materialization.get("committed", 0),
     }
 
 
@@ -2304,8 +2361,17 @@ async def get_batch(
         s,
         {trial.id for trial in effective_trials},
     )
+    service_execution_summary = (
+        await _batch_service_execution_summary(
+            s,
+            [trial.id for trial in original_trials],
+        )
+        if b.backend == NEBIUS_BACKEND
+        else None
+    )
     rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
     extra = {
+        "service_execution_summary": service_execution_summary,
         "rerun_batches": [
             {
                 "id": str(child.id),
@@ -2796,34 +2862,19 @@ async def cancel_batch(
         )
     require_team_or_admin(ctx, b.team_id)
     now = datetime.now(UTC)
-    active_rows = (
+    active_trial_ids = (
         await s.execute(
-            select(Trial.id, Task.config)
-            .join(Task, Task.id == Trial.task_id)
-            .where(
+            select(Trial.id).where(
                 Trial.batch_id == batch_id,
                 Trial.state.in_(["queued", "claimed", "running"]),
             )
         )
-    ).all()
-    service_execution_ids = [
-        trial_id
-        for trial_id, config in active_rows
-        if (
-            b.backend == NEBIUS_BACKEND
-            and isinstance(config, dict)
-            and config.get("service_execution") is not None
-        )
-    ]
-    legacy_ids = [
-        trial_id
-        for trial_id, config in active_rows
-        if (
-            b.backend != NEBIUS_BACKEND
-            or not isinstance(config, dict)
-            or config.get("service_execution") is None
-        )
-    ]
+    ).scalars().all()
+    # The explicit Batch backend owns the execution lifecycle. Ordinary
+    # user-uploaded tasks may receive the Nebius runtime plan automatically
+    # and therefore have no service_execution block in Task.config.
+    service_execution_ids = list(active_trial_ids) if b.backend == NEBIUS_BACKEND else []
+    legacy_ids = list(active_trial_ids) if b.backend != NEBIUS_BACKEND else []
 
     # Service execution has a second, provider-facing lifecycle authority.
     # Route cancellation through the Control Plane so the Trial update, lease

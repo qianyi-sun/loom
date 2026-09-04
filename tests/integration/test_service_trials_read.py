@@ -1317,9 +1317,10 @@ async def test_service_execution_artifacts_are_listed_and_downloadable(
     lease_id = uuid4()
     relative_path = "model-output.txt"
     artifact_key = (
-        f"service-executions/{team_id}/{lease_id}/1/output/"
-        f"artifacts/{artifact_id}/{relative_path}"
+        f"trials/{team_id}/{trial_id}/attempts/1/"
+        f"bundles/{artifact_id}/files/{relative_path}"
     )
+    canonical_bucket = "canonical-artifacts"
     app.state.minio_client = MagicMock()
     app.state.minio_client.get_object.return_value = {
         "Body": BytesIO(b"NEBIUS_SMOKE_OK\n"),
@@ -1346,6 +1347,8 @@ async def test_service_execution_artifacts_are_listed_and_downloadable(
                             "size_bytes": 16,
                             "sha256": "sha256:" + "2" * 64,
                             "media_type": "text/plain",
+                            "bucket": canonical_bucket,
+                            "key": artifact_key,
                         }
                     ]
                 },
@@ -1387,7 +1390,7 @@ async def test_service_execution_artifacts_are_listed_and_downloadable(
     assert downloaded.status_code == 200
     assert downloaded.content == b"NEBIUS_SMOKE_OK\n"
     app.state.minio_client.get_object.assert_called_once_with(
-        Bucket=app.state.settings.artifacts_bucket,
+        Bucket=canonical_bucket,
         Key=artifact_key,
     )
 

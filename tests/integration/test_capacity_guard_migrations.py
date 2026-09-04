@@ -71,6 +71,9 @@ EXPECTED_GUARD_TABLES = {
     "executable_claim_terminal_events",
     "executable_release_publication_state",
     "executable_release_publication_events",
+    "staging_worker_runtime_authority",
+    "protected_runtime_trial_submissions",
+    "protected_runtime_trial_readiness",
 }
 
 
@@ -97,7 +100,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 21
+        assert await assert_capacity_guard_schema_at_head(engine) == 26
     finally:
         await engine.dispose()
 
@@ -496,7 +499,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0021"
+            assert revision == "guard_0026"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -852,6 +855,8 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
                         "'lifecycle_authority_id', 'UPDATE') AS can_bind_lifecycle, "
                         "has_column_privilege(:owner, 'public.trials', 'state', 'UPDATE') "
                         "AS can_fence_state, "
+                        "has_column_privilege(:owner, 'public.trials', 'requires_caps', 'UPDATE') "
+                        "AS can_update_requires_caps, "
                         "has_table_privilege(:owner, 'public.trials', 'REFERENCES') "
                         "AS can_reference_trial_table, "
                         "has_column_privilege(:owner, 'public.trials', 'id', 'REFERENCES') "
@@ -883,12 +888,13 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
             "can_update": False,
             "can_delete": False,
             "can_insert_config": True,
-            "can_select_config": False,
+            "can_select_config": True,
             "can_bind_lifecycle": True,
             "can_fence_state": True,
+            "can_update_requires_caps": True,
             "can_reference_trial_table": False,
             "can_reference_trial_id": True,
-            "can_update_worker": False,
+            "can_update_worker": True,
             "can_insert_lifecycle_table": False,
             "can_insert_lifecycle_environment": True,
             "can_select_lifecycle_id": True,
@@ -910,7 +916,656 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
     os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
     os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(database, "observer_role")
+    os.environ["LOOM_CAPACITY_GUARD_RUNTIME_ROLE"] = _value(database, "runtime_role")
     return cfg
+
+
+def _atomic_submission_function_definition(engine: Engine) -> str:
+    with engine.connect() as connection:
+        definition = connection.execute(
+            text(
+                "SELECT pg_get_functiondef("
+                "'loom_capacity_guard.submit_inert_trial_projection"
+                "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text)'::regprocedure)"
+            )
+        ).scalar_one()
+    assert isinstance(definition, str)
+    return definition
+
+
+def test_guard_0022_staging_submission_admission_is_reversible(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    rejection = "atomic trial submission protected retention is unavailable for staging"
+    try:
+        assert rejection not in _atomic_submission_function_definition(engine)
+
+        command.downgrade(cfg, "guard_0021")
+        assert rejection in _atomic_submission_function_definition(engine)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0021"
+            )
+
+        command.upgrade(cfg, "head")
+        assert rejection not in _atomic_submission_function_definition(engine)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_guard_0023_empty_downgrade_and_reupgrade_restore_runtime_surface(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    runtime = _value(capacity_guard_database, "runtime_role")
+    agent = _value(capacity_guard_database, "agent_role")
+    signatures = (
+        "loom_capacity_guard.current_protected_runtime_registration()",
+        "loom_capacity_guard.submit_protected_runtime_trial_projection"
+        "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text,jsonb,bytea,text)",
+        "loom_capacity_guard.publish_protected_runtime_trial_readiness(uuid,uuid,uuid)",
+        "loom_capacity_guard.register_staging_public_worker(text,jsonb)",
+        "loom_capacity_guard.assert_staging_worker_session(uuid,text)",
+    )
+    runtime_tables = (
+        "staging_worker_runtime_authority",
+        "protected_runtime_trial_submissions",
+        "protected_runtime_trial_readiness",
+    )
+    inspect_signature = (
+        "loom_capacity_guard.inspect_protected_runtime_trial_prerequisites(uuid,uuid,uuid,boolean)"
+    )
+    try:
+        with engine.connect() as connection:
+            protected_capture = connection.execute(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'loom_capacity_guard.capture_lifecycle_demand_observation"
+                    "(uuid,bigint,integer)'::regprocedure)"
+                )
+            ).scalar_one()
+            assert "protected_runtime_trial_readiness" in protected_capture
+        command.downgrade(cfg, "guard_0022")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0022"
+            )
+            for table in runtime_tables:
+                assert (
+                    connection.execute(
+                        text("SELECT to_regclass(:table)"),
+                        {"table": f"loom_capacity_guard.{table}"},
+                    ).scalar_one()
+                    is None
+                )
+            for signature in signatures:
+                assert (
+                    connection.execute(
+                        text("SELECT to_regprocedure(:signature)"),
+                        {"signature": signature},
+                    ).scalar_one()
+                    is None
+                )
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:signature)"),
+                    {"signature": inspect_signature},
+                ).scalar_one()
+                is None
+            )
+            unprotected_capture = connection.execute(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'loom_capacity_guard.capture_lifecycle_demand_observation"
+                    "(uuid,bigint,integer)'::regprocedure)"
+                )
+            ).scalar_one()
+            assert "protected_runtime_trial_readiness" not in unprotected_capture
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+            for table in runtime_tables:
+                assert (
+                    connection.execute(
+                        text("SELECT to_regclass(:table)"),
+                        {"table": f"loom_capacity_guard.{table}"},
+                    ).scalar_one()
+                    == f"loom_capacity_guard.{table}"
+                )
+            for signature in signatures:
+                assert (
+                    connection.execute(
+                        text("SELECT has_function_privilege(:runtime, :signature, 'EXECUTE')"),
+                        {"runtime": runtime, "signature": signature},
+                    ).scalar_one()
+                    is True
+                )
+                assert (
+                    connection.execute(
+                        text("SELECT has_function_privilege(:agent, :signature, 'EXECUTE')"),
+                        {"agent": agent, "signature": signature},
+                    ).scalar_one()
+                    is False
+                )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:runtime, :signature, 'EXECUTE')"),
+                    {"runtime": runtime, "signature": inspect_signature},
+                ).scalar_one()
+                is False
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT has_table_privilege("
+                        ":runtime, 'loom_capacity_guard.executable_admission_events', 'SELECT')"
+                    ),
+                    {"runtime": runtime},
+                ).scalar_one()
+                is False
+            )
+    finally:
+        engine.dispose()
+
+
+def test_guard_0024_terminal_closure_is_private_and_reversible(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    guard_owner = _value(capacity_guard_database, "owner_role")
+    signature = (
+        "loom_capacity_guard.close_protected_runtime_trial_claim(uuid,text,text,uuid,integer)"
+    )
+    application_signature = "public.loom_close_protected_runtime_trial_claim()"
+    denied_roles = (
+        _value(capacity_guard_database, "agent_role"),
+        _value(capacity_guard_database, "executor_role"),
+        _value(capacity_guard_database, "observer_role"),
+        _value(capacity_guard_database, "runtime_role"),
+        "public",
+    )
+
+    def assert_installed() -> None:
+        with engine.connect() as connection:
+            guard_routine = (
+                connection.execute(
+                    text(
+                        "SELECT pg_get_userbyid(routine.proowner) AS owner, "
+                        "routine.prosecdef, routine.proconfig "
+                        "FROM pg_proc AS routine "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = routine.pronamespace "
+                        "WHERE namespace.nspname = 'loom_capacity_guard' "
+                        "AND routine.proname = 'close_protected_runtime_trial_claim'"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            application_routine = (
+                connection.execute(
+                    text(
+                        "SELECT pg_get_userbyid(routine.proowner) AS owner, "
+                        "routine.prosecdef, routine.proconfig, "
+                        "pg_get_functiondef(routine.oid) AS definition "
+                        "FROM pg_proc AS routine "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = routine.pronamespace "
+                        "WHERE namespace.nspname = 'public' "
+                        "AND routine.proname = 'loom_close_protected_runtime_trial_claim'"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(guard_routine) == {
+                "owner": guard_owner,
+                "prosecdef": True,
+                "proconfig": ["search_path=pg_catalog"],
+            }
+            assert application_routine["prosecdef"] is True
+            assert application_routine["proconfig"] == ["search_path=pg_catalog"]
+            assert (
+                "loom_capacity_guard.close_protected_runtime_trial_claim"
+                in application_routine["definition"]
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:owner, :function, 'EXECUTE')"),
+                    {"owner": application_routine["owner"], "function": signature},
+                ).scalar_one()
+                is True
+            )
+            assert {
+                role: connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": role, "function": signature},
+                ).scalar_one()
+                for role in denied_roles
+            } == {role: False for role in denied_roles}
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege('public', :function, 'EXECUTE')"),
+                    {"function": application_signature},
+                ).scalar_one()
+                is False
+            )
+
+    try:
+        assert_installed()
+
+        command.downgrade(cfg, "guard_0023")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": signature},
+                ).scalar_one()
+                is None
+            )
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": application_signature},
+                ).scalar_one()
+                is not None
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0023"
+            )
+
+        command.upgrade(cfg, "head")
+        assert_installed()
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_guard_0025_retry_is_runtime_only_schema_bound_and_reversible(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    owner = _value(capacity_guard_database, "owner_role")
+    runtime = _value(capacity_guard_database, "runtime_role")
+    denied_roles = (
+        _value(capacity_guard_database, "agent_role"),
+        _value(capacity_guard_database, "executor_role"),
+        _value(capacity_guard_database, "observer_role"),
+        "public",
+    )
+    signature = "loom_capacity_guard.retry_staging_claimed_trial(uuid,text,jsonb)"
+
+    def assert_installed() -> None:
+        with engine.connect() as connection:
+            routine = (
+                connection.execute(
+                    text(
+                        "SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef, "
+                        "p.proconfig FROM pg_proc AS p "
+                        "JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = 'loom_capacity_guard' "
+                        "AND p.proname = 'retry_staging_claimed_trial'"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(routine) == {
+                "owner": owner,
+                "prosecdef": True,
+                "proconfig": ["search_path=pg_catalog"],
+            }
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": runtime, "function": signature},
+                ).scalar_one()
+                is True
+            )
+            assert {
+                role: connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": role, "function": signature},
+                ).scalar_one()
+                for role in denied_roles
+            } == {role: False for role in denied_roles}
+
+            columns = {
+                row["column_name"]: (row["data_type"], row["is_nullable"])
+                for row in connection.execute(
+                    text(
+                        "SELECT column_name, data_type, is_nullable "
+                        "FROM information_schema.columns "
+                        "WHERE table_schema = 'loom_capacity_guard' "
+                        "AND table_name = 'protected_runtime_trial_submissions' "
+                        "AND column_name IN "
+                        "('attempt_sequence', 'public_attempt_count', 'not_before')"
+                    )
+                ).mappings()
+            }
+            assert columns == {
+                "attempt_sequence": ("bigint", "NO"),
+                "public_attempt_count": ("integer", "NO"),
+                "not_before": ("timestamp with time zone", "YES"),
+            }
+            primary_keys = {
+                row["table_name"]: list(row["columns"])
+                for row in connection.execute(
+                    text(
+                        "SELECT relation.relname AS table_name, "
+                        "array_agg(attribute.attname ORDER BY key.ordinality) AS columns "
+                        "FROM pg_constraint AS constraint_row "
+                        "JOIN pg_class AS relation "
+                        "ON relation.oid = constraint_row.conrelid "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = relation.relnamespace "
+                        "CROSS JOIN LATERAL unnest(constraint_row.conkey) "
+                        "WITH ORDINALITY AS key(attnum, ordinality) "
+                        "JOIN pg_attribute AS attribute "
+                        "ON attribute.attrelid = relation.oid "
+                        "AND attribute.attnum = key.attnum "
+                        "WHERE namespace.nspname = 'loom_capacity_guard' "
+                        "AND relation.relname IN "
+                        "('protected_runtime_trial_submissions', "
+                        "'protected_runtime_trial_readiness') "
+                        "AND constraint_row.contype = 'p' "
+                        "GROUP BY relation.relname"
+                    )
+                ).mappings()
+            }
+            assert primary_keys == {
+                "protected_runtime_trial_submissions": [
+                    "trial_id",
+                    "protected_attempt_id",
+                ],
+                "protected_runtime_trial_readiness": [
+                    "trial_id",
+                    "protected_attempt_id",
+                ],
+            }
+            exact_guard = connection.execute(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'loom_capacity_guard.enforce_executable_claim_assignment()'"
+                    "::regprocedure)"
+                )
+            ).scalar_one()
+            assert "runtime.attempt_sequence > 0" in exact_guard
+            assert "retry_trial.state = 'protected-pending'" in exact_guard
+            claim_definition = connection.execute(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'loom_capacity_guard.claim_staging_assigned_trial"
+                    "(uuid,text,jsonb)'::regprocedure)"
+                )
+            ).scalar_one()
+            assert "v_candidate.attempt_sequence + 1" in claim_definition
+
+    try:
+        assert_installed()
+
+        command.downgrade(cfg, "guard_0024")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": signature},
+                ).scalar_one()
+                is None
+            )
+            columns = set(
+                connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'loom_capacity_guard' "
+                        "AND table_name = 'protected_runtime_trial_submissions'"
+                    )
+                ).scalars()
+            )
+            assert {
+                "attempt_sequence",
+                "public_attempt_count",
+                "not_before",
+            }.isdisjoint(columns)
+            exact_guard = connection.execute(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'loom_capacity_guard.enforce_executable_claim_assignment()'"
+                    "::regprocedure)"
+                )
+            ).scalar_one()
+            assert "runtime.attempt_sequence > 0" not in exact_guard
+            assert "lifecycle.manager_allocation_epoch =" in exact_guard
+            assert "worker.binding" in exact_guard
+            claim_definition = connection.execute(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'loom_capacity_guard.claim_staging_assigned_trial"
+                    "(uuid,text,jsonb)'::regprocedure)"
+                )
+            ).scalar_one()
+            assert "v_candidate.attempt_sequence + 1" not in claim_definition
+            assert "v_candidate.attempt_count + 1" in claim_definition
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0024"
+            )
+
+        command.upgrade(cfg, "head")
+        assert_installed()
+    finally:
+        engine.dispose()
+
+
+def test_guard_0026_requeue_is_trigger_only_and_reversible(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    owner = _value(capacity_guard_database, "owner_role")
+    signature = (
+        "loom_capacity_guard.transform_protected_runtime_trial_requeue"
+        "(uuid,text,uuid,integer,uuid,integer,text,text,timestamp with time zone)"
+    )
+    trigger_signature = "public.loom_transform_protected_runtime_trial_requeue()"
+
+    def assert_installed() -> None:
+        with engine.connect() as connection:
+            trigger_owner = connection.execute(
+                text(
+                    "SELECT pg_get_userbyid(proowner) FROM pg_proc "
+                    "WHERE oid = to_regprocedure(:signature)"
+                ),
+                {"signature": trigger_signature},
+            ).scalar_one()
+            routine = (
+                connection.execute(
+                    text(
+                        "SELECT pg_get_userbyid(proowner) AS owner, prosecdef, proconfig "
+                        "FROM pg_proc WHERE oid = to_regprocedure(:signature)"
+                    ),
+                    {"signature": signature},
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(routine) == {
+                "owner": owner,
+                "prosecdef": True,
+                "proconfig": ["search_path=pg_catalog"],
+            }
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT has_function_privilege"
+                        "(:role, :signature, 'EXECUTE')"
+                    ),
+                    {"role": trigger_owner, "signature": signature},
+                ).scalar_one()
+                is True
+            )
+            denied_roles = (
+                _value(capacity_guard_database, "agent_role"),
+                _value(capacity_guard_database, "executor_role"),
+                _value(capacity_guard_database, "observer_role"),
+                _value(capacity_guard_database, "runtime_role"),
+                "public",
+            )
+            assert {
+                role: connection.execute(
+                    text(
+                        "SELECT has_function_privilege"
+                        "(:role, :signature, 'EXECUTE')"
+                    ),
+                    {"role": role, "signature": signature},
+                ).scalar_one()
+                for role in denied_roles
+            } == {role: False for role in denied_roles}
+            definition = connection.execute(
+                text("SELECT pg_get_functiondef(to_regprocedure(:signature))"),
+                {"signature": signature},
+            ).scalar_one()
+            assert "claimed-attempt-reclaimed" in definition
+            assert "protected-pending" in definition
+            assert "max_attempts_ceiling" in definition
+
+    try:
+        assert_installed()
+        command.downgrade(cfg, "guard_0025")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regprocedure(:signature)"),
+                {"signature": signature},
+            ).scalar_one() is None
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM "
+                        "loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0025"
+            )
+            assert connection.execute(
+                text("SELECT to_regprocedure(:signature)"),
+                {"signature": trigger_signature},
+            ).scalar_one() is not None
+
+        command.upgrade(cfg, "head")
+        assert_installed()
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM "
+                        "loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_guard_0025_refuses_downgrade_with_retry_attempt_evidence(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    trial_id = _seed_trial(engine)
+    try:
+        with _owner_connection(capacity_guard_database) as connection:
+            _, _ = _insert_foundation_rows(connection, trial_id)
+            connection.execute(
+                text(
+                    "INSERT INTO loom_capacity_guard.trial_attempts "
+                    "(protected_attempt_id, trial_id, execution_generation, "
+                    "attempt_sequence, requirements_digest, claim_state) "
+                    "VALUES (:attempt_id, :trial_id, 2, 1, :digest, 'queued')"
+                ),
+                {
+                    "attempt_id": uuid4(),
+                    "trial_id": trial_id,
+                    "digest": "a" * 64,
+                },
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade guard_0025 while retry attempts exist",
+        ):
+            command.downgrade(cfg, "guard_0024")
+
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM loom_capacity_guard.trial_attempts "
+                        "WHERE trial_id = :trial_id AND attempt_sequence = 1"
+                    ),
+                    {"trial_id": trial_id},
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        engine.dispose()
 
 
 def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
@@ -922,9 +1577,7 @@ def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
     agent = _value(capacity_guard_database, "agent_role")
     executor = _value(capacity_guard_database, "executor_role")
     observer = _value(capacity_guard_database, "observer_role")
-    signature = (
-        "loom_capacity_guard.assert_current_inert_assignment(uuid,jsonb,bytea,text)"
-    )
+    signature = "loom_capacity_guard.assert_current_inert_assignment(uuid,jsonb,bytea,text)"
     try:
         with engine.connect() as connection:
             routine = (
@@ -961,33 +1614,46 @@ def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
 
         command.downgrade(cfg, "guard_0020")
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT to_regprocedure(:function)"),
-                {"function": signature},
-            ).scalar_one() is None
-            assert connection.execute(
-                text(
-                    "SELECT version_num FROM "
-                    "loom_capacity_guard.capacity_guard_alembic_version"
-                )
-            ).scalar_one() == "guard_0020"
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": signature},
+                ).scalar_one()
+                is None
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0020"
+            )
 
         command.upgrade(cfg, "head")
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT to_regprocedure(:function)"),
-                {"function": signature},
-            ).scalar_one() == signature
-            assert connection.execute(
-                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
-                {"role": agent, "function": signature},
-            ).scalar_one() is True
-            assert connection.execute(
-                text(
-                    "SELECT version_num FROM "
-                    "loom_capacity_guard.capacity_guard_alembic_version"
-                )
-            ).scalar_one() == "guard_0021"
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": signature},
+                ).scalar_one()
+                == signature
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": agent, "function": signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
     finally:
         engine.dispose()
 
@@ -995,8 +1661,7 @@ def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
 @pytest.mark.parametrize(
     "statement",
     (
-        "UPDATE loom_capacity_guard.abandoned_admission_plans "
-        "SET payload_digest = payload_digest",
+        "UPDATE loom_capacity_guard.abandoned_admission_plans SET payload_digest = payload_digest",
         "DELETE FROM loom_capacity_guard.abandoned_admission_plans",
         "TRUNCATE loom_capacity_guard.abandoned_admission_plans CASCADE",
     ),
@@ -1029,20 +1694,25 @@ def test_guard_0021_refuses_downgrade_with_abandonment_evidence(
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT version_num FROM "
-                    "loom_capacity_guard.capacity_guard_alembic_version"
-                )
-            ).scalar_one() == "guard_0021"
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM "
-                    "loom_capacity_guard.abandoned_admission_plans "
-                    "WHERE closure_id = :closure_id"
-                ),
-                {"closure_id": closure_id},
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM "
+                        "loom_capacity_guard.abandoned_admission_plans "
+                        "WHERE closure_id = :closure_id"
+                    ),
+                    {"closure_id": closure_id},
+                ).scalar_one()
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -1063,20 +1733,25 @@ def test_guard_0021_refuses_downgrade_with_never_converged_evidence(
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT version_num FROM "
-                    "loom_capacity_guard.capacity_guard_alembic_version"
-                )
-            ).scalar_one() == "guard_0021"
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM "
-                    "loom_capacity_guard.never_converged_admission_plans "
-                    "WHERE closure_id = :closure_id"
-                ),
-                {"closure_id": closure_id},
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0026"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM "
+                        "loom_capacity_guard.never_converged_admission_plans "
+                        "WHERE closure_id = :closure_id"
+                    ),
+                    {"closure_id": closure_id},
+                ).scalar_one()
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -1144,10 +1819,7 @@ def test_guard_0021_empty_downgrade_and_reupgrade_restore_closure_guards(
                     )
                 ).scalars()
             )
-            assert (
-                "prepared_admission_plans_never_converged_exclusion"
-                in prepared_triggers
-            )
+            assert "prepared_admission_plans_never_converged_exclusion" in prepared_triggers
     finally:
         engine.dispose()
 
@@ -1240,7 +1912,7 @@ def test_guard_0015_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0021"
+                == "guard_0026"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -1398,7 +2070,7 @@ def test_guard_0018_downgrades_to_0016_and_reupgrades_observation_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0021"
+                == "guard_0026"
             )
             row = (
                 connection.execute(
@@ -1571,7 +2243,7 @@ def test_guard_0019_downgrades_to_0017_and_reupgrades_outbox_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0021"
+                == "guard_0026"
             )
             for signature in (read_signature, ack_signature):
                 assert (
@@ -2113,6 +2785,7 @@ def test_guard_alembic_environment_has_no_database_fallback() -> None:
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE" in source
+    assert "LOOM_CAPACITY_GUARD_RUNTIME_ROLE" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source
@@ -2141,6 +2814,8 @@ def test_guard_migration_requires_explicit_canonical_settings(
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_OWNER_ROLE", raising=False)
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_AGENT_ROLE", raising=False)
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", raising=False)
+    monkeypatch.delenv("LOOM_CAPACITY_GUARD_OBSERVER_ROLE", raising=False)
+    monkeypatch.delenv("LOOM_CAPACITY_GUARD_RUNTIME_ROLE", raising=False)
     with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_DB_URL"):
         command.current(cfg)
 
@@ -2155,6 +2830,33 @@ def test_guard_migration_requires_explicit_canonical_settings(
         "LOOM_CAPACITY_GUARD_OWNER_ROLE", _value(capacity_guard_database, "owner_role")
     )
     with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_AGENT_ROLE"):
+        command.current(cfg)
+
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
+    )
+    with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"):
+        command.current(cfg)
+
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
+    )
+    with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_OBSERVER_ROLE"):
+        command.current(cfg)
+
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
+        _value(capacity_guard_database, "observer_role"),
+    )
+    with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_RUNTIME_ROLE"):
+        command.current(cfg)
+
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_RUNTIME_ROLE",
+        _value(capacity_guard_database, "observer_role"),
+    )
+    with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_RUNTIME_ROLE"):
         command.current(cfg)
 
 

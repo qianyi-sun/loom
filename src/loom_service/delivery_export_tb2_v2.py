@@ -16,6 +16,7 @@ from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.db.schema import LlmCall, Trial
 from loom.models.trajectory import (
+    AgentRetryEvent,
     EventKind,
     Terminus2ArtifactRefEvent,
     Terminus2RuntimeProvenanceEvent,
@@ -290,6 +291,24 @@ def build_model_input_trajectory(
         "source_of_truth": "provider_logs",
         "calls": entries,
     }
+
+
+
+def events_after_last_agent_retry(
+    events: list[TrajectoryEvent],
+) -> list[TrajectoryEvent]:
+    """Keep only events after the last gateway agent retry.
+
+    Loom appends every attempt into ``loom_trajectory.jsonl``; native Harbor
+    overwrite keeps the final attempt only. Delivery projections should match.
+    """
+    last_retry_idx: int | None = None
+    for i, event in enumerate(events):
+        if isinstance(event, AgentRetryEvent):
+            last_retry_idx = i
+    if last_retry_idx is None:
+        return events
+    return events[last_retry_idx + 1 :]
 
 
 def build_terminal_transcript(events: list[TrajectoryEvent]) -> bytes:
@@ -1135,9 +1154,13 @@ def build_per_trial_v2_bundle(
             },
         )
 
+    # Full event list stays the audit spine; delivery projections match native
+    # Harbor's last-attempt-only overwrite after gateway retries.
+    delivery_events = events_after_last_agent_retry(events)
+
     agent_name = _agent_name_for_trial(trial)
     execution_trajectory = build_execution_trajectory(
-        events,
+        delivery_events,
         task_id=trial.task_id,
         agent_name=agent_name,
         agent_version=agent_version,
@@ -1148,7 +1171,7 @@ def build_per_trial_v2_bundle(
         calls=calls,
         messages_from_raw_log=messages_from_raw_log,
     )
-    terminal_transcript = build_terminal_transcript(events)
+    terminal_transcript = build_terminal_transcript(delivery_events)
     export_provenance = build_export_provenance(
         events,
         trial_id=str(trial.id),

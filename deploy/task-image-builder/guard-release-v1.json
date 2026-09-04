@@ -1,0 +1,92 @@
+{
+  "schema": "loom.task-image-builder-guard-release-spec/v1",
+  "version": 1,
+  "sources": [
+    {
+      "path": "src/loom_task_image_builder_guard/__init__.py",
+      "sha256": "44cb0ba566abd28818e69631beadd37528e3365164e016684a1f6b24407db331"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/__main__.py",
+      "sha256": "8d1784e8ce07793b9aaefa27161d3d307fff427b3d11eb88f379333c79d80edc"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/authority.py",
+      "sha256": "c1515e73a5b0e4e8f8a41d81a4553a2a10e2bb3c13452d39e5c642a733e8704b"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/bpf.py",
+      "sha256": "271654855585e74ef11c962db079336ac0789e3fe67eb2267a11ee1672418ec7"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/config.py",
+      "sha256": "a3acd5008b37ca7c94374ff2c83c7e574d4ea1ab548280d6f2c35e9d42d222c1"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/containment.py",
+      "sha256": "fbd3db090593bb583680510d3efcff5d44c4acfd24ea040cc4afa0e7d4fa9cee"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/errors.py",
+      "sha256": "055856c53f7375c205cec6b43aa86cc5cd7a32200ac0619dcd3c9a78484890bf"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/identity.py",
+      "sha256": "31b5cbea71b1acdf8032133f7feaa83e088e52721109de9f3c87d106066cbcc1"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/ledger.py",
+      "sha256": "1772ffb3f95a9075828df1a3f54911b3f59876fcad24f8ff71da2c5512abc44b"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/models.py",
+      "sha256": "68bdf7eb49c49c0521143489aad727c411deb4762fb4fd35b4290bafbde43b2c"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/protocol.py",
+      "sha256": "a752f0f479a34421938d0930e058bf913506a4393686a577d227afe66c7d6c1d"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/safeio.py",
+      "sha256": "15c2743a0d4df3a1f260fa4109f4df3e4b3f75da7e4920439bda029cc2c284fa"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/service.py",
+      "sha256": "91571b57096fb42a34e81659b5371ddefb296b1190fa574387108d385ae1e150"
+    },
+    {
+      "path": "src/loom_task_image_builder_guard/slurm.py",
+      "sha256": "5906ff85da3222dbc9a70c0d5fbf7d37ddab3b76d445e2ce7bb05c8b063f600d"
+    }
+  ],
+  "bpf_source": {
+    "path": "deploy/task-image-builder/guard-network-v1.bpf.c",
+    "sha256": "d1a0d3735f643798d741472432e64616643a235cf418c63775a77ae23f36d8ac"
+  },
+  "artifacts": [
+    {
+      "path": "deploy/task-image-builder/guard-network-map-schema-v1.json",
+      "sha256": "272db8ab014f094fa3e1d4364ee94fd0892ad8db4c6422ec6e4409829feb69d4",
+      "destination": "guard-network-map-schema-v1.json",
+      "mode": "0444"
+    },
+    {
+      "path": "deploy/task-image-builder/guard-network-v1.bpf.build.json",
+      "sha256": "2291067d11a36f36c58687b17fc0d5267eb73154264cfc7c83566c7519e1a4da",
+      "destination": "guard-network-v1.bpf.build.json",
+      "mode": "0444"
+    },
+    {
+      "path": "deploy/task-image-builder/guard-network-v1.bpf.o",
+      "sha256": "dcec31541f762642b6a5a2211813a67983b25a6315e6993b8b1b3085247d4173",
+      "destination": "guard-network-v1.bpf.o",
+      "mode": "0444"
+    },
+    {
+      "path": "deploy/task-image-builder/loom-task-image-builder-node-guard.service",
+      "sha256": "905296cb392e73a957c82e44f2472b6f246fe6acb95627b16ecb2a6a5e862e57",
+      "destination": "loom-task-image-builder-node-guard.service",
+      "mode": "0444"
+    }
+  ]
+}
