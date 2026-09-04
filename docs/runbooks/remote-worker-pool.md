@@ -158,6 +158,33 @@ Apply autoscaler or Slurm desired state through the environment's authorized
 reconciliation path. Shared staging changes are owned by its installed rollout
 authority; do not submit parallel manual workers for that environment.
 
+Resource-aware Slurm admission accepts only unmodified `idle` or `mixed`
+states (`mix` is also accepted, case-insensitively). It reads full state flags
+from `scontrol --json show nodes` for the exact requested nodes: `sinfo %T`
+alone can hide `RESERVED` behind `mixed`. Missing, ambiguous, or failed state
+read-back stops admission before any memory probe. Compound restrictions such
+as `MIXED+RESERVED` and `MIXED+DRAIN`, display suffixes such as `idle*` and
+`idle~`, and unknown modifiers exclude the node from both worker placement and
+the allocation-backed memory probe. Free CPU or memory does not override a
+reservation or an unavailable node state. Inspect the node, reservation, and
+pending-job reason through `scontrol show node`, `scontrol show reservation`,
+and `squeue`; reconcile the owning pool policy through the authorized path.
+Both resource and allocated-memory `sinfo` reads use the configured partition
+when present. Identical duplicate node rows are accepted, but conflicting or malformed rows
+fail closed so a later safe-looking partition row cannot erase a restriction.
+The required `%C` CPU tuple must have four nonnegative, consistent counts matching
+the node CPU total; unavailable counts refuse admission instead of assuming every CPU is idle.
+Controller JSON must include empty `errors` and `warnings` arrays; missing,
+malformed, or nonempty diagnostics refuse admission.
+
+Resource-aware controllers reject a nonempty `slurm_reservation` configuration
+because reservation ownership admission is not implemented. Existing
+non-resource-aware reservation arguments remain supported. A future reserved
+resource-aware mode needs explicit ownership evidence before activation.
+
+This admission check does not grant access to another user's reservation or
+recover an already-pending worker job or a queued trial's pool assignment.
+
 ## Capacity and concurrency
 
 `LOOM_WORKER_MAX_CONCURRENT` limits in-flight trials for one worker process.
