@@ -190,14 +190,20 @@ def _safe_relative(value: object, label: str) -> str:
     return raw
 
 
-def _read_regular(path: Path, limit: int, label: str) -> bytes:
+def _read_regular(
+    path: Path,
+    limit: int,
+    label: str,
+    *,
+    reject_group_world_write: bool = False,
+) -> bytes:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             initial = os.fstat(descriptor)
             if not stat.S_ISREG(initial.st_mode):
                 raise HostReleaseError(f"{label} must be a regular file")
-            if initial.st_mode & 0o022:
+            if reject_group_world_write and initial.st_mode & 0o022:
                 raise HostReleaseError(f"{label} is group/world writable")
             if initial.st_size > limit:
                 raise HostReleaseError(f"{label} exceeds its size limit")
@@ -817,7 +823,12 @@ def _runtime_binary_payloads(
             raise HostReleaseError("runtime binary digest is invalid")
         direct_path = direct.get(binary)
         if direct_path is not None:
-            payload = _read_regular(direct_path, MAX_BINARY_BYTES, "runtime binary")
+            payload = _read_regular(
+                direct_path,
+                MAX_BINARY_BYTES,
+                "runtime binary",
+                reject_group_world_write=True,
+            )
         else:
             matches: list[bytes] = []
             for archive_path in archives:
@@ -890,19 +901,30 @@ def verify_host_bundle(
     try:
         _verify_layout(snapshot_root, expected)
         keyring_path = snapshot_root / release.keyring_name
-        keyring = _read_regular(keyring_path, MAX_METADATA_BYTES, "Ubuntu archive keyring")
+        keyring = _read_regular(
+            keyring_path,
+            MAX_METADATA_BYTES,
+            "Ubuntu archive keyring",
+            reject_group_world_write=True,
+        )
         if _sha256(keyring) != release.keyring_sha256:
             raise HostReleaseError("Ubuntu archive keyring digest is invalid")
         repository = release.repositories[debian_architecture]
         package_indexes: dict[str, dict[str, dict[str, str]]] = {}
         for suite, index in repository.indexes.items():
             inrelease_path = snapshot_root / "apt" / f"{suite}.InRelease"
-            inrelease = _read_regular(inrelease_path, MAX_METADATA_BYTES, "InRelease")
+            inrelease = _read_regular(
+                inrelease_path,
+                MAX_METADATA_BYTES,
+                "InRelease",
+                reject_group_world_write=True,
+            )
             packages_path = snapshot_root / "apt" / f"{suite}.Packages.xz"
             packages_payload = _read_regular(
                 packages_path,
                 MAX_METADATA_BYTES,
                 "Packages index",
+                reject_group_world_write=True,
             )
             if (
                 len(inrelease) != index.inrelease_size
@@ -950,7 +972,12 @@ def verify_host_bundle(
             if any(fields.get(key) != value for key, value in expected_fields.items()):
                 raise HostReleaseError("package signed metadata is invalid")
             package_path = snapshot_root / "packages" / PurePosixPath(artifact.filename).name
-            package_payload = _read_regular(package_path, MAX_ARTIFACT_BYTES, "package artifact")
+            package_payload = _read_regular(
+                package_path,
+                MAX_ARTIFACT_BYTES,
+                "package artifact",
+                reject_group_world_write=True,
+            )
             if len(package_payload) != artifact.size or _sha256(package_payload) != artifact.sha256:
                 raise HostReleaseError("package artifact digest or size is invalid")
             control_fields = {
@@ -987,7 +1014,12 @@ def verify_host_bundle(
             if SHA256_RE.fullmatch(runtime_digest) is None:
                 raise HostReleaseError("runtime artifact digest is invalid")
             artifact_path = snapshot_root / "runtime" / name
-            payload = _read_regular(artifact_path, MAX_ARTIFACT_BYTES, "runtime artifact")
+            payload = _read_regular(
+                artifact_path,
+                MAX_ARTIFACT_BYTES,
+                "runtime artifact",
+                reject_group_world_write=True,
+            )
             if _sha256(payload) != runtime_digest:
                 raise HostReleaseError("runtime artifact digest is invalid")
             runtime_paths.append(artifact_path)
@@ -1002,7 +1034,12 @@ def verify_host_bundle(
 
         bundle_hasher = hashlib.sha256()
         for relative in sorted(expected):
-            payload = _read_regular(snapshot_root / relative, MAX_ARTIFACT_BYTES, "bundle input")
+            payload = _read_regular(
+                snapshot_root / relative,
+                MAX_ARTIFACT_BYTES,
+                "bundle input",
+                reject_group_world_write=True,
+            )
             bundle_hasher.update(
                 relative.encode("utf-8") + b"\0" + _sha256(payload).encode("ascii") + b"\0"
             )
