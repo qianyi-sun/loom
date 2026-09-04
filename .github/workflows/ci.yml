@@ -889,6 +889,18 @@ jobs:
         run: go vet ./cmd/...
       - name: go test
         run: go test -race ./cmd/...
+      - name: gofmt supervisor
+        run: |
+          out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "gofmt found supervisor issues; run \`gofmt -w ./cmd/loom-task-image-builder-supervisor\` to fix"
+            exit 1
+          fi
+      - name: go vet supervisor
+        run: go vet ./cmd/loom-task-image-builder-supervisor
+      - name: go test supervisor
+        run: go test -race ./cmd/loom-task-image-builder-supervisor
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at both
