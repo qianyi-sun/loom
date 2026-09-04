@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -26,7 +28,12 @@ var (
 	guardClientFactory      = func(cfg Config) supervisorProjectClient {
 		return NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second)
 	}
-	applyProcessEnvironment = replaceProcessEnvironment
+	applyProcessEnvironment      = replaceProcessEnvironment
+	productionPublicationHandoff = DisabledPublicationHandoff{}
+	productionSupervisorNewExec  = func(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (BuildExecutor, error) {
+		return NewExecutor(cfg, caps, plan)
+	}
+	productionSupervisorDownload = realBundleDownloader{}
 )
 
 func main() {
@@ -48,11 +55,31 @@ func run(args []string, environ []string) error {
 		return err
 	}
 	client := guardClientFactory(cfg)
-	caps, err := client.Project(context.Background(), options.GrantID)
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	caps, err := client.Project(ctx, options.GrantID)
 	if err != nil {
 		return err
 	}
 	defer caps.Close()
+	if finisher, ok := client.(interface {
+		Finish(context.Context, string, string, map[string]int) error
+	}); ok {
+		operationID, idErr := newUUID()
+		if idErr != nil {
+			return idErr
+		}
+		defer func() {
+			finishCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second)
+			defer cancel()
+			_ = finisher.Finish(finishCtx, options.GrantID, operationID, map[string]int{
+				"descendant_processes": 0,
+				"mounts":               0,
+				"sockets":              0,
+				"open_files":           0,
+			})
+		}()
+	}
 
 	quotaRoot, err := quotaRootFromDirectoryFD(caps.JobDirectoryFD)
 	if err != nil {
@@ -63,6 +90,18 @@ func run(args []string, environ []string) error {
 		return err
 	}
 	return applyProcessEnvironment(sanitized)
+}
+
+func productionOrchestrator(grantID string, cfg Config) *Orchestrator {
+	return &Orchestrator{
+		GrantID:      grantID,
+		Config:       cfg,
+		Guard:        NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second),
+		NewExecutor:  productionSupervisorNewExec,
+		Download:     productionSupervisorDownload,
+		Handoff:      productionPublicationHandoff,
+		CleanupGrace: time.Duration(cfg.Guard.AckTimeoutSeconds) * time.Second,
+	}
 }
 
 func quotaRootFromDirectoryFD(fd int) (string, error) {

@@ -22,17 +22,24 @@ var requiredGuardUID = uint32(0)
 
 type AllocationCapabilities struct {
 	Bootstrap          *SecretBuffer
+	ProofSHA256        string
+	ReceiptSHA256      string
 	JobDirectoryFD     int
 	JobDirectoryDevice uint64
 	JobDirectoryInode  uint64
 	BuildEgressFD      int
 	BuildEgressDevice  uint64
 	BuildEgressInode   uint64
+	closeHook          func()
 }
 
 func (a *AllocationCapabilities) Close() {
 	if a == nil {
 		return
+	}
+	if a.closeHook != nil {
+		a.closeHook()
+		a.closeHook = nil
 	}
 	if a.Bootstrap != nil {
 		a.Bootstrap.Close()
@@ -139,6 +146,8 @@ func (c *GuardClient) Project(ctx context.Context, grantID string) (*AllocationC
 	}
 	caps := &AllocationCapabilities{
 		Bootstrap:          bootstrap,
+		ProofSHA256:        response.ProofSHA256,
+		ReceiptSHA256:      response.ReceiptPublicBindingSHA256,
 		JobDirectoryFD:     rights[1],
 		JobDirectoryDevice: uint64(jobStat.Dev),
 		JobDirectoryInode:  uint64(jobStat.Ino),
