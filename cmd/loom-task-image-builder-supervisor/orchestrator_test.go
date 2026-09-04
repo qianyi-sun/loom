@@ -484,6 +484,30 @@ func TestOrchestratorRejectsClaimPlanBindingMutations(t *testing.T) {
 	}
 }
 
+// Break caught: sealed build claim JSON accepts duplicate keys and lets the decoder choose an ambiguous value.
+func TestParseBuildClaimRejectsDuplicateKeys(t *testing.T) {
+	mutation := defaultClaimMutation()
+	mutation.AuthorizationExpiresAt = "2026-09-03T12:01:00Z"
+	payload := strings.Replace(
+		testClaimJSON(mutation),
+		`"state":"claimed"`,
+		`"state":"running","state":"claimed"`,
+		1,
+	)
+	_, err := parseBuildClaim(&SecretBuffer{data: []byte(payload)}, claimBinding{
+		GrantID:           testGrantID,
+		ClaimID:           mutation.ClaimID,
+		SessionID:         testSessionID,
+		SessionGeneration: 1,
+		ConfigCPUArch:     "arm64",
+		Now:               testNow,
+		SessionExpiresAt:  testNow.Add(time.Minute),
+	})
+	if err == nil || err.Error() != "claim JSON invalid" {
+		t.Fatalf("parseBuildClaim() error = %v, want duplicate key rejection", err)
+	}
+}
+
 // Break caught: a valid authority claim is rejected when its materialization lease extends beyond the short session used to claim it.
 func TestParseBuildClaimAllowsLeasePastSessionWhenPlanAuthorizationIsSessionBound(t *testing.T) {
 	mutation := defaultClaimMutation()

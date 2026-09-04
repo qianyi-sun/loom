@@ -424,6 +424,7 @@ def _verify_receipt(root: Path, release: VerifiedProviderRelease) -> str:
         or metadata.st_nlink != 1
         or stat.S_IMODE(metadata.st_mode) != 0o600
         or metadata.st_uid != (0 if root == Path("/") else os.geteuid())
+        or metadata.st_gid != (0 if root == Path("/") else os.getegid())
         or payload != _canonical(value)
         or value != expected
     ):

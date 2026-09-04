@@ -864,6 +864,57 @@ def test_release_builds_supervisor_twice_before_publishing(tmp_path: Path) -> No
     assert calls == [(source, "x86_64"), (source, "x86_64")]
 
 
+def test_release_default_supervisor_builder_ignores_runtime_toolchain_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mutation caught: default supervisor builds use the rootless runtime's Go
+    # 1.26 payload image instead of the pinned Go 1.23.4 supervisor toolchain.
+    source, guard_release, runtime_root = _source_tree(tmp_path)
+    runtime_manifest = json.loads(
+        (source / "deploy/task-image-builder/rootless-runtime-v2.json").read_bytes()
+    )
+    supervisor_payload = _elf_payload(62, "supervisor")
+    observed_images: list[str] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        cwd: Path,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, cwd, timeout
+        image = command[command.index("-w") + 2]
+        observed_images.append(image)
+        if image != "golang:1.23.4-bookworm":
+            raise AssertionError(f"supervisor used runtime toolchain image {image}")
+        for index, item in enumerate(command):
+            if item == "-v" and command[index + 1].endswith(":/out"):
+                output_root = Path(command[index + 1].removesuffix(":/out"))
+                _write(output_root / "loom-task-builder-supervisor", supervisor_payload, 0o555)
+                break
+        else:  # pragma: no cover - fixed command invariant
+            raise AssertionError("supervisor output mount missing")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(release_module.subprocess, "run", fake_run)
+
+    result = build_release(
+        source,
+        tmp_path / "out",
+        "x86_64",
+        guard_release_directory=guard_release,
+        runtime_root=runtime_root,
+    )
+
+    assert runtime_manifest["toolchain"]["image"] == "golang:1.26-alpine3.23"
+    assert observed_images == ["golang:1.23.4-bookworm", "golang:1.23.4-bookworm"]
+    assert (result.directory / "bin/loom-task-builder-supervisor").read_bytes() == supervisor_payload
+
+
 def test_release_rejects_nondeterministic_supervisor_builder(tmp_path: Path) -> None:
     source, guard_release, runtime_root = _source_tree(tmp_path)
     payloads = iter(

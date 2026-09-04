@@ -740,6 +740,9 @@ func parseBuildClaim(secret *SecretBuffer, binding claimBinding) (*buildClaim, e
 	if secret == nil || secret.closed {
 		return nil, errors.New("claim secret unavailable")
 	}
+	if err := rejectDuplicateJSONKeys(secret.data); err != nil {
+		return nil, errors.New("claim JSON invalid")
+	}
 	var wire claimWire
 	decoder := json.NewDecoder(strings.NewReader(string(secret.data)))
 	decoder.DisallowUnknownFields()

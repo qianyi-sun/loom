@@ -76,6 +76,7 @@ _GUARD_MEMBER_MODES = {
     item[0] if isinstance(item, tuple) else item: item[1] if isinstance(item, tuple) else 0o444
     for item in _GUARD_MEMBER_LAYOUT
 }
+_SUPERVISOR_TOOLCHAIN_IMAGE = "golang:1.23.4-bookworm"
 _RELEASE_MANIFEST_KEYS = {
     "architecture",
     "authority_contract_version",
@@ -967,7 +968,7 @@ def _build_supervisor_in_container(
     source_root: Path,
     architecture: Architecture,
     *,
-    image: str = "golang:1.23.4-bookworm",
+    image: str = _SUPERVISOR_TOOLCHAIN_IMAGE,
 ) -> bytes:
     goarch = {"x86_64": "amd64", "aarch64": "arm64"}[architecture]
     output_root = Path(tempfile.mkdtemp(prefix=".provider-supervisor."))
@@ -1082,14 +1083,12 @@ def _prepare_provider_release(
         expected_release_sha256=spec.guard_bundle_sha256[architecture],
         expected_release_spec_sha256=spec.guard_release_sha256,
     )
-    runtime_payloads, runtime_release, runtime_x_crypto, toolchain_image = _load_runtime(
+    runtime_payloads, runtime_release, runtime_x_crypto, _runtime_toolchain_image = _load_runtime(
         runtime_manifest_path,
         runtime_root if runtime_root is not None else source_root,
         architecture=architecture,
     )
-    builder = build_supervisor or (
-        lambda src, arch: _build_supervisor_in_container(src, arch, image=toolchain_image)
-    )
+    builder = build_supervisor or _build_supervisor_in_container
     supervisor_payload = _build_deterministic_supervisor(
         source_root,
         architecture,

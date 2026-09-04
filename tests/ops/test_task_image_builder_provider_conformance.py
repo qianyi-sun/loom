@@ -607,6 +607,31 @@ def test_offline_conformance_emits_nonproduction_evidence(tmp_path: Path) -> Non
     assert all(item["status"] == "pass" for item in document["checks"])
 
 
+def test_stage_receipt_conformance_rejects_gid_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.ops import task_image_builder_provider_conformance as conformance_module
+    from scripts.ops.task_image_builder_provider_conformance import ProviderConformanceError
+    from scripts.ops.task_image_builder_provider_release import verify_release_directory
+
+    # Mutation caught: conformance accepts a staged receipt whose GID differs
+    # from the installer-enforced receipt group.
+    installed, target_root, _source = _staged(tmp_path)
+    actual_gid = os.getegid()
+    release = verify_release_directory(
+        installed,
+        expected_release_sha256=installed.name,
+        expected_architecture="x86_64",
+        expected_uid=os.geteuid(),
+        expected_gid=actual_gid,
+    )
+    monkeypatch.setattr(conformance_module.os, "getegid", lambda: actual_gid + 1)
+
+    with pytest.raises(ProviderConformanceError, match="stage receipt"):
+        conformance_module._verify_receipt(target_root, release)
+
+
 @pytest.mark.parametrize(
     "surface",
     ("activation", "current", "socket", "pins", "service", "socket-unit"),
