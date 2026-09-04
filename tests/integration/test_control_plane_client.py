@@ -35,19 +35,22 @@ from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
 
-_CAPS = [{
-    "os": "linux",
-    "gpu_vendor": "none",
-    "network_policies": ["public"],
-    "dynamic_network_policy": True,
-    "mounted_fs": True,
-    "resource_modes": ["auto"],
-}]
+_CAPS = [
+    {
+        "os": "linux",
+        "gpu_vendor": "none",
+        "network_policies": ["public"],
+        "dynamic_network_policy": True,
+        "mounted_fs": True,
+        "resource_modes": ["auto"],
+    }
+]
 
 
 @pytest.fixture
 async def cp_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[object, str]]:
     """Returns (app, raw_token) with state populated and a fresh worker token."""
     for k, v in {
@@ -90,13 +93,16 @@ async def cp_setup(
         s.execute(delete(DataLifecycleAuthority))
         s.execute(delete(Team))
         s.execute(delete(Task))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="worker",
-            scopes=["worker:claim", "worker:report", "worker:index"],
-            team_id=None,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="worker",
+                scopes=["worker:claim", "worker:report", "worker:index"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
         s.commit()
     try:
         yield app, raw
@@ -236,15 +242,17 @@ async def test_register_rejects_invalid_slurm_provenance_without_creating_worker
         engine = create_engine(postgres_url)
         try:
             with sessionmaker(engine)() as session:
-                session.add(Worker(
-                    id=linked_worker_id,
-                    hostname="existing",
-                    version="v",
-                    capabilities=[],
-                    registered_at=now,
-                    last_seen_at=now,
-                    status="active",
-                ))
+                session.add(
+                    Worker(
+                        id=linked_worker_id,
+                        hostname="existing",
+                        version="v",
+                        capabilities=[],
+                        registered_at=now,
+                        last_seen_at=now,
+                        status="active",
+                    )
+                )
                 session.commit()
         finally:
             engine.dispose()
@@ -311,7 +319,8 @@ async def test_heartbeat(cp_setup, postgres_url):  # type: ignore[no-untyped-def
 
 
 async def test_patch_state_returns_true_when_owner(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -325,25 +334,41 @@ async def test_patch_state_returns_true_when_owner(  # type: ignore[no-untyped-d
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="claimed",
-                worker_id=wid,
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="claimed",
+                    worker_id=wid,
+                )
+            )
         engine.dispose()
 
-        assert await cp.patch_state(
-            trial_id=trial_id, worker_id=wid, state="running",
-        ) is True
+        assert (
+            await cp.patch_state(
+                trial_id=trial_id,
+                worker_id=wid,
+                state="running",
+            )
+            is True
+        )
     finally:
         await http.aclose()
 
 
 async def test_patch_state_returns_false_when_fenced(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     """Trial belongs to a different worker → 409 → False."""
     app, raw = cp_setup
@@ -359,30 +384,52 @@ async def test_patch_state_returns_false_when_fenced(  # type: ignore[no-untyped
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Worker).values(
-                id=other_worker, hostname="o", version="v", capabilities=[],
-                registered_at=datetime.now(UTC),
-                last_seen_at=datetime.now(UTC), status="active",
-            ))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="claimed",
-                worker_id=other_worker,
-            ))
+            conn.execute(
+                insert(Worker).values(
+                    id=other_worker,
+                    hostname="o",
+                    version="v",
+                    capabilities=[],
+                    registered_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                    status="active",
+                )
+            )
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="claimed",
+                    worker_id=other_worker,
+                )
+            )
         engine.dispose()
 
-        assert await cp.patch_state(
-            trial_id=trial_id, worker_id=wid, state="running",
-        ) is False
+        assert (
+            await cp.patch_state(
+                trial_id=trial_id,
+                worker_id=wid,
+                state="running",
+            )
+            is False
+        )
     finally:
         await http.aclose()
 
 
 async def test_patch_state_raises_for_terminal_semantic_conflict(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -396,19 +443,28 @@ async def test_patch_state_raises_for_terminal_semantic_conflict(  # type: ignor
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
             conn.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="claimed", worker_id=wid,
-                result={
-                    "state": "succeeded",
-                    "failure_reason": "verifier_error",
-                    "aggregate_reward": 1.0,
-                },
-            ))
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="claimed",
+                    worker_id=wid,
+                    result={
+                        "state": "succeeded",
+                        "failure_reason": "verifier_error",
+                        "aggregate_reward": 1.0,
+                    },
+                )
+            )
         engine.dispose()
         with pytest.raises(httpx.HTTPStatusError) as caught:
             await cp.patch_state(
-                trial_id=trial_id, worker_id=wid, state="succeeded",
+                trial_id=trial_id,
+                worker_id=wid,
+                state="succeeded",
             )
         assert caught.value.response.status_code == 422
         assert caught.value.response.json()["detail"]["code"] == (
@@ -419,7 +475,8 @@ async def test_patch_state_raises_for_terminal_semantic_conflict(  # type: ignor
 
 
 async def test_requeue_trial_retry_moves_prestart_claim_back_to_queue(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -433,22 +490,35 @@ async def test_requeue_trial_retry_moves_prestart_claim_back_to_queue(  # type: 
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="claimed",
-                worker_id=wid,
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="claimed",
+                    worker_id=wid,
+                )
+            )
 
-        assert await cp.requeue_trial_retry(
-            trial_id=trial_id,
-            worker_id=wid,
-            failure_reason="provider_transport_disconnect",
-            failure_message="Server disconnected without sending a response.",
-            retry_after_sec=0.0,
-        ) is True
+        assert (
+            await cp.requeue_trial_retry(
+                trial_id=trial_id,
+                worker_id=wid,
+                failure_reason="provider_transport_disconnect",
+                failure_message="Server disconnected without sending a response.",
+                retry_after_sec=0.0,
+            )
+            is True
+        )
 
         with engine.connect() as conn:
             row = conn.execute(
@@ -474,7 +544,8 @@ async def test_requeue_trial_retry_moves_prestart_claim_back_to_queue(  # type: 
 
 
 async def test_requeue_trial_retry_returns_false_after_trial_started(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -489,22 +560,36 @@ async def test_requeue_trial_retry_returns_false_after_trial_started(  # type: i
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="claimed",
-                worker_id=wid, started_at=started_at,
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="claimed",
+                    worker_id=wid,
+                    started_at=started_at,
+                )
+            )
 
-        assert await cp.requeue_trial_retry(
-            trial_id=trial_id,
-            worker_id=wid,
-            failure_reason="provider_transport_disconnect",
-            failure_message="Server disconnected without sending a response.",
-            retry_after_sec=0.0,
-        ) is False
+        assert (
+            await cp.requeue_trial_retry(
+                trial_id=trial_id,
+                worker_id=wid,
+                failure_reason="provider_transport_disconnect",
+                failure_message="Server disconnected without sending a response.",
+                retry_after_sec=0.0,
+            )
+            is False
+        )
 
         with engine.connect() as conn:
             row = conn.execute(
@@ -522,7 +607,8 @@ async def test_requeue_trial_retry_returns_false_after_trial_started(  # type: i
 
 
 async def test_requeue_trial_retry_returns_false_when_team_attempt_budget_exhausted(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -536,22 +622,36 @@ async def test_requeue_trial_retry_returns_false_when_team_attempt_budget_exhaus
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id, max_attempts_ceiling=1))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="claimed",
-                worker_id=wid, attempt_count=1,
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="claimed",
+                    worker_id=wid,
+                    attempt_count=1,
+                )
+            )
 
-        assert await cp.requeue_trial_retry(
-            trial_id=trial_id,
-            worker_id=wid,
-            failure_reason="provider_transport_disconnect",
-            failure_message="Server disconnected without sending a response.",
-            retry_after_sec=0.0,
-        ) is False
+        assert (
+            await cp.requeue_trial_retry(
+                trial_id=trial_id,
+                worker_id=wid,
+                failure_reason="provider_transport_disconnect",
+                failure_message="Server disconnected without sending a response.",
+                retry_after_sec=0.0,
+            )
+            is False
+        )
 
         with engine.connect() as conn:
             row = conn.execute(
@@ -651,25 +751,29 @@ async def test_node_setup_health_requeue_refunds_attempt_budget(  # type: ignore
 
 
 async def test_get_task_bundle_returns_config(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
     try:
         engine = create_engine(postgres_url)
         with engine.begin() as conn:
-            conn.execute(insert(Task).values(
-                id="t-bundle", checksum="ab" * 32,
-                config={
-                    "schema_version": "1",
-                    "task": {"id": "t-bundle", "name": "t-bundle"},
-                    "environment": {"os": "linux", "docker_image": "alpine"},
-                    "agent": {"name": "oracle"},
-                    "verifier": {"name": "pytest"},
-                    "steps": [{"name": "main"}],
-                },
-                source="fixture://t-bundle",
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t-bundle",
+                    checksum="ab" * 32,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": "t-bundle", "name": "t-bundle"},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
+                    },
+                    source="fixture://t-bundle",
+                )
+            )
         engine.dispose()
 
         bundle = await cp.get_task_bundle("t-bundle")
@@ -682,7 +786,8 @@ async def test_get_task_bundle_returns_config(  # type: ignore[no-untyped-def]
 
 
 async def test_get_task_bundle_returns_slash_task_id_config(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -690,22 +795,24 @@ async def test_get_task_bundle_returns_slash_task_id_config(  # type: ignore[no-
         task_id = "humaneval/HumanEval/26"
         engine = create_engine(postgres_url)
         with engine.begin() as conn:
-            conn.execute(insert(Task).values(
-                id=task_id,
-                checksum="cd" * 32,
-                config={
-                    "schema_version": "1",
-                    "task": {"id": task_id, "name": "HumanEval/26"},
-                    "environment": {
-                        "os": "linux",
-                        "docker_image": "alpine",
+            conn.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="cd" * 32,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": "HumanEval/26"},
+                        "environment": {
+                            "os": "linux",
+                            "docker_image": "alpine",
+                        },
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
                     },
-                    "agent": {"name": "oracle"},
-                    "verifier": {"name": "pytest"},
-                    "steps": [{"name": "main"}],
-                },
-                source="fixture://humaneval/HumanEval/26",
-            ))
+                    source="fixture://humaneval/HumanEval/26",
+                )
+            )
         engine.dispose()
 
         bundle = await cp.get_task_bundle(task_id)
@@ -718,7 +825,8 @@ async def test_get_task_bundle_returns_slash_task_id_config(  # type: ignore[no-
 
 
 async def test_mint_step_token_returns_loom_step_jwt(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     """A11.1: worker mints step tokens via the new endpoint."""
     app, raw = cp_setup
@@ -731,18 +839,30 @@ async def test_mint_step_token_returns_loom_step_jwt(  # type: ignore[no-untyped
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="running",
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="running",
+                )
+            )
         engine.dispose()
 
         token = await cp.mint_step_token(
-            team_id=team_id, trial_id=trial_id,
-            step_id="main", ttl_sec=60,
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id="main",
+            ttl_sec=60,
         )
         assert token.startswith("loom_step_")
     finally:
@@ -750,7 +870,8 @@ async def test_mint_step_token_returns_loom_step_jwt(  # type: ignore[no-untyped
 
 
 async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     """A11.1: worker reads llm_calls rows at finalize."""
     from decimal import Decimal
@@ -766,20 +887,37 @@ async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="running",
-            ))
-            conn.execute(insert(LlmCall).values(
-                team_id=team_id, trial_id=trial_id, step_id="main",
-                dialect="anthropic", model="claude-opus-4-7",
-                input_tokens=100, output_tokens=50,
-                provider_extras={},
-                cost_usd=Decimal("0.001"), rate_card_hash="abc",
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="running",
+                )
+            )
+            conn.execute(
+                insert(LlmCall).values(
+                    team_id=team_id,
+                    trial_id=trial_id,
+                    step_id="main",
+                    dialect="anthropic",
+                    model="claude-opus-4-7",
+                    input_tokens=100,
+                    output_tokens=50,
+                    provider_extras={},
+                    cost_usd=Decimal("0.001"),
+                    rate_card_hash="abc",
+                )
+            )
         engine.dispose()
 
         items = await cp.get_trial_llm_calls(trial_id)
@@ -791,7 +929,8 @@ async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def
 
 
 async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -805,31 +944,44 @@ async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[n
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="running",
-                worker_id=wid,
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="running",
+                    worker_id=wid,
+                )
+            )
         engine.dispose()
 
-        assert await cp.patch_trajectory_index(
-            trial_id=trial_id, worker_id=wid,
-            trajectory_uri=(
-                f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-            ),
+        assert (
+            await cp.patch_trajectory_index(
+                trial_id=trial_id,
+                worker_id=wid,
+                trajectory_uri=(f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
                 trajectory_size_bytes=42,
                 trajectory_sha256="1" * 64,
                 trajectory_version_id=None,
-        ) is True
+            )
+            is True
+        )
     finally:
         await http.aclose()
 
 
 async def test_patch_trajectory_index_persists_result_projection(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -843,25 +995,37 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="succeeded",
-                worker_id=wid, result={},
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="succeeded",
+                    worker_id=wid,
+                    result={},
+                )
+            )
 
         result_payload = {
             "schema_version": "1",
             "state": "succeeded",
             "aggregate_reward": 1.0,
         }
-        assert await cp.patch_trajectory_index(
-            trial_id=trial_id,
-            worker_id=wid,
-            result=result_payload,
-            trajectory_uri=f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
+        assert (
+            await cp.patch_trajectory_index(
+                trial_id=trial_id,
+                worker_id=wid,
+                result=result_payload,
+                trajectory_uri=f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
                 trajectory_size_bytes=42,
                 trajectory_sha256="2" * 64,
                 trajectory_version_id=None,
@@ -869,15 +1033,19 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
                 atif_size_bytes=84,
                 atif_sha256="3" * 64,
                 atif_version_id=None,
-                artifacts=[{
-                "step_name": "main",
-                "bucket": "artifacts",
-                "key": f"{team_id}/{trial_id}/main/result.txt",
-                    "size": 5,
-                    "content_hash": "sha256:" + ("4" * 64),
-                    "version_id": None,
-                }],
-        ) is True
+                artifacts=[
+                    {
+                        "step_name": "main",
+                        "bucket": "artifacts",
+                        "key": f"{team_id}/{trial_id}/main/result.txt",
+                        "size": 5,
+                        "content_hash": "sha256:" + ("4" * 64),
+                        "version_id": None,
+                    }
+                ],
+            )
+            is True
+        )
 
         with engine.begin() as conn:
             row = conn.execute(
@@ -897,7 +1065,8 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
 
 
 async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     """Worker-built trajectory indexes include trial_id/team_id/task_id.
 
@@ -917,14 +1086,25 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="succeeded",
-                worker_id=wid, result={},
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="succeeded",
+                    worker_id=wid,
+                    result={},
+                )
+            )
 
         result_payload = {
             "schema_version": "1",
@@ -945,21 +1125,26 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
             "atif_sha256": "6" * 64,
             "atif_version_id": None,
             "atif_schema_version": "1.7",
-            "artifacts": [{
-                "step_name": "main",
-                "bucket": "artifacts",
-                "key": f"{team_id}/{trial_id}/main/result.txt",
-                "size": 5,
-                "content_hash": "sha256:" + ("7" * 64),
-                "version_id": None,
-            }],
+            "artifacts": [
+                {
+                    "step_name": "main",
+                    "bucket": "artifacts",
+                    "key": f"{team_id}/{trial_id}/main/result.txt",
+                    "size": 5,
+                    "content_hash": "sha256:" + ("7" * 64),
+                    "version_id": None,
+                }
+            ],
         }
-        assert await cp.patch_output_projection(
-            trial_id=trial_id,
-            worker_id=wid,
-            result=result_payload,
-            trajectory_index=trajectory_index,
-        ) is True
+        assert (
+            await cp.patch_output_projection(
+                trial_id=trial_id,
+                worker_id=wid,
+                result=result_payload,
+                trajectory_index=trajectory_index,
+            )
+            is True
+        )
 
         with engine.begin() as conn:
             row = conn.execute(
@@ -979,7 +1164,8 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
 
 
 async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -993,14 +1179,25 @@ async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # ty
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="succeeded",
-                worker_id=worker_id, result={},
-            ))
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="succeeded",
+                    worker_id=worker_id,
+                    result={},
+                )
+            )
         engine.dispose()
 
         with pytest.raises(httpx.HTTPStatusError) as conflict:
@@ -1008,13 +1205,12 @@ async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # ty
                 trial_id=trial_id,
                 worker_id=worker_id,
                 result={
-                    "schema_version": "1", "state": "succeeded",
+                    "schema_version": "1",
+                    "state": "succeeded",
                     "aggregate_reward": 1.0,
                 },
                 trajectory_index={
-                    "trajectory_uri": (
-                        f"s3://wrong-bucket/{team_id}/{trial_id}/events.jsonl"
-                    ),
+                    "trajectory_uri": (f"s3://wrong-bucket/{team_id}/{trial_id}/events.jsonl"),
                     "trajectory_size_bytes": 42,
                     "trajectory_sha256": "8" * 64,
                     "trajectory_version_id": None,
@@ -1030,7 +1226,8 @@ async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # ty
 
 
 async def test_patch_output_projection_returns_false_only_for_claim_fence(  # type: ignore[no-untyped-def]
-    cp_setup, postgres_url,
+    cp_setup,
+    postgres_url,
 ):
     app, raw = cp_setup
     cp, http = await _client(app, raw)
@@ -1045,36 +1242,55 @@ async def test_patch_output_projection_returns_false_only_for_claim_fence(  # ty
         with engine.begin() as conn:
             conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             conn.execute(insert(TeamQuota).values(team_id=team_id))
-            conn.execute(insert(Worker).values(
-                id=owner_id, hostname="owner", version="v", capabilities=[],
-                registered_at=datetime.now(UTC),
-                last_seen_at=datetime.now(UTC), status="active",
-            ))
-            conn.execute(insert(Task).values(
-                id="t", checksum="0" * 64, config={},
-            ))
-            conn.execute(insert(Trial).values(
-                id=trial_id, team_id=team_id, task_id="t",
-                config={}, requires_caps={}, state="succeeded",
-                worker_id=owner_id, result={},
-            ))
+            conn.execute(
+                insert(Worker).values(
+                    id=owner_id,
+                    hostname="owner",
+                    version="v",
+                    capabilities=[],
+                    registered_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                    status="active",
+                )
+            )
+            conn.execute(
+                insert(Task).values(
+                    id="t",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="succeeded",
+                    worker_id=owner_id,
+                    result={},
+                )
+            )
         engine.dispose()
 
-        assert await cp.patch_output_projection(
-            trial_id=trial_id,
-            worker_id=worker_id,
+        assert (
+            await cp.patch_output_projection(
+                trial_id=trial_id,
+                worker_id=worker_id,
                 result={
-                    "schema_version": "1", "state": "succeeded",
+                    "schema_version": "1",
+                    "state": "succeeded",
                     "aggregate_reward": 1.0,
                 },
-            trajectory_index={
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
-                ),
-                "trajectory_size_bytes": 42,
-                "trajectory_sha256": "9" * 64,
-                "trajectory_version_id": None,
-            },
-        ) is False
+                trajectory_index={
+                    "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"),
+                    "trajectory_size_bytes": 42,
+                    "trajectory_sha256": "9" * 64,
+                    "trajectory_version_id": None,
+                },
+            )
+            is False
+        )
     finally:
         await http.aclose()

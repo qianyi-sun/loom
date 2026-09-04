@@ -27,23 +27,40 @@ def state_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, UUID, str, str]]
         s.execute(insert(Team).values(id=team_id, name=f"x-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
         for raw in (raw_a, raw_b):
-            s.execute(insert(Token).values(
-                token_hash=hashlib.sha256(raw.encode()).digest(),
-                type="worker", scopes=["worker:report"], team_id=None,
-                issued_at=datetime.now(UTC), expires_at=None,
-            ))
+            s.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(raw.encode()).digest(),
+                    type="worker",
+                    scopes=["worker:report"],
+                    team_id=None,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                )
+            )
         for wid in (worker_a, worker_b):
-            s.execute(insert(Worker).values(
-                id=wid, hostname="h", version="v", capabilities=[],
-                registered_at=datetime.now(UTC),
-                last_seen_at=datetime.now(UTC), status="active",
-            ))
+            s.execute(
+                insert(Worker).values(
+                    id=wid,
+                    hostname="h",
+                    version="v",
+                    capabilities=[],
+                    registered_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                    status="active",
+                )
+            )
         s.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
-        s.execute(insert(Trial).values(
-            id=trial_id, team_id=team_id, task_id="t",
-            config={}, requires_caps={}, state="claimed",
-            worker_id=worker_a,
-        ))
+        s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id="t",
+                config={},
+                requires_caps={},
+                state="claimed",
+                worker_id=worker_a,
+            )
+        )
         s.commit()
     try:
         yield trial_id, worker_a, worker_b, raw_a, raw_b
@@ -61,7 +78,8 @@ def state_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, UUID, str, str]]
 
 @pytest.fixture
 def app(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
     state_seed: tuple[UUID, UUID, UUID, str, str],
 ):
     for k, v in {
@@ -100,7 +118,9 @@ def test_state_patch_with_wrong_worker_fenced(app, state_seed):  # type: ignore[
 
 
 def test_state_patch_terminal_state(
-    app, state_seed, postgres_url,
+    app,
+    state_seed,
+    postgres_url,
 ):  # type: ignore[no-untyped-def]
     """Transition to a terminal state should set finished_at."""
     trial_id, worker_a, _, raw_a, _ = state_seed
@@ -110,7 +130,8 @@ def test_state_patch_terminal_state(
             f"/trials/{trial_id}/state",
             headers={"Authorization": f"Bearer {raw_a}"},
             json={
-                "worker_id": str(worker_a), "state": "succeeded",
+                "worker_id": str(worker_a),
+                "state": "succeeded",
                 "result": result_payload,
             },
         )
@@ -127,7 +148,9 @@ def test_state_patch_terminal_state(
 
 
 def test_state_patch_rejects_terminal_result_conflict(
-    app, state_seed, postgres_url,
+    app,
+    state_seed,
+    postgres_url,
 ):  # type: ignore[no-untyped-def]
     trial_id, worker_a, _, raw_a, _ = state_seed
     with TestClient(app) as client:
@@ -158,7 +181,9 @@ def test_state_patch_rejects_terminal_result_conflict(
 
 
 def test_state_patch_rejects_persisted_success_failure_reason(
-    app, state_seed, postgres_url,
+    app,
+    state_seed,
+    postgres_url,
 ):  # type: ignore[no-untyped-def]
     trial_id, worker_a, _, raw_a, _ = state_seed
     engine = create_engine(postgres_url)
@@ -179,15 +204,15 @@ def test_state_patch_rejects_persisted_success_failure_reason(
                 json={"worker_id": str(worker_a), "state": "succeeded"},
             )
         assert response.status_code == 422
-        assert response.json()["detail"]["code"] == (
-            "trial_terminal_result_inconsistent"
-        )
+        assert response.json()["detail"]["code"] == ("trial_terminal_result_inconsistent")
     finally:
         engine.dispose()
 
 
 def test_state_patch_accepts_explicit_unscored_collection(
-    app, state_seed, postgres_url,
+    app,
+    state_seed,
+    postgres_url,
 ):  # type: ignore[no-untyped-def]
     trial_id, worker_a, _, raw_a, _ = state_seed
     engine = create_engine(postgres_url)
@@ -213,7 +238,8 @@ def test_state_patch_accepts_explicit_unscored_collection(
 
 
 def test_state_patch_rejects_succeeded_without_result(
-    app, state_seed,
+    app,
+    state_seed,
 ):  # type: ignore[no-untyped-def]
     """A bare succeeded PATCH must fail before the DB CHECK constraint.
 
@@ -263,7 +289,9 @@ def test_state_patch_rejects_invalid_failure_reason(app, state_seed):  # type: i
 
 
 def test_state_patch_rejects_succeeded_when_queued(  # type: ignore[no-untyped-def]
-    app, state_seed, postgres_url,
+    app,
+    state_seed,
+    postgres_url,
 ):
     """Bug 4 regression: succeeded only from claimed/running, not queued.
 
@@ -272,6 +300,7 @@ def test_state_patch_rejects_succeeded_when_queued(  # type: ignore[no-untyped-d
     matches the worker.
     """
     from sqlalchemy import create_engine, text
+
     trial_id, worker_a, _, raw_a, _ = state_seed
     eng = create_engine(postgres_url)
     with eng.begin() as conn:
