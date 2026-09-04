@@ -189,8 +189,10 @@ branch, and exercise the changed behavior locally. Reproduce a bug before its
 fix and run the same regression afterward. Run focused tests and static checks
 on the final diff, then record the commands, environment, results, and any
 unexercised acceptance boundary in the PR's `Verification` section. Complete
-known amendments before pushing that head and enabling auto-merge. Keep Draft
-for genuinely incomplete work; it is not a waiting-room state for finished PRs.
+known amendments before pushing that head. After a push, confirm GitHub reports
+the intended PR head SHA before marking the change Ready and enabling
+auto-merge; push completion can precede the PR head readback. Keep Draft for
+genuinely incomplete work; it is not a waiting-room state for finished PRs.
 
 Include the consumers of a changed contract in this verification. A runner
 interface change also needs compatible test doubles and cancellation/cleanup
