@@ -255,6 +255,41 @@ def test_chat_rejects_bad_token(app, seed_data):  # type: ignore[no-untyped-def]
             },
         )
         assert r.status_code == 401
+        assert r.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+        assert r.json()["detail"] == {"code": "invalid_or_expired_bearer"}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Basic opaque"},
+        {"Authorization": "Bearer"},
+    ],
+)
+def test_chat_rejects_missing_or_malformed_bearer_with_same_contract(
+    app,
+    seed_data,
+    headers,
+):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(uuid4()),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+    assert response.json()["detail"] == {"code": "invalid_or_expired_bearer"}
 
 
 def test_chat_rejects_valid_token_without_llm_call_scope(
@@ -292,8 +327,11 @@ def test_chat_rejects_valid_token_without_llm_call_scope(
                 },
             },
         )
-    assert r.status_code == 401
-    assert r.json()["detail"] == "not authorized"
+    assert r.status_code == 403
+    assert r.json()["detail"] == {
+        "code": "missing_scope",
+        "required_scope": "llm:call",
+    }
 
 
 def test_chat_rejects_worker_token_for_model_call(
@@ -331,8 +369,11 @@ def test_chat_rejects_worker_token_for_model_call(
                 },
             },
         )
-    assert r.status_code == 401
-    assert r.json()["detail"] == "not authorized"
+    assert r.status_code == 403
+    assert r.json()["detail"] == {
+        "code": "missing_scope",
+        "required_scope": "llm:call",
+    }
 
 
 def test_chat_rejects_team_id_mismatch(app, seed_data):  # type: ignore[no-untyped-def]

@@ -2555,7 +2555,7 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
             execution_generation=lease.generation,
         )
 
-        ctx = verify_step_jwt(response["token"], signing_key=signing_key)
+        ctx = verify_step_jwt(response.token, signing_key=signing_key)
         assert ctx.step_jwt_id is not None
         assert ctx.provider_connection_id_bound is True
         assert ctx.service_execution_lease_id == lease.id

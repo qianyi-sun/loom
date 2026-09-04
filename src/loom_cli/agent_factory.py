@@ -8,6 +8,7 @@ API key the CLI puts in the sandbox).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from loom.agent.oracle import OracleAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.errors import AgentError
 from loom.models.types import ModelSpec
+from loom_worker.control_plane_client import StepTokenGrant
 from loom_worker.trial_runner import AgentFactory
 
 
@@ -37,6 +39,22 @@ class _NoopCPClient:
         ttl_sec: int,
     ) -> str:
         return "loom_step_cli-token"
+
+    async def mint_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime,
+    ) -> StepTokenGrant:
+        del team_id, trial_id, step_id, ttl_sec
+        return StepTokenGrant(
+            token="loom_step_cli-token",
+            expires_at=attempt_deadline_wall_clock + timedelta(seconds=300),
+            attempt_deadline_wall_clock=attempt_deadline_wall_clock,
+        )
 
 
 def build_agent_factory(

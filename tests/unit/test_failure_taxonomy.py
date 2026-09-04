@@ -122,6 +122,20 @@ def test_missing_required_artifacts_are_retryable_invalid_evidence() -> None:
             False,
         ),
         (
+            "step_credential_invalid_or_expired",
+            "platform_failure",
+            "step_credential",
+            "operator_approval",
+            False,
+        ),
+        (
+            "step_credential_scope_invalid",
+            "platform_failure",
+            "step_credential",
+            "operator_approval",
+            False,
+        ),
+        (
             "setup_failure",
             "platform_failure",
             "platform_setup",

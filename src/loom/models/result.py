@@ -44,6 +44,8 @@ class FailureReason(StrEnum):
     PROVIDER_ERROR = "provider_error"   # upstream provider returned 4xx
     GATEWAY_ERROR = "gateway_error"     # loom gateway itself returned 5xx
     PROVIDER_TRANSPORT_DISCONNECT = "provider_transport_disconnect"
+    STEP_CREDENTIAL_INVALID_OR_EXPIRED = "step_credential_invalid_or_expired"
+    STEP_CREDENTIAL_SCOPE_INVALID = "step_credential_scope_invalid"
 
 
 class AgentInfo(BaseModel):

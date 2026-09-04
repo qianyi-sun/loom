@@ -29,6 +29,13 @@ from starlette.responses import StreamingResponse
 
 from loom.auth import AuthContext
 from loom.models.types import ModelSpec
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    enforce_request_attempt_deadline,
+    raise_deadline_http_exception,
+    request_attempt_deadline,
+    upstream_timeout,
+)
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
@@ -67,6 +74,7 @@ async def messages(
             authorization,
             signing_key,
             allow_execution_attempt=True,
+            request=request,
         )
     assert ctx.team_id is not None
     assert ctx.step_id is not None
@@ -109,11 +117,14 @@ async def messages(
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
             ),
             settings=settings,
             dialect="anthropic",
+            deadline=request_attempt_deadline(request),
         )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as exc:
         await _record_failed_message_call(
             request=request,
@@ -141,6 +152,7 @@ async def messages(
             detail=f"anthropic upstream request error: {type(exc).__name__}: {exc}",
         ) from exc
     upstream_response = outcome.response
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
         await _record_failed_message_call(
@@ -274,19 +286,26 @@ async def _stream_messages(
     whether to reissue.
     """
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    stream_ctx = upstream.stream(
-        "POST",
-        f"{ANTHROPIC_BASE_URL}/v1/messages",
-        json=payload,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        timeout=settings.upstream_timeout_sec,
-    )
     try:
-        upstream_response = await stream_ctx.__aenter__()
+        stream_ctx = upstream.stream(
+            "POST",
+            f"{ANTHROPIC_BASE_URL}/v1/messages",
+            json=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            timeout=upstream_timeout(request, settings.upstream_timeout_sec),
+        )
+        deadline = request_attempt_deadline(request)
+        upstream_response = (
+            await stream_ctx.__aenter__()
+            if deadline is None
+            else await deadline.run(stream_ctx.__aenter__)
+        )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as exc:
         await _record_failed_message_call(
             request=request,
@@ -314,9 +333,17 @@ async def _stream_messages(
             detail=f"anthropic upstream request error: {type(exc).__name__}: {exc}",
         ) from exc
 
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
         try:
-            body = await upstream_response.aread()
+            deadline = request_attempt_deadline(request)
+            body = (
+                await upstream_response.aread()
+                if deadline is None
+                else await deadline.run(upstream_response.aread)
+            )
+        except AttemptDeadlineReachedError as exc:
+            raise_deadline_http_exception(exc)
         finally:
             await stream_ctx.__aexit__(None, None, None)
         excerpt = redact_api_key(body.decode("utf-8", "replace"), api_key)
@@ -342,7 +369,17 @@ async def _stream_messages(
         accum: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         buffer = b""
         try:
-            async for chunk in upstream_response.aiter_bytes():
+            iterator = upstream_response.aiter_bytes()
+            while True:
+                try:
+                    deadline = request_attempt_deadline(request)
+                    chunk = (
+                        await iterator.__anext__()
+                        if deadline is None
+                        else await deadline.anext(iterator)
+                    )
+                except StopAsyncIteration:
+                    break
                 yield chunk
                 buffer += chunk
                 events, buffer = _parse_sse_blocks(buffer)

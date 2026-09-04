@@ -97,6 +97,48 @@ def test_scored_verifier_result_suppresses_agent_error_terminal_failure() -> Non
     assert failure is None
 
 
+def test_scored_verifier_result_cannot_suppress_agent_timeout() -> None:
+    failure = _first_terminal_step_failure(
+        _trial_result(
+            StepResult(
+                step_name="main",
+                error=StepError(
+                    phase="agent",
+                    reason="timeout",
+                    message="agent run exceeded 10s",
+                    occurred_at=datetime.now(UTC),
+                ),
+                verifier_result=VerifierResult(rewards={"passed": 1.0}),
+            )
+        )
+    )
+
+    assert failure == (FailureReason.AGENT_TIMEOUT, "agent run exceeded 10s")
+
+
+def test_scored_verifier_cannot_suppress_structured_gateway_timeout() -> None:
+    failure = _first_terminal_step_failure(
+        _trial_result(
+            StepResult(
+                step_name="main",
+                error=StepError(
+                    phase="agent",
+                    reason="exception",
+                    message=(
+                        "gateway 504: {'detail': {'code': 'agent_timeout', "
+                        "'reason': 'attempt_deadline_reached'}}"
+                    ),
+                    occurred_at=datetime.now(UTC),
+                ),
+                verifier_result=VerifierResult(rewards={"passed": 1.0}),
+            )
+        )
+    )
+
+    assert failure is not None
+    assert failure[0] == FailureReason.AGENT_TIMEOUT
+
+
 def test_scored_model_backed_agent_error_without_llm_calls_is_terminal() -> None:
     failure = _first_terminal_step_failure(
         _trial_result(

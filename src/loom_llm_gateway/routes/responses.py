@@ -24,6 +24,13 @@ from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection as ProviderConnectionRow
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import CanonicalizationError, canonical_digest
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    enforce_request_attempt_deadline,
+    raise_deadline_http_exception,
+    request_attempt_deadline,
+    upstream_timeout,
+)
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.provider_dispatch import (
@@ -117,6 +124,7 @@ async def _resolve_responses_support(
     row: ProviderConnectionRow,
     api_key: str,
     upstream: httpx.AsyncClient,
+    request: Request,
 ) -> bool:
     """Return True iff we should dispatch the incoming Responses request
     through the native passthrough; False if we should go straight into
@@ -135,11 +143,15 @@ async def _resolve_responses_support(
         row.responses_api_probed_at,
     ):
         return row.responses_api_supported
-    outcome = await probe_responses_api(
-        upstream_url=f"{row.base_url.rstrip('/')}/responses",
-        api_key=api_key,
-        client=upstream,
-    )
+    try:
+        outcome = await probe_responses_api(
+            upstream_url=f"{row.base_url.rstrip('/')}/responses",
+            api_key=api_key,
+            client=upstream,
+            deadline=request_attempt_deadline(request),
+        )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     await _persist_probe_outcome(session_factory, row.id, outcome)
     if outcome.supported is None:
         return True  # ambiguous — leave native path in play
@@ -230,6 +242,7 @@ async def _dispatch_via_chat_translator(
     return _responses_result(
         synthetic_responses_http_response(body_or_stream),
         body_or_stream,
+        request=request,
     )
 
 
@@ -262,6 +275,7 @@ async def responses(
             authorization,
             signing_key,
             allow_execution_attempt=True,
+            request=request,
         )
     assert ctx.team_id is not None
     assert ctx.token_subject is not None
@@ -344,6 +358,7 @@ async def responses(
             row=row,
             api_key=api_key,
             upstream=upstream,
+            request=request,
         )
         if not supported:
             return await _dispatch_via_chat_translator(
@@ -430,7 +445,7 @@ async def responses(
             attempt=attempt,
             request_payload=payload,
         )
-        return _responses_result(upstream_response, body_or_stream)
+        return _responses_result(upstream_response, body_or_stream, request=request)
 
     if settings.openai_api_key is None:
         raise HTTPException(
@@ -516,7 +531,7 @@ async def responses(
             attempt=attempt,
             request_params=normalize_request_params(payload),
         )
-    return _responses_result(upstream_response, body_or_stream)
+    return _responses_result(upstream_response, body_or_stream, request=request)
 
 
 def _execution_attempt_provider_request_id(
@@ -604,16 +619,36 @@ async def _dispatch_execution_attempt_responses(
 
     headers = _upstream_headers(request, api_key)
     try:
-        upstream_response = await upstream.post(
-            upstream_url,
-            json=payload,
-            headers=headers,
-            timeout=min(
-                float(request.app.state.settings.upstream_timeout_sec),
-                float(grant.timeout_seconds),
-            ),
-            follow_redirects=False,
+        configured_timeout = min(
+            float(request.app.state.settings.upstream_timeout_sec),
+            float(grant.timeout_seconds),
         )
+        deadline = request_attempt_deadline(request)
+
+        async def _post() -> httpx.Response:
+            return await upstream.post(
+                upstream_url,
+                json=payload,
+                headers=headers,
+                timeout=upstream_timeout(request, configured_timeout),
+                follow_redirects=False,
+            )
+
+        upstream_response = (
+            await _post()
+            if deadline is None
+            else await deadline.run(_post)
+        )
+        enforce_request_attempt_deadline(request)
+    except AttemptDeadlineReachedError as exc:
+        await _settle_attempt_failure(
+            request,
+            ctx,
+            grant,
+            outcome="uncertain",
+            category="agent_timeout",
+        )
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as exc:
         await _settle_attempt_failure(
             request,
@@ -803,12 +838,15 @@ async def _post_upstream_responses(
                 upstream_url,
                 json=payload,
                 headers=headers,
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
                 follow_redirects=False,
             ),
             settings=settings,
             dialect=dialect,
+            deadline=request_attempt_deadline(request),
         )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as exc:
         if failure_recorder is not None:
             await failure_recorder("upstream_timeout", type(exc).__name__)
@@ -823,6 +861,7 @@ async def _post_upstream_responses(
             status_code=502,
             detail=(f"upstream request error against {upstream_url}: {type(exc).__name__}: {exc}"),
         ) from exc
+    enforce_request_attempt_deadline(request)
     return outcome.response, outcome.attempt
 
 
@@ -844,12 +883,15 @@ async def _post_upstream_chat_completion(
                 upstream_url,
                 json=payload,
                 headers=headers,
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
                 follow_redirects=False,
             ),
             settings=settings,
             dialect="facade_openai_chat_compat",
+            deadline=request_attempt_deadline(request),
         )
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as exc:
         if failure_recorder is not None:
             await failure_recorder("upstream_timeout", type(exc).__name__)
@@ -864,6 +906,7 @@ async def _post_upstream_chat_completion(
             status_code=502,
             detail=(f"upstream request error against {upstream_url}: {type(exc).__name__}: {exc}"),
         ) from exc
+    enforce_request_attempt_deadline(request)
     return outcome.response, outcome.attempt
 
 
@@ -997,11 +1040,14 @@ async def _record_failed_responses_call(
 def _responses_result(
     response: httpx.Response,
     body_or_stream: dict[str, Any] | str,
+    *,
+    request: Request,
 ) -> dict[str, Any] | StreamingResponse:
     if isinstance(body_or_stream, dict):
         return body_or_stream
 
     async def _body() -> Any:
+        enforce_request_attempt_deadline(request)
         yield response.content
 
     return StreamingResponse(

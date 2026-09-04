@@ -105,6 +105,36 @@ _REASON_META: dict[str, _ReasonMeta] = {
         ),
         actions=("provider_preflight", "rerun_failed"),
     ),
+    "trial.step_credential_invalid_or_expired": _ReasonMeta(
+        label="Invalid or expired step credential",
+        category="gateway",
+        attribution="platform",
+        trial_summary=(
+            "The trial stopped before scoring because Loom rejected its step credential."
+        ),
+        batch_summary=(
+            "The batch has step credentials that became invalid or expired before completion."
+        ),
+        impact=(
+            "The affected score is platform-failure evidence, not a model-quality result."
+        ),
+        actions=("inspect_trajectory",),
+    ),
+    "trial.step_credential_scope_invalid": _ReasonMeta(
+        label="Invalid step credential scope",
+        category="gateway",
+        attribution="platform",
+        trial_summary=(
+            "The trial stopped before scoring because its step credential lacked llm:call."
+        ),
+        batch_summary=(
+            "The batch has step credentials with an invalid Loom gateway scope."
+        ),
+        impact=(
+            "The affected score is platform-failure evidence, not a model-quality result."
+        ),
+        actions=("inspect_trajectory",),
+    ),
     "trial.verifier_error": _ReasonMeta(
         label="Benchmark verifier failure",
         category="verifier",

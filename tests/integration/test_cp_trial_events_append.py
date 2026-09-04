@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert, select, text
+from sqlalchemy import create_engine, delete, insert, select, text, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
@@ -134,6 +134,24 @@ def _count_rows(postgres_url: str, trial_id: UUID) -> int:
         engine.dispose()
 
 
+def _set_trial_state(
+    postgres_url: str,
+    trial_id: UUID,
+    state: str,
+) -> None:
+    engine = create_engine(postgres_url)
+    values: dict[str, object] = {"state": state}
+    if state == "succeeded":
+        values["result"] = {"state": "succeeded"}
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                update(Trial).where(Trial.id == trial_id).values(**values),
+            )
+    finally:
+        engine.dispose()
+
+
 def test_append_events_happy_path_inserts_all(
     app: Any, seed: tuple[UUID, UUID, UUID, str, str], postgres_url: str,
 ) -> None:
@@ -155,6 +173,64 @@ def test_append_events_happy_path_inserts_all(
     assert body["inserted"] == 3
     assert body["deduped"] == 0
     assert _count_rows(postgres_url, trial_id) == 3
+
+
+@pytest.mark.parametrize("state", ["claimed", "running", "materializing"])
+def test_append_events_allows_worker_owned_non_terminal_states(
+    app: Any,
+    seed: tuple[UUID, UUID, UUID, str, str],
+    postgres_url: str,
+    state: str,
+) -> None:
+    trial_id, worker_a, _wb, raw_a, _rb = seed
+    _set_trial_state(postgres_url, trial_id, state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/trials/{trial_id}/events",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={
+                "worker_id": str(worker_a),
+                "events": [_event(0)],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["inserted"] == 1
+    assert _count_rows(postgres_url, trial_id) == 1
+
+
+@pytest.mark.parametrize("terminal_state", ["succeeded", "failed", "cancelled"])
+def test_append_events_rejects_same_worker_after_terminal_state(
+    app: Any,
+    seed: tuple[UUID, UUID, UUID, str, str],
+    postgres_url: str,
+    terminal_state: str,
+) -> None:
+    trial_id, worker_a, _wb, raw_a, _rb = seed
+    with TestClient(app) as client:
+        accepted = client.post(
+            f"/trials/{trial_id}/events",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={
+                "worker_id": str(worker_a),
+                "events": [_event(0)],
+            },
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        _set_trial_state(postgres_url, trial_id, terminal_state)
+        late = client.post(
+            f"/trials/{trial_id}/events",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={
+                "worker_id": str(worker_a),
+                "events": [_event(1)],
+            },
+        )
+
+    assert late.status_code == 409
+    assert _count_rows(postgres_url, trial_id) == 1
 
 
 def test_append_events_idempotent_on_seq_retry(

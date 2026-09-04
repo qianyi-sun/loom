@@ -60,7 +60,7 @@ def test_ttl_buffer_is_at_least_a_few_minutes() -> None:
     """Regression guard: shrinking the buffer to near-zero would
     re-introduce the exact race the fix targets (child clock skew +
     retry backoff + exec overhead)."""
-    assert _STEP_JWT_TTL_BUFFER_SEC >= 60
+    assert _STEP_JWT_TTL_BUFFER_SEC == 301
 
 
 def test_fractional_agent_timeout_is_rounded_up_before_add() -> None:
@@ -95,7 +95,7 @@ def test_trial_override_and_multiplier_drive_step_jwt_ttl() -> None:
     _apply_step_token_ttl(agent, effective_timeout)
 
     assert effective_timeout == 9000.0
-    assert agent.step_token_ttl_sec == 9300
+    assert agent.step_token_ttl_sec == 9301
 
 
 def test_step_override_and_multiplier_drive_step_jwt_ttl() -> None:
@@ -113,4 +113,4 @@ def test_step_override_and_multiplier_drive_step_jwt_ttl() -> None:
     _apply_step_token_ttl(agent, effective_timeout)
 
     assert effective_timeout == 5400.0
-    assert agent.step_token_ttl_sec == 5700
+    assert agent.step_token_ttl_sec == 5701

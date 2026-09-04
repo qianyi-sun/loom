@@ -50,6 +50,14 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.responses import StreamingResponse
 
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    GatewayAttemptDeadline,
+    enforce_request_attempt_deadline,
+    raise_deadline_http_exception,
+    request_attempt_deadline,
+    upstream_timeout,
+)
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.model_switch_correlation import (
@@ -114,6 +122,7 @@ async def openai_chat_facade(
             session,
             authorization,
             signing_key,
+            request=request,
         )
     assert ctx.team_id is not None  # narrowed by verify_facade_auth
     assert ctx.trial_id is not None
@@ -168,13 +177,16 @@ async def openai_chat_facade(
                 upstream_url,
                 json=upstream_payload,
                 headers=upstream_headers,
-                timeout=settings.upstream_timeout_sec,
+                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
                 follow_redirects=False,
             ),
             settings=settings,
             dialect="facade_openai",
+            deadline=request_attempt_deadline(request),
         )
         upstream_response = outcome.response
+    except AttemptDeadlineReachedError as exc:
+        raise_deadline_http_exception(exc)
     except httpx.TimeoutException as e:
         await record_facade_failed_call(
             request=request,
@@ -208,6 +220,7 @@ async def openai_chat_facade(
             detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
+    enforce_request_attempt_deadline(request)
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
         await record_facade_failed_call(
@@ -296,6 +309,7 @@ async def openai_chat_facade(
     return openai_chat_facade_result(
         body=body,
         client_requested_stream=client_requested_stream,
+        deadline=request_attempt_deadline(request),
     )
 
 
@@ -303,12 +317,15 @@ def openai_chat_facade_result(
     *,
     body: dict[str, Any],
     client_requested_stream: bool,
+    deadline: GatewayAttemptDeadline | None = None,
 ) -> dict[str, Any] | StreamingResponse:
     if not client_requested_stream:
         return body
 
     async def _body() -> Any:
         for chunk in _synthetic_openai_chat_sse_chunks(body):
+            if deadline is not None:
+                deadline.require_remaining()
             yield chunk
 
     return StreamingResponse(

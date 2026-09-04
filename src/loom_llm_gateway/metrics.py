@@ -82,3 +82,24 @@ RETRY_AMBIGUOUS_504_TOTAL = Counter(
     "can spot if the risk is materializing.",
     labelnames=("dialect",),
 )
+
+# Authentication and signed attempt lifecycle.  Both series are deliberately
+# free of credential, subject, and request identifiers.
+AUTH_REJECTIONS_TOTAL = Counter(
+    "loom_gateway_auth_rejections_total",
+    "Gateway bearer requests rejected before provider dispatch.",
+    # missing | malformed | invalid_signature | expired | missing_scope
+    labelnames=("reason",),
+)
+
+ATTEMPT_DEADLINE_REACHED_TOTAL = Counter(
+    "loom_gateway_attempt_deadline_reached_total",
+    "Gateway requests stopped by their signed attempt deadline.",
+)
+
+LEGACY_ATTEMPT_DEADLINE_TOKEN_TOTAL = Counter(
+    "loom_gateway_legacy_attempt_deadline_token_total",
+    "Gateway tokens without a signed attempt deadline by compatibility outcome.",
+    # accepted | rejected
+    labelnames=("outcome",),
+)
