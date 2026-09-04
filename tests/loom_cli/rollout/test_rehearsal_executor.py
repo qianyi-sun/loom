@@ -9,8 +9,10 @@ from collections import Counter
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml  # type: ignore[import-untyped]
@@ -19,6 +21,11 @@ import loom_cli.rollout.operator.protected_external_supervisor_transport as tran
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom.models.types import ModelSpec
+from loom_capacity_manager.contracts import (
+    ConfigurationGenerationRefV1,
+    ConfigurationSnapshotV1,
+    canonical_digest,
+)
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
     ExternalSupervisorCanonicalIdentity,
@@ -31,6 +38,8 @@ from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     staging_working_directory,
 )
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
+from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     ServiceRuntimeStatus,
@@ -68,6 +77,7 @@ from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
 from loom_control_plane.global_execution_fence import (
     parse_global_execution_witness_export,
 )
+from tests.capacity_fixtures import fleet_with_development_template, subject_configuration
 from tests.loom_cli.rollout.rehearsal_fixtures import (
     PassingGB10RehearsalTransport,
     active_external_supervisor_artifact,
@@ -216,21 +226,167 @@ def _repairable_gb10_external_supervisor_observation(
     return observation
 
 
+def _database_authority(*, public_revision: str = "0066") -> DatabaseAuthorityEvidence:
+    fleet = fleet_with_development_template()
+    subject = subject_configuration()
+    refs = (
+        ConfigurationGenerationRefV1(
+            scope="subject",
+            generation=subject.configuration_generation,
+            digest=canonical_digest(subject),
+            subject_id=subject.subject_id,
+            subject_incarnation=subject.subject_incarnation,
+        ),
+    )
+    snapshot = ConfigurationSnapshotV1(
+        configuration_epoch=9,
+        fleet=ConfigurationGenerationRefV1(
+            scope="fleet",
+            generation=fleet.fleet_generation,
+            digest=canonical_digest(fleet),
+        ),
+        subjects=refs,
+    )
+    return DatabaseAuthorityEvidence(
+        public_schema_revision=public_revision,
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest=canonical_digest(snapshot),
+        authority_incarnation=fleet.authority_incarnation,
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
+
+
+def _database_authority_observation(*, public_revision: str = "0066") -> dict[str, object]:
+    fleet = fleet_with_development_template()
+    subject = subject_configuration()
+    fleet_digest = canonical_digest(fleet)
+    subject_digest = canonical_digest(subject)
+    refs = (
+        ConfigurationGenerationRefV1(
+            scope="subject",
+            generation=subject.configuration_generation,
+            digest=subject_digest,
+            subject_id=subject.subject_id,
+            subject_incarnation=subject.subject_incarnation,
+        ),
+    )
+    snapshot = ConfigurationSnapshotV1(
+        configuration_epoch=9,
+        fleet=ConfigurationGenerationRefV1(
+            scope="fleet",
+            generation=fleet.fleet_generation,
+            digest=fleet_digest,
+        ),
+        subjects=refs,
+    )
+    return {
+        "authority": [
+            {
+                "authority_incarnation": str(fleet.authority_incarnation),
+                "executable_new_capacity_ceiling": 0,
+                "execution_epoch": 0,
+                "execution_manifest_sha256": None,
+                "execution_state": "shadow",
+                "increase_freeze": True,
+                "recovery_state": "shadow",
+                "schema_version": 1,
+                "singleton_id": 1,
+                "writer_epoch": 4,
+            }
+        ],
+        "configuration": [
+            {
+                "canonical_digest": canonical_digest(snapshot),
+                "configuration_epoch": 9,
+                "fleet_digest": fleet_digest,
+                "fleet_generation": fleet.fleet_generation,
+                "subject_generation_manifest": [item.model_dump(mode="json") for item in refs],
+            }
+        ],
+        "generations": [
+            {
+                "digest": fleet_digest,
+                "payload": fleet.model_dump(mode="json"),
+                "scope": "fleet",
+                "scope_generation": fleet.fleet_generation,
+                "state": "active",
+                "subject_id": None,
+                "subject_incarnation": None,
+            },
+            {
+                "digest": subject_digest,
+                "payload": subject.model_dump(mode="json"),
+                "scope": "subject",
+                "scope_generation": subject.configuration_generation,
+                "state": "active",
+                "subject_id": str(subject.subject_id),
+                "subject_incarnation": str(subject.subject_incarnation),
+            },
+        ],
+        "guard_revisions": ["guard_0027"],
+        "guard_table_present": True,
+        "public_revisions": [public_revision],
+    }
+
+
+def _critical_checkpoint() -> CriticalCheckpointEvidence:
+    authority = _database_authority()
+    return CriticalCheckpointEvidence(
+        request_id="req-abcdefgh",
+        manifest_path=Path("/data/loom-staging/backups/exact/backup-manifest.json"),
+        manifest_sha256="d" * 64,
+        component_sha256={
+            "database_authority": authority.digest,
+            "k8s_secrets": "7" * 64,
+            "object_inventory": "6" * 64,
+            "postgres": "e" * 64,
+        },
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=8,
+        db_snapshot_identity="pgdump-sha256:" + "e" * 64,
+        schema_revision=authority.public_schema_revision,
+        object_inventory_root="f" * 64,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
+        created_at=datetime(2026, 7, 19, tzinfo=UTC),
+    )
+
+
 def _plan() -> RehearsalPlan:
     supervisor = _external_supervisor_artifact()
+    checkpoint = _critical_checkpoint()
     return RehearsalPlan(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
         cluster_name="loom-staging",
-        checkpoint_request_id="req-abcdefgh",
-        checkpoint_evidence_sha256="c" * 64,
-        checkpoint_manifest_path=Path("/data/loom-staging/backups/exact/backup-manifest.json"),
-        checkpoint_manifest_sha256="d" * 64,
-        mutation_epoch=8,
-        db_snapshot_identity="pgdump-sha256:" + "e" * 64,
-        object_inventory_root="f" * 64,
-        schema_revision="0066",
+        checkpoint_request_id=checkpoint.request_id,
+        checkpoint_evidence_sha256=checkpoint.evidence_digest,
+        checkpoint_manifest_path=checkpoint.manifest_path,
+        checkpoint_manifest_sha256=checkpoint.manifest_sha256,
+        mutation_epoch=checkpoint.mutation_epoch,
+        db_snapshot_identity=checkpoint.db_snapshot_identity,
+        object_inventory_root=checkpoint.object_inventory_root,
+        schema_revision=checkpoint.schema_revision,
         image_digests={
+            "loom-capacity-executor": "sha256:" + "e" * 64,
+            "loom-capacity-manager": "sha256:" + "d" * 64,
             "loom-control-plane": "sha256:" + "8" * 64,
             "loom-egress-xds": "sha256:" + "3" * 64,
             "loom-execution-actuator": "sha256:" + "b" * 64,
@@ -281,6 +437,22 @@ def _plan() -> RehearsalPlan:
             agent="oracle",
         ),
         gb10_authority=gb10_rehearsal_authority(),
+        checkpoint_schema_version=3,
+        checkpoint_component_sha256=checkpoint.component_sha256,
+        database_authority_digest=checkpoint.database_authority_digest,
+        public_schema_revision=checkpoint.public_schema_revision,
+        capacity_guard_schema_revision=checkpoint.capacity_guard_schema_revision,
+        manager_configuration_epoch=checkpoint.manager_configuration_epoch,
+        manager_configuration_digest=checkpoint.manager_configuration_digest,
+        manager_authority_incarnation=checkpoint.manager_authority_incarnation,
+        manager_writer_epoch=checkpoint.manager_writer_epoch,
+        manager_execution_state=checkpoint.manager_execution_state,
+        manager_execution_epoch=checkpoint.manager_execution_epoch,
+        manager_execution_manifest_sha256=checkpoint.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(
+            checkpoint.manager_executable_new_capacity_ceiling
+        ),
+        manager_increase_freeze=checkpoint.manager_increase_freeze,
     )
 
 
@@ -408,7 +580,12 @@ def _release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
 
 
 def _secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
-    names = ("loom-admin-secret", "loom-secrets", "loom-staging-tls")
+    names = (
+        "loom-admin-secret",
+        "loom-secrets",
+        "loom-staging-tls",
+        "loom-capacity-manager",
+    )
     payload = yaml.safe_dump_all(
         [
             {
@@ -432,6 +609,19 @@ def _secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
         source_component_sha256="7" * 64,
         artifact_sha256=hashlib.sha256(payload).hexdigest(),
     )
+
+
+def _default_deny_policy(plan: RehearsalPlan) -> dict[str, object]:
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+            "name": "loom-rehearsal-default-deny",
+            "namespace": plan.resources.namespace,
+        },
+        "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
+    }
 
 
 def test_namespace_uses_fixed_scoped_apply_and_exact_readback() -> None:
@@ -509,8 +699,14 @@ def test_namespace_returns_normalized_blockers_without_command_output() -> None:
     assert blocked.blockers == {"namespace": "network-policy-failed"}
 
 
-def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
+def test_database_streams_exact_checkpoint_into_restricted_pod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     plan = _plan()
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor.inspect_critical_checkpoint",
+        lambda *_args, **_kwargs: _critical_checkpoint(),
+    )
     postgres_config = "sha256:" + "a" * 64
     postgres_manifest = "sha256:" + "b" * 64
     postgres_import = "sha256:" + "e" * 64
@@ -583,6 +779,13 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
         if "psql" in argv:
             assert "--username=loom_rehearsal" in argv
             command = next(item for item in argv if item.startswith("--command="))
+            if "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in command:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    json.dumps(_database_authority_observation()) + "\n",
+                    "",
+                )
             if "to_regclass" in command:
                 record = {"database": plan.resources.database, "restored": restored}
             else:
@@ -604,6 +807,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
 
     assert outcome.passed
     assert outcome.details == {
+        "database-authority-sha256": plan.database_authority_digest,
         "database": plan.resources.database,
         "schema-revision": plan.schema_revision,
         "status": "restored",
@@ -620,6 +824,23 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     assert "--jobs=4" in restore_call
     assert "--username=loom_rehearsal" in restore_call
     assert restore_call[-1] == "/var/lib/postgresql/data/loom-rehearsal.dump"
+    authority_call = next(
+        call[0]
+        for call in calls
+        if "psql" in call[0]
+        and any(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in item
+            for item in call[0]
+        )
+    )
+    authority_sql = next(item for item in authority_call if item.startswith("--command="))
+    assert "FROM public.alembic_version" in authority_sql
+    assert "FROM loom_capacity_guard.capacity_guard_alembic_version" in authority_sql
+    assert "FROM public.capacity_configuration_epochs" in authority_sql
+    assert "FROM public.capacity_authority_state" in authority_sql
+    assert calls.index(next(call for call in calls if call[0] == restore_call)) < calls.index(
+        next(call for call in calls if call[0] == authority_call)
+    )
     remove_call = next(call[0] for call in calls if "rm" in call[0])
     assert remove_call[-4:] == (
         "rm",
@@ -641,6 +862,82 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     }
     assert manifest["spec"]["containers"][1]["image"] == ("loom-control-plane:" + plan.image_tag)
     assert manifest["spec"]["containers"][1]["command"] == ["/bin/sleep", "infinity"]
+
+
+@pytest.mark.parametrize(
+    "drifted_component",
+    ("database_authority", "k8s_secrets", "object_inventory", "postgres"),
+)
+def test_database_revalidates_every_checkpoint_component_immediately_before_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    drifted_component: str,
+) -> None:
+    plan = _plan()
+    commands: list[tuple[str, ...]] = []
+    components = dict(plan.checkpoint_component_sha256 or {})
+    components[drifted_component] = "0" * 64
+    observed = SimpleNamespace(
+        evidence_digest=plan.checkpoint_evidence_sha256,
+        manifest_path=plan.checkpoint_manifest_path,
+        manifest_sha256=plan.checkpoint_manifest_sha256,
+        component_sha256=components,
+        mutation_epoch=plan.mutation_epoch,
+        db_snapshot_identity=plan.db_snapshot_identity,
+        object_inventory_root=plan.object_inventory_root,
+        schema_revision=plan.schema_revision,
+        database_authority_digest=plan.database_authority_digest,
+        public_schema_revision=plan.public_schema_revision,
+        capacity_guard_schema_revision=plan.capacity_guard_schema_revision,
+        manager_configuration_epoch=plan.manager_configuration_epoch,
+        manager_configuration_digest=plan.manager_configuration_digest,
+        manager_authority_incarnation=plan.manager_authority_incarnation,
+        manager_writer_epoch=plan.manager_writer_epoch,
+        manager_execution_state=plan.manager_execution_state,
+        manager_execution_epoch=plan.manager_execution_epoch,
+        manager_execution_manifest_sha256=plan.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(plan.manager_executable_new_capacity_ceiling),
+        manager_increase_freeze=plan.manager_increase_freeze,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor.inspect_critical_checkpoint",
+        lambda *_args, **_kwargs: observed,
+        raising=False,
+    )
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_load_images", lambda *_args: True)
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_runtime_image_ids",
+        lambda _self, _plan, names: {name: (plan.image_digests[name],) for name in names},
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor._database_pod_matches",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_command", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_database_identity", lambda *_args: None)
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_text_command",
+        lambda *_args, **_kwargs: (
+            plan.db_snapshot_identity.removeprefix("pgdump-sha256:")
+            + "  /var/lib/postgresql/data/loom-rehearsal.dump\n"
+        ),
+    )
+
+    def status(_self, argv, **_kwargs):
+        commands.append(tuple(argv))
+        return True
+
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_status", status)
+    executor = IsolatedRehearsalExecutor(
+        stream_run=lambda argv, _source, _timeout: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+
+    outcome = executor.execute("rehearsal.db-clone", plan)
+
+    assert outcome.blockers == {"database": "checkpoint-readback-drift"}
+    assert not any("pg_restore" in command for command in commands)
+    assert sum("rm" in command for command in commands) == 1
 
 
 @pytest.mark.parametrize(
@@ -697,6 +994,11 @@ def test_database_staged_restore_fails_closed(
         IsolatedRehearsalExecutor,
         "_database_identity",
         lambda _self, _plan: None,
+    )
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_checkpoint_matches_plan",
+        lambda _self, _plan: True,
     )
 
     def text_command(*_args, **_kwargs):
@@ -973,11 +1275,12 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
         calls.append(command)
         if "psql" in command:
             sql = next(item for item in command if item.startswith("--command="))
-            record = (
-                {"database": plan.resources.database, "restored": True}
-                if "to_regclass" in sql
-                else {"schema_revision": revision}
-            )
+            if "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in sql:
+                record = _database_authority_observation(public_revision=revision)
+            elif "to_regclass" in sql:
+                record = {"database": plan.resources.database, "restored": True}
+            else:
+                record = {"schema_revision": revision}
             return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
         if "alembic" in command:
             revision = plan.migration_target_revision
@@ -988,6 +1291,10 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
 
     assert outcome.passed
     assert outcome.details == {
+        "database-authority-after-sha256": _database_authority(
+            public_revision=plan.migration_target_revision
+        ).digest,
+        "database-authority-before-sha256": plan.database_authority_digest,
         "plan-sha256": plan.migration_plan_sha256,
         "schema-revision": plan.migration_target_revision,
         "status": "migrated",
@@ -998,6 +1305,104 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
     db_url = next(item for item in migration if item.startswith("LOOM_DB_URL="))
     assert plan.resources.database in db_url
     assert "loom-staging" not in db_url
+    revision_queries = [
+        next(item for item in command if item.startswith("--command="))
+        for command in calls
+        if "psql" in command
+        and not any(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in item
+            for item in command
+        )
+    ]
+    assert all("FROM public.alembic_version" in query for query in revision_queries[1::2])
+    authority_indexes = [
+        index
+        for index, command in enumerate(calls)
+        if any(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in item
+            for item in command
+        )
+    ]
+    migration_index = calls.index(migration)
+    assert len(authority_indexes) == 2
+    assert authority_indexes[0] < migration_index < authority_indexes[1]
+
+
+@pytest.mark.parametrize(
+    ("field", "drifted"),
+    [
+        ("capacity_guard_schema_revision", "guard_0028"),
+        ("configuration_epoch", 10),
+        ("configuration_digest", "0" * 64),
+        ("authority_incarnation", uuid.UUID("00000000-0000-4000-8000-0000000000bb")),
+        ("writer_epoch", 5),
+        ("execution_state", "active"),
+        ("execution_epoch", 1),
+        ("execution_manifest_sha256", "0" * 64),
+        ("executable_new_capacity_ceiling", 1),
+        ("increase_freeze", False),
+    ],
+)
+def test_migration_rejects_each_protected_authority_change(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    drifted: object,
+) -> None:
+    plan = _plan()
+    before = _database_authority()
+    expected_after = _database_authority(public_revision=plan.migration_target_revision)
+    after_values = {
+        "public_schema_revision": expected_after.public_schema_revision,
+        "capacity_guard_schema_revision": expected_after.capacity_guard_schema_revision,
+        "configuration_epoch": expected_after.configuration_epoch,
+        "configuration_digest": expected_after.configuration_digest,
+        "authority_incarnation": expected_after.authority_incarnation,
+        "writer_epoch": expected_after.writer_epoch,
+        "execution_state": expected_after.execution_state,
+        "execution_epoch": expected_after.execution_epoch,
+        "execution_manifest_sha256": expected_after.execution_manifest_sha256,
+        "executable_new_capacity_ceiling": expected_after.executable_new_capacity_ceiling,
+        "increase_freeze": expected_after.increase_freeze,
+    }
+    after_values[field] = drifted
+    after = SimpleNamespace(**after_values)
+    identities = iter(
+        (
+            {
+                "database": plan.resources.database,
+                "restored": True,
+                "schema_revision": plan.schema_revision,
+            },
+            {
+                "database": plan.resources.database,
+                "restored": True,
+                "schema_revision": plan.migration_target_revision,
+            },
+        )
+    )
+    authorities = iter((before, after))
+    migration_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_database_identity",
+        lambda *_args: next(identities),
+    )
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_database_authority",
+        lambda *_args: next(authorities),
+    )
+
+    def status(_self, argv, **_kwargs):
+        migration_calls.append(tuple(argv))
+        return True
+
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_status", status)
+
+    outcome = IsolatedRehearsalExecutor().execute("rehearsal.migration", plan)
+
+    assert outcome.blockers == {"migration": "upgrade-authority-drift"}
+    assert sum("alembic" in command for command in migration_calls) == 1
 
 
 def test_migration_is_idempotent_and_rejects_unexpected_baseline() -> None:
@@ -1011,11 +1416,12 @@ def test_migration_is_idempotent_and_rejects_unexpected_baseline() -> None:
         if "psql" not in command:
             raise AssertionError(argv)
         sql = next(item for item in command if item.startswith("--command="))
-        record = (
-            {"database": plan.resources.database, "restored": True}
-            if "to_regclass" in sql
-            else {"schema_revision": revision}
-        )
+        if "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in sql:
+            record = _database_authority_observation(public_revision=revision)
+        elif "to_regclass" in sql:
+            record = {"database": plan.resources.database, "restored": True}
+        else:
+            record = {"schema_revision": revision}
         return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
 
     outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.migration", plan)
@@ -1114,7 +1520,12 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
             resource = resources[("Service", name)]
             return subprocess.CompletedProcess(argv, 0, json.dumps(resource), "")
         if "networkpolicy" in command and "get" in command:
-            resource = resources[("NetworkPolicy", "loom-rehearsal-release")]
+            name = command[command.index("networkpolicy") + 1]
+            resource = (
+                _default_deny_policy(plan)
+                if name == "loom-rehearsal-default-deny"
+                else resources[("NetworkPolicy", "loom-rehearsal-release")]
+            )
             return subprocess.CompletedProcess(argv, 0, json.dumps(resource), "")
         raise AssertionError(command)
 
@@ -1131,6 +1542,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     assert outcome.passed
     assert outcome.details["manifest-sha256"] == release.artifact_sha256
     assert outcome.details["secret-artifact-sha256"] == secrets.artifact_sha256
+    assert outcome.details["secret-inventory"] == ",".join(secrets.secret_names)
     assert outcome.details["status"] == "ready"
     validation_digest = outcome.details["external-supervisor-validation-sha256"]
     assert len(validation_digest) == 64
@@ -1143,6 +1555,11 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     assert secret_apply == secrets.payload
     secret_apply_index = next(
         index for index, (_command, payload) in enumerate(calls) if payload == secrets.payload
+    )
+    boundary_index = next(
+        index
+        for index, (command, _payload) in enumerate(calls)
+        if "networkpolicy" in command and "loom-rehearsal-default-deny" in command
     )
     secret_readback_indexes = [
         index
@@ -1159,7 +1576,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         index for index, (_command, payload) in enumerate(calls) if payload == release.payload
     )
     assert len(secret_readback_indexes) == len(secrets.secret_names)
-    assert secret_apply_index < min(secret_readback_indexes)
+    assert boundary_index < secret_apply_index < min(secret_readback_indexes)
     policy_seed_index, policy_seed_argv = next(
         (index, command)
         for index, (command, payload) in enumerate(calls)
@@ -1234,6 +1651,83 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     assert witness_apply_command[-4:] == ("-f", "-", "-o", "json")
     assert all(not ("get" in command and "configmap" in command) for command, _payload in calls)
     assert policy_seed_index < witness_seed_index < validation_index
+
+
+def test_release_revalidates_default_deny_before_any_secret_apply() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    secrets = _secret_artifact(plan)
+    secret_applied = False
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, payload, _timeout):
+        nonlocal secret_applied
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if payload == secrets.payload:
+            secret_applied = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "networkpolicy" in command and "get" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy"}',
+                "",
+            )
+        if "secret" in command and "get" in command:
+            name = command[command.index("secret") + 1]
+            return subprocess.CompletedProcess(argv, 0, f"{name}\t{plan.plan_digest}\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        secret_artifacts=lambda _plan: secrets,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.release", plan)
+
+    assert outcome.blockers == {"release": "default-deny-readback-drift"}
+    assert not secret_applied
+    boundary_call = next(command for command in calls if "networkpolicy" in command)
+    assert "loom-rehearsal-default-deny" in boundary_call
+
+
+def test_release_rejects_secret_checkpoint_component_drift_before_apply() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    secrets = replace(_secret_artifact(plan), source_component_sha256="0" * 64)
+    secret_applied = False
+
+    def run(argv, payload, _timeout):
+        nonlocal secret_applied
+        command = tuple(argv)
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if "networkpolicy" in command and "get" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_default_deny_policy(plan)),
+                "",
+            )
+        if payload == secrets.payload:
+            secret_applied = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        secret_artifacts=lambda _plan: secrets,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.release", plan)
+
+    assert outcome.blockers == {"release": "artifact-validation-failed"}
+    assert not secret_applied
 
 
 def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() -> None:
@@ -1590,6 +2084,13 @@ def test_release_rejects_external_supervisor_artifact_drift_after_secret_readbac
         if command[:3] == ("docker", "image", "inspect"):
             name = command[-1].split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if "networkpolicy" in command and "get" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_default_deny_policy(plan)),
+                "",
+            )
         if payload == secrets.payload:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if (
@@ -1635,6 +2136,13 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         if command[:3] == ("docker", "image", "inspect"):
             name = command[-1].split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if "networkpolicy" in command and "get" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_default_deny_policy(plan)),
+                "",
+            )
         if command[:3] == ("systemctl", "--user", "show"):
             return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
@@ -2460,7 +2968,14 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
 
     assert outcome.passed and outcome.cleanup_verified
     assert sleeps == [0.1, 0.1]
-    assert outcome.details["status"] == "absent"
+    assert outcome.details == {
+        "database": plan.resources.database,
+        "database-status": "absent",
+        "namespace": plan.resources.namespace,
+        "namespace-status": "absent",
+        "status": "absent",
+        "unit": plan.resources.systemd_unit,
+    }
     delete = next(command for command, _payload in calls if "--raw" in command)
     assert delete[-2:] == ("-f", "-")
     assert plan.resources.namespace in delete[-3]

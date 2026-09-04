@@ -368,6 +368,44 @@ class StaticPrincipalVerifier:
         return self._principal
 
 
+class RecordingRollbackStore:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_actor: str | None = None
+        self.last_request: dict[str, object] | None = None
+        self.last_idempotency_key: UUID | None = None
+
+    async def rollback_configuration(
+        self,
+        _session,  # type: ignore[no-untyped-def]
+        value,  # type: ignore[no-untyped-def]
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> dict[str, object]:
+        self.calls += 1
+        self.last_actor = actor
+        self.last_request = value.model_dump(mode="json")
+        self.last_idempotency_key = idempotency_key
+        return {
+            "configuration_epoch": 3,
+            "digest": "9" * 64,
+            "snapshot": {
+                "schema_version": 1,
+                "configuration_epoch": 3,
+                "fleet": {
+                    "schema_version": 1,
+                    "scope": "fleet",
+                    "generation": 2,
+                    "digest": "8" * 64,
+                    "subject_id": None,
+                    "subject_incarnation": None,
+                },
+                "subjects": [],
+            },
+        }
+
+
 def _owner_file(path: Path, value: str) -> Path:
     path.write_text(value, encoding="utf-8")
     path.chmod(0o600)
@@ -1005,7 +1043,12 @@ async def execution_preparation_api_context(
                     _principal(
                         "execution-preparer",
                         EXECUTION_PREPARE_TOKEN,
-                        ["capacity:execution:prepare", "capacity:reconcile"],
+                        ["capacity:execution:prepare"],
+                    ),
+                    _principal(
+                        "execution-reconciler",
+                        EXECUTION_READ_TOKEN + "-reconcile",
+                        ["capacity:reconcile"],
                     ),
                     _principal(
                         "execution-aborter",
@@ -1174,8 +1217,8 @@ def _prepare_ready_execution(
             json=inventory.model_dump(mode="json"),
         )
         assert inventoried.status_code == 200, inventoried.text
-        confirmation_sequence, confirmation_digest = (
-            canonical_inventory_confirmation_journal_head(inventory)
+        confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+            inventory
         )
         confirmed = client.put(
             f"/v2/executors/{pool_id}/heartbeat",
@@ -1229,8 +1272,8 @@ async def _store_activation_request(
             records=(),
         )
         await execution_store.ingest_executor_inventory(session, inventory)
-        confirmation_sequence, confirmation_digest = (
-            canonical_inventory_confirmation_journal_head(inventory)
+        confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+            inventory
         )
         await execution_store.heartbeat_executor(
             session,
@@ -1289,9 +1332,11 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
     routes = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes}
     assert routes == {
         ("/healthz", ("GET",)),
+        ("/v1/configuration", ("GET",)),
         ("/v1/config-proposals/fleet", ("PUT",)),
         ("/v1/config-proposals/subjects/{subject_id}", ("PUT",)),
         ("/v1/config-activations", ("POST",)),
+        ("/v1/configuration-rollbacks", ("POST",)),
         ("/v1/development-projections/{subject_id}", ("PUT",)),
         ("/v1/reports/demand/{subject_id}", ("PUT",)),
         (
@@ -1725,9 +1770,9 @@ def test_execution_activation_route_is_least_scope_atomic_and_exactly_replayable
     stale_digest = client.post(
         path,
         headers=headers | {"Idempotency-Key": str(UUID(int=15127))},
-        json=activation.model_copy(
-            update={"prepared_readiness_sha256": "f" * 64}
-        ).model_dump(mode="json"),
+        json=activation.model_copy(update={"prepared_readiness_sha256": "f" * 64}).model_dump(
+            mode="json"
+        ),
     )
     assert stale_digest.status_code == 409
     assert stale_digest.json() == {"detail": "capacity state conflict"}
@@ -1769,9 +1814,9 @@ def test_execution_activation_route_is_least_scope_atomic_and_exactly_replayable
     changed = client.post(
         path,
         headers=headers | {"Idempotency-Key": str(activation_key)},
-        json=activation.model_copy(
-            update={"prepared_readiness_sha256": "f" * 64}
-        ).model_dump(mode="json"),
+        json=activation.model_copy(update={"prepared_readiness_sha256": "f" * 64}).model_dump(
+            mode="json"
+        ),
     )
     assert changed.status_code == 409
     assert changed.json() == {"detail": "capacity state conflict"}
@@ -1855,8 +1900,9 @@ def test_execution_drain_and_retirement_routes_require_exact_final_evidence(
         == 403
     )
     assert (
-        client.post(drain_path, headers=drain_headers, json=drain.model_dump(mode="json"))
-        .status_code
+        client.post(
+            drain_path, headers=drain_headers, json=drain.model_dump(mode="json")
+        ).status_code
         == 422
     )
     malformed_drain = client.post(
@@ -1960,8 +2006,8 @@ def test_execution_drain_and_retirement_routes_require_exact_final_evidence(
             json=final_inventory.model_dump(mode="json"),
         )
         assert inventoried.status_code == 200, inventoried.text
-        confirmation_sequence, confirmation_digest = (
-            canonical_inventory_confirmation_journal_head(final_inventory)
+        confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+            final_inventory
         )
         final_heartbeat = ExecutableExecutorHeartbeatV2(
             execution=active,
@@ -1991,9 +2037,9 @@ def test_execution_drain_and_retirement_routes_require_exact_final_evidence(
     assert [item["pool_id"] for item in items] == ["gb10", "oldlab"]
     assert all(item["retirement_safe"] is True for item in items)
     final_checkpoints = tuple(
-            ExecutionRetirementExecutorCheckpointV2(
-                executor_id=item["executor_id"],
-                executor_incarnation=UUID(item["executor_incarnation"]),
+        ExecutionRetirementExecutorCheckpointV2(
+            executor_id=item["executor_id"],
+            executor_incarnation=UUID(item["executor_incarnation"]),
             pool_id=item["pool_id"],
             pool_generation=item["pool_generation"],
             heartbeat_sequence=item["heartbeat_sequence"],
@@ -2005,9 +2051,7 @@ def test_execution_drain_and_retirement_routes_require_exact_final_evidence(
         )
         for item in items
     )
-    retirement = unsafe_retirement.model_copy(
-        update={"executor_checkpoints": final_checkpoints}
-    )
+    retirement = unsafe_retirement.model_copy(update={"executor_checkpoints": final_checkpoints})
     assert client.post(retire_path, json=retirement.model_dump(mode="json")).status_code == 401
     assert (
         client.post(
@@ -2067,11 +2111,7 @@ def test_execution_drain_and_retirement_routes_require_exact_final_evidence(
             update={
                 "executor_checkpoints": (
                     final_checkpoints[0].model_copy(
-                        update={
-                            "heartbeat_sequence": (
-                                final_checkpoints[0].heartbeat_sequence + 1
-                            )
-                        }
+                        update={"heartbeat_sequence": (final_checkpoints[0].heartbeat_sequence + 1)}
                     ),
                     final_checkpoints[1],
                 )
@@ -2442,6 +2482,58 @@ def test_executable_status_is_read_only_and_shadow_is_never_worker_available(
         "intent_state_counts": {},
         "blockers": ["manager-shadow"],
     }
+
+
+def test_active_configuration_read_returns_exact_fleet_and_subjects(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    fleet = fleet_with_development_template()
+    subject = subject_configuration(fleet)
+
+    response = client.get("/v1/configuration", headers=operator_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": 1,
+        "configuration": {
+            "schema_version": 1,
+            "configuration_epoch": 1,
+            "fleet": {
+                "schema_version": 1,
+                "scope": "fleet",
+                "generation": fleet.fleet_generation,
+                "digest": canonical_digest(fleet),
+                "subject_id": None,
+                "subject_incarnation": None,
+            },
+            "subjects": [
+                {
+                    "schema_version": 1,
+                    "scope": "subject",
+                    "generation": subject.configuration_generation,
+                    "digest": canonical_digest(subject),
+                    "subject_id": str(subject.subject_id),
+                    "subject_incarnation": str(subject.subject_incarnation),
+                }
+            ],
+        },
+        "fleet": fleet.model_dump(mode="json"),
+        "subjects": [subject.model_dump(mode="json")],
+    }
+
+
+def test_active_configuration_read_requires_capacity_read_scope(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    reporter_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+
+    response = client.get("/v1/configuration", headers=reporter_headers)
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "forbidden"}
 
 
 @pytest.fixture
@@ -3227,8 +3319,7 @@ def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(
     )
     assert (
         client.put(
-            f"/v2/subjects/{UUID(int=999)}/admission-acknowledgements/"
-            f"{proposal.proposal_id}",
+            f"/v2/subjects/{UUID(int=999)}/admission-acknowledgements/{proposal.proposal_id}",
             headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
             json=acknowledgement.model_dump(mode="json"),
         ).status_code
@@ -3237,8 +3328,7 @@ def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(
     wrong_subject = acknowledgement.model_copy(update={"subject_id": UUID(int=999)})
     assert (
         client.put(
-            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/"
-            f"{proposal.proposal_id}",
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{proposal.proposal_id}",
             headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
             json=wrong_subject.model_dump(mode="json"),
         ).status_code
@@ -3249,16 +3339,13 @@ def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(
     )
     assert (
         client.put(
-            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/"
-            f"{proposal.proposal_id}",
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{proposal.proposal_id}",
             headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
             json=wrong_subject_incarnation.model_dump(mode="json"),
         ).status_code
         == 403
     )
-    wrong_reporter = acknowledgement.model_copy(
-        update={"reporter_incarnation": UUID(int=999)}
-    )
+    wrong_reporter = acknowledgement.model_copy(update={"reporter_incarnation": UUID(int=999)})
     assert (
         client.put(
             f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{proposal.proposal_id}",
@@ -3269,8 +3356,7 @@ def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(
     )
     assert (
         client.put(
-            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/"
-            f"{proposal.proposal_id}",
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{proposal.proposal_id}",
             headers=executor_headers | {"Idempotency-Key": str(uuid4())},
             json=acknowledgement.model_dump(mode="json"),
         ).status_code
@@ -3288,8 +3374,7 @@ def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(
     assert closed.json()["executable"] is False
     assert (
         client.put(
-            f"/v2/subjects/{SUBJECT_ID}/admission-closures/{UUID(int=999)}/"
-            "acknowledgements",
+            f"/v2/subjects/{SUBJECT_ID}/admission-closures/{UUID(int=999)}/acknowledgements",
             headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
             json=closure_acknowledgement.model_dump(mode="json"),
         ).status_code
@@ -3458,6 +3543,81 @@ def test_lifecycle_can_restore_an_unregistered_personal_subject_from_full_eviden
     assert response.json()["subject"]["configuration_generation"] == (
         projection.configuration_generation
     )
+
+
+def test_configuration_rollback_route_requires_distinct_scope(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    rollback_store = RecordingRollbackStore()
+    request = {
+        "schema_version": 1,
+        "expected_configuration_epoch": 2,
+        "expected_configuration_digest": "1" * 64,
+        "restore_configuration_epoch": 1,
+        "restore_configuration_digest": "2" * 64,
+        "rollback_evidence_sha256": "3" * 64,
+    }
+    key = UUID("00000000-0000-4000-8000-00000000b331")
+
+    app = create_app(
+        settings,
+        verifier=StaticPrincipalVerifier(
+            CapacityPrincipal(
+                principal_id="rollback-operator",
+                scopes=frozenset({"capacity:configure:rollback"}),  # type: ignore[arg-type]
+                subject_id=None,
+                subject_incarnation=None,
+                demand_reporter_incarnation=None,
+                pool_id=None,
+                pool_reporter_incarnation=None,
+                executor_id=None,
+                executor_incarnation=None,
+                executor_pool_generation=None,
+            )
+        ),
+    )
+    with TestClient(app) as rollback_client:
+        app.state.store = rollback_store
+        response = rollback_client.post(
+            "/v1/configuration-rollbacks",
+            headers={"Authorization": "Bearer injected", "Idempotency-Key": str(key)},
+            json=request,
+        )
+
+    assert response.status_code == 200, response.text
+    assert rollback_store.calls == 1
+    assert rollback_store.last_actor == "rollback-operator"
+    assert rollback_store.last_request == request
+    assert rollback_store.last_idempotency_key == key
+
+    app = create_app(
+        settings,
+        verifier=StaticPrincipalVerifier(
+            CapacityPrincipal(
+                principal_id="activate-only-operator",
+                scopes=frozenset({"capacity:configure:activate"}),  # type: ignore[arg-type]
+                subject_id=None,
+                subject_incarnation=None,
+                demand_reporter_incarnation=None,
+                pool_id=None,
+                pool_reporter_incarnation=None,
+                executor_id=None,
+                executor_incarnation=None,
+                executor_pool_generation=None,
+            )
+        ),
+    )
+    with TestClient(app) as activate_client:
+        app.state.store = rollback_store
+        forbidden = activate_client.post(
+            "/v1/configuration-rollbacks",
+            headers={"Authorization": "Bearer injected", "Idempotency-Key": str(uuid4())},
+            json=request,
+        )
+
+    assert forbidden.status_code == 403
+    assert forbidden.json() == {"detail": "forbidden"}
 
 
 async def test_streaming_body_limit_rejects_oversized_body_without_content_length() -> None:

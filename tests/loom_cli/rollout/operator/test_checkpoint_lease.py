@@ -3,18 +3,25 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from loom_cli.cluster_backup_guard import backup_manifest_sha256, write_backup_manifest
 from loom_cli.rollout.operator.backup import VerifiedBackup
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.checkpoint_lease import (
     CheckpointLeaseError,
     RestoreVerificationEvidence,
     build_restore_verified_lease,
     inspect_critical_checkpoint,
+)
+from loom_cli.rollout.operator.protected_secret_inventory import (
+    PROTECTED_SECRET_SPECS,
+    build_secret_inventory,
 )
 from loom_cli.rollout.operator.rollout_checkpoint import (
     ImmutableObjectReference,
@@ -31,19 +38,65 @@ def _private_file(path: Path, payload: bytes) -> None:
     path.chmod(0o600)
 
 
-def _checkpoint(tmp_path: Path, *, schema_version: int = 2) -> VerifiedBackup:
+def _checkpoint(tmp_path: Path, *, schema_version: int = 3) -> VerifiedBackup:
     root = tmp_path / "20260719T200000Z-req-checkpoint1"
     root.mkdir(mode=0o700)
     postgres = root / "postgres" / "loom.dump"
     secrets = root / "secrets"
     secrets.mkdir(mode=0o700)
     _private_file(postgres, b"PGDMP\x00critical-snapshot")
-    _private_file(secrets / "loom-db-auth.json", b'{"kind":"Secret"}\n')
+    for name in ("loom-admin-secret", "loom-secrets", "loom-staging-tls"):
+        _private_file(
+            secrets / f"{name}.yaml",
+            (
+                json.dumps(
+                    {
+                        "apiVersion": "v1",
+                        "data": {"token": "c2Vuc2l0aXZl"},
+                        "kind": "Secret",
+                        "metadata": {"name": name, "namespace": "loom-staging"},
+                        "type": "Opaque",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode(),
+        )
+    observations = {}
+    for spec in PROTECTED_SECRET_SPECS:
+        present = spec.required
+        payload = (
+            json.dumps(
+                {
+                    "apiVersion": "v1",
+                    "data": {"token": "c2Vuc2l0aXZl"},
+                    "kind": "Secret",
+                    "metadata": {
+                        "name": spec.name,
+                        "namespace": spec.namespace,
+                        "resourceVersion": "7",
+                        "uid": "11111111-1111-4111-8111-111111111111",
+                    },
+                    "type": "Opaque",
+                }
+            ).encode()
+            if present
+            else None
+        )
+        observations[(spec.namespace, spec.name)] = (payload, payload)
+    secret_inventory = build_secret_inventory(observations)
+    for filename, payload in secret_inventory.exported_objects.items():
+        _private_file(secrets / filename, payload)
+    _private_file(
+        secrets / "protected-capacity-secret-inventory.json",
+        secret_inventory.inventory_payload,
+    )
     inventory = build_immutable_inventory(
         environment="staging",
         namespace="loom-staging",
         mutation_epoch=17,
-        schema_revision="0067",
+        schema_revision="0067_global_capacity",
         created_at=NOW,
         objects=(
             ImmutableObjectReference(
@@ -73,8 +126,25 @@ def _checkpoint(tmp_path: Path, *, schema_version: int = 2) -> VerifiedBackup:
         "k8s_secrets": secrets,
         "postgres": postgres,
     }
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         components["object_inventory"] = object_inventory
+        if schema_version == 3:
+            authority = DatabaseAuthorityEvidence(
+                public_schema_revision="0067_global_capacity",
+                capacity_guard_schema_revision="guard_0027",
+                configuration_epoch=9,
+                configuration_digest="9" * 64,
+                authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+                writer_epoch=4,
+                execution_state="shadow",
+                execution_epoch=0,
+                execution_manifest_sha256=None,
+                executable_new_capacity_ceiling=0,
+                increase_freeze=True,
+            )
+            authority_path = root / "database-authority.json"
+            _private_file(authority_path, authority.payload)
+            components["database_authority"] = authority_path
     else:
         minio = root / "minio"
         minio.mkdir(mode=0o700)
@@ -113,12 +183,28 @@ def _restore(checkpoint, **changes: object) -> RestoreVerificationEvidence:
         "namespace": checkpoint.namespace,
         "report_sha256": "f" * 64,
         "verified_at": NOW + timedelta(minutes=5),
+        "checkpoint_schema_version": 3,
+        "component_sha256": checkpoint.component_sha256,
+        "database_authority_digest": checkpoint.database_authority_digest,
+        "public_schema_revision": checkpoint.public_schema_revision,
+        "capacity_guard_schema_revision": checkpoint.capacity_guard_schema_revision,
+        "manager_configuration_epoch": checkpoint.manager_configuration_epoch,
+        "manager_configuration_digest": checkpoint.manager_configuration_digest,
+        "manager_authority_incarnation": checkpoint.manager_authority_incarnation,
+        "manager_writer_epoch": checkpoint.manager_writer_epoch,
+        "manager_execution_state": checkpoint.manager_execution_state,
+        "manager_execution_epoch": checkpoint.manager_execution_epoch,
+        "manager_execution_manifest_sha256": checkpoint.manager_execution_manifest_sha256,
+        "manager_executable_new_capacity_ceiling": (
+            checkpoint.manager_executable_new_capacity_ceiling
+        ),
+        "manager_increase_freeze": checkpoint.manager_increase_freeze,
     }
     values.update(changes)
     return RestoreVerificationEvidence(**values)  # type: ignore[arg-type]
 
 
-def test_schema_v2_checkpoint_requires_isolated_restore_before_lease(tmp_path: Path) -> None:
+def test_schema_v3_checkpoint_carries_typed_database_authority(tmp_path: Path) -> None:
     backup = _checkpoint(tmp_path)
 
     checkpoint = inspect_critical_checkpoint(
@@ -136,19 +222,136 @@ def test_schema_v2_checkpoint_requires_isolated_restore_before_lease(tmp_path: P
     )
 
     assert checkpoint.mutation_epoch == 17
-    assert checkpoint.schema_revision == "0067"
+    assert checkpoint.schema_revision == "0067_global_capacity"
     assert checkpoint.db_snapshot_identity == (
         "pgdump-sha256:" + checkpoint.component_sha256["postgres"]
     )
+    assert checkpoint.database_authority_digest == checkpoint.component_sha256["database_authority"]
+    assert checkpoint.public_schema_revision == "0067_global_capacity"
+    assert checkpoint.capacity_guard_schema_revision == "guard_0027"
+    assert checkpoint.manager_configuration_epoch == 9
+    assert checkpoint.manager_configuration_digest == "9" * 64
+    assert checkpoint.manager_authority_incarnation == UUID("00000000-0000-4000-8000-0000000000aa")
+    assert checkpoint.manager_writer_epoch == 4
     assert lease.source_request_id == "req-checkpoint1"
     assert lease.restore_verified_at == NOW + timedelta(minutes=5)
     assert lease.component_sha256 == checkpoint.component_sha256
+    assert lease.checkpoint_schema_version == 3
+    assert lease.database_authority_digest == checkpoint.database_authority_digest
+    assert lease.manager_configuration_epoch == checkpoint.manager_configuration_epoch
+
+
+def test_restore_report_digest_is_bound_into_lease(tmp_path: Path) -> None:
+    checkpoint = inspect_critical_checkpoint(
+        _checkpoint(tmp_path),
+        request_id="req-checkpoint1",
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.geteuid(),
+        now=NOW + timedelta(minutes=1),
+    )
+    restore = _restore(checkpoint)
+    lease = build_restore_verified_lease(checkpoint, restore, expires_at=NOW + timedelta(hours=6))
+    assert lease.restore_report_sha256 == restore.report_sha256
+    alternate = build_restore_verified_lease(
+        checkpoint,
+        replace(restore, report_sha256="e" * 64),
+        expires_at=NOW + timedelta(hours=6),
+    )
+    assert alternate.restore_report_sha256 != lease.restore_report_sha256
+
+
+def test_restore_evidence_schema_three_round_trip_rejects_mixed_fields(tmp_path: Path) -> None:
+    checkpoint = inspect_critical_checkpoint(
+        _checkpoint(tmp_path),
+        request_id="req-checkpoint1",
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.geteuid(),
+        now=NOW + timedelta(minutes=1),
+    )
+    evidence = _restore(checkpoint)
+
+    record = evidence.to_dict()
+    assert record["schema_version"] == 2
+    assert record["checkpoint_schema_version"] == 3
+    assert RestoreVerificationEvidence.from_dict(record) == evidence
+
+    record.pop("database_authority_digest")
+    with pytest.raises(ValueError, match="schema"):
+        RestoreVerificationEvidence.from_dict(record)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capacity_guard_schema_revision", "guard_0027"),
+        ("manager_execution_manifest_sha256", "f" * 64),
+    ],
+)
+def test_historical_restore_constructor_rejects_schema_three_only_fields(
+    field: str,
+    value: str,
+) -> None:
+    historical = RestoreVerificationEvidence(
+        verification_id="restore-checkpoint1",
+        request_id="req-checkpoint1",
+        checkpoint_evidence_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        db_snapshot_identity="pgdump-sha256:" + "c" * 64,
+        object_inventory_root="d" * 64,
+        mutation_epoch=17,
+        schema_revision="0067_global_capacity",
+        environment="staging",
+        namespace="loom-staging",
+        report_sha256="e" * 64,
+        verified_at=NOW + timedelta(minutes=5),
+    )
+
+    with pytest.raises(ValueError, match="historical restore evidence"):
+        replace(historical, **{field: value})
+
+
+def test_checkpoint_rejects_database_authority_digest_outside_component_binding(
+    tmp_path: Path,
+) -> None:
+    checkpoint = inspect_critical_checkpoint(
+        _checkpoint(tmp_path),
+        request_id="req-checkpoint1",
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.geteuid(),
+        now=NOW + timedelta(minutes=1),
+    )
+
+    with pytest.raises(ValueError, match="component authority"):
+        replace(
+            checkpoint,
+            component_sha256={
+                **checkpoint.component_sha256,
+                "database_authority": "0" * 64,
+            },
+        )
 
 
 def test_full_minio_dr_manifest_cannot_become_rollout_lease(tmp_path: Path) -> None:
     backup = _checkpoint(tmp_path, schema_version=1)
 
-    with pytest.raises(CheckpointLeaseError, match="schema version 2"):
+    with pytest.raises(CheckpointLeaseError, match="schema version 3"):
+        inspect_critical_checkpoint(
+            backup,
+            request_id="req-checkpoint1",
+            environment="staging",
+            namespace="loom-staging",
+            expected_owner_uid=os.geteuid(),
+            now=NOW + timedelta(minutes=1),
+        )
+
+
+def test_historical_schema_v2_manifest_cannot_issue_new_rollout_authority(tmp_path: Path) -> None:
+    backup = _checkpoint(tmp_path, schema_version=2)
+
+    with pytest.raises(CheckpointLeaseError, match="schema version 3"):
         inspect_critical_checkpoint(
             backup,
             request_id="req-checkpoint1",

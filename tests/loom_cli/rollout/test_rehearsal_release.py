@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 from dataclasses import replace
@@ -106,6 +107,8 @@ def _plan(tmp_path: Path) -> RehearsalPlan:
         object_inventory_root="f" * 64,
         schema_revision="0066",
         image_digests={
+            "loom-capacity-executor": "sha256:" + "e" * 64,
+            "loom-capacity-manager": "sha256:" + "d" * 64,
             "loom-control-plane": "sha256:" + "8" * 64,
             "loom-egress-xds": "sha256:" + "3" * 64,
             "loom-execution-actuator": "sha256:" + "b" * 64,
@@ -275,8 +278,7 @@ def test_release_artifact_bounds_disposable_grace_without_mutating_source(
     gateway = next(
         resource
         for resource in resources
-        if resource["kind"] == "Deployment"
-        and resource["metadata"]["name"] == "loom-llm-gateway"
+        if resource["kind"] == "Deployment" and resource["metadata"]["name"] == "loom-llm-gateway"
     )
     gateway["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] = 300
     source_payload = yaml.safe_dump_all(resources, sort_keys=True)
@@ -288,9 +290,7 @@ def test_release_artifact_bounds_disposable_grace_without_mutating_source(
     artifact = build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
 
     isolated = list(yaml.safe_load_all(artifact.payload))
-    isolated_deployments = [
-        resource for resource in isolated if resource["kind"] == "Deployment"
-    ]
+    isolated_deployments = [resource for resource in isolated if resource["kind"] == "Deployment"]
     assert len(isolated_deployments) == 4
     assert all(
         deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 10
@@ -332,6 +332,25 @@ def test_release_artifact_accepts_real_staging_render(
         "loom-service",
         "loom-web",
     }
+    control_plane = next(
+        item
+        for item in resources
+        if item["kind"] == "Deployment" and item["metadata"]["name"] == "loom-control-plane"
+    )
+    control_plane_pod = control_plane["spec"]["template"]["spec"]
+    assert "initContainers" not in control_plane_pod
+    assert {item["name"] for item in control_plane_pod["containers"][0]["env"]}.isdisjoint(
+        {"LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"}
+    )
+    assert {item["name"] for item in control_plane_pod["containers"][0]["volumeMounts"]} == {
+        "loom-admin-secret",
+        "loom-rehearsal-tmp",
+    }
+    assert {item["name"] for item in control_plane_pod["volumes"]} == {
+        "loom-admin-secret",
+        "loom-rehearsal-tmp",
+    }
+    assert "protected-worker-runtime" not in yaml.safe_dump(control_plane, sort_keys=True)
     gateway = next(
         item
         for item in resources
@@ -365,6 +384,200 @@ def _contains_null_mapping_field(value: object) -> bool:
     if isinstance(value, list):
         return any(_contains_null_mapping_field(item) for item in value)
     return False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-init",
+        "drifted-init",
+        "extra-init",
+        "missing-env",
+        "drifted-env",
+        "missing-mount",
+        "drifted-mount",
+        "missing-projected-volume",
+        "drifted-projected-volume",
+        "missing-memory-volume",
+        "drifted-memory-volume",
+    ),
+)
+def test_release_artifact_rejects_partial_or_drifted_protected_runtime_bootstrap(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    plan = _plan(tmp_path)
+    config = replace(
+        load_cluster_config(Path("deploy/environments/staging.cluster.toml")),
+        image_tag=plan.image_tag,
+        container_registry="",
+        container_registry_push="",
+    )
+    resources = list(yaml.safe_load_all(render_manifests(config)))
+    control_plane = next(
+        item
+        for item in resources
+        if item["kind"] == "Deployment" and item["metadata"]["name"] == "loom-control-plane"
+    )
+    pod = control_plane["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    if mutation == "missing-init":
+        pod.pop("initContainers")
+    elif mutation == "drifted-init":
+        pod["initContainers"][0]["image"] = "loom-control-plane:stale"
+    elif mutation == "extra-init":
+        pod["initContainers"].append({"image": "busybox:latest", "name": "unexpected"})
+    elif mutation == "missing-env":
+        container["env"] = [
+            item
+            for item in container["env"]
+            if item["name"] != "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
+        ]
+    elif mutation == "drifted-env":
+        next(
+            item
+            for item in container["env"]
+            if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
+        )["value"] = "/var/run/loom/live-database-url"
+    elif mutation == "missing-mount":
+        container["volumeMounts"] = [
+            item for item in container["volumeMounts"] if item["name"] != "protected-worker-runtime"
+        ]
+    elif mutation == "drifted-mount":
+        next(
+            item for item in container["volumeMounts"] if item["name"] == "protected-worker-runtime"
+        )["readOnly"] = False
+    elif mutation == "missing-projected-volume":
+        pod["volumes"] = [
+            item for item in pod["volumes"] if item["name"] != "protected-worker-runtime-projected"
+        ]
+    elif mutation == "drifted-projected-volume":
+        next(
+            item for item in pod["volumes"] if item["name"] == "protected-worker-runtime-projected"
+        )["secret"]["secretName"] = "loom-live-secret"
+    elif mutation == "missing-memory-volume":
+        pod["volumes"] = [
+            item for item in pod["volumes"] if item["name"] != "protected-worker-runtime"
+        ]
+    else:
+        next(item for item in pod["volumes"] if item["name"] == "protected-worker-runtime")[
+            "emptyDir"
+        ]["sizeLimit"] = "2Mi"
+    payload = yaml.safe_dump_all(resources, sort_keys=True)
+    plan.rendered_manifest_path.write_text(payload)
+    plan.rendered_manifest_path.chmod(0o600)
+    record = plan.to_record()
+    record["rendered_manifest_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+
+    with pytest.raises(ValueError, match="protected worker runtime bootstrap"):
+        build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
+
+
+def test_release_artifact_rejects_protected_runtime_bootstrap_on_other_deployment(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    config = replace(
+        load_cluster_config(Path("deploy/environments/staging.cluster.toml")),
+        image_tag=plan.image_tag,
+        container_registry="",
+        container_registry_push="",
+    )
+    resources = list(yaml.safe_load_all(render_manifests(config)))
+    deployments = {
+        item["metadata"]["name"]: item
+        for item in resources
+        if isinstance(item, dict) and item["kind"] == "Deployment"
+    }
+    control_plane_pod = deployments["loom-control-plane"]["spec"]["template"]["spec"]
+    gateway_pod = deployments["loom-llm-gateway"]["spec"]["template"]["spec"]
+    gateway_container = gateway_pod["containers"][0]
+    control_plane_container = control_plane_pod["containers"][0]
+    gateway_pod["initContainers"] = copy.deepcopy(control_plane_pod["initContainers"])
+    gateway_container["env"].append(
+        copy.deepcopy(
+            next(
+                item
+                for item in control_plane_container["env"]
+                if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
+            )
+        )
+    )
+    gateway_container.setdefault("volumeMounts", []).append(
+        copy.deepcopy(
+            next(
+                item
+                for item in control_plane_container["volumeMounts"]
+                if item["name"] == "protected-worker-runtime"
+            )
+        )
+    )
+    gateway_pod.setdefault("volumes", []).extend(
+        copy.deepcopy(
+            [
+                item
+                for item in control_plane_pod["volumes"]
+                if item["name"]
+                in {"protected-worker-runtime", "protected-worker-runtime-projected"}
+            ]
+        )
+    )
+    payload = yaml.safe_dump_all(resources, sort_keys=True)
+    plan.rendered_manifest_path.write_text(payload)
+    plan.rendered_manifest_path.chmod(0o600)
+    record = plan.to_record()
+    record["rendered_manifest_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+
+    with pytest.raises(ValueError, match="protected worker runtime bootstrap"):
+        build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
+
+
+@pytest.mark.parametrize(
+    "residual_environment",
+    (
+        {
+            "name": "ALT_DATABASE_URL",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "key": "database-url",
+                    "name": "loom-protected-worker-runtime",
+                }
+            },
+        },
+        {
+            "name": "ALT_DATABASE_URL_FILE",
+            "value": "/run/loom/protected-worker-runtime/files/database-url",
+        },
+    ),
+)
+def test_release_artifact_rejects_residual_protected_runtime_authority(
+    tmp_path: Path,
+    residual_environment: dict[str, object],
+) -> None:
+    plan = _plan(tmp_path)
+    config = replace(
+        load_cluster_config(Path("deploy/environments/staging.cluster.toml")),
+        image_tag=plan.image_tag,
+        container_registry="",
+        container_registry_push="",
+    )
+    resources = list(yaml.safe_load_all(render_manifests(config)))
+    control_plane = next(
+        item
+        for item in resources
+        if isinstance(item, dict)
+        and item["kind"] == "Deployment"
+        and item["metadata"]["name"] == "loom-control-plane"
+    )
+    control_plane["spec"]["template"]["spec"]["containers"][0]["env"].append(residual_environment)
+    payload = yaml.safe_dump_all(resources, sort_keys=True)
+    plan.rendered_manifest_path.write_text(payload)
+    plan.rendered_manifest_path.chmod(0o600)
+    record = plan.to_record()
+    record["rendered_manifest_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+
+    with pytest.raises(ValueError, match="protected worker runtime authority"):
+        build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
 
 
 def test_release_artifact_rejects_host_authority_or_image_drift(tmp_path: Path) -> None:

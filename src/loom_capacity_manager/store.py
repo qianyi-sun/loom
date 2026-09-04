@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
@@ -20,6 +20,7 @@ from loom_capacity_manager.contracts import (
     AllocationInputV1,
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
+    ConfigurationRollbackV1,
     ConfigurationSnapshotV1,
     DemandSnapshotV1,
     DynamicDevelopmentSubjectProjectionV1,
@@ -689,29 +690,13 @@ class CapacityManagementStore:
                 )
             ).scalar_one_or_none()
             if replay is not None:
-                if (
-                    replay.activation_actor != actor
-                    or replay.activation_request_digest != request_digest
-                ):
-                    raise IdempotencyConflictError(
+                return self._replay_configuration_epoch(
+                    replay,
+                    actor=actor,
+                    request_digest=request_digest,
+                    conflict_message=(
                         "configuration activation idempotency key was reused with different input"
-                    )
-                snapshot = ConfigurationSnapshotV1(
-                    configuration_epoch=replay.configuration_epoch,
-                    fleet=ConfigurationGenerationRefV1(
-                        scope="fleet",
-                        generation=replay.fleet_generation,
-                        digest=replay.fleet_digest,
                     ),
-                    subjects=tuple(
-                        _parse_contract(ConfigurationGenerationRefV1, item)
-                        for item in replay.subject_generation_manifest
-                    ),
-                )
-                return ActivatedConfiguration(
-                    configuration_epoch=replay.configuration_epoch,
-                    digest=replay.canonical_digest,
-                    snapshot=snapshot,
                 )
             latest = (
                 (
@@ -768,11 +753,14 @@ class CapacityManagementStore:
             authority.updated_at = await _db_now(session)
 
             if latest is not None:
-                previous_ids = {
-                    UUID(item["subject_id"]) for item in latest.subject_generation_manifest
+                previous_subjects = {
+                    (UUID(item["subject_id"]), UUID(item["subject_incarnation"]))
+                    for item in latest.subject_generation_manifest
                 }
-                new_ids = {subject.subject_id for subject in subjects}
-                if new_ids != previous_ids:
+                new_subjects = {
+                    (subject.subject_id, subject.subject_incarnation) for subject in subjects
+                }
+                if not previous_subjects <= new_subjects:
                     raise ConfigurationConflictError(
                         "active subject manifest must be complete; deletion is unavailable"
                     )
@@ -852,6 +840,518 @@ class CapacityManagementStore:
                 digest=snapshot_digest,
                 snapshot=snapshot,
             )
+
+    async def rollback_configuration(
+        self,
+        session: AsyncSession,
+        request: ConfigurationRollbackV1,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> ActivatedConfiguration:
+        request_digest = canonical_digest(request)
+        async with _write_transaction(session):
+            authority = await _lock_shadow_authority(session)
+            if not authority.increase_freeze:
+                raise ConfigurationConflictError(
+                    "configuration rollback requires increase freeze enabled"
+                )
+            replay = (
+                await session.execute(
+                    select(CapacityConfigurationEpoch).where(
+                        CapacityConfigurationEpoch.activation_idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one_or_none()
+            if replay is not None:
+                return self._replay_configuration_epoch(
+                    replay,
+                    actor=actor,
+                    request_digest=request_digest,
+                    conflict_message=(
+                        "configuration rollback idempotency key was reused with different input"
+                    ),
+                )
+
+            latest = (
+                (
+                    await session.execute(
+                        select(CapacityConfigurationEpoch)
+                        .order_by(CapacityConfigurationEpoch.configuration_epoch.desc())
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if (
+                latest is None
+                or latest.configuration_epoch != request.expected_configuration_epoch
+                or latest.canonical_digest != request.expected_configuration_digest
+            ):
+                raise ConfigurationConflictError("expected active configuration changed")
+            if request.restore_configuration_epoch != latest.configuration_epoch - 1:
+                raise ConfigurationConflictError(
+                    "restore configuration must be the immediate predecessor"
+                )
+            restore = (
+                await session.execute(
+                    select(CapacityConfigurationEpoch)
+                    .where(
+                        CapacityConfigurationEpoch.configuration_epoch
+                        == request.restore_configuration_epoch
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if restore is None or restore.canonical_digest != request.restore_configuration_digest:
+                raise ConfigurationConflictError("restore configuration changed")
+
+            current_fleet_row = await self._load_fleet_generation_row(session, latest)
+            restore_fleet_row = await self._load_fleet_generation_row(session, restore)
+            current_fleet = _parse_contract(FleetManifestV1, current_fleet_row.payload)
+            restore_fleet = _parse_contract(FleetManifestV1, restore_fleet_row.payload)
+            if (
+                current_fleet.authority_incarnation != restore_fleet.authority_incarnation
+                or current_fleet.authority_incarnation != authority.authority_incarnation
+            ):
+                raise ConfigurationConflictError("authority incarnation changed")
+
+            current_pools = await self._load_pools_by_id(session, latest.configuration_epoch)
+            restore_pools = await self._load_pools_by_id(session, restore.configuration_epoch)
+            if set(current_pools) != set(restore_pools):
+                raise ConfigurationConflictError("pool generation changed")
+            for pool_id, restore_pool in restore_pools.items():
+                current_pool = current_pools[pool_id]
+                if current_pool.pool_generation != restore_pool.pool_generation:
+                    raise ConfigurationConflictError("pool generation changed")
+                if (
+                    current_pool.protocol_generation != restore_pool.protocol_generation
+                    or current_pool.protocol_digest != restore_pool.protocol_digest
+                ):
+                    raise ConfigurationConflictError("protocol changed")
+                current_reporter = await self._load_current_pool_reporter(session, pool_id)
+                if current_reporter.pool_generation != restore_pool.pool_generation:
+                    raise ConfigurationConflictError("pool generation changed")
+                restore_manifest_pool = next(
+                    item for item in restore_fleet.pools if item.pool_id == pool_id
+                )
+                if (
+                    current_reporter.reporter_incarnation
+                    != restore_manifest_pool.pool_reporter_incarnation
+                ):
+                    raise ConfigurationConflictError("pool reporter changed")
+
+            current_subjects = await self._load_subjects_by_id(session, latest.configuration_epoch)
+            restore_subjects = await self._load_subjects_by_id(session, restore.configuration_epoch)
+            if set(restore_subjects) - set(current_subjects):
+                raise ConfigurationConflictError("restore subject is absent from current target")
+            removed_subject_ids = tuple(
+                sorted(
+                    set(current_subjects) - set(restore_subjects),
+                    key=lambda subject_id: subject_id.hex,
+                )
+            )
+            retained_subjects = tuple(
+                restore_subjects[subject_id]
+                for subject_id in sorted(restore_subjects, key=lambda value: value.hex)
+            )
+            for restore_subject in retained_subjects:
+                current_subject = current_subjects[restore_subject.subject_id]
+                if current_subject.subject_incarnation != restore_subject.subject_incarnation:
+                    raise ConfigurationConflictError("subject incarnation changed")
+                if current_subject.candidate_generation != restore_subject.candidate_generation:
+                    raise ConfigurationConflictError("candidate generation changed")
+                if current_subject.deployment_generation != restore_subject.deployment_generation:
+                    raise ConfigurationConflictError("deployment generation changed")
+                if (
+                    current_subject.demand_reporter_incarnation
+                    != restore_subject.demand_reporter_incarnation
+                ):
+                    raise ConfigurationConflictError("demand reporter changed")
+                await self._require_preserved_subject_bindings(session, restore_subject)
+
+            previous_accounts = (
+                (
+                    await session.execute(
+                        select(CapacityAccountPolicy).where(
+                            CapacityAccountPolicy.configuration_epoch
+                            == restore.configuration_epoch,
+                            CapacityAccountPolicy.kind == "owner",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            derived_accounts = tuple(
+                _derive_owner_account(restore_fleet, account.owner_id)
+                for account in previous_accounts
+                if account.owner_id is not None
+            )
+            next_fleet_generation = (
+                await session.execute(
+                    select(func.max(CapacityConfigGeneration.scope_generation)).where(
+                        CapacityConfigGeneration.scope == "fleet"
+                    )
+                )
+            ).scalar_one()
+            cloned_fleet = restore_fleet.model_copy(
+                update={
+                    "fleet_generation": 1
+                    if next_fleet_generation is None
+                    else next_fleet_generation + 1,
+                    "fleet_digest": "0" * 64,
+                }
+            )
+            cloned_fleet = cloned_fleet.model_copy(
+                update={"fleet_digest": canonical_digest_excluding(cloned_fleet, "fleet_digest")}
+            )
+            cloned_subjects: list[SubjectConfigurationV1] = []
+            for subject in retained_subjects:
+                latest_generation = (
+                    await session.execute(
+                        select(func.max(CapacityConfigGeneration.scope_generation)).where(
+                            CapacityConfigGeneration.scope == "subject",
+                            CapacityConfigGeneration.subject_id == subject.subject_id,
+                            CapacityConfigGeneration.subject_incarnation
+                            == subject.subject_incarnation,
+                        )
+                    )
+                ).scalar_one()
+                cloned_subjects.append(
+                    subject.model_copy(
+                        update={
+                            "configuration_generation": (
+                                1 if latest_generation is None else latest_generation + 1
+                            )
+                        }
+                    )
+                )
+            cloned_subject_tuple = tuple(cloned_subjects)
+            self._validate_activation(cloned_fleet, cloned_subject_tuple, derived_accounts)
+
+            fleet_digest = canonical_digest(cloned_fleet)
+            fleet_generation_row = CapacityConfigGeneration(
+                scope="fleet",
+                subject_id=None,
+                subject_incarnation=None,
+                scope_generation=cloned_fleet.fleet_generation,
+                digest=fleet_digest,
+                payload=cloned_fleet.model_dump(mode="json", exclude_none=False),
+                state="proposed",
+                actor=actor,
+                idempotency_key=uuid4(),
+            )
+            session.add(fleet_generation_row)
+            subject_generation_rows: list[CapacityConfigGeneration] = []
+            for subject in cloned_subject_tuple:
+                row = CapacityConfigGeneration(
+                    scope="subject",
+                    subject_id=subject.subject_id,
+                    subject_incarnation=subject.subject_incarnation,
+                    scope_generation=subject.configuration_generation,
+                    digest=canonical_digest(subject),
+                    payload=subject.model_dump(mode="json", exclude_none=False),
+                    state="proposed",
+                    actor=actor,
+                    idempotency_key=uuid4(),
+                )
+                session.add(row)
+                subject_generation_rows.append(row)
+            authority.global_pending_slot_ceiling = cloned_fleet.global_max_pending_slots
+            authority.global_pending_job_ceiling = cloned_fleet.global_max_pending_jobs
+            authority.global_submission_rate_ceiling = (
+                cloned_fleet.global_submission_rate_per_minute
+            )
+            authority.updated_at = await _db_now(session)
+            configuration_epoch = latest.configuration_epoch + 1
+            snapshot = ConfigurationSnapshotV1(
+                configuration_epoch=configuration_epoch,
+                fleet=ConfigurationGenerationRefV1(
+                    scope="fleet",
+                    generation=cloned_fleet.fleet_generation,
+                    digest=fleet_digest,
+                ),
+                subjects=tuple(
+                    ConfigurationGenerationRefV1(
+                        scope="subject",
+                        generation=row.scope_generation,
+                        digest=row.digest,
+                        subject_id=row.subject_id,
+                        subject_incarnation=row.subject_incarnation,
+                    )
+                    for row in sorted(
+                        subject_generation_rows,
+                        key=(lambda item: "" if item.subject_id is None else item.subject_id.hex),
+                    )
+                ),
+            )
+            snapshot_digest = canonical_digest(snapshot)
+            session.add(
+                CapacityConfigurationEpoch(
+                    configuration_epoch=configuration_epoch,
+                    fleet_generation=cloned_fleet.fleet_generation,
+                    fleet_digest=fleet_digest,
+                    subject_generation_manifest=[
+                        reference.model_dump(mode="json", exclude_none=False)
+                        for reference in snapshot.subjects
+                    ],
+                    canonical_digest=snapshot_digest,
+                    activation_idempotency_key=idempotency_key,
+                    activation_actor=actor,
+                    activation_request_digest=request_digest,
+                )
+            )
+            await session.flush()
+            await self._persist_active_configuration(
+                session,
+                configuration_epoch=configuration_epoch,
+                fleet=cloned_fleet,
+                subjects=cloned_subject_tuple,
+                derived_accounts=derived_accounts,
+            )
+            if removed_subject_ids:
+                await session.execute(
+                    update(CapacityDemandReporter)
+                    .where(
+                        CapacityDemandReporter.subject_id.in_(removed_subject_ids),
+                        CapacityDemandReporter.state == "current",
+                    )
+                    .values(state="fenced")
+                )
+            await session.execute(
+                update(CapacityConfigGeneration)
+                .where(CapacityConfigGeneration.state == "active")
+                .values(state="retired")
+            )
+            await session.execute(
+                update(CapacityConfigGeneration)
+                .where(
+                    CapacityConfigGeneration.id.in_(
+                        [fleet_generation_row.id, *(row.id for row in subject_generation_rows)]
+                    )
+                )
+                .values(state="active")
+            )
+            session.add(
+                _audit(
+                    actor_kind="operator",
+                    actor_id=actor,
+                    event_kind="capacity_configuration_rolled_back",
+                    object_binding={"configuration_epoch": configuration_epoch},
+                    detail={
+                        "configuration_digest": snapshot_digest,
+                        "expected_configuration_digest": request.expected_configuration_digest,
+                        "restore_configuration_digest": request.restore_configuration_digest,
+                        "rollback_evidence_sha256": request.rollback_evidence_sha256,
+                    },
+                )
+            )
+            return ActivatedConfiguration(
+                configuration_epoch=configuration_epoch,
+                digest=snapshot_digest,
+                snapshot=snapshot,
+            )
+
+    @staticmethod
+    def _replay_configuration_epoch(
+        replay: CapacityConfigurationEpoch,
+        *,
+        actor: str,
+        request_digest: str,
+        conflict_message: str,
+    ) -> ActivatedConfiguration:
+        if replay.activation_actor != actor or replay.activation_request_digest != request_digest:
+            raise IdempotencyConflictError(conflict_message)
+        snapshot = ConfigurationSnapshotV1(
+            configuration_epoch=replay.configuration_epoch,
+            fleet=ConfigurationGenerationRefV1(
+                scope="fleet",
+                generation=replay.fleet_generation,
+                digest=replay.fleet_digest,
+            ),
+            subjects=tuple(
+                _parse_contract(ConfigurationGenerationRefV1, item)
+                for item in replay.subject_generation_manifest
+            ),
+        )
+        return ActivatedConfiguration(
+            configuration_epoch=replay.configuration_epoch,
+            digest=replay.canonical_digest,
+            snapshot=snapshot,
+        )
+
+    async def _load_fleet_generation_row(
+        self,
+        session: AsyncSession,
+        epoch: CapacityConfigurationEpoch,
+    ) -> CapacityConfigGeneration:
+        row = (
+            await session.execute(
+                select(CapacityConfigGeneration).where(
+                    CapacityConfigGeneration.scope == "fleet",
+                    CapacityConfigGeneration.digest == epoch.fleet_digest,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ConfigurationConflictError("restore configuration changed")
+        return row
+
+    async def _load_pools_by_id(
+        self,
+        session: AsyncSession,
+        configuration_epoch: int,
+    ) -> dict[str, CapacityPool]:
+        rows = (
+            (
+                await session.execute(
+                    select(CapacityPool).where(
+                        CapacityPool.configuration_epoch == configuration_epoch
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {row.pool_id: row for row in rows}
+
+    async def _load_current_pool_reporter(
+        self,
+        session: AsyncSession,
+        pool_id: str,
+    ) -> CapacityPoolReporter:
+        row = (
+            await session.execute(
+                select(CapacityPoolReporter)
+                .where(
+                    CapacityPoolReporter.pool_id == pool_id,
+                    CapacityPoolReporter.state == "current",
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ConfigurationConflictError("pool reporter changed")
+        return row
+
+    async def _load_subjects_by_id(
+        self,
+        session: AsyncSession,
+        configuration_epoch: int,
+    ) -> dict[UUID, SubjectConfigurationV1]:
+        rows = (
+            (
+                await session.execute(
+                    select(CapacitySubject).where(
+                        CapacitySubject.configuration_epoch == configuration_epoch
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        subjects: dict[UUID, SubjectConfigurationV1] = {}
+        for row in rows:
+            payload_subject = _parse_contract(SubjectConfigurationV1, row.payload)
+            subjects[row.subject_id] = payload_subject.model_copy(
+                update={
+                    "subject_id": row.subject_id,
+                    "subject_incarnation": row.subject_incarnation,
+                    "display_name": row.display_name,
+                    "account_id": row.account_id,
+                    "tier_id": row.tier_id,
+                    "min_slots": row.min_slots,
+                    "max_slots": row.max_slots,
+                    "rollout_surge_slots": row.rollout_surge_slots,
+                    "max_pending_slots": row.max_pending_slots,
+                    "max_pending_jobs": row.max_pending_jobs,
+                    "submission_rate_per_minute": row.submission_rate_per_minute,
+                    "lifecycle_state": row.lifecycle_state,
+                    "candidate_generation": row.candidate_generation,
+                    "deployment_generation": row.deployment_generation,
+                    "configuration_generation": row.configuration_generation,
+                    "demand_reporter_incarnation": row.demand_reporter_incarnation,
+                }
+            )
+        return subjects
+
+    async def _require_preserved_subject_bindings(
+        self,
+        session: AsyncSession,
+        subject: SubjectConfigurationV1,
+    ) -> None:
+        candidate = (
+            await session.execute(
+                select(CapacityCandidate).where(
+                    CapacityCandidate.subject_id == subject.subject_id,
+                    CapacityCandidate.subject_incarnation == subject.subject_incarnation,
+                    CapacityCandidate.candidate_generation == subject.candidate_generation,
+                )
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            raise ConfigurationConflictError("candidate generation changed")
+        deployment = (
+            await session.execute(
+                select(CapacityDeploymentGeneration).where(
+                    CapacityDeploymentGeneration.subject_id == subject.subject_id,
+                    CapacityDeploymentGeneration.subject_incarnation == subject.subject_incarnation,
+                    CapacityDeploymentGeneration.deployment_generation
+                    == subject.deployment_generation,
+                )
+            )
+        ).scalar_one_or_none()
+        if deployment is not None:
+            required_profiles = [
+                profile.model_dump(mode="json", exclude_none=False) for profile in subject.profiles
+            ]
+            if deployment.required_profiles != required_profiles:
+                raise ConfigurationConflictError("deployment generation changed")
+        reporter = (
+            await session.execute(
+                select(CapacityDemandReporter).where(
+                    CapacityDemandReporter.subject_id == subject.subject_id,
+                    CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
+                    CapacityDemandReporter.reporter_incarnation
+                    == subject.demand_reporter_incarnation,
+                    CapacityDemandReporter.state == "current",
+                )
+            )
+        ).scalar_one_or_none()
+        if reporter is None:
+            raise ConfigurationConflictError("demand reporter changed")
+        if reporter.deployment_generation != subject.deployment_generation:
+            raise ConfigurationConflictError("deployment generation changed")
+        if reporter.configuration_generation > subject.configuration_generation:
+            raise ConfigurationConflictError("configuration generation changed")
+        for profile in subject.profiles:
+            current_profile = (
+                await session.execute(
+                    select(CapacityWorkerProfile).where(
+                        CapacityWorkerProfile.subject_id == subject.subject_id,
+                        CapacityWorkerProfile.subject_incarnation == subject.subject_incarnation,
+                        CapacityWorkerProfile.deployment_generation
+                        == subject.deployment_generation,
+                        CapacityWorkerProfile.pool_id == profile.pool_id,
+                        CapacityWorkerProfile.profile_generation == profile.profile_generation,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current_profile is None:
+                raise ConfigurationConflictError("worker profile binding changed")
+            shape_catalog = [
+                shape.model_dump(mode="json", exclude_none=False) for shape in profile.worker_shapes
+            ]
+            narrowing = {"eligible_resource_domains": list(profile.eligible_resource_domains)}
+            if (
+                current_profile.pool_generation != profile.pool_generation
+                or current_profile.profile_digest != profile.profile_digest
+                or current_profile.shape_catalog != shape_catalog
+                or current_profile.narrowing_constraints != narrowing
+            ):
+                raise ConfigurationConflictError("worker profile binding changed")
 
     @staticmethod
     async def _persist_static_candidate_provenance(
@@ -2418,10 +2918,7 @@ class CapacityManagementStore:
                 raise ExecutionConflictError("prepared execution readiness is not current")
             if readiness.execution != self._execution_context(authority, row):
                 raise ExecutionConflictError("prepared execution readiness changed")
-            if (
-                canonical_prepared_readiness_digest(readiness)
-                != request.prepared_readiness_sha256
-            ):
+            if canonical_prepared_readiness_digest(readiness) != request.prepared_readiness_sha256:
                 raise ExecutionConflictError("prepared execution readiness changed")
 
             preparation = self._execution_preparation_from_row(row)

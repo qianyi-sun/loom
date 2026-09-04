@@ -34,6 +34,7 @@ from loom_cli.rollout.operator.envelope import (
 from loom_cli.rollout.operator.redaction import redact_rollout_text
 from loom_cli.rollout.steps import default_step_sequence
 from loom_cli.rollout.steps.s00_resolve_target import resolve_ref_to_sha
+from loom_cli.rollout.steps.s13_smoke import DEFAULT_CURRENT_GB10_MODEL_SMOKE_TASK_ID
 
 _STAGING_CLUSTER_NAME = "loom-staging"
 _STAGING_NAMESPACE = "loom-staging"
@@ -190,7 +191,7 @@ _ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
             "file:/shared_work/loom/staging-rollout/credentials/staging-service-token"
         ),
         smoke_submit_mode="admin-on-behalf",
-        smoke_task_id="loom-smoke/gb10-oracle-hello-world",
+        smoke_task_id=DEFAULT_CURRENT_GB10_MODEL_SMOKE_TASK_ID,
         smoke_required_worker_pool="gb10",
         smoke_agent="oracle",
         smoke_on_behalf_username="devansh",

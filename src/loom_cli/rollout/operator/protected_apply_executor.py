@@ -86,6 +86,30 @@ _EXTERNAL_SUPERVISOR_CREDENTIAL_ORDER = (
 _EXTERNAL_SUPERVISOR_RECONCILIATION_IMPLEMENTATION_DIGEST = hashlib.sha256(
     b"loom-protected-external-supervisor-reconciliation-v1"
 ).hexdigest()
+_STAGING_CAPACITY_COMPONENT_ORDER = (
+    "staging-capacity-credentials",
+    "staging-capacity-database",
+    "staging-protected-runtime-secret",
+    "capacity-manager-runtime",
+    "capacity-manager-configuration",
+    "staging-capacity-agent",
+)
+_STAGING_CAPACITY_EXECUTION_COMPONENT_ORDER = (
+    *_STAGING_CAPACITY_COMPONENT_ORDER[:3],
+    "oldlab-controller-prerequisite",
+    "gb10-controller-prerequisite",
+    "staging-capacity-execution-credentials",
+    *_STAGING_CAPACITY_COMPONENT_ORDER[3:],
+    "capacity-execution-preparation",
+)
+
+
+def _staging_capacity_component_order(plan: FinalGatePlan) -> tuple[str, ...]:
+    return (
+        _STAGING_CAPACITY_EXECUTION_COMPONENT_ORDER
+        if plan.schema_version == 7
+        else _STAGING_CAPACITY_COMPONENT_ORDER
+    )
 
 
 class ProtectedApplyCommandRunner(Protocol):
@@ -126,6 +150,17 @@ class ProtectedApplyCommandRunner(Protocol):
         input_payload: bytes | None,
         timeout_seconds: float,
     ) -> int: ...
+
+
+class ProtectedStagingCapacityRuntime(Protocol):
+    """Build the complete, fixed protected staging-capacity component chain."""
+
+    def components(
+        self,
+        plan: FinalGatePlan,
+        *,
+        epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+    ) -> tuple[ProtectedApplyComponent, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +333,7 @@ class MigrationEpochProtectedApplyExecutor:
     gb10_transport: ProtectedGB10FleetTransport
     environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
+    staging_capacity_runtime: ProtectedStagingCapacityRuntime
     external_supervisor_transport: ProtectedExternalSupervisorTransport | None = None
     external_supervisor_execution_host: str | None = None
     external_supervisor_transports: Mapping[str, ProtectedExternalSupervisorTransport] = field(
@@ -321,6 +357,7 @@ class MigrationEpochProtectedApplyExecutor:
             or not self.candidate_root.is_absolute()
             or ".." in self.candidate_root.parts
             or self.service_uid < 0
+            or not callable(getattr(self.staging_capacity_runtime, "components", None))
             or bool(self.external_supervisor_transport) == bool(self.external_supervisor_transports)
             or not self.external_supervisor_credential_transports
             or set(self.external_supervisor_credential_transports)
@@ -373,6 +410,7 @@ class MigrationEpochProtectedApplyExecutor:
             service_uid=self.service_uid,
             container_registry=self.container_registry,
         ).component(plan)
+        staging_capacity = self._staging_capacity_components(plan, epoch.classify)
         manifests = KubernetesProtectedManifestComponent(
             runner=self.runner,
             environment=environment,
@@ -424,6 +462,7 @@ class MigrationEpochProtectedApplyExecutor:
                 supervisor_reconciliation,
                 migration,
                 epoch,
+                *staging_capacity,
                 manifests,
                 external_supervisor_database,
                 environment_state,
@@ -438,6 +477,7 @@ class MigrationEpochProtectedApplyExecutor:
                 supervisor_reconciliation,
                 epoch,
                 migration,
+                *staging_capacity,
                 manifests,
                 external_supervisor_database,
                 environment_state,
@@ -468,6 +508,21 @@ class MigrationEpochProtectedApplyExecutor:
             blockers={},
         )
 
+    def _staging_capacity_components(
+        self,
+        plan: FinalGatePlan,
+        epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+    ) -> tuple[ProtectedApplyComponent, ...]:
+        components = self.staging_capacity_runtime.components(
+            plan,
+            epoch_guard=epoch_guard,
+        )
+        if tuple(component.component_id for component in components) != (
+            _staging_capacity_component_order(plan)
+        ):
+            raise ValueError("protected staging capacity component coverage drifted")
+        return components
+
 
 @dataclass(frozen=True, slots=True)
 class KubernetesProtectedConvergenceExecutor:
@@ -478,6 +533,7 @@ class KubernetesProtectedConvergenceExecutor:
     gb10_transport: ProtectedGB10FleetTransport
     environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
+    staging_capacity_runtime: ProtectedStagingCapacityRuntime
     external_supervisor_transport: ProtectedExternalSupervisorTransport | None = None
     external_supervisor_execution_host: str | None = None
     external_supervisor_transports: Mapping[str, ProtectedExternalSupervisorTransport] = field(
@@ -502,6 +558,7 @@ class KubernetesProtectedConvergenceExecutor:
             self.service_uid < 0
             or not self.candidate_root.is_absolute()
             or ".." in self.candidate_root.parts
+            or not callable(getattr(self.staging_capacity_runtime, "components", None))
             or not 1 <= self.environment_state_attempts <= 721
             or not 0 <= self.environment_state_interval_seconds <= 30
             or not callable(self.sleep)
@@ -555,6 +612,7 @@ class KubernetesProtectedConvergenceExecutor:
             environment=environment,
             epoch_guard=epoch.classify,
         )
+        staging_capacity = self._staging_capacity_components(plan, epoch.classify)
         observations = {
             "database-migration": KubernetesProtectedMigrationComponent(
                 runner=self.runner,
@@ -593,6 +651,10 @@ class KubernetesProtectedConvergenceExecutor:
             ).classify(plan),
             "external-supervisor-transition-cleanup": transition_cleanup.classify(plan),
         }
+        staging_capacity_component_ids: list[str] = []
+        for component in staging_capacity:
+            staging_capacity_component_ids.append(component.component_id)
+            observations[component.component_id] = component.classify(plan)
         external_component_ids: list[str] = []
         credential_component_ids: list[str] = []
         for credential in credential_components:
@@ -623,7 +685,11 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["production-defaults"] = "protected-epoch-not-exact"
         if observations["external-supervisor-transition-cleanup"].observed_epoch != expected_epoch:
             blockers["external-supervisor-transition-cleanup"] = "protected-epoch-not-exact"
-        for component_id in (*credential_component_ids, *external_component_ids):
+        for component_id in (
+            *staging_capacity_component_ids,
+            *credential_component_ids,
+            *external_component_ids,
+        ):
             if observations[component_id].observed_epoch != expected_epoch:
                 blockers[component_id] = "protected-epoch-not-exact"
         return FinalGateResult(
@@ -636,6 +702,21 @@ class KubernetesProtectedConvergenceExecutor:
             protected_mutation=False,
             blockers=blockers,
         )
+
+    def _staging_capacity_components(
+        self,
+        plan: FinalGatePlan,
+        epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+    ) -> tuple[ProtectedApplyComponent, ...]:
+        components = self.staging_capacity_runtime.components(
+            plan,
+            epoch_guard=epoch_guard,
+        )
+        if tuple(component.component_id for component in components) != (
+            _staging_capacity_component_order(plan)
+        ):
+            raise ValueError("protected staging capacity component coverage drifted")
+        return components
 
     def _environment_state_observation(
         self,
@@ -842,5 +923,6 @@ __all__ = [
     "KubernetesProtectedConvergenceExecutor",
     "MigrationEpochProtectedApplyExecutor",
     "ProtectedApplyCommandRunner",
+    "ProtectedStagingCapacityRuntime",
     "SubprocessProtectedApplyCommandRunner",
 ]

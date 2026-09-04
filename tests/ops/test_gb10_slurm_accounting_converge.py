@@ -34,7 +34,9 @@ def test_converger_is_fixed_to_the_gb10_controller_and_service_identity() -> Non
     source = _source()
     assert 'CLUSTER="trt-gb10"' in source
     assert 'CONTROLLER="gx10-01c7"' in source
-    assert 'SERVICE_USER="loom-rollout"' in source
+    assert 'LEGACY_SERVICE_USER="loom-rollout"' in source
+    assert 'EXECUTOR_SERVICE_USER="loom_capacity_executor"' in source
+    assert 'EXECUTOR_PARTITION="loom-staging"' in source
     assert 'ACCOUNT="loom-staging"' in source
     assert 'QOS="loom-staging"' in source
     assert "scontrol show config" in source
@@ -46,11 +48,12 @@ def test_converger_adds_only_missing_bounded_accounting_objects() -> None:
     assert "show account where" in source
     assert 'sacctmgr --immediate add account name="$ACCOUNT"' in source
     assert 'sacctmgr --immediate add qos name="$QOS"' in source
-    assert 'MaxJobsPU=15' in source
-    assert 'MaxSubmitJobsPU=15' in source
-    assert 'sacctmgr --immediate add user name="$SERVICE_USER"' in source
-    assert 'sacctmgr --immediate modify user' in source
-    assert 'where name="$SERVICE_USER"' in source
+    assert "MaxJobsPU=15" in source
+    assert "MaxSubmitJobsPU=15" in source
+    assert 'sacctmgr --immediate add user name="$user"' in source
+    assert "sacctmgr --immediate modify user" in source
+    assert 'where name="$user"' in source
+    assert 'partition="$EXECUTOR_PARTITION"' in source
     assert "sacctmgr --immediate delete" not in source
 
 
@@ -59,5 +62,7 @@ def test_converger_verifies_exact_readback_and_never_mentions_personal_paths() -
     assert "account readback did not converge" in source
     assert "QoS readback did not converge" in source
     assert "association readback did not converge" in source
+    assert "legacy association readback did not converge" in source
+    assert "executor association readback did not converge" in source
     assert "/home/qianyi" not in source
     assert "/shared_work2/qianyi" not in source

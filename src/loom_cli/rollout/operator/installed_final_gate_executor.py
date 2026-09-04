@@ -27,6 +27,11 @@ from .final_capacity_executor import FinalCapacityExecutor
 from .final_gate_plan import FinalGatePlan
 from .final_smoke_executor import FinalSmokeExecutor
 from .final_summary_executor import FinalSummaryExecutor
+from .installed_execution_authority import (
+    InstalledExecutionAuthorityReader,
+    InstalledExecutionAuthoritySource,
+    KubernetesExecutionWitnessExportsSource,
+)
 from .installed_rollout_capacity_refresh import (
     build_installed_rollout_capacity_refresh,
 )
@@ -35,8 +40,29 @@ from .protected_apply_executor import (
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
+from .protected_capacity_execution_preparation_component import (
+    PreparedControllerTransport,
+)
+from .protected_capacity_manager_client import open_protected_capacity_manager_client
+from .protected_controller_prerequisite_component import (
+    ProtectedControllerPrerequisiteTransport,
+)
+from .protected_controller_prerequisite_transport import (
+    build_fixed_gb10_controller_prerequisite_transport,
+    build_fixed_oldlab_controller_prerequisite_transport,
+)
 from .protected_environment_state_component import (
     HttpxProtectedEnvironmentStateTransport,
+)
+from .protected_execution_preparation_dependency import (
+    ProtectedExecutionPreparationDependencyGuard,
+)
+from .protected_execution_prerequisite_source import (
+    ProtectedExecutionPrerequisiteAuthority,
+)
+from .protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisitePublication,
+    ProtectedExecutionPrerequisiteStore,
 )
 from .protected_external_supervisor_credential_transport import (
     FixedLocalExternalSupervisorCredentialTransport,
@@ -54,6 +80,22 @@ from .protected_gb10_external_supervisor_transport import (
     build_fixed_gb10_external_supervisor_transport,
 )
 from .protected_gb10_transport import build_fixed_gb10_ssh_transport
+from .protected_pool_credential_transport import (
+    ProtectedPoolCredentialTransport,
+    build_fixed_gb10_pool_credential_transport,
+    build_fixed_oldlab_pool_credential_transport,
+)
+from .protected_prepared_controller_transport import (
+    build_fixed_gb10_prepared_controller_transport,
+    build_fixed_oldlab_prepared_controller_transport,
+)
+from .protected_staging_capacity_manager_configuration_component import (
+    ProtectedStagingDesiredConfiguration,
+    derive_protected_staging_capacity_configuration,
+)
+from .protected_staging_capacity_runtime import (
+    KubernetesProtectedStagingCapacityRuntime,
+)
 from .resume_runtime_upgrade import (
     ResumeRuntimeUpgradeAuthority,
     build_installed_resume_runtime_upgrade_authority,
@@ -64,6 +106,10 @@ _CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
 _MAX_HTTP_BODY = 1024 * 1024
 _MAX_COMMAND_OUTPUT = 64 * 1024
 _MAX_COMMAND_INPUT = 4 * 1024 * 1024
+_MAX_CONTROLLER_COMMAND_INPUT = 8 * 1024 * 1024
+_EXECUTION_AUTHORITY_PUBLICATION = Path(
+    "/var/lib/loom-staging-rollout/protected-capacity/execution-authority/issue-906.json"
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -183,6 +229,23 @@ class InstalledFinalGateExecutor:
                 candidate_tree=plan.candidate_tree,
                 run=self._supervisor_ssh_run,
             )
+            controller_prerequisite_transports: dict[
+                str, ProtectedControllerPrerequisiteTransport
+            ] = {}
+            pool_credential_transports: dict[str, ProtectedPoolCredentialTransport] = {}
+            prepared_controller_transports: dict[str, PreparedControllerTransport] = {}
+            if plan.schema_version == 7:
+                gb10_prerequisite_controller = build_fixed_gb10_external_supervisor_transport(
+                    candidate_sha=plan.candidate_sha,
+                    candidate_tree=plan.candidate_tree,
+                    run=self._controller_prerequisite_run,
+                )
+                gb10_prerequisite_transport = build_fixed_gb10_controller_prerequisite_transport(
+                    controller=gb10_prerequisite_controller,
+                )
+                controller_prerequisite_transports = {
+                    "gb10": gb10_prerequisite_transport,
+                }
             credential_candidate_root = effective_config.runner_repo
             gb10_credential_controller = gb10_controller
             if plan.runner_config_hash != self.config.config_sha256:
@@ -200,9 +263,99 @@ class InstalledFinalGateExecutor:
             container_registry = str(
                 load_cluster_config(effective_config.cluster_config_path).container_registry
             )
+            if plan.schema_version == 7:
+                prerequisite_path = Path(plan.execution_prerequisite_artifact_path or "")
+                prerequisite_digest = plan.execution_prerequisite_artifact_sha256
+                prerequisite_root = effective_config.state_root / "execution-prerequisites"
+                if prerequisite_path.parent != prerequisite_root or not isinstance(
+                    prerequisite_digest, str
+                ):
+                    raise ValueError("installed execution prerequisite publication is invalid")
+                prerequisite = ProtectedExecutionPrerequisiteStore(
+                    effective_config.state_root,
+                    service_uid=self.service_uid,
+                ).read(
+                    ProtectedExecutionPrerequisitePublication(
+                        path=prerequisite_path,
+                        artifact_sha256=prerequisite_digest,
+                    )
+                )
+                executor_image = prerequisite.executor_profile_seed.executor_image
+                oldlab_prerequisite_transport = (
+                    build_fixed_oldlab_controller_prerequisite_transport(
+                        image=executor_image,
+                        run=self._controller_prerequisite_run,
+                    )
+                )
+                controller_prerequisite_transports["oldlab"] = oldlab_prerequisite_transport
+                pool_credential_transports = {
+                    "gb10": build_fixed_gb10_pool_credential_transport(
+                        controller=gb10_prerequisite_controller,
+                    ),
+                    "oldlab": build_fixed_oldlab_pool_credential_transport(
+                        image=executor_image,
+                        run=self._controller_prerequisite_run,
+                    ),
+                }
+                prepared_controller_transports = {
+                    "gb10": build_fixed_gb10_prepared_controller_transport(
+                        controller=gb10_prerequisite_controller,
+                    ),
+                    "oldlab": build_fixed_oldlab_prepared_controller_transport(
+                        image=executor_image,
+                        run=self._controller_prerequisite_run,
+                    ),
+                }
             protected_runner = SubprocessProtectedApplyCommandRunner(
                 kubeconfig=effective_config.kubeconfig_path
             )
+            execution_preparation_dependency_guard = None
+            if plan.schema_version == 7:
+
+                def desired_configuration_source(
+                    bound_plan: FinalGatePlan,
+                ) -> ProtectedStagingDesiredConfiguration:
+                    seed = staging_capacity.read_credential_seed()
+                    with open_protected_capacity_manager_client(
+                        runner=protected_runner,
+                        credentials_root=staging_capacity.credentials_root,
+                        service_uid=self.service_uid,
+                        service_gid=self.service_gid,
+                    ) as client:
+                        active = client.get_configuration()
+                    return derive_protected_staging_capacity_configuration(
+                        active_document=active,
+                        seed_values=seed,
+                        target_generation=bound_plan.starting_mutation_epoch + 1,
+                    )
+
+                def execution_authority_source(
+                    desired: ProtectedStagingDesiredConfiguration,
+                ) -> ProtectedExecutionPrerequisiteAuthority:
+                    return InstalledExecutionAuthoritySource(
+                        publication_reader=InstalledExecutionAuthorityReader(
+                            path=_EXECUTION_AUTHORITY_PUBLICATION,
+                            expected_uid=self.service_uid,
+                            expected_gid=self.service_gid,
+                        ),
+                        controller_transports={
+                            "gb10": gb10_prerequisite_transport,
+                            "oldlab": oldlab_prerequisite_transport,
+                        },
+                        credential_bundle_reader=(
+                            staging_capacity.read_execution_credential_bundle
+                        ),
+                        witness_exports_source=KubernetesExecutionWitnessExportsSource(
+                            protected_runner
+                        ),
+                    )(desired)
+
+                execution_preparation_dependency_guard = (
+                    ProtectedExecutionPreparationDependencyGuard(
+                        desired_configuration_source=desired_configuration_source,
+                        authority_source=execution_authority_source,
+                    )
+                )
             gb10 = build_fixed_gb10_ssh_transport(
                 effective_config.cluster_config_path,
                 expected_hosts=tuple(plan.gb10_boot_ids),
@@ -245,6 +398,18 @@ class InstalledFinalGateExecutor:
                 cp_url=effective_config.cp_url,
                 service_uid=self.service_uid,
             )
+            staging_capacity = KubernetesProtectedStagingCapacityRuntime(
+                runner=protected_runner,
+                state_root=effective_config.state_root,
+                candidate_root=effective_config.runner_repo,
+                service_uid=self.service_uid,
+                service_gid=self.service_gid,
+                container_registry=container_registry,
+                controller_prerequisite_transports=controller_prerequisite_transports,
+                pool_credential_transports=pool_credential_transports,
+                prepared_controller_transports=prepared_controller_transports,
+                execution_preparation_dependency_guard=(execution_preparation_dependency_guard),
+            )
         if check_id == "final.protected-apply":
             return MigrationEpochProtectedApplyExecutor(
                 state_root=effective_config.state_root,
@@ -253,6 +418,7 @@ class InstalledFinalGateExecutor:
                 gb10_transport=gb10,
                 environment_state_transport=environment_state,
                 candidate_root=effective_config.runner_repo,
+                staging_capacity_runtime=staging_capacity,
                 external_supervisor_transports=external_supervisors,
                 external_supervisor_credential_transports=external_supervisor_credentials,
                 external_supervisor_credential_identities=external_supervisor_credential_identities,
@@ -265,6 +431,7 @@ class InstalledFinalGateExecutor:
                 gb10_transport=gb10,
                 environment_state_transport=environment_state,
                 candidate_root=effective_config.runner_repo,
+                staging_capacity_runtime=staging_capacity,
                 external_supervisor_transports=external_supervisors,
                 external_supervisor_credential_transports=external_supervisor_credentials,
                 external_supervisor_credential_identities=external_supervisor_credential_identities,
@@ -413,6 +580,19 @@ class InstalledFinalGateExecutor:
         )
 
     @staticmethod
+    def _controller_prerequisite_run(
+        argv: Sequence[str],
+        input_payload: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return _run_command(
+            argv,
+            timeout=1500,
+            capture_output=True,
+            input_payload=input_payload,
+            max_input_bytes=_MAX_CONTROLLER_COMMAND_INPUT,
+        )
+
+    @staticmethod
     def _browser_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return _run_command(argv, timeout=900, capture_output=False)
 
@@ -423,6 +603,7 @@ def _run_command(
     timeout: int,
     capture_output: bool,
     input_payload: str | None = None,
+    max_input_bytes: int = _MAX_COMMAND_INPUT,
 ) -> subprocess.CompletedProcess[str]:
     command = tuple(argv)
     if (
@@ -437,8 +618,13 @@ def _run_command(
         or not 1 <= timeout <= 1800
     ):
         raise ValueError("installed final command is invalid")
+    if (
+        type(max_input_bytes) is not int
+        or not 1 <= max_input_bytes <= _MAX_CONTROLLER_COMMAND_INPUT
+    ):
+        raise ValueError("installed final command input bound is invalid")
     if input_payload is not None and (
-        type(input_payload) is not str or len(input_payload.encode()) > _MAX_COMMAND_INPUT
+        type(input_payload) is not str or len(input_payload.encode()) > max_input_bytes
     ):
         raise ValueError("installed final command input is too large")
     environment = {

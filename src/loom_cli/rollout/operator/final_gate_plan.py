@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import TypedDict, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from loom_cli.rollout.external_supervisor_controller import (
     encode_external_supervisor_predecessor_identities,
@@ -36,8 +36,13 @@ from loom_cli.rollout.preflight_contract import (
 from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
 
 from .backup_lease import BackupLease, component_set_digest
+from .checkpoint_database_authority import DatabaseAuthorityEvidence
 from .model import DriverEnvelope, driver_envelope_sha256, validate_safe_identifier
 from .protected_apply_baseline import ProtectedApplyBaseline
+from .protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisitePublication,
+    ProtectedExecutionPrerequisiteStore,
+)
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -161,12 +166,38 @@ class FinalGatePlan:
     protected_baseline_digest: str
     protected_baseline_resource_digests: Mapping[str, str]
     plan_digest: str
+    checkpoint_schema_version: int | None = None
+    checkpoint_component_sha256: Mapping[str, str] | None = None
+    database_authority_digest: str | None = None
+    public_schema_revision: str | None = None
+    capacity_guard_schema_revision: str | None = None
+    manager_configuration_epoch: int | None = None
+    manager_configuration_digest: str | None = None
+    manager_authority_incarnation: str | None = None
+    manager_writer_epoch: int | None = None
+    manager_execution_state: str | None = None
+    manager_execution_epoch: int | None = None
+    manager_execution_manifest_sha256: str | None = None
+    manager_executable_new_capacity_ceiling: int | None = None
+    manager_increase_freeze: bool | None = None
+    restore_report_sha256: str | None = None
+    execution_prerequisite_schema_version: int | None = None
+    execution_prerequisite_artifact_path: str | None = None
+    execution_prerequisite_artifact_sha256: str | None = None
+    execution_core_artifact_bundle_sha256: str | None = None
+    execution_policy_sha256: str | None = None
+    executor_profile_seed_sha256: str | None = None
+    execution_manager_route_sha256: str | None = None
+    execution_access_metadata_sha256: str | None = None
+    execution_coexistence_witness_sha256: str | None = None
+    execution_legacy_writer_sha256: str | None = None
+    execution_rollback_evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
         validate_safe_identifier(self.request_id, "request_id")
         validate_safe_identifier(self.rollout_id, "rollout_id")
         if (
-            self.schema_version not in {4, 5}
+            self.schema_version not in {4, 5, 6, 7}
             or type(self.attempt_number) is not int
             or self.attempt_number < 1
             or self.source_mode not in {"merged-dev", "sealed-cumulative"}
@@ -219,6 +250,96 @@ class FinalGatePlan:
         )
         if any(_SHA256_RE.fullmatch(value) is None for value in digest_fields):
             raise ValueError("final gate plan digest is invalid")
+        checkpoint_components = dict(self.checkpoint_component_sha256 or {})
+        if self.schema_version in {4, 5}:
+            if (
+                self.checkpoint_schema_version is not None
+                or self.checkpoint_component_sha256 is not None
+                or any(
+                    value is not None
+                    for value in (
+                        self.database_authority_digest,
+                        self.public_schema_revision,
+                        self.capacity_guard_schema_revision,
+                        self.manager_configuration_epoch,
+                        self.manager_configuration_digest,
+                        self.manager_authority_incarnation,
+                        self.manager_writer_epoch,
+                        self.manager_execution_state,
+                        self.manager_execution_epoch,
+                        self.manager_execution_manifest_sha256,
+                        self.manager_executable_new_capacity_ceiling,
+                        self.manager_increase_freeze,
+                        self.restore_report_sha256,
+                    )
+                )
+            ):
+                raise ValueError("historical final gate plan cannot carry schema-3 authority")
+        else:
+            try:
+                authority = DatabaseAuthorityEvidence(
+                    public_schema_revision=self.public_schema_revision,  # type: ignore[arg-type]
+                    capacity_guard_schema_revision=self.capacity_guard_schema_revision,
+                    configuration_epoch=self.manager_configuration_epoch,  # type: ignore[arg-type]
+                    configuration_digest=self.manager_configuration_digest,  # type: ignore[arg-type]
+                    authority_incarnation=UUID(str(self.manager_authority_incarnation)),
+                    writer_epoch=self.manager_writer_epoch,  # type: ignore[arg-type]
+                    execution_state=self.manager_execution_state,  # type: ignore[arg-type]
+                    execution_epoch=self.manager_execution_epoch,  # type: ignore[arg-type]
+                    execution_manifest_sha256=self.manager_execution_manifest_sha256,  # type: ignore[arg-type]
+                    executable_new_capacity_ceiling=(
+                        self.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+                    ),
+                    increase_freeze=self.manager_increase_freeze,  # type: ignore[arg-type]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("final gate schema-3 authority is invalid") from exc
+            if (
+                self.checkpoint_schema_version != 3
+                or set(checkpoint_components)
+                != {"database_authority", "k8s_secrets", "object_inventory", "postgres"}
+                or authority.digest != self.database_authority_digest
+                or checkpoint_components["database_authority"] != self.database_authority_digest
+                or checkpoint_components["postgres"]
+                != self.db_snapshot_identity.removeprefix("pgdump-sha256:")
+                or self.public_schema_revision != self.schema_revision
+                or _SHA256_RE.fullmatch(self.restore_report_sha256 or "") is None
+            ):
+                raise ValueError("final gate schema-3 authority binding is invalid")
+        execution_prerequisite_digests = (
+            self.execution_prerequisite_artifact_sha256,
+            self.execution_core_artifact_bundle_sha256,
+            self.execution_policy_sha256,
+            self.executor_profile_seed_sha256,
+            self.execution_manager_route_sha256,
+            self.execution_access_metadata_sha256,
+            self.execution_coexistence_witness_sha256,
+            self.execution_legacy_writer_sha256,
+            self.execution_rollback_evidence_sha256,
+        )
+        if self.schema_version == 7:
+            prerequisite_path = Path(self.execution_prerequisite_artifact_path or "")
+            if (
+                self.execution_prerequisite_schema_version != 1
+                or not prerequisite_path.is_absolute()
+                or ".." in prerequisite_path.parts
+                or prerequisite_path.name != f"{self.execution_prerequisite_artifact_sha256}.json"
+                or any(
+                    not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
+                    for value in execution_prerequisite_digests
+                )
+                or self.execution_core_artifact_bundle_sha256 != self.artifact_bundle_digest
+                or self.execution_rollback_evidence_sha256 is None
+            ):
+                raise ValueError("final gate execution prerequisite binding is invalid")
+        elif self.execution_prerequisite_schema_version is not None or any(
+            value is not None
+            for value in (
+                self.execution_prerequisite_artifact_path,
+                *execution_prerequisite_digests,
+            )
+        ):
+            raise ValueError("historical final gate plan cannot carry execution prerequisites")
         for value in (
             self.artifact_descriptor_path,
             self.rendered_manifest_path,
@@ -491,6 +612,12 @@ class FinalGatePlan:
             MappingProxyType(dict(self.check_implementation_digests)),
         )
         object.__setattr__(self, "evidence_hashes", MappingProxyType(dict(self.evidence_hashes)))
+        if self.checkpoint_component_sha256 is not None:
+            object.__setattr__(
+                self,
+                "checkpoint_component_sha256",
+                MappingProxyType(checkpoint_components),
+            )
         object.__setattr__(
             self,
             "protected_baseline_resource_digests",
@@ -518,8 +645,70 @@ class FinalGatePlan:
         baseline: ProtectedApplyBaseline,
         systemd_evidence: Mapping[str, object],
         predecessor_evidence: Mapping[str, object],
+        *,
+        execution_prerequisite_publication: (
+            ProtectedExecutionPrerequisitePublication | None
+        ) = None,
+        execution_prerequisite_store: ProtectedExecutionPrerequisiteStore | None = None,
     ) -> FinalGatePlan:
         bindings = attestation.bindings
+        if (execution_prerequisite_publication is None) is not (
+            execution_prerequisite_store is None
+        ) or (bindings.execution_prerequisite_schema_version is None) is not (
+            execution_prerequisite_publication is None
+        ):
+            raise ValueError("final gate execution prerequisite authority is incomplete")
+        execution_prerequisites: dict[str, object] = {}
+        if (
+            execution_prerequisite_publication is not None
+            and execution_prerequisite_store is not None
+        ):
+            prerequisite = execution_prerequisite_store.read(execution_prerequisite_publication)
+            if (
+                attestation.schema_version != 5
+                or bindings.execution_prerequisite_schema_version != prerequisite.schema_version
+                or bindings.execution_prerequisite_artifact_path
+                != str(execution_prerequisite_publication.path)
+                or bindings.execution_prerequisite_artifact_sha256 != prerequisite.artifact_sha256
+                or bindings.execution_core_artifact_bundle_sha256
+                != prerequisite.core_artifact_bundle_sha256
+                or bindings.execution_policy_sha256 != prerequisite.execution_policy_sha256
+                or bindings.executor_profile_seed_sha256
+                != prerequisite.executor_profile_seed_sha256
+                or bindings.execution_manager_route_sha256 != prerequisite.manager_route_sha256
+                or bindings.execution_access_metadata_sha256
+                != prerequisite.credential_metadata_manifest_sha256
+                or bindings.execution_coexistence_witness_sha256
+                != prerequisite.witness_manifest_sha256
+                or bindings.execution_legacy_writer_sha256
+                != prerequisite.legacy_writer_manifest_sha256
+                or bindings.execution_rollback_evidence_sha256
+                != prerequisite.rollback_evidence_sha256
+                or prerequisite.core_artifact_bundle_sha256 != artifacts.bundle_digest
+                or prerequisite.candidate_sha != bindings.candidate_sha
+                or prerequisite.candidate_tree != bindings.candidate_tree
+                or prerequisite.backup_lease_sha256 != lease.evidence_digest
+                or prerequisite.source_configuration_epoch != bindings.manager_configuration_epoch
+                or prerequisite.source_configuration_sha256 != bindings.manager_configuration_digest
+            ):
+                raise ValueError("final gate execution prerequisite authority drifted")
+            execution_prerequisites = {
+                "execution_prerequisite_schema_version": prerequisite.schema_version,
+                "execution_prerequisite_artifact_path": str(
+                    execution_prerequisite_publication.path
+                ),
+                "execution_prerequisite_artifact_sha256": prerequisite.artifact_sha256,
+                "execution_core_artifact_bundle_sha256": (prerequisite.core_artifact_bundle_sha256),
+                "execution_policy_sha256": prerequisite.execution_policy_sha256,
+                "executor_profile_seed_sha256": prerequisite.executor_profile_seed_sha256,
+                "execution_manager_route_sha256": prerequisite.manager_route_sha256,
+                "execution_access_metadata_sha256": (
+                    prerequisite.credential_metadata_manifest_sha256
+                ),
+                "execution_coexistence_witness_sha256": (prerequisite.witness_manifest_sha256),
+                "execution_legacy_writer_sha256": (prerequisite.legacy_writer_manifest_sha256),
+                "execution_rollback_evidence_sha256": (prerequisite.rollback_evidence_sha256),
+            }
         systemd = _parse_systemd_evidence(systemd_evidence)
         predecessor = _parse_external_supervisor_predecessor_evidence(predecessor_evidence)
         attested_controller_bindings = dict(bindings.supervisor_controller_bindings)
@@ -575,6 +764,22 @@ class FinalGatePlan:
             or lease.db_snapshot_identity != bindings.db_snapshot_identity
             or lease.schema_revision != bindings.schema_revision
             or lease.object_inventory_root != bindings.object_inventory_root
+            or lease.checkpoint_schema_version != bindings.checkpoint_schema_version
+            or dict(lease.component_sha256) != dict(bindings.checkpoint_component_sha256 or {})
+            or lease.database_authority_digest != bindings.database_authority_digest
+            or lease.public_schema_revision != bindings.public_schema_revision
+            or lease.capacity_guard_schema_revision != bindings.capacity_guard_schema_revision
+            or lease.manager_configuration_epoch != bindings.manager_configuration_epoch
+            or lease.manager_configuration_digest != bindings.manager_configuration_digest
+            or str(lease.manager_authority_incarnation) != bindings.manager_authority_incarnation
+            or lease.manager_writer_epoch != bindings.manager_writer_epoch
+            or lease.manager_execution_state != bindings.manager_execution_state
+            or lease.manager_execution_epoch != bindings.manager_execution_epoch
+            or lease.manager_execution_manifest_sha256 != bindings.manager_execution_manifest_sha256
+            or lease.manager_executable_new_capacity_ceiling
+            != bindings.manager_executable_new_capacity_ceiling
+            or lease.manager_increase_freeze != bindings.manager_increase_freeze
+            or lease.restore_report_sha256 != bindings.restore_report_sha256
             or baseline.environment != bindings.environment
             or baseline.namespace != bindings.namespace
             or baseline.mutation_epoch != bindings.staging_mutation_epoch
@@ -589,7 +794,7 @@ class FinalGatePlan:
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
-            "schema_version": 5,
+            "schema_version": 7 if execution_prerequisites else 6,
             "request_id": envelope.request_id,
             "rollout_id": envelope.rollout_id,
             "attempt_number": envelope.attempt_number,
@@ -665,6 +870,24 @@ class FinalGatePlan:
             "evidence_hashes": dict(attestation.evidence_hashes),
             "protected_baseline_digest": baseline.baseline_digest,
             "protected_baseline_resource_digests": dict(baseline.resource_digests),
+            "checkpoint_schema_version": bindings.checkpoint_schema_version,
+            "checkpoint_component_sha256": dict(bindings.checkpoint_component_sha256 or {}),
+            "database_authority_digest": bindings.database_authority_digest,
+            "public_schema_revision": bindings.public_schema_revision,
+            "capacity_guard_schema_revision": bindings.capacity_guard_schema_revision,
+            "manager_configuration_epoch": bindings.manager_configuration_epoch,
+            "manager_configuration_digest": bindings.manager_configuration_digest,
+            "manager_authority_incarnation": bindings.manager_authority_incarnation,
+            "manager_writer_epoch": bindings.manager_writer_epoch,
+            "manager_execution_state": bindings.manager_execution_state,
+            "manager_execution_epoch": bindings.manager_execution_epoch,
+            "manager_execution_manifest_sha256": bindings.manager_execution_manifest_sha256,
+            "manager_executable_new_capacity_ceiling": (
+                bindings.manager_executable_new_capacity_ceiling
+            ),
+            "manager_increase_freeze": bindings.manager_increase_freeze,
+            "restore_report_sha256": bindings.restore_report_sha256,
+            **execution_prerequisites,
         }
         return cls.from_dict({**payload, "plan_digest": _hash_json(payload)})
 
@@ -673,7 +896,28 @@ class FinalGatePlan:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> FinalGatePlan:
-        expected = set(cls.__dataclass_fields__)
+        checkpoint_fields = {
+            name
+            for name in cls.__dataclass_fields__
+            if name.startswith("checkpoint_")
+            or name.startswith("database_authority")
+            or name.startswith("public_schema")
+            or name.startswith("capacity_guard")
+            or name.startswith("manager_")
+            or name == "restore_report_sha256"
+        }
+        execution_fields = {
+            name
+            for name in cls.__dataclass_fields__
+            if name.startswith("execution_") or name == "executor_profile_seed_sha256"
+        }
+        historical = set(cls.__dataclass_fields__) - checkpoint_fields - execution_fields
+        schema_version = value.get("schema_version")
+        expected = (
+            historical
+            | (checkpoint_fields if schema_version in {6, 7} else set())
+            | (execution_fields if schema_version == 7 else set())
+        )
         if set(value) != expected:
             raise ValueError("final gate plan fields are invalid")
         plan = cls(
@@ -768,6 +1012,106 @@ class FinalGatePlan:
                 value, "protected_baseline_resource_digests"
             ),
             plan_digest=_string(value, "plan_digest"),
+            checkpoint_schema_version=(
+                _integer(value, "checkpoint_schema_version") if schema_version in {6, 7} else None
+            ),
+            checkpoint_component_sha256=(
+                _string_map(value, "checkpoint_component_sha256")
+                if schema_version in {6, 7}
+                else None
+            ),
+            database_authority_digest=(
+                _string(value, "database_authority_digest") if schema_version in {6, 7} else None
+            ),
+            public_schema_revision=(
+                _string(value, "public_schema_revision") if schema_version in {6, 7} else None
+            ),
+            capacity_guard_schema_revision=(
+                _optional_string(value, "capacity_guard_schema_revision")
+                if schema_version in {6, 7}
+                else None
+            ),
+            manager_configuration_epoch=(
+                _integer(value, "manager_configuration_epoch") if schema_version in {6, 7} else None
+            ),
+            manager_configuration_digest=(
+                _string(value, "manager_configuration_digest") if schema_version in {6, 7} else None
+            ),
+            manager_authority_incarnation=(
+                _string(value, "manager_authority_incarnation")
+                if schema_version in {6, 7}
+                else None
+            ),
+            manager_writer_epoch=(
+                _integer(value, "manager_writer_epoch") if schema_version in {6, 7} else None
+            ),
+            manager_execution_state=(
+                _string(value, "manager_execution_state") if schema_version in {6, 7} else None
+            ),
+            manager_execution_epoch=(
+                _integer(value, "manager_execution_epoch") if schema_version in {6, 7} else None
+            ),
+            manager_execution_manifest_sha256=(
+                _optional_string(value, "manager_execution_manifest_sha256")
+                if schema_version in {6, 7}
+                else None
+            ),
+            manager_executable_new_capacity_ceiling=(
+                _integer(value, "manager_executable_new_capacity_ceiling")
+                if schema_version in {6, 7}
+                else None
+            ),
+            manager_increase_freeze=(
+                _boolean(value, "manager_increase_freeze") if schema_version in {6, 7} else None
+            ),
+            restore_report_sha256=(
+                _string(value, "restore_report_sha256") if schema_version in {6, 7} else None
+            ),
+            execution_prerequisite_schema_version=(
+                _integer(value, "execution_prerequisite_schema_version")
+                if schema_version == 7
+                else None
+            ),
+            execution_prerequisite_artifact_path=(
+                _string(value, "execution_prerequisite_artifact_path")
+                if schema_version == 7
+                else None
+            ),
+            execution_prerequisite_artifact_sha256=(
+                _string(value, "execution_prerequisite_artifact_sha256")
+                if schema_version == 7
+                else None
+            ),
+            execution_core_artifact_bundle_sha256=(
+                _string(value, "execution_core_artifact_bundle_sha256")
+                if schema_version == 7
+                else None
+            ),
+            execution_policy_sha256=(
+                _string(value, "execution_policy_sha256") if schema_version == 7 else None
+            ),
+            executor_profile_seed_sha256=(
+                _string(value, "executor_profile_seed_sha256") if schema_version == 7 else None
+            ),
+            execution_manager_route_sha256=(
+                _string(value, "execution_manager_route_sha256") if schema_version == 7 else None
+            ),
+            execution_access_metadata_sha256=(
+                _string(value, "execution_access_metadata_sha256") if schema_version == 7 else None
+            ),
+            execution_coexistence_witness_sha256=(
+                _string(value, "execution_coexistence_witness_sha256")
+                if schema_version == 7
+                else None
+            ),
+            execution_legacy_writer_sha256=(
+                _string(value, "execution_legacy_writer_sha256") if schema_version == 7 else None
+            ),
+            execution_rollback_evidence_sha256=(
+                _string(value, "execution_rollback_evidence_sha256")
+                if schema_version == 7
+                else None
+            ),
         )
         if _hash_json(_plan_payload(plan, include_digest=False)) != plan.plan_digest:
             raise ValueError("final gate plan content digest drifted")
@@ -891,10 +1235,27 @@ class FinalGatePlanStore:
 
 
 def _plan_payload(plan: FinalGatePlan, *, include_digest: bool) -> dict[str, object]:
+    checkpoint_fields = {
+        name
+        for name in plan.__dataclass_fields__
+        if name.startswith("checkpoint_")
+        or name.startswith("database_authority")
+        or name.startswith("public_schema")
+        or name.startswith("capacity_guard")
+        or name.startswith("manager_")
+        or name == "restore_report_sha256"
+    }
+    execution_fields = {
+        name
+        for name in plan.__dataclass_fields__
+        if name.startswith("execution_") or name == "executor_profile_seed_sha256"
+    }
     payload = {
         name: (dict(value) if isinstance(value, Mapping) else value)
         for name, value in ((field, getattr(plan, field)) for field in plan.__dataclass_fields__)
-        if include_digest or name != "plan_digest"
+        if (include_digest or name != "plan_digest")
+        and (plan.schema_version in {6, 7} or name not in checkpoint_fields)
+        and (plan.schema_version == 7 or name not in execution_fields)
     }
     return payload
 
@@ -917,6 +1278,13 @@ def _integer(value: Mapping[str, object], key: str) -> int:
     found = value[key]
     if type(found) is not int:
         raise ValueError(f"final gate plan {key} must be an integer")
+    return found
+
+
+def _boolean(value: Mapping[str, object], key: str) -> bool:
+    found = value[key]
+    if type(found) is not bool:
+        raise ValueError(f"final gate plan {key} must be a boolean")
     return found
 
 

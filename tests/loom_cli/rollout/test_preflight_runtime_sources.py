@@ -143,9 +143,7 @@ def _runtime_sources(
         gb10_mount_binding_digest="6" * 64,
         alembic_ini=tmp_path / "alembic.ini",
         migration_policy_path=DEFAULT_MIGRATION_POLICY,
-        migration_policy_digest=hashlib.sha256(
-            DEFAULT_MIGRATION_POLICY.read_bytes()
-        ).hexdigest(),
+        migration_policy_digest=hashlib.sha256(DEFAULT_MIGRATION_POLICY.read_bytes()).hexdigest(),
         systemd_analyze_run=lambda *_args, **_kwargs: _result(),
         image_run=image_run,
         render_manifest=render_manifest,
@@ -174,6 +172,7 @@ def _runtime_sources(
             "rehearsal-exact-checkpoint",
             "7" * 64,
         ),
+        execution_prerequisite_publisher=lambda _lease, _images: {},
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
         loaded_artifacts=loaded_artifacts,
         container_registry=container_registry,
@@ -282,15 +281,14 @@ def test_fresh_runtime_sources_forwards_post_pin_to_manifest_session_artifact(
     assert server_probe.passed
     assert len(render_calls) == 1
     assert len(callback_payloads) == 1
-    expected_artifact_yaml = (
-        callback_payloads[0] + "# gb10-manifest-post-image-pin-sentinel\n"
-    )
+    expected_artifact_yaml = callback_payloads[0] + "# gb10-manifest-post-image-pin-sentinel\n"
     for name, _path in ROLLOUT_IMAGES:
         assert f"{registry}/{name}@{manifest_digests[name]}" in callback_payloads[0]
     assert server_payloads == [expected_artifact_yaml]
-    assert render_probe.evidence["rendered-sha256"] == hashlib.sha256(
-        expected_artifact_yaml.encode()
-    ).hexdigest()
+    assert (
+        render_probe.evidence["rendered-sha256"]
+        == hashlib.sha256(expected_artifact_yaml.encode()).hexdigest()
+    )
 
 
 def test_loaded_runtime_sources_reuse_seeded_manifest_without_rematerializing(
@@ -299,10 +297,13 @@ def test_loaded_runtime_sources_reuse_seeded_manifest_without_rematerializing(
     """Catch removal of ``artifact=loaded_artifacts.manifests`` from the session seed."""
     candidate = _candidate()
     images = replace(_images(), plan_digest=image_plan_digest())
-    stored_yaml = _rendered_with_lifecycle_cronjob().replace(
-        "staging-1111111",
-        candidate.image_tag,
-    ) + "# gb10-loaded-manifest-sentinel\n"
+    stored_yaml = (
+        _rendered_with_lifecycle_cronjob().replace(
+            "staging-1111111",
+            candidate.image_tag,
+        )
+        + "# gb10-loaded-manifest-sentinel\n"
+    )
     manifests = inspect_rendered_manifests(
         stored_yaml,
         image_tag=candidate.image_tag,
@@ -503,6 +504,7 @@ def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
         "images.build",
         "staging.release-baseline",
         "rehearsal.cleanup",
+        "execution.prerequisites",
     }
     assert plan.context.bindings["staging.mutation-epoch"] == 9
     assert plan.context.bindings["backup.source-request"] == "fresh-checkpoint"

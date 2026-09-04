@@ -13,8 +13,9 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from loom.data_lifecycle import (
     STAGING_ADMISSION_BYTES_LIMIT,
@@ -46,6 +47,14 @@ from loom_cli.rollout.gb10_rehearsal import (
     GB10RehearsalEvidence,
 )
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE, _inspect_registry_manifest
+from loom_cli.rollout.operator.backup import VerifiedBackup
+from loom_cli.rollout.operator.checkpoint_database_authority import (
+    _DATABASE_AUTHORITY_SQL,
+    DatabaseAuthorityError,
+    DatabaseAuthorityEvidence,
+    parse_database_authority_observation,
+)
+from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     classify_external_supervisor_live_state,
@@ -110,6 +119,7 @@ REHEARSAL_KUBECONFIG = REHEARSAL_KUBECONFIG_PATH
 _MAX_OUTPUT_BYTES = 1024 * 1024
 _MAX_PRODUCTION_DEFAULTS_BYTES = 1024 * 1024
 _MAX_EXTERNAL_SUPERVISOR_PROFILE_BYTES = 1024 * 1024
+_MAX_DATABASE_AUTHORITY_BYTES = 4 * 1024 * 1024
 _KUBERNETES_UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -1216,7 +1226,10 @@ class IsolatedRehearsalExecutor:
         existing = self._database_identity(plan)
         if existing is not None and existing.get("restored") is True:
             if existing.get("schema_revision") == plan.schema_revision:
-                return _database_ready(plan)
+                authority = self._database_authority(plan)
+                if authority is not None and _database_authority_matches_plan(authority, plan):
+                    return _database_ready(plan)
+                return _blocked("database", "restore-authority-drift")
             return _blocked("database", "existing-restore-drift")
         dump_path = plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
         transfer_argv = (
@@ -1280,6 +1293,10 @@ class IsolatedRehearsalExecutor:
             if not self._remove_staged_dump(plan):
                 return _blocked("database", "restore-staging-cleanup-failed")
             return _blocked("database", "restore-staging-verification-failed")
+        if not self._checkpoint_matches_plan(plan):
+            if not self._remove_staged_dump(plan):
+                return _blocked("database", "restore-staging-cleanup-failed")
+            return _blocked("database", "checkpoint-readback-drift")
         restored = self._status(
             (
                 "kubectl",
@@ -1316,7 +1333,50 @@ class IsolatedRehearsalExecutor:
             or identity.get("schema_revision") != plan.schema_revision
         ):
             return _blocked("database", "restore-verification-failed")
+        authority = self._database_authority(plan)
+        if authority is None or not _database_authority_matches_plan(authority, plan):
+            return _blocked("database", "restore-authority-drift")
         return _database_ready(plan)
+
+    def _checkpoint_matches_plan(self, plan: RehearsalPlan) -> bool:
+        try:
+            checkpoint = inspect_critical_checkpoint(
+                VerifiedBackup(
+                    manifest_path=plan.checkpoint_manifest_path,
+                    manifest_sha256=plan.checkpoint_manifest_sha256,
+                ),
+                request_id=plan.checkpoint_request_id,
+                environment="staging",
+                namespace="loom-staging",
+                expected_owner_uid=os.geteuid(),
+                now=datetime.now(UTC),
+            )
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return bool(
+            checkpoint.evidence_digest == plan.checkpoint_evidence_sha256
+            and checkpoint.manifest_path == plan.checkpoint_manifest_path
+            and checkpoint.manifest_sha256 == plan.checkpoint_manifest_sha256
+            and dict(checkpoint.component_sha256) == dict(plan.checkpoint_component_sha256 or {})
+            and checkpoint.mutation_epoch == plan.mutation_epoch
+            and checkpoint.db_snapshot_identity == plan.db_snapshot_identity
+            and checkpoint.object_inventory_root == plan.object_inventory_root
+            and checkpoint.schema_revision == plan.schema_revision
+            and checkpoint.database_authority_digest == plan.database_authority_digest
+            and checkpoint.public_schema_revision == plan.public_schema_revision
+            and checkpoint.capacity_guard_schema_revision == plan.capacity_guard_schema_revision
+            and checkpoint.manager_configuration_epoch == plan.manager_configuration_epoch
+            and checkpoint.manager_configuration_digest == plan.manager_configuration_digest
+            and checkpoint.manager_authority_incarnation == plan.manager_authority_incarnation
+            and checkpoint.manager_writer_epoch == plan.manager_writer_epoch
+            and checkpoint.manager_execution_state == plan.manager_execution_state
+            and checkpoint.manager_execution_epoch == plan.manager_execution_epoch
+            and checkpoint.manager_execution_manifest_sha256
+            == plan.manager_execution_manifest_sha256
+            and checkpoint.manager_executable_new_capacity_ceiling
+            == plan.manager_executable_new_capacity_ceiling
+            and checkpoint.manager_increase_freeze == plan.manager_increase_freeze
+        )
 
     def _remove_staged_dump(self, plan: RehearsalPlan) -> bool:
         return self._status(
@@ -1350,11 +1410,44 @@ class IsolatedRehearsalExecutor:
         revision = self._psql_json(
             plan,
             "SELECT json_build_object('schema_revision',version_num)::text "
-            "FROM alembic_version LIMIT 1;",
+            "FROM public.alembic_version LIMIT 1;",
         )
         if revision is None or not isinstance(revision.get("schema_revision"), str):
             return None
         return {**identity, "schema_revision": revision["schema_revision"]}
+
+    def _database_authority(self, plan: RehearsalPlan) -> DatabaseAuthorityEvidence | None:
+        payload = self._text_command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "postgres",
+                "--",
+                "psql",
+                "--no-psqlrc",
+                "--quiet",
+                "--tuples-only",
+                "--no-align",
+                "--set=ON_ERROR_STOP=1",
+                "--username=loom_rehearsal",
+                f"--dbname={plan.resources.database}",
+                f"--command={_DATABASE_AUTHORITY_SQL}",
+            ),
+            timeout=30,
+            max_bytes=_MAX_DATABASE_AUTHORITY_BYTES,
+        )
+        if payload is None:
+            return None
+        try:
+            return parse_database_authority_observation(payload.strip().encode())
+        except DatabaseAuthorityError:
+            return None
 
     def _migration(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
         identity = self._database_identity(plan)
@@ -1363,10 +1456,25 @@ class IsolatedRehearsalExecutor:
         observed_revision = identity.get("schema_revision")
         if identity.get("restored") is not True or not isinstance(observed_revision, str):
             return _blocked("migration", "database-baseline-missing")
+        authority = self._database_authority(plan)
+        if authority is None:
+            return _blocked("migration", "database-authority-unavailable")
         if observed_revision == plan.migration_target_revision:
-            return _migration_ready(plan)
+            if not _database_authority_matches_plan(
+                authority,
+                plan,
+                public_revision=plan.migration_target_revision,
+            ):
+                return _blocked("migration", "database-authority-drift")
+            return _migration_ready(
+                plan,
+                before_authority_sha256=authority.digest,
+                after_authority_sha256=authority.digest,
+            )
         if observed_revision != plan.schema_revision:
             return _blocked("migration", "database-baseline-drift")
+        if not _database_authority_matches_plan(authority, plan):
+            return _blocked("migration", "database-authority-drift")
         db_url = "postgresql+psycopg://loom_rehearsal@127.0.0.1:5432/" + plan.resources.database
         migrated = self._status(
             (
@@ -1401,13 +1509,35 @@ class IsolatedRehearsalExecutor:
             or verified.get("schema_revision") != plan.migration_target_revision
         ):
             return _blocked("migration", "upgrade-verification-failed")
-        return _migration_ready(plan)
+        migrated_authority = self._database_authority(plan)
+        if migrated_authority is None or not _database_authority_matches_plan(
+            migrated_authority,
+            plan,
+            public_revision=plan.migration_target_revision,
+        ):
+            return _blocked("migration", "upgrade-authority-drift")
+        return _migration_ready(
+            plan,
+            before_authority_sha256=authority.digest,
+            after_authority_sha256=migrated_authority.digest,
+        )
 
     def _release(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
         try:
             release = self.release_artifacts(plan)
             secrets = self.secret_artifacts(plan)
         except (OSError, RuntimeError, ValueError):
+            return _blocked("release", "artifact-validation-failed")
+        checkpoint_components = dict(plan.checkpoint_component_sha256 or {})
+        required_secret_names = {
+            "loom-admin-secret",
+            "loom-capacity-manager",
+            "loom-secrets",
+            "loom-staging-tls",
+        }
+        if secrets.source_component_sha256 != checkpoint_components.get(
+            "k8s_secrets"
+        ) or not required_secret_names <= set(secrets.secret_names):
             return _blocked("release", "artifact-validation-failed")
         image_names = tuple(sorted(release.deployment_images))
         if not self._local_images_match(plan, image_names) or not self._load_images(
@@ -1418,6 +1548,25 @@ class IsolatedRehearsalExecutor:
         runtime_images = self._runtime_image_ids(plan, image_names)
         if runtime_images is None:
             return _blocked("release", "runtime-image-binding-failed")
+        boundary = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "networkpolicy",
+                "loom-rehearsal-default-deny",
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if boundary is None or not _default_deny_network_policy_matches(boundary, plan):
+            return _blocked("release", "default-deny-readback-drift")
         if not self._status_with_payload(
             (
                 "kubectl",
@@ -1585,6 +1734,7 @@ class IsolatedRehearsalExecutor:
                 "external-supervisor-validation-sha256": supervisor_validation_digest,
                 "manifest-sha256": release.artifact_sha256,
                 "secret-artifact-sha256": secrets.artifact_sha256,
+                "secret-inventory": ",".join(secrets.secret_names),
                 "status": "ready",
             },
             blockers={},
@@ -1810,13 +1960,10 @@ class IsolatedRehearsalExecutor:
         artifact: ExternalSupervisorArtifact,
     ) -> ExternalSupervisorLiveObservation:
         def run(argv: Sequence[str], payload: str) -> GB10ControllerCommandResult:
-            return cast(
-                GB10ControllerCommandResult,
-                self.run(
-                    argv,
-                    payload.encode("utf-8"),
-                    _GB10_CONTROLLER_PROOF_TIMEOUT_SECONDS,
-                ),
+            return self.run(
+                argv,
+                payload.encode("utf-8"),
+                _GB10_CONTROLLER_PROOF_TIMEOUT_SECONDS,
             )
 
         transport = build_fixed_gb10_external_supervisor_transport(
@@ -2860,10 +3007,35 @@ def _runtime_container_ready(
     )
 
 
+def _database_authority_matches_plan(
+    authority: DatabaseAuthorityEvidence,
+    plan: RehearsalPlan,
+    *,
+    public_revision: str | None = None,
+) -> bool:
+    return bool(
+        plan.checkpoint_schema_version == 3
+        and authority.public_schema_revision
+        == (plan.public_schema_revision if public_revision is None else public_revision)
+        and authority.capacity_guard_schema_revision == plan.capacity_guard_schema_revision
+        and authority.configuration_epoch == plan.manager_configuration_epoch
+        and authority.configuration_digest == plan.manager_configuration_digest
+        and authority.authority_incarnation == plan.manager_authority_incarnation
+        and authority.writer_epoch == plan.manager_writer_epoch
+        and authority.execution_state == plan.manager_execution_state
+        and authority.execution_epoch == plan.manager_execution_epoch
+        and authority.execution_manifest_sha256 == plan.manager_execution_manifest_sha256
+        and authority.executable_new_capacity_ceiling
+        == plan.manager_executable_new_capacity_ceiling
+        and authority.increase_freeze == plan.manager_increase_freeze
+    )
+
+
 def _database_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
     return RehearsalStepOutcome(
         passed=True,
         details={
+            "database-authority-sha256": str(plan.database_authority_digest),
             "database": plan.resources.database,
             "schema-revision": plan.schema_revision,
             "status": "restored",
@@ -2872,10 +3044,17 @@ def _database_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
     )
 
 
-def _migration_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
+def _migration_ready(
+    plan: RehearsalPlan,
+    *,
+    before_authority_sha256: str,
+    after_authority_sha256: str,
+) -> RehearsalStepOutcome:
     return RehearsalStepOutcome(
         passed=True,
         details={
+            "database-authority-after-sha256": after_authority_sha256,
+            "database-authority-before-sha256": before_authority_sha256,
             "plan-sha256": plan.migration_plan_sha256,
             "schema-revision": plan.migration_target_revision,
             "status": "migrated",
@@ -2908,7 +3087,10 @@ def _cleanup_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
     return RehearsalStepOutcome(
         passed=True,
         details={
+            "database": plan.resources.database,
+            "database-status": "absent",
             "namespace": plan.resources.namespace,
+            "namespace-status": "absent",
             "status": "absent",
             "unit": plan.resources.systemd_unit,
         },

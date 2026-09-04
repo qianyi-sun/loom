@@ -27,6 +27,7 @@ def _authority() -> AdminSmokeAuthority:
 def _model_authority() -> AdminSmokeAuthority:
     return replace(
         _authority(),
+        task_id="loom-smoke/gb10-direct-completion-hello-world",
         agent="direct-completion",
         agent_model=ModelSpec(
             provider="yibu",

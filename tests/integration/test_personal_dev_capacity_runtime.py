@@ -130,6 +130,41 @@ async def test_capacity_role_convergence_provisions_isolated_runtime_role(
 
 
 @pytest.mark.asyncio
+async def test_capacity_role_convergence_removes_owner_password(
+    postgres_url: str,
+) -> None:
+    name = f"ownpw-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    credentials = _new_credentials()
+
+    owner, *_rest = await database._converge_roles(identity, credentials)
+    async with await psycopg.AsyncConnection.connect(
+        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        autocommit=True,
+    ) as connection:
+        await connection.execute(
+            psycopg.sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                psycopg.sql.Identifier(owner),
+                psycopg.sql.Literal("contaminated-owner-password"),
+            )
+        )
+
+    await database._converge_roles(identity, credentials)
+
+    async with await psycopg.AsyncConnection.connect(
+        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+    ) as connection:
+        role = await connection.execute(
+            "SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid WHERE rolname = %s",
+            (owner,),
+        )
+        assert await role.fetchone() == (False, True)
+
+
+@pytest.mark.asyncio
 async def test_executor_surface_convergence_preserves_exact_protected_runtime_functions(
     capacity_guard_database: dict[str, object],
 ) -> None:
@@ -168,6 +203,169 @@ async def test_executor_surface_convergence_preserves_exact_protected_runtime_fu
             (runtime,),
         )
         assert {row[0] for row in await functions.fetchall()} == expected
+
+
+@pytest.mark.asyncio
+async def test_runtime_registration_rejects_privileged_runtime_role(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    runtime = str(capacity_guard_database["runtime_role"])
+    runtime_url = str(capacity_guard_database["runtime_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    cluster_admin_url = str(capacity_guard_database["cluster_admin_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    alter = psycopg.sql.SQL("ALTER ROLE {} ").format(psycopg.sql.Identifier(runtime))
+
+    async with await psycopg.AsyncConnection.connect(cluster_admin_url, autocommit=True) as admin:
+        await admin.execute(alter + psycopg.sql.SQL("CREATEDB"))
+    try:
+        async with await psycopg.AsyncConnection.connect(runtime_url) as connection:
+            with pytest.raises(
+                InsufficientPrivilege,
+                match="protected submission runtime role attributes drifted",
+            ):
+                await connection.execute(
+                    "SELECT loom_capacity_guard.current_protected_runtime_registration()"
+                )
+    finally:
+        async with await psycopg.AsyncConnection.connect(
+            cluster_admin_url, autocommit=True
+        ) as admin:
+            await admin.execute(alter + psycopg.sql.SQL("NOCREATEDB"))
+
+
+@pytest.mark.asyncio
+async def test_runtime_registration_rejects_runtime_role_membership(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    runtime = str(capacity_guard_database["runtime_role"])
+    runtime_url = str(capacity_guard_database["runtime_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    cluster_admin_url = str(capacity_guard_database["cluster_admin_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    outsider = f"loom_runtime_outsider_{uuid4().hex[:8]}"
+    grant = psycopg.sql.SQL("GRANT {} TO {}").format(
+        psycopg.sql.Identifier(outsider), psycopg.sql.Identifier(runtime)
+    )
+    revoke = psycopg.sql.SQL("REVOKE {} FROM {}").format(
+        psycopg.sql.Identifier(outsider), psycopg.sql.Identifier(runtime)
+    )
+
+    async with await psycopg.AsyncConnection.connect(cluster_admin_url, autocommit=True) as admin:
+        await admin.execute(
+            psycopg.sql.SQL("CREATE ROLE {}").format(psycopg.sql.Identifier(outsider))
+        )
+        await admin.execute(grant)
+    try:
+        async with await psycopg.AsyncConnection.connect(runtime_url) as connection:
+            with pytest.raises(
+                InsufficientPrivilege,
+                match="protected submission runtime role memberships drifted",
+            ):
+                await connection.execute(
+                    "SELECT loom_capacity_guard.current_protected_runtime_registration()"
+                )
+    finally:
+        async with await psycopg.AsyncConnection.connect(
+            cluster_admin_url, autocommit=True
+        ) as admin:
+            await admin.execute(revoke)
+            await admin.execute(
+                psycopg.sql.SQL("DROP ROLE {}").format(psycopg.sql.Identifier(outsider))
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relation_kind", ["table", "sequence"])
+async def test_runtime_registration_rejects_direct_relation_privileges(
+    capacity_guard_database: dict[str, object],
+    relation_kind: str,
+) -> None:
+    runtime = str(capacity_guard_database["runtime_role"])
+    runtime_url = str(capacity_guard_database["runtime_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    admin_url = str(capacity_guard_database["admin_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    if relation_kind == "table":
+        grant = psycopg.sql.SQL("GRANT SELECT ON loom_capacity_guard.authority_state TO {}").format(
+            psycopg.sql.Identifier(runtime)
+        )
+        cleanup = psycopg.sql.SQL(
+            "REVOKE SELECT ON loom_capacity_guard.authority_state FROM {}"
+        ).format(psycopg.sql.Identifier(runtime))
+    else:
+        grant = psycopg.sql.SQL(
+            "CREATE SEQUENCE loom_capacity_guard.runtime_contamination; "
+            "GRANT USAGE ON SEQUENCE loom_capacity_guard.runtime_contamination TO {}"
+        ).format(psycopg.sql.Identifier(runtime))
+        cleanup = psycopg.sql.SQL("DROP SEQUENCE loom_capacity_guard.runtime_contamination")
+
+    async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as admin:
+        await admin.execute(grant)
+    try:
+        async with await psycopg.AsyncConnection.connect(runtime_url) as connection:
+            with pytest.raises(
+                InsufficientPrivilege,
+                match="protected submission runtime relation privileges drifted",
+            ):
+                await connection.execute(
+                    "SELECT loom_capacity_guard.current_protected_runtime_registration()"
+                )
+    finally:
+        async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as admin:
+            await admin.execute(cleanup)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("privilege_drift", ["extra", "missing"])
+async def test_runtime_registration_rejects_function_privilege_drift(
+    capacity_guard_database: dict[str, object],
+    privilege_drift: str,
+) -> None:
+    runtime = str(capacity_guard_database["runtime_role"])
+    runtime_url = str(capacity_guard_database["runtime_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    admin_url = str(capacity_guard_database["admin_url"]).replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+    if privilege_drift == "extra":
+        function = "observe_executable_intent(uuid,uuid,uuid)"
+        mutation = "GRANT"
+        cleanup = "REVOKE"
+    else:
+        function = "publish_protected_runtime_trial_readiness(uuid,uuid,uuid)"
+        mutation = "REVOKE"
+        cleanup = "GRANT"
+    mutate = psycopg.sql.SQL(
+        f"{mutation} EXECUTE ON FUNCTION loom_capacity_guard.{function} "
+        + ("TO {}" if mutation == "GRANT" else "FROM {}")
+    ).format(psycopg.sql.Identifier(runtime))
+    restore = psycopg.sql.SQL(
+        f"{cleanup} EXECUTE ON FUNCTION loom_capacity_guard.{function} "
+        + ("TO {}" if cleanup == "GRANT" else "FROM {}")
+    ).format(psycopg.sql.Identifier(runtime))
+
+    async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as admin:
+        await admin.execute(mutate)
+    try:
+        async with await psycopg.AsyncConnection.connect(runtime_url) as connection:
+            with pytest.raises(
+                InsufficientPrivilege,
+                match="protected submission runtime function privileges drifted",
+            ):
+                await connection.execute(
+                    "SELECT loom_capacity_guard.current_protected_runtime_registration()"
+                )
+    finally:
+        async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as admin:
+            await admin.execute(restore)
 
 
 @pytest.mark.asyncio

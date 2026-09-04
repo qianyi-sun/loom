@@ -9,12 +9,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
+from uuid import UUID
+
+from .checkpoint_database_authority import DatabaseAuthorityEvidence
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LEASE_ID_RE = re.compile(r"^lease-[a-z0-9][a-z0-9-]{7,63}$")
 _REQUEST_ID_RE = re.compile(r"^req-[a-z0-9][a-z0-9-]{7,63}$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_SCHEMA_THREE_COMPONENTS = frozenset(
+    {"database_authority", "k8s_secrets", "object_inventory", "postgres"}
+)
 
 
 def _bounded_identity(value: str, *, limit: int = 160) -> bool:
@@ -58,6 +64,20 @@ class BackupLease:
     created_at: datetime
     expires_at: datetime
     restore_verified_at: datetime
+    checkpoint_schema_version: int | None = None
+    database_authority_digest: str | None = None
+    public_schema_revision: str | None = None
+    capacity_guard_schema_revision: str | None = None
+    manager_configuration_epoch: int | None = None
+    manager_configuration_digest: str | None = None
+    manager_authority_incarnation: UUID | None = None
+    manager_writer_epoch: int | None = None
+    manager_execution_state: str | None = None
+    manager_execution_epoch: int | None = None
+    manager_execution_manifest_sha256: str | None = None
+    manager_executable_new_capacity_ceiling: int | None = None
+    manager_increase_freeze: bool | None = None
+    restore_report_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -74,6 +94,55 @@ class BackupLease:
             raise ValueError("backup lease identity is invalid")
         components = dict(self.component_sha256)
         component_set_digest(components)
+        authority_fields = (
+            self.database_authority_digest,
+            self.public_schema_revision,
+            self.capacity_guard_schema_revision,
+            self.manager_configuration_epoch,
+            self.manager_configuration_digest,
+            self.manager_authority_incarnation,
+            self.manager_writer_epoch,
+            self.manager_execution_state,
+            self.manager_execution_epoch,
+            self.manager_execution_manifest_sha256,
+            self.manager_executable_new_capacity_ceiling,
+            self.manager_increase_freeze,
+            self.restore_report_sha256,
+        )
+        if self.checkpoint_schema_version is None:
+            if any(value is not None for value in authority_fields):
+                raise ValueError("historical backup lease cannot carry schema-3 authority")
+        else:
+            if self.checkpoint_schema_version != 3 or set(components) != _SCHEMA_THREE_COMPONENTS:
+                raise ValueError("backup lease schema-3 component authority is invalid")
+            try:
+                authority = DatabaseAuthorityEvidence(
+                    public_schema_revision=self.public_schema_revision,  # type: ignore[arg-type]
+                    capacity_guard_schema_revision=self.capacity_guard_schema_revision,
+                    configuration_epoch=self.manager_configuration_epoch,  # type: ignore[arg-type]
+                    configuration_digest=self.manager_configuration_digest,  # type: ignore[arg-type]
+                    authority_incarnation=self.manager_authority_incarnation,  # type: ignore[arg-type]
+                    writer_epoch=self.manager_writer_epoch,  # type: ignore[arg-type]
+                    execution_state=self.manager_execution_state,  # type: ignore[arg-type]
+                    execution_epoch=self.manager_execution_epoch,  # type: ignore[arg-type]
+                    execution_manifest_sha256=self.manager_execution_manifest_sha256,  # type: ignore[arg-type]
+                    executable_new_capacity_ceiling=(
+                        self.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+                    ),
+                    increase_freeze=self.manager_increase_freeze,  # type: ignore[arg-type]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("backup lease schema-3 database authority is invalid") from exc
+            if (
+                not isinstance(self.restore_report_sha256, str)
+                or _SHA256_RE.fullmatch(self.restore_report_sha256) is None
+                or authority.digest != self.database_authority_digest
+                or components["database_authority"] != self.database_authority_digest
+                or components["postgres"]
+                != self.db_snapshot_identity.removeprefix("pgdump-sha256:")
+                or self.public_schema_revision != self.schema_revision
+            ):
+                raise ValueError("backup lease schema-3 authority binding is invalid")
         timestamps = (self.created_at, self.expires_at, self.restore_verified_at)
         if any(value.tzinfo is None or value.utcoffset() is None for value in timestamps):
             raise ValueError("backup lease timestamps must be timezone-aware")
@@ -88,7 +157,7 @@ class BackupLease:
         ).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "component_sha256": dict(self.component_sha256),
             "created_at": self.created_at.isoformat(),
             "db_snapshot_identity": self.db_snapshot_identity,
@@ -102,12 +171,34 @@ class BackupLease:
             "restore_verified_at": self.restore_verified_at.isoformat(),
             "schema_revision": self.schema_revision,
             "source_request_id": self.source_request_id,
-            "schema_version": 1,
+            "schema_version": 1 if self.checkpoint_schema_version is None else 2,
         }
+        if self.checkpoint_schema_version is not None:
+            payload.update(
+                {
+                    "checkpoint_schema_version": self.checkpoint_schema_version,
+                    "database_authority_digest": self.database_authority_digest,
+                    "public_schema_revision": self.public_schema_revision,
+                    "capacity_guard_schema_revision": self.capacity_guard_schema_revision,
+                    "manager_configuration_epoch": self.manager_configuration_epoch,
+                    "manager_configuration_digest": self.manager_configuration_digest,
+                    "manager_authority_incarnation": str(self.manager_authority_incarnation),
+                    "manager_writer_epoch": self.manager_writer_epoch,
+                    "manager_execution_state": self.manager_execution_state,
+                    "manager_execution_epoch": self.manager_execution_epoch,
+                    "manager_execution_manifest_sha256": self.manager_execution_manifest_sha256,
+                    "manager_executable_new_capacity_ceiling": (
+                        self.manager_executable_new_capacity_ceiling
+                    ),
+                    "manager_increase_freeze": self.manager_increase_freeze,
+                    "restore_report_sha256": self.restore_report_sha256,
+                }
+            )
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> BackupLease:
-        expected = {
+        historical = {
             "component_sha256",
             "created_at",
             "db_snapshot_identity",
@@ -123,10 +214,28 @@ class BackupLease:
             "schema_version",
             "source_request_id",
         }
+        schema_three = historical | {
+            "checkpoint_schema_version",
+            "database_authority_digest",
+            "public_schema_revision",
+            "capacity_guard_schema_revision",
+            "manager_configuration_epoch",
+            "manager_configuration_digest",
+            "manager_authority_incarnation",
+            "manager_writer_epoch",
+            "manager_execution_state",
+            "manager_execution_epoch",
+            "manager_execution_manifest_sha256",
+            "manager_executable_new_capacity_ceiling",
+            "manager_increase_freeze",
+            "restore_report_sha256",
+        }
+        schema_version = data.get("schema_version")
+        expected = historical if schema_version == 1 else schema_three
         components = data.get("component_sha256")
         if (
             set(data) != expected
-            or data.get("schema_version") != 1
+            or schema_version not in {1, 2}
             or type(data.get("mutation_epoch")) is not int
             or not isinstance(components, Mapping)
             or not all(
@@ -134,7 +243,7 @@ class BackupLease:
             )
         ):
             raise ValueError("backup lease schema is invalid")
-        string_fields = expected - {
+        string_fields = historical - {
             "component_sha256",
             "mutation_epoch",
             "schema_version",
@@ -149,6 +258,55 @@ class BackupLease:
             )
         except ValueError as exc:
             raise ValueError("backup lease timestamps are invalid") from exc
+        authority: dict[str, object] = {}
+        if schema_version == 2:
+            guard_revision = data["capacity_guard_schema_revision"]
+            manifest_digest = data["manager_execution_manifest_sha256"]
+            integer_fields = (
+                "checkpoint_schema_version",
+                "manager_configuration_epoch",
+                "manager_writer_epoch",
+                "manager_execution_epoch",
+                "manager_executable_new_capacity_ceiling",
+            )
+            string_authority_fields = (
+                "database_authority_digest",
+                "public_schema_revision",
+                "manager_configuration_digest",
+                "manager_authority_incarnation",
+                "manager_execution_state",
+                "restore_report_sha256",
+            )
+            if (
+                any(type(data[field]) is not int for field in integer_fields)
+                or any(not isinstance(data[field], str) for field in string_authority_fields)
+                or (guard_revision is not None and not isinstance(guard_revision, str))
+                or manifest_digest is not None
+                or type(data["manager_increase_freeze"]) is not bool
+            ):
+                raise ValueError("backup lease schema is invalid")
+            try:
+                incarnation = UUID(data["manager_authority_incarnation"])  # type: ignore[arg-type]
+            except (TypeError, ValueError) as exc:
+                raise ValueError("backup lease schema is invalid") from exc
+            authority = {
+                "checkpoint_schema_version": data["checkpoint_schema_version"],
+                "database_authority_digest": data["database_authority_digest"],
+                "public_schema_revision": data["public_schema_revision"],
+                "capacity_guard_schema_revision": guard_revision,
+                "manager_configuration_epoch": data["manager_configuration_epoch"],
+                "manager_configuration_digest": data["manager_configuration_digest"],
+                "manager_authority_incarnation": incarnation,
+                "manager_writer_epoch": data["manager_writer_epoch"],
+                "manager_execution_state": data["manager_execution_state"],
+                "manager_execution_epoch": data["manager_execution_epoch"],
+                "manager_execution_manifest_sha256": manifest_digest,
+                "manager_executable_new_capacity_ceiling": data[
+                    "manager_executable_new_capacity_ceiling"
+                ],
+                "manager_increase_freeze": data["manager_increase_freeze"],
+                "restore_report_sha256": data["restore_report_sha256"],
+            }
         return cls(
             lease_id=data["lease_id"],  # type: ignore[arg-type]
             source_request_id=data["source_request_id"],  # type: ignore[arg-type]
@@ -163,6 +321,7 @@ class BackupLease:
             created_at=created_at,
             expires_at=expires_at,
             restore_verified_at=restore_verified_at,
+            **authority,  # type: ignore[arg-type]
         )
 
 

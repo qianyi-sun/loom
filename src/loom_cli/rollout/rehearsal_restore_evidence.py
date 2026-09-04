@@ -83,6 +83,23 @@ def build_restore_verification_evidence(
     report = {
         "candidate_sha": next(iter(candidate_shas)),
         "checkpoint_evidence_sha256": checkpoint.evidence_digest,
+        "checkpoint_component_sha256": dict(checkpoint.component_sha256),
+        "database_authority": {
+            "digest": checkpoint.database_authority_digest,
+            "public_schema_revision": checkpoint.public_schema_revision,
+            "capacity_guard_schema_revision": checkpoint.capacity_guard_schema_revision,
+            "manager_configuration_epoch": checkpoint.manager_configuration_epoch,
+            "manager_configuration_digest": checkpoint.manager_configuration_digest,
+            "manager_authority_incarnation": str(checkpoint.manager_authority_incarnation),
+            "manager_writer_epoch": checkpoint.manager_writer_epoch,
+            "manager_execution_state": checkpoint.manager_execution_state,
+            "manager_execution_epoch": checkpoint.manager_execution_epoch,
+            "manager_execution_manifest_sha256": checkpoint.manager_execution_manifest_sha256,
+            "manager_executable_new_capacity_ceiling": (
+                checkpoint.manager_executable_new_capacity_ceiling
+            ),
+            "manager_increase_freeze": checkpoint.manager_increase_freeze,
+        },
         "checks": report_entries,
         "isolation_id": next(iter(isolation_ids)),
         "rehearsal_digest": rehearsal.rehearsal_digest,
@@ -104,6 +121,22 @@ def build_restore_verification_evidence(
         namespace=checkpoint.namespace,
         report_sha256=report_sha256,
         verified_at=verified_at,
+        checkpoint_schema_version=3,
+        component_sha256=checkpoint.component_sha256,
+        database_authority_digest=checkpoint.database_authority_digest,
+        public_schema_revision=checkpoint.public_schema_revision,
+        capacity_guard_schema_revision=checkpoint.capacity_guard_schema_revision,
+        manager_configuration_epoch=checkpoint.manager_configuration_epoch,
+        manager_configuration_digest=checkpoint.manager_configuration_digest,
+        manager_authority_incarnation=checkpoint.manager_authority_incarnation,
+        manager_writer_epoch=checkpoint.manager_writer_epoch,
+        manager_execution_state=checkpoint.manager_execution_state,
+        manager_execution_epoch=checkpoint.manager_execution_epoch,
+        manager_execution_manifest_sha256=checkpoint.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(
+            checkpoint.manager_executable_new_capacity_ceiling
+        ),
+        manager_increase_freeze=checkpoint.manager_increase_freeze,
     )
 
 

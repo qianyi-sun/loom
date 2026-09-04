@@ -113,6 +113,11 @@ policy = "virtual-workspace-v1"
 fixture_files = [{ path = "result.txt", content = "hello\n" }]
 
 [[execution_cases]]
+path = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "answer.txt", content = "hello\n" }]
+
+[[execution_cases]]
 path = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
 policy = "virtual-workspace-v1"
 fixture_files = [
@@ -218,7 +223,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-capacity-manager"
 runtime_policy = "start"
-rollout_role = "none"
+rollout_role = "primary"
 
 [[components]]
 id = "capacity-executor"
@@ -253,8 +258,8 @@ smoke_owner = "staging-smoke"
 scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-capacity-executor"
-runtime_policy = "conformance"
-rollout_role = "none"
+runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "personal-dev-scanner-cache"
@@ -643,6 +648,17 @@ kind = "runtime-payload-image"
 dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environment/Dockerfile"
 build_context = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world"
 source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/**"]
+smoke_owner = "gb10-catalog-smoke"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "gb10-direct-completion-smoke-task"
+kind = "runtime-payload-image"
+dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/environment/Dockerfile"
+build_context = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world"
+source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/**"]
 smoke_owner = "gb10-catalog-smoke"
 scan_owner = "runtime-payload-scan"
 attestation_owner = "runtime-payload-provenance"

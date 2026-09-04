@@ -19,10 +19,12 @@ from dataclasses import dataclass, fields, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Event
 from time import monotonic
 from types import MappingProxyType
 from typing import NoReturn, TypeAlias, cast
+from uuid import UUID
 
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST as EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
@@ -33,6 +35,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     external_supervisor_unit_set_digest,
     external_supervisor_unit_set_digest_or_empty,
 )
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.redaction import redact_rollout_mapping, redact_rollout_text
 
 SafeScalar: TypeAlias = str | int | float | bool | None
@@ -1531,6 +1534,32 @@ class AttestationBindings:
     supervisor_predecessor_pending_transition_digest: str
     supervisor_transition_digest: str
     supervisor_controller_bindings: Mapping[str, str]
+    checkpoint_schema_version: int | None = None
+    checkpoint_component_sha256: Mapping[str, str] | None = None
+    database_authority_digest: str | None = None
+    public_schema_revision: str | None = None
+    capacity_guard_schema_revision: str | None = None
+    manager_configuration_epoch: int | None = None
+    manager_configuration_digest: str | None = None
+    manager_authority_incarnation: str | None = None
+    manager_writer_epoch: int | None = None
+    manager_execution_state: str | None = None
+    manager_execution_epoch: int | None = None
+    manager_execution_manifest_sha256: str | None = None
+    manager_executable_new_capacity_ceiling: int | None = None
+    manager_increase_freeze: bool | None = None
+    restore_report_sha256: str | None = None
+    execution_prerequisite_schema_version: int | None = None
+    execution_prerequisite_artifact_path: str | None = None
+    execution_prerequisite_artifact_sha256: str | None = None
+    execution_core_artifact_bundle_sha256: str | None = None
+    execution_policy_sha256: str | None = None
+    executor_profile_seed_sha256: str | None = None
+    execution_manager_route_sha256: str | None = None
+    execution_access_metadata_sha256: str | None = None
+    execution_coexistence_witness_sha256: str | None = None
+    execution_legacy_writer_sha256: str | None = None
+    execution_rollback_evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
         git_identities = (
@@ -1586,6 +1615,87 @@ class AttestationBindings:
             raise ValueError("attestation browser image digest is invalid")
         if self.staging_mutation_epoch < 0 or self.environment != "staging":
             raise ValueError("attestation staging epoch binding is invalid")
+        checkpoint_components = dict(self.checkpoint_component_sha256 or {})
+        if self.checkpoint_schema_version is None:
+            if self.checkpoint_component_sha256 is not None or any(
+                value is not None
+                for value in (
+                    self.database_authority_digest,
+                    self.public_schema_revision,
+                    self.capacity_guard_schema_revision,
+                    self.manager_configuration_epoch,
+                    self.manager_configuration_digest,
+                    self.manager_authority_incarnation,
+                    self.manager_writer_epoch,
+                    self.manager_execution_state,
+                    self.manager_execution_epoch,
+                    self.manager_execution_manifest_sha256,
+                    self.manager_executable_new_capacity_ceiling,
+                    self.manager_increase_freeze,
+                    self.restore_report_sha256,
+                )
+            ):
+                raise ValueError("historical attestation cannot carry schema-3 authority")
+        else:
+            try:
+                authority = DatabaseAuthorityEvidence(
+                    public_schema_revision=self.public_schema_revision,  # type: ignore[arg-type]
+                    capacity_guard_schema_revision=self.capacity_guard_schema_revision,
+                    configuration_epoch=self.manager_configuration_epoch,  # type: ignore[arg-type]
+                    configuration_digest=self.manager_configuration_digest,  # type: ignore[arg-type]
+                    authority_incarnation=UUID(str(self.manager_authority_incarnation)),
+                    writer_epoch=self.manager_writer_epoch,  # type: ignore[arg-type]
+                    execution_state=self.manager_execution_state,  # type: ignore[arg-type]
+                    execution_epoch=self.manager_execution_epoch,  # type: ignore[arg-type]
+                    execution_manifest_sha256=self.manager_execution_manifest_sha256,  # type: ignore[arg-type]
+                    executable_new_capacity_ceiling=(
+                        self.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+                    ),
+                    increase_freeze=self.manager_increase_freeze,  # type: ignore[arg-type]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("attestation schema-3 authority binding is invalid") from exc
+            if (
+                self.checkpoint_schema_version != 3
+                or set(checkpoint_components)
+                != {"database_authority", "k8s_secrets", "object_inventory", "postgres"}
+                or authority.digest != self.database_authority_digest
+                or checkpoint_components["database_authority"] != self.database_authority_digest
+                or checkpoint_components["postgres"]
+                != self.db_snapshot_identity.removeprefix("pgdump-sha256:")
+                or self.public_schema_revision != self.schema_revision
+                or _SHA256_RE.fullmatch(self.restore_report_sha256 or "") is None
+            ):
+                raise ValueError("attestation schema-3 authority binding is invalid")
+        execution_prerequisite_digests = (
+            self.execution_prerequisite_artifact_sha256,
+            self.execution_core_artifact_bundle_sha256,
+            self.execution_policy_sha256,
+            self.executor_profile_seed_sha256,
+            self.execution_manager_route_sha256,
+            self.execution_access_metadata_sha256,
+            self.execution_coexistence_witness_sha256,
+            self.execution_legacy_writer_sha256,
+            self.execution_rollback_evidence_sha256,
+        )
+        if self.execution_prerequisite_schema_version is None:
+            if self.execution_prerequisite_artifact_path is not None or any(
+                value is not None for value in execution_prerequisite_digests
+            ):
+                raise ValueError("attestation execution prerequisite binding is incomplete")
+        else:
+            prerequisite_path = Path(self.execution_prerequisite_artifact_path or "")
+            if (
+                self.execution_prerequisite_schema_version != 1
+                or not prerequisite_path.is_absolute()
+                or ".." in prerequisite_path.parts
+                or prerequisite_path.name != f"{self.execution_prerequisite_artifact_sha256}.json"
+                or any(
+                    not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
+                    for value in execution_prerequisite_digests
+                )
+            ):
+                raise ValueError("attestation execution prerequisite binding is invalid")
         predecessor_units = dict(self.supervisor_predecessor_unit_sha256)
         # An absent predecessor (first introduction of the supervisor) carries no
         # units and the absent authority/pointer digests; a present predecessor
@@ -1662,13 +1772,39 @@ class AttestationBindings:
             "supervisor_controller_bindings",
             MappingProxyType(dict(sorted(self.supervisor_controller_bindings.items()))),
         )
+        if self.checkpoint_component_sha256 is not None:
+            object.__setattr__(
+                self,
+                "checkpoint_component_sha256",
+                MappingProxyType(checkpoint_components),
+            )
 
     def to_dict(self) -> dict[str, object]:
         return _attestation_bindings_payload(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> AttestationBindings:
-        expected = {field.name for field in fields(cls)}
+        checkpoint_fields = {
+            field.name
+            for field in fields(cls)
+            if field.name.startswith("checkpoint_")
+            or field.name.startswith("database_authority")
+            or field.name.startswith("public_schema")
+            or field.name.startswith("capacity_guard")
+            or field.name.startswith("manager_")
+            or field.name == "restore_report_sha256"
+        }
+        execution_fields = {
+            field.name
+            for field in fields(cls)
+            if field.name.startswith("execution_") or field.name == "executor_profile_seed_sha256"
+        }
+        historical = {field.name for field in fields(cls)} - checkpoint_fields - execution_fields
+        expected = (
+            historical
+            | (checkpoint_fields if "checkpoint_schema_version" in data else set())
+            | (execution_fields if "execution_prerequisite_schema_version" in data else set())
+        )
         if set(data) != expected:
             raise ValueError("attestation bindings fields are invalid")
 
@@ -1689,6 +1825,75 @@ class AttestationBindings:
         epoch = data["staging_mutation_epoch"]
         if type(epoch) is not int:
             raise ValueError("attestation staging epoch must be an integer")
+        authority: dict[str, object] = {}
+        if "checkpoint_schema_version" in data:
+            guard = data["capacity_guard_schema_revision"]
+            manifest = data["manager_execution_manifest_sha256"]
+            if (guard is not None and not isinstance(guard, str)) or manifest is not None:
+                raise ValueError("attestation schema-3 authority fields are invalid")
+            authority = {
+                "checkpoint_schema_version": data["checkpoint_schema_version"],
+                "checkpoint_component_sha256": require_string_map("checkpoint_component_sha256"),
+                "database_authority_digest": require_string("database_authority_digest"),
+                "public_schema_revision": require_string("public_schema_revision"),
+                "capacity_guard_schema_revision": guard,
+                "manager_configuration_epoch": data["manager_configuration_epoch"],
+                "manager_configuration_digest": require_string("manager_configuration_digest"),
+                "manager_authority_incarnation": require_string("manager_authority_incarnation"),
+                "manager_writer_epoch": data["manager_writer_epoch"],
+                "manager_execution_state": require_string("manager_execution_state"),
+                "manager_execution_epoch": data["manager_execution_epoch"],
+                "manager_execution_manifest_sha256": manifest,
+                "manager_executable_new_capacity_ceiling": data[
+                    "manager_executable_new_capacity_ceiling"
+                ],
+                "manager_increase_freeze": data["manager_increase_freeze"],
+                "restore_report_sha256": require_string("restore_report_sha256"),
+            }
+            if (
+                any(
+                    type(authority[name]) is not int
+                    for name in (
+                        "checkpoint_schema_version",
+                        "manager_configuration_epoch",
+                        "manager_writer_epoch",
+                        "manager_execution_epoch",
+                        "manager_executable_new_capacity_ceiling",
+                    )
+                )
+                or type(authority["manager_increase_freeze"]) is not bool
+            ):
+                raise ValueError("attestation schema-3 authority fields are invalid")
+        execution_prerequisites: dict[str, object] = {}
+        if "execution_prerequisite_schema_version" in data:
+            schema = data["execution_prerequisite_schema_version"]
+            if type(schema) is not int:
+                raise ValueError("attestation execution prerequisite schema is invalid")
+            execution_prerequisites = {
+                "execution_prerequisite_schema_version": schema,
+                "execution_prerequisite_artifact_path": require_string(
+                    "execution_prerequisite_artifact_path"
+                ),
+                "execution_prerequisite_artifact_sha256": require_string(
+                    "execution_prerequisite_artifact_sha256"
+                ),
+                "execution_core_artifact_bundle_sha256": require_string(
+                    "execution_core_artifact_bundle_sha256"
+                ),
+                "execution_policy_sha256": require_string("execution_policy_sha256"),
+                "executor_profile_seed_sha256": require_string("executor_profile_seed_sha256"),
+                "execution_manager_route_sha256": require_string("execution_manager_route_sha256"),
+                "execution_access_metadata_sha256": require_string(
+                    "execution_access_metadata_sha256"
+                ),
+                "execution_coexistence_witness_sha256": require_string(
+                    "execution_coexistence_witness_sha256"
+                ),
+                "execution_legacy_writer_sha256": require_string("execution_legacy_writer_sha256"),
+                "execution_rollback_evidence_sha256": require_string(
+                    "execution_rollback_evidence_sha256"
+                ),
+            }
         return cls(
             candidate_sha=require_string("candidate_sha"),
             candidate_tree=require_string("candidate_tree"),
@@ -1735,6 +1940,8 @@ class AttestationBindings:
             ),
             supervisor_transition_digest=require_string("supervisor_transition_digest"),
             supervisor_controller_bindings=require_string_map("supervisor_controller_bindings"),
+            **authority,  # type: ignore[arg-type]
+            **execution_prerequisites,  # type: ignore[arg-type]
         )
 
 
@@ -1752,7 +1959,7 @@ class PreflightAttestation:
     identity_evidence_hashes: Mapping[str, str] = dataclass_field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.schema_version not in {2, 3}:
+        if self.schema_version not in {2, 3, 4, 5}:
             raise ValueError("preflight attestation schema is unsupported")
         if not isinstance(self.bindings, AttestationBindings):
             raise ValueError("preflight attestation bindings are invalid")
@@ -1779,8 +1986,14 @@ class PreflightAttestation:
         )
         if self.schema_version == 2 and self.identity_evidence_hashes:
             raise ValueError("preflight attestation v2 cannot carry identity evidence")
-        if self.schema_version == 3 and identity.keys() != evidence.keys():
+        if self.schema_version in {3, 4, 5} and identity.keys() != evidence.keys():
             raise ValueError("preflight attestation identity maps differ")
+        if (self.schema_version in {4, 5}) is not (self.bindings.checkpoint_schema_version == 3):
+            raise ValueError("preflight attestation checkpoint schema binding is invalid")
+        if (self.schema_version == 5) is not (
+            self.bindings.execution_prerequisite_schema_version == 1
+        ):
+            raise ValueError("preflight attestation execution prerequisite binding is invalid")
         if _SHA256_RE.fullmatch(self.attestation_digest) is None:
             raise ValueError("preflight attestation digest is invalid")
         object.__setattr__(
@@ -1853,8 +2066,15 @@ class PreflightAttestation:
             # projected deliberately rather than inferred here.
             identity = dict(evidence)
         expires_at = min(result.expires_at for result in freshness_authority)
+        schema_version = (
+            5
+            if bindings.execution_prerequisite_schema_version == 1
+            else 4
+            if bindings.checkpoint_schema_version == 3
+            else 3
+        )
         payload = {
-            "schema_version": 3,
+            "schema_version": schema_version,
             "bindings": _attestation_bindings_payload(bindings),
             "registry_digest": registry_digest,
             "coverage_digest": coverage_digest,
@@ -1865,7 +2085,7 @@ class PreflightAttestation:
             "expires_at": expires_at.isoformat(),
         }
         return cls(
-            schema_version=3,
+            schema_version=schema_version,
             bindings=bindings,
             registry_digest=registry_digest,
             coverage_digest=coverage_digest,
@@ -1896,7 +2116,7 @@ class PreflightAttestation:
             "attestation_digest",
         }
         schema_version = data.get("schema_version")
-        expected = common | ({"identity_evidence_hashes"} if schema_version == 3 else set())
+        expected = common | ({"identity_evidence_hashes"} if schema_version in {3, 4, 5} else set())
         if set(data) != expected:
             raise ValueError("preflight attestation fields are invalid")
         schema_version = data["schema_version"]
@@ -1924,9 +2144,16 @@ class PreflightAttestation:
             expires_at = datetime.fromisoformat(raw_expires)
         except ValueError as exc:
             raise ValueError("preflight attestation timestamps are invalid") from exc
+        parsed_bindings = AttestationBindings.from_dict(raw_bindings)
+        if (schema_version in {4, 5}) is not (parsed_bindings.checkpoint_schema_version == 3):
+            raise ValueError("preflight attestation binding fields are invalid")
+        if (schema_version == 5) is not (
+            parsed_bindings.execution_prerequisite_schema_version == 1
+        ):
+            raise ValueError("preflight attestation binding fields are invalid")
         attestation = cls(
             schema_version=schema_version,
-            bindings=AttestationBindings.from_dict(raw_bindings),
+            bindings=parsed_bindings,
             registry_digest=raw_registry,
             coverage_digest=raw_coverage,
             check_implementation_digests=_validate_digest_map(
@@ -1939,7 +2166,7 @@ class PreflightAttestation:
             attestation_digest=raw_digest,
             identity_evidence_hashes=(
                 _validate_digest_map(data["identity_evidence_hashes"], "identity evidence")
-                if schema_version == 3
+                if schema_version in {3, 4, 5}
                 else {}
             ),
         )
@@ -1958,6 +2185,19 @@ class PreflightAttestation:
 def _attestation_bindings_payload(bindings: AttestationBindings) -> dict[str, object]:
     payload: dict[str, object] = {}
     for field in fields(bindings):
+        if bindings.checkpoint_schema_version is None and (
+            field.name.startswith("checkpoint_")
+            or field.name.startswith("database_authority")
+            or field.name.startswith("public_schema")
+            or field.name.startswith("capacity_guard")
+            or field.name.startswith("manager_")
+            or field.name == "restore_report_sha256"
+        ):
+            continue
+        if bindings.execution_prerequisite_schema_version is None and (
+            field.name.startswith("execution_") or field.name == "executor_profile_seed_sha256"
+        ):
+            continue
         value = getattr(bindings, field.name)
         payload[field.name] = dict(value) if isinstance(value, Mapping) else value
     _assert_secret_safe_mapping(
@@ -1995,7 +2235,7 @@ def _preflight_attestation_payload(attestation: PreflightAttestation) -> dict[st
         "issued_at": attestation.issued_at.isoformat(),
         "expires_at": attestation.expires_at.isoformat(),
     }
-    if attestation.schema_version == 3:
+    if attestation.schema_version in {3, 4, 5}:
         payload["identity_evidence_hashes"] = dict(attestation.identity_evidence_hashes)
     return payload
 

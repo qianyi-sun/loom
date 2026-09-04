@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -16,6 +17,7 @@ from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.migration_manifest_readiness import (
     build_migration_manifest_artifact,
 )
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -48,6 +50,19 @@ def _candidate() -> CandidateBinding:
 
 
 def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0066",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
     return CriticalCheckpointEvidence(
         request_id="req-abcdefgh",
         manifest_path=tmp_path / "backup-manifest.json",
@@ -56,13 +71,26 @@ def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
             "k8s_secrets": "2" * 64,
             "object_inventory": "3" * 64,
             "postgres": "4" * 64,
+            "database_authority": authority.digest,
         },
         environment="staging",
         namespace="loom-staging",
         mutation_epoch=9,
-        db_snapshot_identity="pgdump-sha256:" + "5" * 64,
+        db_snapshot_identity="pgdump-sha256:" + "4" * 64,
         schema_revision="0066",
         object_inventory_root="6" * 64,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
         created_at=datetime(2026, 7, 19, 12, tzinfo=UTC),
     )
 
@@ -296,7 +324,7 @@ def test_smoke_authority_rejects_unsafe_identity(field: str, value: str) -> None
         replace(_smoke_authority(), **{field: value})
 
 
-def test_plan_schema_round_trips_smoke_authority(tmp_path: Path) -> None:
+def test_plan_schema_round_trips_schema_three_checkpoint_authority(tmp_path: Path) -> None:
     backend = Backend()
     source = _source(backend, tmp_path)
     candidate = _candidate()
@@ -306,12 +334,59 @@ def test_plan_schema_round_trips_smoke_authority(tmp_path: Path) -> None:
     plan = backend.calls[-1][1]
 
     record = plan.to_record()
-    assert record["schema_version"] == 9
+    assert record["schema_version"] == 10
+    assert record["checkpoint_schema_version"] == 3
+    assert record["checkpoint_component_sha256"] == checkpoint.component_sha256
+    assert record["database_authority_digest"] == checkpoint.database_authority_digest
+    assert record["manager_configuration_digest"] == checkpoint.manager_configuration_digest
     assert RehearsalPlan.from_record(record) == plan
 
-    record["schema_version"] = 1
+    record.pop("manager_writer_epoch")
     with pytest.raises(ValueError, match="plan schema is invalid"):
         RehearsalPlan.from_record(record)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capacity_guard_schema_revision", "guard_0027"),
+        ("manager_execution_manifest_sha256", "f" * 64),
+    ],
+)
+def test_historical_plan_constructor_rejects_schema_three_only_fields(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    backend = Backend()
+    source = _source(backend, tmp_path)
+    candidate = _candidate()
+    checkpoint = _checkpoint(tmp_path)
+    isolation_id, _digest = source.identity(candidate, checkpoint)
+    source.actions(candidate, checkpoint, isolation_id)["rehearsal.namespace"]()
+    record = backend.calls[-1][1].to_record()
+    record["schema_version"] = 9
+    for authority_field in (
+        "checkpoint_schema_version",
+        "checkpoint_component_sha256",
+        "database_authority_digest",
+        "public_schema_revision",
+        "capacity_guard_schema_revision",
+        "manager_configuration_epoch",
+        "manager_configuration_digest",
+        "manager_authority_incarnation",
+        "manager_writer_epoch",
+        "manager_execution_state",
+        "manager_execution_epoch",
+        "manager_execution_manifest_sha256",
+        "manager_executable_new_capacity_ceiling",
+        "manager_increase_freeze",
+    ):
+        record.pop(authority_field)
+    historical = RehearsalPlan.from_record(record)
+
+    with pytest.raises(ValueError, match="historical rehearsal plan"):
+        replace(historical, **{field: value})
 
 
 @pytest.mark.parametrize(

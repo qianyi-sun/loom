@@ -4,32 +4,59 @@
 from __future__ import annotations
 
 import argparse
-import io
+import hashlib
+import ipaddress
 import json
 import os
 import platform
 import re
+import socket
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Protocol
+from typing import IO, TYPE_CHECKING, Protocol
 
-try:
+from loom_cli.rollout.operator.protected_capacity_execution_preparation_component import (
+    PreparedControllerEvidence,
+    PreparedControllerRequest,
+)
+from loom_cli.rollout.operator.protected_controller_discovery import (
+    ControllerDiscoveryEvidence,
+    ControllerDiscoveryRequest,
+    controller_job_visibility_evidence_sha256,
+)
+from loom_cli.rollout.operator.protected_controller_prerequisite_component import (
+    ControllerDirectoryEvidence,
+    ControllerPrerequisiteEvidence,
+    ControllerPrerequisiteRequest,
+    capacity_executor_image_digest,
+    controller_local_authority_sha256,
+)
+from loom_cli.rollout.operator.protected_pool_credential_transport import (
+    FixedLocalPoolCredentialTransport,
+    PoolExecutionCredentialEvidence,
+    PoolExecutionCredentialPayload,
+)
+
+if TYPE_CHECKING:
     from scripts.ops.capacity_executor_release import (
         CapacityExecutorReleaseError,
         verify_release,
     )
-except ModuleNotFoundError:  # Installed helper is colocated with the verifier.
-    from capacity_executor_release import (  # type: ignore[no-redef]
-        CapacityExecutorReleaseError,
-        verify_release,
-    )
+else:
+    try:
+        from scripts.ops.capacity_executor_release import (
+            CapacityExecutorReleaseError,
+            verify_release,
+        )
+    except ModuleNotFoundError:  # Installed helper is colocated with the verifier.
+        from capacity_executor_release import CapacityExecutorReleaseError, verify_release
 
-_IMAGE_RE = re.compile(r"^ghcr[.]io/qianyi-sun/loom-capacity-executor@sha256:([0-9a-f]{64})$")
 _MAX_ARCHIVE_MEMBERS = 4096
 _MAX_ARCHIVE_FILE_BYTES = 1024 * 1024 * 1024
 _MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
@@ -70,16 +97,63 @@ _ROOT_ENV = {
 _DOCKER = "/usr/bin/docker"
 _GETENT = "/usr/bin/getent"
 _ID = "/usr/bin/id"
+_IP = "/usr/sbin/ip"
 _GROUPADD = "/usr/sbin/groupadd"
 _USERADD = "/usr/sbin/useradd"
+_USERMOD = "/usr/sbin/usermod"
+_RUNUSER = "/usr/sbin/runuser"
 _PYTHON = "/usr/bin/python3.12"
 _SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
 _SYSTEMCTL = "/usr/bin/systemctl"
 _SYSTEMD_TMPFILES = "/usr/bin/systemd-tmpfiles"
+_SLURM_CONF = Path("/etc/slurm/slurm.conf")
+_MAX_AUTHORITY_FILE_BYTES = 256 * 1024 * 1024
+_MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
+_MAX_PREREQUISITE_REQUEST_BYTES = 2 * 1024 * 1024
+_MAX_DISCOVERY_REQUEST_BYTES = 256 * 1024
+_MAX_CREDENTIAL_REQUEST_BYTES = 8 * 1024 * 1024
+_MAX_PREPARED_REQUEST_BYTES = 4 * 1024 * 1024
+_PREPARED_OPERATIONS = frozenset(
+    {
+        "observe-prepared",
+        "converge-prepared-files",
+        "enable-prepared-timer",
+        "run-prepared-tick",
+        "disable-prepared-timer",
+    }
+)
+_CONTROLLER_CREDENTIAL_HOSTS = {
+    "gb10": "gx10-01c7",
+    "oldlab": "TRT-EAI-OLDLAB-1",
+}
+_CONTROLLER_ARCHITECTURES = {"gb10": "arm64", "oldlab": "amd64"}
+_CONTROLLER_CLUSTERS = {"gb10": "trt-gb10", "oldlab": "trt-oldlab"}
+_CONTROLLER_TARGET_NODES = {
+    "gb10": tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16))),
+    "oldlab": tuple(f"trt-eai-oldlab-{index}" for index in range(3, 6)),
+}
+_SLURM_EXECUTABLES = {
+    name: Path(f"/usr/bin/{name}")
+    for name in ("sacct", "sacctmgr", "sbatch", "scancel", "scontrol", "squeue")
+}
+_MANAGER_ROUTE_TARGET = "192.168.50.103"
 
 
 class CapacityExecutorInstallError(RuntimeError):
     """The controller installation could not converge without weakening safety."""
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("ascii")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,16 +233,25 @@ class InstallResult:
     release_root: Path
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedLocalAuthority:
+    uid: int
+    gid: int
+    release_root: Path
+    unit_active_state: dict[str, str]
+    unit_file_state: dict[str, str]
+
+
 Extractor = Callable[[str, Path, Runner, InstallContext], None]
 
 
 def _validate_image_reference(image: str) -> str:
-    if not isinstance(image, str):
-        raise CapacityExecutorInstallError("executor image must be an exact digest reference")
-    match = _IMAGE_RE.fullmatch(image)
-    if match is None:
-        raise CapacityExecutorInstallError("executor image must be an exact digest reference")
-    return match.group(1)
+    try:
+        return capacity_executor_image_digest(image)
+    except ValueError as exc:
+        raise CapacityExecutorInstallError(
+            "executor image must be an exact digest reference"
+        ) from exc
 
 
 def _archive_path(name: str) -> PurePosixPath | None:
@@ -213,7 +296,7 @@ def _write_archive_file(bundle: tarfile.TarFile, member: tarfile.TarInfo, path: 
     path.chmod(0o444)
 
 
-def _extract_release_tar(stream: BinaryIO | io.BytesIO, destination: Path) -> None:
+def _extract_release_tar(stream: IO[bytes], destination: Path) -> None:
     """Extract only canonical read-only directories and regular files."""
 
     if not isinstance(destination, Path) or not destination.is_absolute():
@@ -357,6 +440,20 @@ def _safe_remove_tree(path: Path) -> None:
     path.rmdir()
 
 
+def _metadata_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 class ControllerInstaller:
     def __init__(
         self,
@@ -365,12 +462,14 @@ class ControllerInstaller:
         runner: Runner,
         extractor: Extractor = _extract_image_release,
         machine: str | None = None,
+        hostname: str | None = None,
         effective_uid: int | None = None,
     ) -> None:
         self.context = context
         self.runner = runner
         self.extractor = extractor
         self.machine = platform.machine() if machine is None else machine
+        self.hostname = socket.gethostname().split(".", 1)[0] if hostname is None else hostname
         self.effective_uid = os.geteuid() if effective_uid is None else effective_uid
 
     def _run(
@@ -387,6 +486,9 @@ class ControllerInstaller:
 
     def _path(self, absolute: Path) -> Path:
         return self.context.path(absolute)
+
+    def _run_as_service(self, *argv: str) -> CommandResult:
+        return self._run(_RUNUSER, "--user", _SERVICE_USER, "--", *argv)
 
     def _assert_quiescent(self) -> None:
         for unit in _UNITS:
@@ -422,8 +524,16 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("current executor release target is unsafe")
         return target
 
-    def _inspect_image(self, image: str, *, source_sha: str, architecture: str) -> None:
-        self._run(_DOCKER, "pull", "--quiet", image)
+    def _inspect_image(
+        self,
+        image: str,
+        *,
+        source_sha: str,
+        architecture: str,
+        pull: bool = True,
+    ) -> None:
+        if pull:
+            self._run(_DOCKER, "pull", "--quiet", image)
         inspected = self._run(_DOCKER, "image", "inspect", image)
         try:
             payload = json.loads(inspected.stdout)
@@ -506,9 +616,11 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError(f"installer directory did not converge: {absolute}")
         _fsync_directory(parent)
 
-    def _service_ids(self) -> tuple[int, int]:
+    def _service_ids(self, *, create: bool = True) -> tuple[int, int]:
         group = self._run(_GETENT, "group", _SERVICE_GROUP, check=False)
         passwd = self._run(_GETENT, "passwd", _SERVICE_USER, check=False)
+        if not create and (group.returncode != 0 or passwd.returncode != 0):
+            raise CapacityExecutorInstallError("executor service identity authority is unavailable")
         if group.returncode != 0:
             if passwd.returncode == 0:
                 raise CapacityExecutorInstallError("executor service group is unavailable")
@@ -526,6 +638,46 @@ class ControllerInstaller:
                 _SERVICE_SHELL,
                 _SERVICE_USER,
             )
+        rollout_group_fields: list[str] | None = None
+        if self.hostname == _CONTROLLER_CREDENTIAL_HOSTS["oldlab"]:
+            rollout_group = self._run(_GETENT, "group", "loom-rollout", check=False)
+            if rollout_group.returncode != 0:
+                raise CapacityExecutorInstallError(
+                    "executor service identity authority is unavailable"
+                )
+            rollout_group_fields = rollout_group.stdout.strip().split(":")
+            if (
+                len(rollout_group_fields) != 4
+                or rollout_group_fields[0] != "loom-rollout"
+                or not rollout_group_fields[2].isdigit()
+            ):
+                raise CapacityExecutorInstallError("executor service identity authority is unsafe")
+            members = rollout_group_fields[3].split(",") if rollout_group_fields[3] else []
+            if len(members) != len(set(members)) or any(not member for member in members):
+                raise CapacityExecutorInstallError("executor service identity authority is unsafe")
+            if _SERVICE_USER not in members:
+                if not create:
+                    raise CapacityExecutorInstallError(
+                        "executor service identity authority is unavailable"
+                    )
+                self._run(
+                    _USERMOD,
+                    "--append",
+                    "--groups",
+                    "loom-rollout",
+                    _SERVICE_USER,
+                )
+                rollout_group = self._run(_GETENT, "group", "loom-rollout")
+                rollout_group_fields = rollout_group.stdout.strip().split(":")
+                members = (
+                    rollout_group_fields[3].split(",")
+                    if len(rollout_group_fields) == 4 and rollout_group_fields[3]
+                    else []
+                )
+                if members.count(_SERVICE_USER) != 1:
+                    raise CapacityExecutorInstallError(
+                        "executor service identity authority did not converge"
+                    )
         group = self._run(_GETENT, "group", _SERVICE_GROUP)
         passwd = self._run(_GETENT, "passwd", _SERVICE_USER)
         uid_result = self._run(_ID, "-u", _SERVICE_USER)
@@ -557,15 +709,407 @@ class ControllerInstaller:
             int(passwd_fields[3]),
             int(gid_result.stdout.strip()),
         }
+        expected_gids = set(gids)
+        if rollout_group_fields is not None:
+            expected_gids.add(int(rollout_group_fields[2]))
         if (
             len(uids) != 1
             or len(gids) != 1
             or 0 in uids
             or 0 in gids
-            or {int(value) for value in supplementary_gid_fields} != gids
+            or {int(value) for value in supplementary_gid_fields} != expected_gids
         ):
             raise CapacityExecutorInstallError("executor service identity is inconsistent")
         return uids.pop(), gids.pop()
+
+    def _bounded_stdout(self, result: CommandResult, *, label: str) -> str:
+        output = result.stdout
+        if (
+            not isinstance(output, str)
+            or len(output.encode("utf-8")) > _MAX_COMMAND_OUTPUT_BYTES
+            or "\x00" in output
+        ):
+            raise CapacityExecutorInstallError(f"{label} output is invalid")
+        return output
+
+    def _job_visibility_evidence(
+        self,
+        *,
+        pool_id: str,
+        partition_fields: dict[str, str],
+    ) -> str:
+        association_fields: tuple[str, ...] = ()
+        if pool_id == "gb10":
+            association_output = self._bounded_stdout(
+                self._run_as_service(
+                    str(_SLURM_EXECUTABLES["sacctmgr"]),
+                    "--noheader",
+                    "--parsable2",
+                    "show",
+                    "association",
+                    "where",
+                    "Cluster=trt-gb10",
+                    "Account=loom-staging",
+                    f"User={_SERVICE_USER}",
+                    "format=Cluster,Account,User,Partition,QOS,DefaultQOS",
+                ),
+                label="Slurm admission",
+            )
+            lines = [line.removesuffix("|") for line in association_output.splitlines() if line]
+            if len(lines) != 1:
+                raise CapacityExecutorInstallError("controller discovery Slurm admission drifted")
+            association_fields = tuple(lines[0].split("|"))
+        try:
+            return controller_job_visibility_evidence_sha256(
+                pool_id=pool_id,
+                partition_fields=partition_fields,
+                association_fields=association_fields,
+            )
+        except ValueError as exc:
+            raise CapacityExecutorInstallError(
+                "controller discovery Slurm admission drifted"
+            ) from exc
+
+    def _authority_file_sha256(
+        self,
+        absolute: Path,
+        *,
+        executable: bool,
+    ) -> str:
+        path = self._path(absolute)
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise CapacityExecutorInstallError("controller authority file is unavailable") from exc
+        try:
+            before = os.fstat(descriptor)
+            mode = stat.S_IMODE(before.st_mode)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_uid != self.context.authority_uid
+                or before.st_gid != self.context.authority_gid
+                or mode & 0o022
+                or (executable and not mode & 0o111)
+                or not 0 < before.st_size <= _MAX_AUTHORITY_FILE_BYTES
+            ):
+                raise CapacityExecutorInstallError("controller authority file metadata is unsafe")
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    raise CapacityExecutorInstallError(
+                        "controller authority file changed while reading"
+                    )
+                digest.update(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(descriptor)
+            if _metadata_identity(before) != _metadata_identity(after):
+                raise CapacityExecutorInstallError(
+                    "controller authority file changed while reading"
+                )
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+
+    def _local_authority(
+        self,
+        request: ControllerPrerequisiteRequest,
+    ) -> tuple[int, int, dict[str, str], dict[str, str]]:
+        if (
+            not isinstance(request, ControllerPrerequisiteRequest)
+            or self.hostname != request.binding.controller_host
+            or _architecture(self.machine) != request.architecture
+        ):
+            raise CapacityExecutorInstallError("controller prerequisite host authority drifted")
+        uid, gid = self._service_ids(create=False)
+        if uid != request.binding.local_uid:
+            raise CapacityExecutorInstallError("controller prerequisite service authority drifted")
+        executable_paths = request.binding.slurm_executables.model_dump(mode="python")
+        executable_sha256 = {
+            name: self._authority_file_sha256(Path(path), executable=True)
+            for name, path in executable_paths.items()
+        }
+        configuration_sha256 = {
+            "slurm.conf": self._authority_file_sha256(_SLURM_CONF, executable=False)
+        }
+        cluster_output = self._bounded_stdout(
+            self._run_as_service(str(executable_paths["scontrol"]), "show", "config"),
+            label="Slurm configuration",
+        )
+        clusters = [
+            line.split("=", 1)[1].strip()
+            for line in cluster_output.splitlines()
+            if "=" in line and line.split("=", 1)[0].strip() == "ClusterName"
+        ]
+        partition_output = self._bounded_stdout(
+            self._run_as_service(
+                str(executable_paths["scontrol"]),
+                "show",
+                "partition",
+                request.binding.partition,
+                "-o",
+            ),
+            label="Slurm partition",
+        )
+        partition_lines = [line for line in partition_output.splitlines() if line]
+        fields: dict[str, str] = {}
+        if len(partition_lines) == 1:
+            for token in partition_lines[0].split():
+                if "=" in token:
+                    key, value = token.split("=", 1)
+                    if key in fields:
+                        raise CapacityExecutorInstallError(
+                            "controller prerequisite Slurm authority drifted"
+                        )
+                    fields[key] = value
+        nodes_expression = fields.get("Nodes")
+        if (
+            clusters != [request.binding.slurm_cluster]
+            or fields.get("PartitionName") != request.binding.partition
+            or not nodes_expression
+        ):
+            raise CapacityExecutorInstallError("controller prerequisite Slurm authority drifted")
+        nodes_output = self._bounded_stdout(
+            self._run_as_service(
+                str(executable_paths["scontrol"]),
+                "show",
+                "hostnames",
+                nodes_expression,
+            ),
+            label="Slurm node inventory",
+        )
+        nodes = tuple(line.strip() for line in nodes_output.splitlines() if line.strip())
+        if len(nodes) != len(set(nodes)) or set(nodes) != set(request.target_nodes):
+            raise CapacityExecutorInstallError("controller prerequisite Slurm authority drifted")
+        job_visibility_evidence_sha256 = self._job_visibility_evidence(
+            pool_id=request.pool_id,
+            partition_fields=fields,
+        )
+        if (
+            job_visibility_evidence_sha256
+            != request.binding.inventory.job_visibility_evidence_sha256
+        ):
+            raise CapacityExecutorInstallError(
+                "controller prerequisite Slurm admission authority drifted"
+            )
+        local_authority = controller_local_authority_sha256(
+            pool_id=request.pool_id,
+            architecture=request.architecture,
+            controller_hostname=self.hostname,
+            service_uid=uid,
+            service_gid=gid,
+            slurm_cluster=request.binding.slurm_cluster,
+            partition=request.binding.partition,
+            target_nodes=request.target_nodes,
+            executable_sha256=executable_sha256,
+            configuration_sha256=configuration_sha256,
+            job_visibility_evidence_sha256=job_visibility_evidence_sha256,
+        )
+        if local_authority != request.binding.local_authority_sha256:
+            raise CapacityExecutorInstallError("controller prerequisite local authority drifted")
+        return uid, gid, executable_sha256, configuration_sha256
+
+    def discover_controller(
+        self,
+        request: ControllerDiscoveryRequest,
+    ) -> ControllerDiscoveryEvidence:
+        """Capture only stable, non-secret controller-local facts."""
+
+        if self.effective_uid != 0:
+            raise CapacityExecutorInstallError("controller discovery requires root")
+        if not isinstance(request, ControllerDiscoveryRequest):
+            raise CapacityExecutorInstallError("controller discovery request is invalid")
+        expected_host = _CONTROLLER_CREDENTIAL_HOSTS.get(request.pool_id)
+        expected_architecture = _CONTROLLER_ARCHITECTURES.get(request.pool_id)
+        expected_cluster = _CONTROLLER_CLUSTERS.get(request.pool_id)
+        expected_nodes = _CONTROLLER_TARGET_NODES.get(request.pool_id)
+        if (
+            self.hostname != expected_host
+            or _architecture(self.machine) != expected_architecture
+            or expected_cluster is None
+            or expected_nodes is None
+        ):
+            raise CapacityExecutorInstallError("controller discovery host authority drifted")
+        uid, gid = self._service_ids(create=False)
+        executable_sha256 = {
+            name: self._authority_file_sha256(path, executable=True)
+            for name, path in _SLURM_EXECUTABLES.items()
+        }
+        configuration_sha256 = {
+            "slurm.conf": self._authority_file_sha256(_SLURM_CONF, executable=False)
+        }
+        cluster_output = self._bounded_stdout(
+            self._run_as_service(str(_SLURM_EXECUTABLES["scontrol"]), "show", "config"),
+            label="Slurm configuration",
+        )
+        clusters = [
+            line.split("=", 1)[1].strip()
+            for line in cluster_output.splitlines()
+            if "=" in line and line.split("=", 1)[0].strip() == "ClusterName"
+        ]
+        partition_output = self._bounded_stdout(
+            self._run_as_service(
+                str(_SLURM_EXECUTABLES["scontrol"]),
+                "show",
+                "partition",
+                "loom-staging",
+                "-o",
+            ),
+            label="Slurm partition",
+        )
+        partition_lines = [line for line in partition_output.splitlines() if line]
+        partition_fields: dict[str, str] = {}
+        if len(partition_lines) == 1:
+            for token in partition_lines[0].split():
+                if "=" in token:
+                    key, value = token.split("=", 1)
+                    if key in partition_fields:
+                        raise CapacityExecutorInstallError(
+                            "controller discovery Slurm authority drifted"
+                        )
+                    partition_fields[key] = value
+        nodes_expression = partition_fields.get("Nodes")
+        if (
+            clusters != [expected_cluster]
+            or partition_fields.get("PartitionName") != "loom-staging"
+            or not nodes_expression
+        ):
+            raise CapacityExecutorInstallError("controller discovery Slurm authority drifted")
+        nodes_output = self._bounded_stdout(
+            self._run_as_service(
+                str(_SLURM_EXECUTABLES["scontrol"]),
+                "show",
+                "hostnames",
+                nodes_expression,
+            ),
+            label="Slurm node inventory",
+        )
+        nodes = tuple(line.strip() for line in nodes_output.splitlines() if line.strip())
+        if len(nodes) != len(set(nodes)) or set(nodes) != set(expected_nodes):
+            raise CapacityExecutorInstallError("controller discovery Slurm authority drifted")
+        job_visibility_evidence_sha256 = self._job_visibility_evidence(
+            pool_id=request.pool_id,
+            partition_fields=partition_fields,
+        )
+        version_output = self._bounded_stdout(
+            self._run_as_service(str(_SLURM_EXECUTABLES["scontrol"]), "--version"),
+            label="Slurm version",
+        ).strip()
+        matched_version = re.fullmatch(r"slurm-wlm ([0-9]+)\.([0-9]+)\.([0-9]+)", version_output)
+        if matched_version is None:
+            raise CapacityExecutorInstallError("controller discovery Slurm version drifted")
+        slurm_version = (
+            int(matched_version.group(1)),
+            int(matched_version.group(2)),
+            int(matched_version.group(3)),
+        )
+        metadata_output = self._bounded_stdout(
+            self._run_as_service(
+                str(_SLURM_EXECUTABLES["scontrol"]),
+                "show",
+                "nodes",
+                nodes_expression,
+                "--json",
+            ),
+            label="Slurm metadata",
+        )
+        try:
+            metadata = json.loads(metadata_output)
+            meta = metadata["meta"]
+            slurm = meta["slurm"]
+            version = slurm["version"]
+            plugin = meta["plugin"]
+            raw_metadata_nodes = metadata["nodes"]
+            observed_version = tuple(int(version[name]) for name in ("major", "minor", "micro"))
+            data_parser = plugin["data_parser"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CapacityExecutorInstallError(
+                "controller discovery Slurm metadata drifted"
+            ) from exc
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(meta, dict)
+            or not isinstance(slurm, dict)
+            or not isinstance(version, dict)
+            or not isinstance(plugin, dict)
+            or not isinstance(raw_metadata_nodes, list)
+            or slurm.get("cluster") != expected_cluster
+            or observed_version != slurm_version
+            or not isinstance(data_parser, str)
+        ):
+            raise CapacityExecutorInstallError("controller discovery Slurm metadata drifted")
+        metadata_nodes = tuple(
+            item.get("name") if isinstance(item, dict) else None for item in raw_metadata_nodes
+        )
+        if (
+            any(not isinstance(node, str) for node in metadata_nodes)
+            or len(metadata_nodes) != len(set(metadata_nodes))
+            or set(metadata_nodes) != set(expected_nodes)
+        ):
+            raise CapacityExecutorInstallError("controller discovery Slurm metadata drifted")
+        route_output = self._bounded_stdout(
+            self._run_as_service(_IP, "-json", "route", "get", _MANAGER_ROUTE_TARGET),
+            label="manager route",
+        )
+        try:
+            routes = json.loads(route_output)
+            route = routes[0]
+            route_source = ipaddress.ip_address(route["prefsrc"])
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CapacityExecutorInstallError(
+                "controller discovery manager route drifted"
+            ) from exc
+        if (
+            not isinstance(routes, list)
+            or len(routes) != 1
+            or not isinstance(route, dict)
+            or route.get("dst") != _MANAGER_ROUTE_TARGET
+            or not isinstance(route_source, ipaddress.IPv4Address)
+            or not route_source.is_private
+        ):
+            raise CapacityExecutorInstallError("controller discovery manager route drifted")
+        local_authority = controller_local_authority_sha256(
+            pool_id=request.pool_id,
+            architecture=expected_architecture,
+            controller_hostname=self.hostname,
+            service_uid=uid,
+            service_gid=gid,
+            slurm_cluster=expected_cluster,
+            partition="loom-staging",
+            target_nodes=expected_nodes,
+            executable_sha256=executable_sha256,
+            configuration_sha256=configuration_sha256,
+            job_visibility_evidence_sha256=job_visibility_evidence_sha256,
+        )
+        try:
+            return ControllerDiscoveryEvidence(
+                schema_version=1,
+                pool_id=request.pool_id,
+                transport_authority_sha256=request.transport_authority_sha256,
+                controller_hostname=self.hostname,
+                architecture=expected_architecture,
+                service_user=_SERVICE_USER,
+                service_uid=uid,
+                service_gid=gid,
+                slurm_cluster=expected_cluster,
+                partition="loom-staging",
+                target_nodes=expected_nodes,
+                slurm_version=slurm_version,
+                data_parser=data_parser,
+                query_principal=_SERVICE_USER,
+                manager_client_cidr=f"{route_source}/32",
+                executable_sha256=executable_sha256,
+                configuration_sha256=configuration_sha256,
+                job_visibility_evidence_sha256=job_visibility_evidence_sha256,
+                local_authority_sha256=local_authority,
+            )
+        except ValueError as exc:
+            raise CapacityExecutorInstallError("controller discovery evidence is invalid") from exc
 
     def _release_root(self, *, source_sha: str, architecture: str, digest: str) -> Path:
         return _RELEASES_ROOT / f"{source_sha}-{architecture}-{digest}"
@@ -904,6 +1448,647 @@ class ControllerInstaller:
         if not current.is_symlink() or os.readlink(current) != str(release_root):
             raise CapacityExecutorInstallError("executor release publication did not converge")
 
+    def _private_directory_evidence(
+        self,
+        absolute: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> ControllerDirectoryEvidence:
+        path = self._path(absolute)
+        metadata = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != uid
+            or metadata.st_gid != gid
+        ):
+            raise CapacityExecutorInstallError("controller prerequisite directory is unsafe")
+        return ControllerDirectoryEvidence(path=str(absolute), mode=0o700, uid=uid, gid=gid)
+
+    def _pool_credential_transport(
+        self,
+        payload: PoolExecutionCredentialPayload,
+    ) -> FixedLocalPoolCredentialTransport:
+        if (
+            self.effective_uid != 0
+            or not isinstance(payload, PoolExecutionCredentialPayload)
+            or self.hostname != _CONTROLLER_CREDENTIAL_HOSTS.get(payload.pool_id)
+        ):
+            raise CapacityExecutorInstallError("controller credential authority is invalid")
+        self._assert_quiescent()
+        uid, gid = self._service_ids(create=False)
+        self._private_directory_evidence(_RUNTIME_ROOT, uid=uid, gid=gid)
+        return FixedLocalPoolCredentialTransport(
+            pool_id=payload.pool_id,
+            target_directory=self._path(_RUNTIME_ROOT / payload.pool_id),
+            service_uid=uid,
+            service_gid=gid,
+        )
+
+    def observe_credential(
+        self,
+        payload: PoolExecutionCredentialPayload,
+    ) -> PoolExecutionCredentialEvidence | None:
+        transport = self._pool_credential_transport(payload)
+        try:
+            evidence = transport.observe(payload)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CapacityExecutorInstallError(
+                "controller credential observation failed safely"
+            ) from exc
+        self._assert_quiescent()
+        return evidence
+
+    def publish_credential(
+        self,
+        payload: PoolExecutionCredentialPayload,
+    ) -> PoolExecutionCredentialEvidence:
+        transport = self._pool_credential_transport(payload)
+        try:
+            evidence = transport.publish(payload)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CapacityExecutorInstallError(
+                "controller credential publication failed safely"
+            ) from exc
+        self._assert_quiescent()
+        return evidence
+
+    def _prepared_prerequisite(
+        self,
+        request: PreparedControllerRequest,
+    ) -> _PreparedLocalAuthority:
+        if (
+            self.effective_uid != 0
+            or not isinstance(request, PreparedControllerRequest)
+            or request.pool_id != request.prerequisite.pool_id
+            or request.transport_authority_sha256 != request.prerequisite.transport_authority_sha256
+        ):
+            raise CapacityExecutorInstallError("prepared controller request is invalid")
+        prerequisite = request.prerequisite
+        digest = _validate_image_reference(prerequisite.image)
+        uid, gid, _executables, _configuration = self._local_authority(prerequisite)
+        expected_release = self._release_root(
+            source_sha=prerequisite.source_sha,
+            architecture=prerequisite.architecture,
+            digest=digest,
+        )
+        if self._assert_current_destination_safe() != str(expected_release):
+            raise CapacityExecutorInstallError(
+                "controller prerequisite changed before prepared operation"
+            )
+        self._inspect_image(
+            prerequisite.image,
+            source_sha=prerequisite.source_sha,
+            architecture=prerequisite.architecture,
+            pull=False,
+        )
+        release = self._path(expected_release)
+        try:
+            verify_release(
+                release,
+                expected_source_sha=prerequisite.source_sha,
+                expected_architecture=prerequisite.architecture,
+            )
+        except CapacityExecutorReleaseError as exc:
+            raise CapacityExecutorInstallError(
+                "controller prerequisite changed before prepared operation"
+            ) from exc
+        self._verify_runtime_files(expected_release)
+        self._probe_runtime(expected_release)
+        for path in (
+            _CONFIG_ROOT,
+            _RUNTIME_ROOT,
+            _RUNTIME_ROOT / request.pool_id,
+            _SERVICE_HOME,
+            Path(prerequisite.binding.state_directory),
+        ):
+            self._private_directory_evidence(path, uid=uid, gid=gid)
+        try:
+            installed_input = self._read_private_input(
+                Path(prerequisite.prerequisite_input_path),
+                uid=uid,
+                gid=gid,
+            )
+        except FileNotFoundError as exc:
+            raise CapacityExecutorInstallError(
+                "controller prerequisite changed before prepared operation"
+            ) from exc
+        if installed_input != _canonical_json_bytes(prerequisite.prerequisite_input_value()):
+            raise CapacityExecutorInstallError(
+                "controller prerequisite changed before prepared operation"
+            )
+        _unit_sha256, active_states, file_states = self._prepared_unit_evidence(expected_release)
+        return _PreparedLocalAuthority(
+            uid=uid,
+            gid=gid,
+            release_root=expected_release,
+            unit_active_state=active_states,
+            unit_file_state=file_states,
+        )
+
+    def observe_prepared(
+        self,
+        request: PreparedControllerRequest,
+    ) -> PreparedControllerEvidence | None:
+        authority = self._prepared_prerequisite(request)
+        installed: dict[str, bytes] = {}
+        try:
+            for absolute in request.files:
+                installed[absolute] = self._read_private_input(
+                    Path(absolute),
+                    uid=authority.uid,
+                    gid=authority.gid,
+                )
+        except FileNotFoundError:
+            return None
+        if installed != dict(request.files):
+            return None
+        tick_digest = self._prepared_tick_evidence(
+            request,
+            uid=authority.uid,
+            gid=authority.gid,
+        )
+        timer = "loom-capacity-pool-executor-prepared.timer"
+        timer_active = (
+            authority.unit_active_state[timer],
+            authority.unit_file_state[timer],
+        ) == ("active", "enabled")
+        return PreparedControllerEvidence(
+            schema_version=1,
+            pool_id=request.pool_id,
+            transport_authority_sha256=request.transport_authority_sha256,
+            request_sha256=request.request_sha256,
+            file_sha256={
+                path: hashlib.sha256(payload).hexdigest() for path, payload in installed.items()
+            },
+            unit_active_state=authority.unit_active_state,
+            unit_file_state=authority.unit_file_state,
+            successful_tick=timer_active and tick_digest is not None,
+            tick_evidence_sha256=tick_digest if timer_active else None,
+        )
+
+    def converge_prepared_files(
+        self,
+        request: PreparedControllerRequest,
+    ) -> PreparedControllerEvidence:
+        authority = self._prepared_prerequisite(request)
+        timer = "loom-capacity-pool-executor-prepared.timer"
+        if (
+            authority.unit_active_state[timer],
+            authority.unit_file_state[timer],
+        ) != ("inactive", "disabled"):
+            raise CapacityExecutorInstallError(
+                "prepared controller timer must be disabled before file convergence"
+            )
+        for absolute, payload in request.files.items():
+            self._write_private_input(
+                Path(absolute),
+                payload,
+                uid=authority.uid,
+                gid=authority.gid,
+            )
+        evidence = self.observe_prepared(request)
+        if evidence is None:
+            raise CapacityExecutorInstallError("prepared controller files did not converge")
+        return evidence
+
+    def enable_prepared_timer(
+        self,
+        request: PreparedControllerRequest,
+    ) -> PreparedControllerEvidence:
+        evidence = self.observe_prepared(request)
+        if evidence is None:
+            raise CapacityExecutorInstallError("prepared controller files are not exact")
+        timer = "loom-capacity-pool-executor-prepared.timer"
+        state = (
+            evidence.unit_active_state[timer],
+            evidence.unit_file_state[timer],
+        )
+        if state == ("inactive", "disabled"):
+            self._prepared_prerequisite(request)
+            self._run(_SYSTEMCTL, "enable", "--now", timer)
+            evidence = self.observe_prepared(request)
+        if evidence is None or (
+            evidence.unit_active_state[timer],
+            evidence.unit_file_state[timer],
+        ) != ("active", "enabled"):
+            raise CapacityExecutorInstallError("prepared controller timer did not converge")
+        return evidence
+
+    def run_prepared_tick(
+        self,
+        request: PreparedControllerRequest,
+    ) -> PreparedControllerEvidence:
+        evidence = self.observe_prepared(request)
+        timer = "loom-capacity-pool-executor-prepared.timer"
+        if evidence is None or (
+            evidence.unit_active_state[timer],
+            evidence.unit_file_state[timer],
+        ) != ("active", "enabled"):
+            raise CapacityExecutorInstallError("prepared controller timer is not exact")
+        self._prepared_prerequisite(request)
+        self._run(_SYSTEMCTL, "start", "loom-capacity-pool-executor-prepared.service")
+        authority = self._prepared_prerequisite(request)
+        receipt = self._prepared_tick_receipt(request)
+        path = self._prepared_tick_path(request)
+        try:
+            current = self._read_private_input(
+                path,
+                uid=authority.uid,
+                gid=authority.gid,
+            )
+        except FileNotFoundError:
+            current = None
+        if current is not None and current != receipt:
+            raise CapacityExecutorInstallError("prepared controller tick evidence drifted")
+        if current is None:
+            self._write_private_input(
+                path,
+                receipt,
+                uid=authority.uid,
+                gid=authority.gid,
+            )
+        evidence = self.observe_prepared(request)
+        if evidence is None or not evidence.successful_tick:
+            raise CapacityExecutorInstallError("prepared controller tick did not converge")
+        return evidence
+
+    def disable_prepared_timer(
+        self,
+        request: PreparedControllerRequest,
+    ) -> PreparedControllerEvidence | None:
+        self._prepared_prerequisite(request)
+        timer = "loom-capacity-pool-executor-prepared.timer"
+        self._run(_SYSTEMCTL, "disable", "--now", timer)
+        self._run(_SYSTEMCTL, "stop", "loom-capacity-pool-executor-prepared.service")
+        authority = self._prepared_prerequisite(request)
+        if (
+            authority.unit_active_state[timer],
+            authority.unit_file_state[timer],
+        ) != ("inactive", "disabled"):
+            raise CapacityExecutorInstallError("prepared controller timer disable did not converge")
+        installed: dict[str, bytes] = {}
+        missing = 0
+        for absolute in request.files:
+            try:
+                installed[absolute] = self._read_private_input(
+                    Path(absolute),
+                    uid=authority.uid,
+                    gid=authority.gid,
+                )
+            except FileNotFoundError:
+                missing += 1
+        if missing:
+            if missing != len(request.files):
+                raise CapacityExecutorInstallError(
+                    "prepared controller timer disable did not converge"
+                )
+            return None
+        if installed != dict(request.files):
+            raise CapacityExecutorInstallError("prepared controller timer disable did not converge")
+        evidence = self.observe_prepared(request)
+        if evidence is None or (
+            evidence.unit_active_state[timer],
+            evidence.unit_file_state[timer],
+        ) != ("inactive", "disabled"):
+            raise CapacityExecutorInstallError("prepared controller timer disable did not converge")
+        return evidence
+
+    @staticmethod
+    def _prepared_tick_receipt(request: PreparedControllerRequest) -> bytes:
+        return _canonical_json_bytes(
+            {
+                "execution": request.execution.model_dump(mode="json", exclude_none=False),
+                "file_sha256": {
+                    path: hashlib.sha256(payload).hexdigest()
+                    for path, payload in request.files.items()
+                },
+                "pool_id": request.pool_id,
+                "profile_sha256": request.profile_sha256,
+                "request_sha256": request.request_sha256,
+                "schema_version": 1,
+            }
+        )
+
+    @staticmethod
+    def _prepared_tick_path(request: PreparedControllerRequest) -> Path:
+        return Path(request.prerequisite.binding.state_directory) / (
+            f".prepared-tick-{request.request_sha256}.json"
+        )
+
+    def _prepared_tick_evidence(
+        self,
+        request: PreparedControllerRequest,
+        *,
+        uid: int,
+        gid: int,
+    ) -> str | None:
+        expected = self._prepared_tick_receipt(request)
+        try:
+            current = self._read_private_input(
+                self._prepared_tick_path(request),
+                uid=uid,
+                gid=gid,
+            )
+        except FileNotFoundError:
+            return None
+        if current != expected:
+            raise CapacityExecutorInstallError("prepared controller tick evidence drifted")
+        return hashlib.sha256(current).hexdigest()
+
+    def _ensure_private_child_directory(
+        self,
+        absolute: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> None:
+        parent_absolute = absolute.parent
+        self._private_directory_evidence(parent_absolute, uid=uid, gid=gid)
+        path = self._path(absolute)
+        if path.exists() or path.is_symlink():
+            self._private_directory_evidence(absolute, uid=uid, gid=gid)
+            return
+        parent = path.parent
+        try:
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
+            os.chown(path, uid, gid)
+        except FileExistsError:
+            pass
+        self._private_directory_evidence(absolute, uid=uid, gid=gid)
+        _fsync_directory(parent)
+
+    def _read_private_input(self, absolute: Path, *, uid: int, gid: int) -> bytes:
+        path = self._path(absolute)
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError):
+                raise
+            raise CapacityExecutorInstallError(
+                "controller prerequisite input is unavailable"
+            ) from exc
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_uid != uid
+                or before.st_gid != gid
+                or before.st_nlink != 1
+                or not 0 < before.st_size <= _MAX_COMMAND_OUTPUT_BYTES
+            ):
+                raise CapacityExecutorInstallError(
+                    "controller prerequisite input metadata is unsafe"
+                )
+            chunks: list[bytes] = []
+            remaining = before.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    raise CapacityExecutorInstallError(
+                        "controller prerequisite input changed while reading"
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(descriptor)
+            if _metadata_identity(before) != _metadata_identity(after):
+                raise CapacityExecutorInstallError(
+                    "controller prerequisite input changed while reading"
+                )
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+
+    def _write_private_input(
+        self,
+        absolute: Path,
+        payload: bytes,
+        *,
+        uid: int,
+        gid: int,
+    ) -> None:
+        self._private_directory_evidence(absolute.parent, uid=uid, gid=gid)
+        path = self._path(absolute)
+        try:
+            current = self._read_private_input(absolute, uid=uid, gid=gid)
+        except FileNotFoundError:
+            current = None
+        if current == payload:
+            return
+        parent = path.parent
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fchown(descriptor, uid, gid)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            _fsync_directory(parent)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            temporary.unlink(missing_ok=True)
+            raise
+        if self._read_private_input(absolute, uid=uid, gid=gid) != payload:
+            raise CapacityExecutorInstallError("controller prerequisite input did not converge")
+
+    def _unit_evidence(
+        self,
+        release_root: Path,
+        *,
+        allow_prepared_timer: bool,
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        active_states: dict[str, str] = {}
+        file_states: dict[str, str] = {}
+        unit_sha256: dict[str, str] = {}
+        release_units = self._path(release_root) / "payload/units"
+        for unit in _UNITS:
+            active = self._bounded_stdout(
+                self._run(_SYSTEMCTL, "is-active", unit, check=False),
+                label="systemd active state",
+            ).strip()
+            enabled = self._bounded_stdout(
+                self._run(_SYSTEMCTL, "is-enabled", unit, check=False),
+                label="systemd unit-file state",
+            ).strip()
+            expected_file_state = "disabled" if unit.endswith(".timer") else "static"
+            prepared_timer = unit == "loom-capacity-pool-executor-prepared.timer"
+            allowed_state = (
+                {("inactive", "disabled"), ("active", "enabled")}
+                if allow_prepared_timer and prepared_timer
+                else {("inactive", expected_file_state)}
+            )
+            if (active, enabled) not in allowed_state:
+                raise CapacityExecutorInstallError(
+                    "controller prerequisite units are not exactly inert"
+                )
+            installed = self._path(_UNIT_ROOT / unit)
+            source = release_units / unit
+            installed_metadata = os.lstat(installed)
+            if (
+                not stat.S_ISREG(installed_metadata.st_mode)
+                or installed_metadata.st_nlink != 1
+                or installed_metadata.st_uid != self.context.authority_uid
+                or installed_metadata.st_gid != self.context.authority_gid
+                or stat.S_IMODE(installed_metadata.st_mode) != 0o644
+                or source.read_bytes() != installed.read_bytes()
+            ):
+                raise CapacityExecutorInstallError("controller prerequisite unit authority drifted")
+            active_states[unit] = active
+            file_states[unit] = enabled
+            unit_sha256[unit] = self._authority_file_sha256(
+                _UNIT_ROOT / unit,
+                executable=False,
+            )
+        return unit_sha256, active_states, file_states
+
+    def _exact_unit_evidence(
+        self,
+        release_root: Path,
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        return self._unit_evidence(release_root, allow_prepared_timer=False)
+
+    def _prepared_unit_evidence(
+        self,
+        release_root: Path,
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        return self._unit_evidence(release_root, allow_prepared_timer=True)
+
+    def observe_prerequisite(
+        self,
+        request: ControllerPrerequisiteRequest,
+    ) -> ControllerPrerequisiteEvidence | None:
+        if self.effective_uid != 0:
+            raise CapacityExecutorInstallError("capacity executor observation requires root")
+        digest = _validate_image_reference(request.image)
+        uid, gid, executable_sha256, configuration_sha256 = self._local_authority(request)
+        self._assert_quiescent()
+        expected_release = self._release_root(
+            source_sha=request.source_sha,
+            architecture=request.architecture,
+            digest=digest,
+        )
+        current_target = self._assert_current_destination_safe()
+        if current_target is None or current_target != str(expected_release):
+            return None
+        self._inspect_image(
+            request.image,
+            source_sha=request.source_sha,
+            architecture=request.architecture,
+            pull=False,
+        )
+        release = self._path(expected_release)
+        try:
+            verify_release(
+                release,
+                expected_source_sha=request.source_sha,
+                expected_architecture=request.architecture,
+            )
+        except CapacityExecutorReleaseError as exc:
+            raise CapacityExecutorInstallError(
+                "controller prerequisite release authority drifted"
+            ) from exc
+        self._verify_runtime_files(expected_release)
+        self._probe_runtime(expected_release)
+        unit_sha256, active_states, file_states = self._exact_unit_evidence(expected_release)
+        directory_paths = (
+            _CONFIG_ROOT,
+            _RUNTIME_ROOT,
+            _RUNTIME_ROOT / request.pool_id,
+            _SERVICE_HOME,
+            Path(request.binding.state_directory),
+        )
+        try:
+            directories = {
+                str(path): self._private_directory_evidence(path, uid=uid, gid=gid)
+                for path in directory_paths
+            }
+            installed_input = self._read_private_input(
+                Path(request.prerequisite_input_path),
+                uid=uid,
+                gid=gid,
+            )
+        except FileNotFoundError:
+            return None
+        expected_input = _canonical_json_bytes(request.prerequisite_input_value())
+        if installed_input != expected_input:
+            return None
+        release_manifest_sha256 = self._authority_file_sha256(
+            expected_release / "release-manifest.json",
+            executable=False,
+        )
+        return ControllerPrerequisiteEvidence(
+            schema_version=1,
+            pool_id=request.pool_id,
+            controller_hostname=self.hostname,
+            transport_authority_sha256=request.transport_authority_sha256,
+            image=request.image,
+            source_sha=request.source_sha,
+            architecture=request.architecture,
+            release_root=str(expected_release),
+            release_manifest_sha256=release_manifest_sha256,
+            service_user=request.service_user,
+            service_uid=uid,
+            service_gid=gid,
+            slurm_cluster=request.binding.slurm_cluster,
+            partition=request.binding.partition,
+            target_nodes=request.target_nodes,
+            executable_sha256=executable_sha256,
+            configuration_sha256=configuration_sha256,
+            job_visibility_evidence_sha256=(
+                request.binding.inventory.job_visibility_evidence_sha256
+            ),
+            directories=directories,
+            unit_sha256=unit_sha256,
+            unit_active_state=active_states,
+            unit_file_state=file_states,
+            prerequisite_input_path=request.prerequisite_input_path,
+            prerequisite_input_sha256=request.prerequisite_input_sha256,
+            credential_metadata_sha256=request.credential_metadata_sha256,
+            controller_authority_sha256=request.binding.controller_authority_sha256,
+            local_authority_sha256=request.binding.local_authority_sha256,
+        )
+
+    def converge_prerequisite(
+        self,
+        request: ControllerPrerequisiteRequest,
+    ) -> ControllerPrerequisiteEvidence:
+        uid, gid, _executables, _configuration = self._local_authority(request)
+        result = self.install(image=request.image, source_sha=request.source_sha)
+        if result.architecture != request.architecture:
+            raise CapacityExecutorInstallError("controller prerequisite release authority drifted")
+        self._ensure_private_child_directory(
+            _RUNTIME_ROOT / request.pool_id,
+            uid=uid,
+            gid=gid,
+        )
+        self._ensure_private_child_directory(
+            Path(request.binding.state_directory),
+            uid=uid,
+            gid=gid,
+        )
+        self._write_private_input(
+            Path(request.prerequisite_input_path),
+            _canonical_json_bytes(request.prerequisite_input_value()),
+            uid=uid,
+            gid=gid,
+        )
+        evidence = self.observe_prerequisite(request)
+        if evidence is None:
+            raise CapacityExecutorInstallError("controller prerequisite convergence was incomplete")
+        return evidence
+
     def install(self, *, image: str, source_sha: str) -> InstallResult:
         if self.effective_uid != 0:
             raise CapacityExecutorInstallError("capacity executor installation requires root")
@@ -955,10 +2140,104 @@ def _validate_host_root(root: Path) -> None:
         raise CapacityExecutorInstallError("installer host PID namespace is unavailable") from exc
 
 
+def _controller_prerequisite_operation(
+    installer: ControllerInstaller,
+    operation: str,
+    payload: bytes,
+) -> bytes:
+    if operation not in {"observe-prerequisite", "converge-prerequisite"}:
+        raise CapacityExecutorInstallError("controller prerequisite operation is invalid")
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= _MAX_PREREQUISITE_REQUEST_BYTES:
+        raise CapacityExecutorInstallError("controller prerequisite request bytes are invalid")
+    try:
+        request = ControllerPrerequisiteRequest.from_bytes(payload)
+    except ValueError as exc:
+        raise CapacityExecutorInstallError("controller prerequisite request is invalid") from exc
+    if operation == "observe-prerequisite":
+        evidence = installer.observe_prerequisite(request)
+        return b"null\n" if evidence is None else evidence.to_bytes()
+    return installer.converge_prerequisite(request).to_bytes()
+
+
+def _controller_discovery_operation(
+    installer: ControllerInstaller,
+    payload: bytes,
+) -> bytes:
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= _MAX_DISCOVERY_REQUEST_BYTES:
+        raise CapacityExecutorInstallError("controller discovery request bytes are invalid")
+    try:
+        request = ControllerDiscoveryRequest.from_bytes(payload)
+    except ValueError as exc:
+        raise CapacityExecutorInstallError("controller discovery request is invalid") from exc
+    return installer.discover_controller(request).to_bytes()
+
+
+def _pool_credential_operation(
+    installer: ControllerInstaller,
+    operation: str,
+    payload: bytes,
+) -> bytes:
+    if operation not in {"observe-credential", "publish-credential"}:
+        raise CapacityExecutorInstallError("controller credential operation is invalid")
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= _MAX_CREDENTIAL_REQUEST_BYTES:
+        raise CapacityExecutorInstallError("controller credential request bytes are invalid")
+    try:
+        request = PoolExecutionCredentialPayload.from_bytes(payload)
+    except ValueError as exc:
+        raise CapacityExecutorInstallError("controller credential request is invalid") from exc
+    if operation == "observe-credential":
+        evidence = installer.observe_credential(request)
+        return b"null\n" if evidence is None else evidence.to_bytes()
+    return installer.publish_credential(request).to_bytes()
+
+
+def _prepared_controller_operation(
+    installer: ControllerInstaller,
+    operation: str,
+    payload: bytes,
+) -> bytes:
+    if operation not in _PREPARED_OPERATIONS:
+        raise CapacityExecutorInstallError("prepared controller operation is invalid")
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= _MAX_PREPARED_REQUEST_BYTES:
+        raise CapacityExecutorInstallError("prepared controller request bytes are invalid")
+    try:
+        request = PreparedControllerRequest.from_bytes(payload)
+    except ValueError as exc:
+        raise CapacityExecutorInstallError("prepared controller request is invalid") from exc
+    if operation == "observe-prepared":
+        evidence = installer.observe_prepared(request)
+        return b"null\n" if evidence is None else evidence.to_bytes()
+    handlers = {
+        "converge-prepared-files": installer.converge_prepared_files,
+        "enable-prepared-timer": installer.enable_prepared_timer,
+        "run-prepared-tick": installer.run_prepared_tick,
+        "disable-prepared-timer": installer.disable_prepared_timer,
+    }
+    evidence = handlers[operation](request)
+    return b"null\n" if evidence is None else evidence.to_bytes()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True)
-    parser.add_argument("--source-sha", required=True)
+    parser.add_argument(
+        "--operation",
+        choices=(
+            "install",
+            "discover-controller",
+            "observe-prerequisite",
+            "converge-prerequisite",
+            "observe-credential",
+            "publish-credential",
+            "observe-prepared",
+            "converge-prepared-files",
+            "enable-prepared-timer",
+            "run-prepared-tick",
+            "disable-prepared-timer",
+        ),
+        default="install",
+    )
+    parser.add_argument("--image")
+    parser.add_argument("--source-sha")
     parser.add_argument("--host-root", type=Path, default=Path("/"))
     args = parser.parse_args(argv)
     try:
@@ -966,12 +2245,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         command_prefix = (
             () if args.host_root == Path("/") else ("/usr/sbin/chroot", str(args.host_root))
         )
-        result = ControllerInstaller(
+        installer = ControllerInstaller(
             context=InstallContext(root=args.host_root, command_prefix=command_prefix),
             runner=SubprocessRunner(),
-        ).install(image=args.image, source_sha=args.source_sha)
+        )
+        if args.operation == "install":
+            if args.image is None or args.source_sha is None:
+                raise CapacityExecutorInstallError(
+                    "capacity executor image and source SHA are required"
+                )
+            result = installer.install(image=args.image, source_sha=args.source_sha)
+        else:
+            if args.image is not None or args.source_sha is not None:
+                raise CapacityExecutorInstallError(
+                    "controller prerequisite operation has unexpected arguments"
+                )
+            if args.operation == "discover-controller":
+                payload = sys.stdin.buffer.read(_MAX_DISCOVERY_REQUEST_BYTES + 1)
+                response = _controller_discovery_operation(installer, payload)
+            elif args.operation in {"observe-prerequisite", "converge-prerequisite"}:
+                payload = sys.stdin.buffer.read(_MAX_PREREQUISITE_REQUEST_BYTES + 1)
+                response = _controller_prerequisite_operation(installer, args.operation, payload)
+            elif args.operation in _PREPARED_OPERATIONS:
+                payload = sys.stdin.buffer.read(_MAX_PREPARED_REQUEST_BYTES + 1)
+                response = _prepared_controller_operation(installer, args.operation, payload)
+            else:
+                payload = sys.stdin.buffer.read(_MAX_CREDENTIAL_REQUEST_BYTES + 1)
+                response = _pool_credential_operation(installer, args.operation, payload)
     except CapacityExecutorInstallError as exc:
         parser.error(str(exc))
+    if args.operation != "install":
+        sys.stdout.buffer.write(response)
+        return 0
     print(
         json.dumps(
             {
