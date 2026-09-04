@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -38,8 +39,8 @@ RUNTIME_MEMBERS = (
 
 EXPECTED_BINARY_SHA256 = {
     "amd64": {
-        "buildctl": "850722004a245c2599c9472a85863fb4ce4e44deb3e4e8eacb705dc59552b147",
-        "buildkitd": "0fcdc1aa3454419a72615fe2e306d4bcf47ac7c61430e78b36fdad2ebea59dc5",
+        "buildctl": "b2dc3eb537b912717670347cf449ca501e769d5a6beeebaad0aab8abb7f495e1",
+        "buildkitd": "0e01e2cac7df591ac129ee86543ac36bc6ef08b50aee8550f5675675208564e7",
         "buildkit-runc": "b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c",
         "rootlesskit": "b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db",
         "rootlessctl": "5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96",
@@ -47,8 +48,8 @@ EXPECTED_BINARY_SHA256 = {
         "fuse-overlayfs": "1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90",
     },
     "arm64": {
-        "buildctl": "38ec6be685e56e42ca836a527f54757f493a945f8da84113b1c91772de3ba055",
-        "buildkitd": "93783b021da7c1e337b5940f05fc2924871916083171f1fe1c1fe973ac744d81",
+        "buildctl": "8913f65a380be955abe4f5a155970ece8a2b3a26408c16431e806963e6acc97a",
+        "buildkitd": "fded12c1a4ab70a21278dc860a1d000bca68421e9f45a9e0fcf1e1807ae19c03",
         "buildkit-runc": "1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441",
         "rootlesskit": "5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2",
         "rootlessctl": "d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94",
@@ -64,6 +65,30 @@ def _dockerfile() -> str:
 
 def _manifest() -> dict[str, Any]:
     return json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def _decoded_patch_payloads(dockerfile: str) -> dict[str, str]:
+    matches = re.finditer(
+        r"COPY <<'PATCH_B64' (/tmp/(?:buildkit|rootlesskit)-runtime-v2\.patch)\.b64\n"
+        r"(?P<payload>[A-Za-z0-9+/=\n]+?)\nPATCH_B64",
+        dockerfile,
+    )
+    payloads: dict[str, str] = {}
+    for match in matches:
+        payload = "".join(match.group("payload").splitlines())
+        payloads[match.group(1)] = base64.b64decode(payload, validate=True).decode(
+            "utf-8"
+        )
+    return payloads
+
+
+def _runtime_patch_text(dockerfile: str) -> str:
+    payloads = _decoded_patch_payloads(dockerfile)
+    assert set(payloads) == {
+        "/tmp/buildkit-runtime-v2.patch",
+        "/tmp/rootlesskit-runtime-v2.patch",
+    }
+    return "\n".join(payloads.values())
 
 
 def test_runtime_v2_dockerfile_binds_toolchain_sources_and_reproducible_flags() -> None:
@@ -112,21 +137,43 @@ def test_runtime_v2_emits_only_the_seven_host_runtime_members() -> None:
 
 def test_runtime_v2_patches_transitive_helper_paths_without_path_authority() -> None:
     dockerfile = _dockerfile()
+    patches = _runtime_patch_text(dockerfile)
 
-    assert 'exec.Command("/usr/bin/newuidmap"' in dockerfile
-    assert 'exec.Command("/usr/bin/newgidmap"' in dockerfile
-    assert '"/usr/bin/nsenter"' in dockerfile
-    assert '"/usr/bin/ip", "tuntap"' in dockerfile
-    assert '"/usr/bin/ip", "link"' in dockerfile
-    assert "BUILDKIT_FUSE_OVERLAYFS_BINARY" in dockerfile
-    assert "mountWithDirectFUSE" in dockerfile
-    assert "direct FUSE helper path" in dockerfile
-    assert "must be absolute clean path" in dockerfile
-    assert "Preserve explicit cgroup paths supplied by the allocation supervisor" in dockerfile
-    assert '-\tspec.Linux.CgroupsPath = ""' in dockerfile
-    assert "patch -p1 <<'PATCH'" in dockerfile
+    assert 'exec.Command("/usr/bin/newuidmap"' in patches
+    assert 'exec.Command("/usr/bin/newgidmap"' in patches
+    assert '"/usr/bin/nsenter"' in patches
+    assert '"/usr/bin/ip", "tuntap"' in patches
+    assert '"/usr/bin/ip", "link"' in patches
+    assert "BUILDKIT_FUSE_OVERLAYFS_BINARY" in patches
+    assert "mountWithDirectFUSE" in patches
+    assert "direct FUSE helper path" in patches
+    assert "must be absolute clean path" in patches
+    assert "Preserve only supervisor-derived cgroup paths" in patches
+    assert "rootless cgroup parent override forbidden" in patches
+    assert "meta.CgroupParent != cgroupParent" in patches
+    assert "spec.Linux.CgroupsPath = \"\"" in patches
     assert "go mod vendor" in dockerfile
     assert dockerfile.count("go build -mod=vendor") == 2
+
+
+def test_runtime_v2_applies_embedded_patches_with_strict_git_apply() -> None:
+    dockerfile = _dockerfile()
+    patches = _runtime_patch_text(dockerfile)
+
+    assert "patch -p1" not in dockerfile
+    assert "apk add --no-cache ca-certificates git patch" not in dockerfile
+    assert (
+        "base64 -d /tmp/buildkit-runtime-v2.patch.b64 > /tmp/buildkit-runtime-v2.patch"
+        in dockerfile
+    )
+    assert (
+        "base64 -d /tmp/rootlesskit-runtime-v2.patch.b64 > /tmp/rootlesskit-runtime-v2.patch"
+        in dockerfile
+    )
+    assert "git apply --check" in dockerfile
+    assert re.search(r"\bgit apply /tmp/(buildkit|rootlesskit)-runtime-v2\.patch\b", dockerfile)
+    assert "--unidiff-zero" not in dockerfile
+    assert not re.search(r"@@ -\d+(?:,0)? \+\d+(?:,0)? @@", patches)
 
 
 def test_runtime_v2_manifest_records_exact_amd64_and_arm64_member_hashes() -> None:

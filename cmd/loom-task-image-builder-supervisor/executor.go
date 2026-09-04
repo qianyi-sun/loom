@@ -39,7 +39,9 @@ type BuildComponent struct {
 }
 
 type Executor struct {
-	config          Config
+	config Config
+	// capabilities contains borrowed guard-transferred descriptors. Executor uses
+	// these FDs for exact placement/cleanup but never closes caller-owned rights.
 	capabilities    *AllocationCapabilities
 	plan            BuildPlan
 	jobRoot         string
@@ -50,6 +52,7 @@ type Executor struct {
 
 const (
 	buildkitFuseOverlayFSBinaryEnv = "BUILDKIT_FUSE_OVERLAYFS_BINARY"
+	maxBuildkitUnixSocketPathBytes = 104
 	hostNewuidmapPath              = "/usr/bin/newuidmap"
 	hostNewgidmapPath              = "/usr/bin/newgidmap"
 	hostNsenterPath                = "/usr/bin/nsenter"
@@ -109,7 +112,11 @@ func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Exe
 	if err != nil {
 		return nil, err
 	}
-	address := "unix://" + filepath.Join(jobRoot, "buildkit", "buildkitd.sock")
+	socketPath, err := buildkitSocketPath(jobRoot)
+	if err != nil {
+		return nil, err
+	}
+	address := "unix://" + socketPath
 	return &Executor{
 		config:          cfg,
 		capabilities:    caps,
@@ -119,23 +126,25 @@ func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Exe
 	}, nil
 }
 
-func (e *Executor) Start(ctx context.Context) error {
+func (e *Executor) Start(ctx context.Context) (err error) {
 	if e == nil {
 		return errors.New("executor unavailable")
 	}
 	if e.started {
 		return errors.New("executor already started")
 	}
-	for _, dir := range []string{
-		filepath.Join(e.jobRoot, "buildkit"),
-		filepath.Join(e.jobRoot, "buildkit-root"),
-		filepath.Join(e.jobRoot, "rootlesskit"),
-		filepath.Join(e.jobRoot, "tmp"),
-		filepath.Join(e.jobRoot, "home"),
-	} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
+	defer func() {
+		if err == nil {
+			return
 		}
+		if cleanupErr := e.cleanupState(); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cleanup partial executor state: %w", cleanupErr))
+		}
+		e.daemon = nil
+		e.started = false
+	}()
+	if err := e.prepareStateDirs(); err != nil {
+		return err
 	}
 	if err := executorVerifyHostIDMapHelpers(); err != nil {
 		return err
@@ -203,7 +212,7 @@ func (e *Executor) Start(ctx context.Context) error {
 	return nil
 }
 
-func (e *Executor) Build(ctx context.Context, component BuildComponent) (OCIOutput, error) {
+func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOutput, err error) {
 	if e == nil || !e.started {
 		return OCIOutput{}, errors.New("executor not started")
 	}
@@ -218,6 +227,14 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (OCIOutp
 		return OCIOutput{}, err
 	}
 	outputPath := filepath.Join(outputDir, component.Name+".tar")
+	cleanupOutput := true
+	defer func() {
+		if cleanupOutput {
+			if cleanupErr := removePartialOCIOutput(outputPath); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup partial OCI output: %w", cleanupErr))
+			}
+		}
+	}()
 	platform := "linux/" + e.plan.Architecture
 	argv := []string{
 		"--addr", e.buildkitAddress,
@@ -234,7 +251,12 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (OCIOutp
 	if err := executorRunBuildctl(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD); err != nil {
 		return OCIOutput{}, err
 	}
-	return executorValidateOCIOutput(outputPath, platform)
+	output, err := executorValidateOCIOutput(outputPath, platform)
+	if err != nil {
+		return OCIOutput{}, err
+	}
+	cleanupOutput = false
+	return output, nil
 }
 
 func (e *Executor) Close(ctx context.Context) error {
@@ -274,25 +296,28 @@ func (e *Executor) waitForBuildkitReady(ctx context.Context) error {
 }
 
 func (e *Executor) stopDaemon(ctx context.Context) error {
-	if err := executorSignalProcess(e.daemon, syscall.SIGTERM); err != nil {
-		return err
-	}
-	waitErr := e.waitForDaemonExit(ctx)
-	if !daemonExitAllowedAfterStop(waitErr) {
-		return waitErr
+	var errs []error
+	if e.daemon != nil {
+		if err := executorSignalProcess(e.daemon, syscall.SIGTERM); err != nil {
+			errs = append(errs, fmt.Errorf("signal daemon: %w", err))
+		}
+		waitErr := e.waitForDaemonExit(ctx)
+		if !daemonExitAllowedAfterStop(waitErr) {
+			errs = append(errs, fmt.Errorf("wait daemon: %w", waitErr))
+		}
 	}
 	if err := e.waitForCgroupEmpty(ctx); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("wait cgroup empty: %w", err))
 	}
 	if err := executorCleanupCgroup(e.capabilities.BuildEgressFD); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("cleanup cgroup children: %w", err))
 	}
 	if err := e.cleanupState(); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("cleanup executor state: %w", err))
 	}
 	e.daemon = nil
 	e.started = false
-	return nil
+	return errors.Join(errs...)
 }
 
 func (e *Executor) waitForDaemonExit(ctx context.Context) error {
@@ -304,16 +329,16 @@ func (e *Executor) waitForDaemonExit(ctx context.Context) error {
 	case err := <-done:
 		return err
 	case <-time.After(executorShutdownTimeout):
-		_ = e.daemon.Kill()
+		killErr := e.daemon.Kill()
 		select {
 		case err := <-done:
-			return err
+			return errors.Join(killErr, err)
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.Join(killErr, ctx.Err())
 		}
 	case <-ctx.Done():
-		_ = e.daemon.Kill()
-		return ctx.Err()
+		killErr := e.daemon.Kill()
+		return errors.Join(killErr, ctx.Err())
 	}
 }
 
@@ -456,16 +481,107 @@ func decodeMountInfoField(path string) string {
 	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(path)
 }
 
+func (e *Executor) prepareStateDirs() error {
+	for _, name := range []string{"buildkit", "buildkit-root", "rootlesskit", "tmp", "home"} {
+		if err := e.ensureJobSubdirectory(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Executor) ensureJobSubdirectory(name string) error {
+	if name == "" || strings.ContainsRune(name, os.PathSeparator) || name == "." || name == ".." {
+		return errors.New("executor state directory name invalid")
+	}
+	if err := syscall.Mkdirat(e.capabilities.JobDirectoryFD, name, 0o700); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return err
+	}
+	fd, err := syscall.Openat(e.capabilities.JobDirectoryFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(fd, &statValue); err != nil {
+		return err
+	}
+	if statValue.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		return errors.New("executor state path is not a directory")
+	}
+	if os.FileMode(statValue.Mode).Perm() != 0o700 {
+		return errors.New("executor state directory mode invalid")
+	}
+	return nil
+}
+
+func buildkitSocketPath(jobRoot string) (string, error) {
+	if !filepath.IsAbs(jobRoot) || filepath.Clean(jobRoot) != jobRoot {
+		return "", errors.New("job root path invalid")
+	}
+	socketPath := filepath.Join(jobRoot, "buildkit", "buildkitd.sock")
+	if len(socketPath) > maxBuildkitUnixSocketPathBytes {
+		return "", fmt.Errorf("buildkit unix socket path length %d exceeds linux limit %d", len(socketPath), maxBuildkitUnixSocketPathBytes)
+	}
+	return socketPath, nil
+}
+
 func (e *Executor) writeBuildkitConfig(cgroupParent string) (string, error) {
 	if err := validateBuildkitCgroupParent(cgroupParent); err != nil {
 		return "", err
 	}
 	configPath := filepath.Join(e.jobRoot, "buildkit", "buildkitd.toml")
 	payload := []byte("[worker.oci]\ndefaultCgroupParent = " + strconv.Quote(cgroupParent) + "\n")
-	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
+	buildkitDirFD, err := syscall.Openat(e.capabilities.JobDirectoryFD, "buildkit", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
 		return "", err
 	}
+	defer syscall.Close(buildkitDirFD)
+	fd, err := createBundleFile(buildkitDirFD, "buildkitd.toml", 0o600)
+	if err != nil {
+		return "", err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = unlinkBundleFile(buildkitDirFD, "buildkitd.toml")
+		}
+	}()
+	file := os.NewFile(uintptr(fd), configPath)
+	if file == nil {
+		syscall.Close(fd)
+		return "", errors.New("buildkit config file unavailable")
+	}
+	written, writeErr := file.Write(payload)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	if written != len(payload) {
+		return "", io.ErrShortWrite
+	}
+	if syncErr != nil {
+		return "", syncErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	if err := fsyncDirectory(buildkitDirFD); err != nil {
+		return "", err
+	}
+	complete = true
 	return configPath, nil
+}
+
+func removePartialOCIOutput(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func buildkitCgroupParent(cgroupFD int) (string, error) {

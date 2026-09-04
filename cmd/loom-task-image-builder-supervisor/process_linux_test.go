@@ -218,6 +218,49 @@ func TestLaunchRefusesInheritedPathAndMalformedEnvironmentEntries(t *testing.T) 
 	}
 }
 
+func TestProcessWaitDoesNotExposeCapturedBuildOutput(t *testing.T) {
+	root := t.TempDir()
+	executablePath := filepath.Join(root, "runtime", "buildctl")
+	writeExecutableFixture(t, executablePath, "#!/bin/sh\nprintf secret-build-output\nexit 1\n")
+	member := ExecutableMember{Path: executablePath, SHA256: sha256FileHex(t, executablePath)}
+	cgroupDir := filepath.Join(root, "cgroup")
+	if err := os.Mkdir(cgroupDir, 0o755); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", cgroupDir, err)
+	}
+	cgroupFD := openDirectoryFD(t, cgroupDir)
+	defer syscall.Close(cgroupFD)
+	cgroupIdentity := identityFromStat(mustFstat(t, cgroupFD))
+
+	restoreProcessHooks(t)
+	processCommandStarter = func(cmd *exec.Cmd) error {
+		if cmd.Stdout == nil || cmd.Stderr == nil {
+			t.Fatal("process output must be captured or discarded, never inherited")
+		}
+		_, _ = cmd.Stdout.Write([]byte("secret-build-output\n"))
+		_, _ = cmd.Stderr.Write([]byte("Dockerfile RUN leaked-token\n"))
+		cmd.Process, _ = os.FindProcess(999997)
+		return nil
+	}
+	processCgroupIdentity = func(pid int) (fileIdentity, error) {
+		return cgroupIdentity, nil
+	}
+	processCommandWaiter = func(*exec.Cmd) error { return errors.New("exit status 1") }
+
+	proc, err := LaunchInCgroup(context.Background(), member, nil, []string{"LANG=C.UTF-8"}, cgroupFD)
+	if err != nil {
+		t.Fatalf("LaunchInCgroup() error = %v", err)
+	}
+	err = proc.Wait()
+	if err == nil {
+		t.Fatal("Wait() succeeded, want process failure")
+	}
+	for _, leaked := range []string{"secret-build-output", "Dockerfile RUN", "leaked-token"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("Wait() exposed captured build output %q in error %q", leaked, err.Error())
+		}
+	}
+}
+
 func restoreProcessHooks(t *testing.T) {
 	t.Helper()
 	previousStarter := processCommandStarter

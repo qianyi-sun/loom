@@ -8,7 +8,7 @@ ENV GOTOOLCHAIN=local \
     GOPROXY=https://proxy.golang.org,direct \
     GOSUMDB=sum.golang.org
 RUN case "$(go version)" in "go version go1.26.7 linux/"*) ;; *) exit 1 ;; esac \
-    && apk add --no-cache ca-certificates git patch
+    && apk add --no-cache ca-certificates git
 
 # moby/buildkit v0.32.2, signed tag commit 991535e0973488b6a429096d21fa13f81f2d89d8.
 ADD --checksum=sha256:ebc242057b1eee67eb14ead8def52c3770c6793c8c8ac0c53d41983b085360f4 \
@@ -19,118 +19,138 @@ RUN mkdir -p /out /src/buildkit \
 WORKDIR /src/buildkit
 RUN go get golang.org/x/crypto@v0.55.0
 RUN go mod vendor
-RUN <<'EOF'
-set -eu
-patch -p1 <<'PATCH'
-diff --git a/util/rootless/specconv/specconv_linux.go b/util/rootless/specconv/specconv_linux.go
-index 7118f8d6d..68d6ad6fc 100644
---- a/util/rootless/specconv/specconv_linux.go
-+++ b/util/rootless/specconv/specconv_linux.go
-@@ -36,0 +37 @@ func ToRootless(spec *specs.Spec) error {
-+	// Preserve explicit cgroup paths supplied by the allocation supervisor so RUN containers remain under the guard-transferred cgroup.
-@@ -38 +38,0 @@ func ToRootless(spec *specs.Spec) error {
--	spec.Linux.CgroupsPath = ""
-diff --git a/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go b/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go
-index d38a2c7c1..43d895e7e 100644
---- a/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go
-+++ b/vendor/github.com/containerd/containerd/v2/core/mount/mount_linux.go
-@@ -84,0 +85,4 @@ func (m *Mount) mount(target string) (err error) {
-+			fuseBinary := strings.TrimPrefix(m.Type, typePrefix)
-+			if filepath.IsAbs(fuseBinary) {
-+				return m.mountWithDirectFUSE(fuseBinary, target)
-+			}
-@@ -590,0 +595,39 @@ func (m *Mount) mountWithHelper(helperBinary, typePrefix, target string) error {
-+
-+func (m *Mount) mountWithDirectFUSE(helperBinary, target string) error {
-+	if !filepath.IsAbs(helperBinary) || filepath.Clean(helperBinary) != helperBinary {
-+		return fmt.Errorf("direct FUSE helper path %q is not absolute and clean", helperBinary)
-+	}
-+	args := []string{}
-+	for _, o := range m.Options {
-+		args = append(args, "-o", o)
-+	}
-+	args = append(args, m.Source, target)
-+
-+	infoBeforeMount, err := Lookup(target)
-+	if err != nil {
-+		return err
-+	}
-+
-+	const retriesOnECHILD = 10
-+	for range retriesOnECHILD {
-+		cmd := exec.Command(helperBinary, args...)
-+		out, err := cmd.CombinedOutput()
-+		if err == nil {
-+			return nil
-+		}
-+		if !errors.Is(err, unix.ECHILD) {
-+			return fmt.Errorf("direct FUSE helper [%s %v] failed: %q: %w", helperBinary, args, string(out), err)
-+		}
-+		infoAfterMount, err := Lookup(target)
-+		if err != nil {
-+			return err
-+		}
-+		if infoAfterMount.ID != infoBeforeMount.ID {
-+			if err := Unmount(target, 0); err != nil {
-+				log.L.WithError(err).Warnf("failed to unmount after ECHILD: %s", target)
-+			}
-+		}
-+	}
-+
-+	return fmt.Errorf("direct FUSE helper [%s %v] failed with ECHILD (retried %d times)", helperBinary, args, retriesOnECHILD)
-+}
-diff --git a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go
-index 8528fda9d..0711c1964 100644
---- a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go
-+++ b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/check.go
-@@ -50,0 +51,4 @@ func supportsReadonlyMultipleLowerDir(d string) error {
-+	binary, err := fuseOverlayFSBinary()
-+	if err != nil {
-+		return err
-+	}
-@@ -52 +56 @@ func supportsReadonlyMultipleLowerDir(d string) error {
--		Type:    "fuse3." + fuseoverlayfsBinary,
-+		Type:    "fuse3." + binary,
-@@ -70,2 +74,6 @@ func Supported(root string) error {
--	if _, err := exec.LookPath(fuseoverlayfsBinary); err != nil {
--		return fmt.Errorf("%s not installed: %w", fuseoverlayfsBinary, err)
-+	binary, err := fuseOverlayFSBinary()
-+	if err != nil {
-+		return err
-+	}
-+	if _, err := exec.LookPath(binary); err != nil {
-+		return fmt.Errorf("%s not installed: %w", binary, err)
-diff --git a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go
-index 4830ad107..fc569fdef 100644
---- a/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go
-+++ b/vendor/github.com/containerd/fuse-overlayfs-snapshotter/v2/fuseoverlayfs.go
-@@ -36,3 +36,9 @@ import (
--const (
--	fuseoverlayfsBinary = "fuse-overlayfs"
--)
-+const fuseOverlayFSBinaryEnv = "BUILDKIT_FUSE_OVERLAYFS_BINARY"
-+
-+func fuseOverlayFSBinary() (string, error) {
-+	path := os.Getenv(fuseOverlayFSBinaryEnv)
-+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-+		return "", fmt.Errorf("%s must be absolute clean path", fuseOverlayFSBinaryEnv)
-+	}
-+	return path, nil
-+}
-@@ -60,0 +67 @@ type snapshotter struct {
-+	binary      string
-@@ -68,0 +76,4 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
-+	binary, err := fuseOverlayFSBinary()
-+	if err != nil {
-+		return nil, err
-+	}
-@@ -89,0 +101 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
-+		binary:      binary,
-@@ -490 +502 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
--			Type:    "fuse3." + fuseoverlayfsBinary,
-+			Type:    "fuse3." + o.binary,
-PATCH
-EOF
+COPY <<'PATCH_B64' /tmp/buildkit-runtime-v2.patch.b64
+ZGlmZiAtLWdpdCBhL2V4ZWN1dG9yL29jaS9zcGVjLmdvIGIvZXhlY3V0b3Ivb2NpL3NwZWMuZ28K
+aW5kZXggNmNhYmFlNS4uNzNkOTY5NyAxMDA2NDQKLS0tIGEvZXhlY3V0b3Ivb2NpL3NwZWMuZ28K
+KysrIGIvZXhlY3V0b3Ivb2NpL3NwZWMuZ28KQEAgLTg5LDYgKzg5LDkgQEAgZnVuYyBHZW5lcmF0
+ZVNwZWMoY3R4IGNvbnRleHQuQ29udGV4dCwgbWV0YSBleGVjdXRvci5NZXRhLCBtb3VudHMgW11l
+eGVjdXRvci5Nb3UKIAkJSUQ6IGlkLAogCX0KIAorCWlmIGxlbihtZXRhLkNncm91cFBhcmVudCkg
+PiAwICYmIG1ldGEuQ2dyb3VwUGFyZW50ICE9IGNncm91cFBhcmVudCB7CisJCXJldHVybiBuaWws
+IG5pbCwgZXJyb3JzLk5ldygicm9vdGxlc3MgY2dyb3VwIHBhcmVudCBvdmVycmlkZSBmb3JiaWRk
+ZW4iKQorCX0KIAlpZiBsZW4obWV0YS5DZ3JvdXBQYXJlbnQpID4gMCB7CiAJCWNncm91cFBhcmVu
+dCA9IG1ldGEuQ2dyb3VwUGFyZW50CiAJfQpkaWZmIC0tZ2l0IGEvdXRpbC9yb290bGVzcy9zcGVj
+Y29udi9zcGVjY29udl9saW51eC5nbyBiL3V0aWwvcm9vdGxlc3Mvc3BlY2NvbnYvc3BlY2NvbnZf
+bGludXguZ28KaW5kZXggNzExOGY4ZC4uOTIyZmJjMiAxMDA2NDQKLS0tIGEvdXRpbC9yb290bGVz
+cy9zcGVjY29udi9zcGVjY29udl9saW51eC5nbworKysgYi91dGlsL3Jvb3RsZXNzL3NwZWNjb252
+L3NwZWNjb252X2xpbnV4LmdvCkBAIC0zMyw4ICszMyw5IEBAIGZ1bmMgVG9Sb290bGVzcyhzcGVj
+ICpzcGVjcy5TcGVjKSBlcnJvciB7CiAJfQogCXNwZWMuTW91bnRzID0gbW91bnRzCiAKLQkvLyBS
+ZW1vdmUgY2dyb3VwcyBzbyBhcyB0byBhdm9pZCBgY29udGFpbmVyX2xpbnV4LmdvOjMzNzogc3Rh
+cnRpbmcgY29udGFpbmVyIHByb2Nlc3MgY2F1c2VkICJwcm9jZXNzX2xpbnV4LmdvOjI4MDogYXBw
+bHlpbmcgY2dyb3VwIGNvbmZpZ3VyYXRpb24gZm9yIHByb2Nlc3MgY2F1c2VkIFwibWtkaXIgL3N5
+cy9mcy9jZ3JvdXAvY3B1c2V0L2J1aWxka2l0OiBwZXJtaXNzaW9uIGRlbmllZFwiImAKKwkvLyBS
+ZW1vdmUgY2dyb3VwIHJlc291cmNlcyBzbyBhcyB0byBhdm9pZCBgY29udGFpbmVyX2xpbnV4Lmdv
+OjMzNzogc3RhcnRpbmcgY29udGFpbmVyIHByb2Nlc3MgY2F1c2VkICJwcm9jZXNzX2xpbnV4Lmdv
+OjI4MDogYXBwbHlpbmcgY2dyb3VwIGNvbmZpZ3VyYXRpb24gZm9yIHByb2Nlc3MgY2F1c2VkIFwi
+bWtkaXIgL3N5cy9mcy9jZ3JvdXAvY3B1c2V0L2J1aWxka2l0OiBwZXJtaXNzaW9uIGRlbmllZFwi
+ImAKIAlzcGVjLkxpbnV4LlJlc291cmNlcyA9IG5pbAotCXNwZWMuTGludXguQ2dyb3Vwc1BhdGgg
+PSAiIgorCS8vIFByZXNlcnZlIG9ubHkgc3VwZXJ2aXNvci1kZXJpdmVkIGNncm91cCBwYXRocyBz
+byBSVU4gY29udGFpbmVycyByZW1haW4KKwkvLyB1bmRlciB0aGUgZ3VhcmQtdHJhbnNmZXJyZWQg
+Y2dyb3VwIGFzc2lnbmVkIGJ5IHRoZSBMb29tIGV4ZWN1dG9yLgogCXJldHVybiBuaWwKIH0KZGlm
+ZiAtLWdpdCBhL3ZlbmRvci9naXRodWIuY29tL2NvbnRhaW5lcmQvY29udGFpbmVyZC92Mi9jb3Jl
+L21vdW50L21vdW50X2xpbnV4LmdvIGIvdmVuZG9yL2dpdGh1Yi5jb20vY29udGFpbmVyZC9jb250
+YWluZXJkL3YyL2NvcmUvbW91bnQvbW91bnRfbGludXguZ28KaW5kZXggZDM4YTJjNy4uZTU2ZTFh
+ZCAxMDA2NDQKLS0tIGEvdmVuZG9yL2dpdGh1Yi5jb20vY29udGFpbmVyZC9jb250YWluZXJkL3Yy
+L2NvcmUvbW91bnQvbW91bnRfbGludXguZ28KKysrIGIvdmVuZG9yL2dpdGh1Yi5jb20vY29udGFp
+bmVyZC9jb250YWluZXJkL3YyL2NvcmUvbW91bnQvbW91bnRfbGludXguZ28KQEAgLTgyLDYgKzgy
+LDEwIEBAIGZ1bmMgKG0gKk1vdW50KSBtb3VudCh0YXJnZXQgc3RyaW5nKSAoZXJyIGVycm9yKSB7
+CiAJCS8vIGhlbHBlckJpbmFyeSA9ICJtb3VudC5mdXNlIiwgdHlwZVByZWZpeCA9ICJmdXNlLiIK
+IAkJdHlwZVByZWZpeCA6PSBzdHJpbmdzLlRyaW1QcmVmaXgoaGVscGVyQmluYXJ5LCAibW91bnQu
+IikgKyAiLiIKIAkJaWYgc3RyaW5ncy5IYXNQcmVmaXgobS5UeXBlLCB0eXBlUHJlZml4KSB7CisJ
+CQlmdXNlQmluYXJ5IDo9IHN0cmluZ3MuVHJpbVByZWZpeChtLlR5cGUsIHR5cGVQcmVmaXgpCisJ
+CQlpZiBmaWxlcGF0aC5Jc0FicyhmdXNlQmluYXJ5KSB7CisJCQkJcmV0dXJuIG0ubW91bnRXaXRo
+RGlyZWN0RlVTRShmdXNlQmluYXJ5LCB0YXJnZXQpCisJCQl9CiAJCQlyZXR1cm4gbS5tb3VudFdp
+dGhIZWxwZXIoaGVscGVyQmluYXJ5LCB0eXBlUHJlZml4LCB0YXJnZXQpCiAJCX0KIAl9CkBAIC01
+ODgsMyArNTkyLDQ0IEBAIGZ1bmMgKG0gKk1vdW50KSBtb3VudFdpdGhIZWxwZXIoaGVscGVyQmlu
+YXJ5LCB0eXBlUHJlZml4LCB0YXJnZXQgc3RyaW5nKSBlcnJvciB7CiAJfQogCXJldHVybiBmbXQu
+RXJyb3JmKCJtb3VudCBoZWxwZXIgWyVzICV2XSBmYWlsZWQgd2l0aCBFQ0hJTEQgKHJldHJpZWQg
+JWQgdGltZXMpIiwgaGVscGVyQmluYXJ5LCBhcmdzLCByZXRyaWVzT25FQ0hJTEQpCiB9CisKK2Z1
+bmMgKG0gKk1vdW50KSBtb3VudFdpdGhEaXJlY3RGVVNFKGhlbHBlckJpbmFyeSwgdGFyZ2V0IHN0
+cmluZykgZXJyb3IgeworCWlmICFmaWxlcGF0aC5Jc0FicyhoZWxwZXJCaW5hcnkpIHx8IGZpbGVw
+YXRoLkNsZWFuKGhlbHBlckJpbmFyeSkgIT0gaGVscGVyQmluYXJ5IHsKKwkJcmV0dXJuIGZtdC5F
+cnJvcmYoImRpcmVjdCBGVVNFIGhlbHBlciBwYXRoICVxIGlzIG5vdCBhYnNvbHV0ZSBhbmQgY2xl
+YW4iLCBoZWxwZXJCaW5hcnkpCisJfQorCWFyZ3MgOj0gW11zdHJpbmd7fQorCWZvciBfLCBvIDo9
+IHJhbmdlIG0uT3B0aW9ucyB7CisJCWFyZ3MgPSBhcHBlbmQoYXJncywgIi1vIiwgbykKKwl9CisJ
+YXJncyA9IGFwcGVuZChhcmdzLCBtLlNvdXJjZSwgdGFyZ2V0KQorCisJaW5mb0JlZm9yZU1vdW50
+LCBlcnIgOj0gTG9va3VwKHRhcmdldCkKKwlpZiBlcnIgIT0gbmlsIHsKKwkJcmV0dXJuIGVycgor
+CX0KKworCS8vIGNtZC5Db21iaW5lZE91dHB1dCgpIG1heSBpbnRlcm1pdHRlbnRseSByZXR1cm4g
+RUNISUxEIGJlY2F1c2Ugb2Ygb3VyIHNpZ25hbCBoYW5kbGluZyBpbiBzaGltLgorCS8vIFNlZSAj
+NDM4NyBhbmQgd2FpdCgyKS4KKwljb25zdCByZXRyaWVzT25FQ0hJTEQgPSAxMAorCWZvciByYW5n
+ZSByZXRyaWVzT25FQ0hJTEQgeworCQljbWQgOj0gZXhlYy5Db21tYW5kKGhlbHBlckJpbmFyeSwg
+YXJncy4uLikKKwkJb3V0LCBlcnIgOj0gY21kLkNvbWJpbmVkT3V0cHV0KCkKKwkJaWYgZXJyID09
+IG5pbCB7CisJCQlyZXR1cm4gbmlsCisJCX0KKwkJaWYgIWVycm9ycy5JcyhlcnIsIHVuaXguRUNI
+SUxEKSB7CisJCQlyZXR1cm4gZm10LkVycm9yZigiZGlyZWN0IEZVU0UgaGVscGVyIFslcyAldl0g
+ZmFpbGVkOiAlcTogJXciLCBoZWxwZXJCaW5hcnksIGFyZ3MsIHN0cmluZyhvdXQpLCBlcnIpCisJ
+CX0KKwkJLy8gV2UgZ290IEVDSElMRCwgd2UgYXJlIG5vdCBzdXJlIHdoZXRoZXIgdGhlIG1vdW50
+IHdhcyBzdWNjZXNzZnVsLgorCQkvLyBJZiB0aGUgbW91bnQgSUQgaGFzIGNoYW5nZWQsIHdlIGFy
+ZSBzdXJlIHdlIGdvdCBzb21lIG5ldyBtb3VudCwgYnV0IHN0aWxsIG5vdCBzdXJlIGl0IGlzIGZ1
+bGx5IGNvbXBsZXRlZC4KKwkJLy8gU28gd2UgYXR0ZW1wdCB0byB1bm1vdW50IHRoZSBuZXcgbW91
+bnQgYmVmb3JlIHJldHJ5aW5nLgorCQlpbmZvQWZ0ZXJNb3VudCwgZXJyIDo9IExvb2t1cCh0YXJn
+ZXQpCisJCWlmIGVyciAhPSBuaWwgeworCQkJcmV0dXJuIGVycgorCQl9CisJCWlmIGluZm9BZnRl
+ck1vdW50LklEICE9IGluZm9CZWZvcmVNb3VudC5JRCB7CisJCQlfID0gdW5tb3VudCh0YXJnZXQs
+IDApCisJCX0KKwl9CisJcmV0dXJuIGZtdC5FcnJvcmYoImRpcmVjdCBGVVNFIGhlbHBlciBbJXMg
+JXZdIGZhaWxlZCB3aXRoIEVDSElMRCAocmV0cmllZCAlZCB0aW1lcykiLCBoZWxwZXJCaW5hcnks
+IGFyZ3MsIHJldHJpZXNPbkVDSElMRCkKK30KZGlmZiAtLWdpdCBhL3ZlbmRvci9naXRodWIuY29t
+L2NvbnRhaW5lcmQvZnVzZS1vdmVybGF5ZnMtc25hcHNob3R0ZXIvdjIvY2hlY2suZ28gYi92ZW5k
+b3IvZ2l0aHViLmNvbS9jb250YWluZXJkL2Z1c2Utb3ZlcmxheWZzLXNuYXBzaG90dGVyL3YyL2No
+ZWNrLmdvCmluZGV4IDg1MjhmZGEuLjdmZWE5MzIgMTAwNjQ0Ci0tLSBhL3ZlbmRvci9naXRodWIu
+Y29tL2NvbnRhaW5lcmQvZnVzZS1vdmVybGF5ZnMtc25hcHNob3R0ZXIvdjIvY2hlY2suZ28KKysr
+IGIvdmVuZG9yL2dpdGh1Yi5jb20vY29udGFpbmVyZC9mdXNlLW92ZXJsYXlmcy1zbmFwc2hvdHRl
+ci92Mi9jaGVjay5nbwpAQCAtNDcsOSArNDcsMTQgQEAgZnVuYyBzdXBwb3J0c1JlYWRvbmx5TXVs
+dGlwbGVMb3dlckRpcihkIHN0cmluZykgZXJyb3IgewogCQl9CiAJfQogCisJYmluYXJ5LCBlcnIg
+Oj0gZnVzZU92ZXJsYXlGU0JpbmFyeSgpCisJaWYgZXJyICE9IG5pbCB7CisJCXJldHVybiBlcnIK
+Kwl9CisKIAlvcHRzIDo9IFtdc3RyaW5ne2ZtdC5TcHJpbnRmKCJsb3dlcmRpcj0lczolcyIsIGZp
+bGVwYXRoLkpvaW4odGQsICJsb3dlcjIiKSwgZmlsZXBhdGguSm9pbih0ZCwgImxvd2VyMSIpKX0K
+IAltIDo9IG1vdW50Lk1vdW50ewotCQlUeXBlOiAgICAiZnVzZTMuIiArIGZ1c2VvdmVybGF5ZnNC
+aW5hcnksCisJCVR5cGU6ICAgICJmdXNlMy4iICsgYmluYXJ5LAogCQlTb3VyY2U6ICAib3Zlcmxh
+eSIsCiAJCU9wdGlvbnM6IG9wdHMsCiAJfQpAQCAtNjcsOCArNzIsMTIgQEAgZnVuYyBzdXBwb3J0
+c1JlYWRvbmx5TXVsdGlwbGVMb3dlckRpcihkIHN0cmluZykgZXJyb3IgewogLy8gU3VwcG9ydGVk
+IGlzIG5vdCBjYWxsZWQgZHVyaW5nIHBsdWdpbiBpbml0aWFsaXphdGlvbiwgYnV0IGV4cG9zZWQg
+Zm9yIGRvd25zdHJlYW0gcHJvamVjdHMgd2hpY2ggdXNlcwogLy8gdGhpcyBzbmFwc2hvdHRlciBh
+cyBhIGxpYnJhcnkuCiBmdW5jIFN1cHBvcnRlZChyb290IHN0cmluZykgZXJyb3IgewotCWlmIF8s
+IGVyciA6PSBleGVjLkxvb2tQYXRoKGZ1c2VvdmVybGF5ZnNCaW5hcnkpOyBlcnIgIT0gbmlsIHsK
+LQkJcmV0dXJuIGZtdC5FcnJvcmYoIiVzIG5vdCBpbnN0YWxsZWQ6ICV3IiwgZnVzZW92ZXJsYXlm
+c0JpbmFyeSwgZXJyKQorCWJpbmFyeSwgZXJyIDo9IGZ1c2VPdmVybGF5RlNCaW5hcnkoKQorCWlm
+IGVyciAhPSBuaWwgeworCQlyZXR1cm4gZXJyCisJfQorCWlmIF8sIGVyciA6PSBleGVjLkxvb2tQ
+YXRoKGJpbmFyeSk7IGVyciAhPSBuaWwgeworCQlyZXR1cm4gZm10LkVycm9yZigiJXMgbm90IGlu
+c3RhbGxlZDogJXciLCBiaW5hcnksIGVycikKIAl9CiAJaWYgZXJyIDo9IG9zLk1rZGlyQWxsKHJv
+b3QsIDA3MDApOyBlcnIgIT0gbmlsIHsKIAkJcmV0dXJuIGVycgpkaWZmIC0tZ2l0IGEvdmVuZG9y
+L2dpdGh1Yi5jb20vY29udGFpbmVyZC9mdXNlLW92ZXJsYXlmcy1zbmFwc2hvdHRlci92Mi9mdXNl
+b3ZlcmxheWZzLmdvIGIvdmVuZG9yL2dpdGh1Yi5jb20vY29udGFpbmVyZC9mdXNlLW92ZXJsYXlm
+cy1zbmFwc2hvdHRlci92Mi9mdXNlb3ZlcmxheWZzLmdvCmluZGV4IDQ4MzBhZDEuLmRlNzdjODMg
+MTAwNjQ0Ci0tLSBhL3ZlbmRvci9naXRodWIuY29tL2NvbnRhaW5lcmQvZnVzZS1vdmVybGF5ZnMt
+c25hcHNob3R0ZXIvdjIvZnVzZW92ZXJsYXlmcy5nbworKysgYi92ZW5kb3IvZ2l0aHViLmNvbS9j
+b250YWluZXJkL2Z1c2Utb3ZlcmxheWZzLXNuYXBzaG90dGVyL3YyL2Z1c2VvdmVybGF5ZnMuZ28K
+QEAgLTMzLDkgKzMzLDE1IEBAIGltcG9ydCAoCiAJImdpdGh1Yi5jb20vY29udGFpbmVyZC9sb2ci
+CiApCiAKLWNvbnN0ICgKLQlmdXNlb3ZlcmxheWZzQmluYXJ5ID0gImZ1c2Utb3ZlcmxheWZzIgot
+KQorY29uc3QgZnVzZU92ZXJsYXlGU0JpbmFyeUVudiA9ICJCVUlMREtJVF9GVVNFX09WRVJMQVlG
+U19CSU5BUlkiCisKK2Z1bmMgZnVzZU92ZXJsYXlGU0JpbmFyeSgpIChzdHJpbmcsIGVycm9yKSB7
+CisJcGF0aCA6PSBvcy5HZXRlbnYoZnVzZU92ZXJsYXlGU0JpbmFyeUVudikKKwlpZiAhZmlsZXBh
+dGguSXNBYnMocGF0aCkgfHwgZmlsZXBhdGguQ2xlYW4ocGF0aCkgIT0gcGF0aCB7CisJCXJldHVy
+biAiIiwgZm10LkVycm9yZigiJXMgbXVzdCBiZSBhYnNvbHV0ZSBjbGVhbiBwYXRoIiwgZnVzZU92
+ZXJsYXlGU0JpbmFyeUVudikKKwl9CisJcmV0dXJuIHBhdGgsIG5pbAorfQogCiAvLyBTbmFwc2hv
+dHRlckNvbmZpZyBpcyB1c2VkIHRvIGNvbmZpZ3VyZSB0aGUgb3ZlcmxheSBzbmFwc2hvdHRlciBp
+bnN0YW5jZQogdHlwZSBTbmFwc2hvdHRlckNvbmZpZyBzdHJ1Y3QgewpAQCAtNjAsNiArNjYsNyBA
+QCB0eXBlIHNuYXBzaG90dGVyIHN0cnVjdCB7CiAJcm9vdCAgICAgICAgc3RyaW5nCiAJbXMgICAg
+ICAgICAgKnN0b3JhZ2UuTWV0YVN0b3JlCiAJYXN5bmNSZW1vdmUgYm9vbAorCWJpbmFyeSAgICAg
+IHN0cmluZwogfQogCiAvLyBOZXdTbmFwc2hvdHRlciByZXR1cm5zIGEgU25hcHNob3R0ZXIgd2hp
+Y2ggdXNlcyBvdmVybGF5ZnMuIFRoZSBvdmVybGF5ZnMKQEAgLTczLDYgKzgwLDExIEBAIGZ1bmMg
+TmV3U25hcHNob3R0ZXIocm9vdCBzdHJpbmcsIG9wdHMgLi4uT3B0KSAoc25hcHNob3RzLlNuYXBz
+aG90dGVyLCBlcnJvcikgewogCQl9CiAJfQogCisJYmluYXJ5LCBlcnIgOj0gZnVzZU92ZXJsYXlG
+U0JpbmFyeSgpCisJaWYgZXJyICE9IG5pbCB7CisJCXJldHVybiBuaWwsIGVycgorCX0KKwogCWlm
+IGVyciA6PSBvcy5Na2RpckFsbChyb290LCAwNzAwKTsgZXJyICE9IG5pbCB7CiAJCXJldHVybiBu
+aWwsIGVycgogCX0KQEAgLTg5LDYgKzEwMSw3IEBAIGZ1bmMgTmV3U25hcHNob3R0ZXIocm9vdCBz
+dHJpbmcsIG9wdHMgLi4uT3B0KSAoc25hcHNob3RzLlNuYXBzaG90dGVyLCBlcnJvcikgewogCQly
+b290OiAgICAgICAgcm9vdCwKIAkJbXM6ICAgICAgICAgIG1zLAogCQlhc3luY1JlbW92ZTogY29u
+ZmlnLmFzeW5jUmVtb3ZlLAorCQliaW5hcnk6ICAgICAgYmluYXJ5LAogCX0sIG5pbAogfQogCkBA
+IC00ODcsNyArNTAwLDcgQEAgZnVuYyAobyAqc25hcHNob3R0ZXIpIG1vdW50cyhzIHN0b3JhZ2Uu
+U25hcHNob3QsIGluZm8gc25hcHNob3RzLkluZm8pIFtdbW91bnQuTW8KIAl9CiAJcmV0dXJuIFtd
+bW91bnQuTW91bnR7CiAJCXsKLQkJCVR5cGU6ICAgICJmdXNlMy4iICsgZnVzZW92ZXJsYXlmc0Jp
+bmFyeSwKKwkJCVR5cGU6ICAgICJmdXNlMy4iICsgby5iaW5hcnksCiAJCQlTb3VyY2U6ICAib3Zl
+cmxheSIsCiAJCQlPcHRpb25zOiBvcHRpb25zLAogCQl9LAo=
+PATCH_B64
+RUN base64 -d /tmp/buildkit-runtime-v2.patch.b64 > /tmp/buildkit-runtime-v2.patch \
+    && git apply --check /tmp/buildkit-runtime-v2.patch \
+    && git apply /tmp/buildkit-runtime-v2.patch
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
@@ -153,49 +173,71 @@ ADD --checksum=sha256:51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8d
 RUN mkdir -p /src/rootlesskit \
     && tar -xzf /tmp/rootlesskit.tar.gz --strip-components=1 -C /src/rootlesskit
 WORKDIR /src/rootlesskit
-RUN <<'EOF'
-set -eu
-patch -p1 <<'PATCH'
-diff --git a/pkg/child/child.go b/pkg/child/child.go
-index c72b90444..e10d95a05 100644
---- a/pkg/child/child.go
-+++ b/pkg/child/child.go
-@@ -147 +147 @@ func activateLoopback() error {
--		{"ip", "link", "set", "lo", "up"},
-+		{"/usr/bin/ip", "link", "set", "lo", "up"},
-@@ -157,4 +157,4 @@ func activateDev(dev, ip string, netmask int, gateway string, mtu int) error {
--		{"ip", "link", "set", dev, "up"},
--		{"ip", "link", "set", "dev", dev, "mtu", strconv.Itoa(mtu)},
--		{"ip", "addr", "add", ip + "/" + strconv.Itoa(netmask), "dev", dev},
--		{"ip", "route", "add", "default", "via", gateway, "dev", dev},
-+		{"/usr/bin/ip", "link", "set", dev, "up"},
-+		{"/usr/bin/ip", "link", "set", "dev", dev, "mtu", strconv.Itoa(mtu)},
-+		{"/usr/bin/ip", "addr", "add", ip + "/" + strconv.Itoa(netmask), "dev", dev},
-+		{"/usr/bin/ip", "route", "add", "default", "via", gateway, "dev", dev},
-diff --git a/pkg/network/parentutils/parentutils.go b/pkg/network/parentutils/parentutils.go
-index 181ca0417..39ae63c7d 100644
---- a/pkg/network/parentutils/parentutils.go
-+++ b/pkg/network/parentutils/parentutils.go
-@@ -13,2 +13,2 @@ func PrepareTap(childPID int, childNetNsPath string, tap string) error {
--		nsenter(childPID, childNetNsPath, []string{"ip", "tuntap", "add", "name", tap, "mode", "tap"}),
--		nsenter(childPID, childNetNsPath, []string{"ip", "link", "set", tap, "up"}),
-+		nsenter(childPID, childNetNsPath, []string{"/usr/bin/ip", "tuntap", "add", "name", tap, "mode", "tap"}),
-+		nsenter(childPID, childNetNsPath, []string{"/usr/bin/ip", "link", "set", tap, "up"}),
-@@ -23 +23 @@ func nsenter(childPID int, childNetNsPath string, cmd []string) []string {
--	fullCmd := []string{"nsenter", "-t", strconv.Itoa(childPID)}
-+	fullCmd := []string{"/usr/bin/nsenter", "-t", strconv.Itoa(childPID)}
-diff --git a/pkg/parent/parent.go b/pkg/parent/parent.go
-index 2fbed7898..d76d0f0aa 100644
---- a/pkg/parent/parent.go
-+++ b/pkg/parent/parent.go
-@@ -441 +441 @@ func setupUIDGIDMap(pid int, subidSource SubidSource) error {
--	cmd := exec.Command("newuidmap", append([]string{pidS}, uArgs...)...)
-+	cmd := exec.Command("/usr/bin/newuidmap", append([]string{pidS}, uArgs...)...)
-@@ -446 +446 @@ func setupUIDGIDMap(pid int, subidSource SubidSource) error {
--	cmd = exec.Command("newgidmap", append([]string{pidS}, gArgs...)...)
-+	cmd = exec.Command("/usr/bin/newgidmap", append([]string{pidS}, gArgs...)...)
-PATCH
-EOF
+COPY <<'PATCH_B64' /tmp/rootlesskit-runtime-v2.patch.b64
+ZGlmZiAtLWdpdCBhL3BrZy9jaGlsZC9jaGlsZC5nbyBiL3BrZy9jaGlsZC9jaGlsZC5nbwppbmRl
+eCBjNzJiOTA0Li5lMTBkOTVhIDEwMDY0NAotLS0gYS9wa2cvY2hpbGQvY2hpbGQuZ28KKysrIGIv
+cGtnL2NoaWxkL2NoaWxkLmdvCkBAIC0xNDQsNyArMTQ0LDcgQEAgZnVuYyBtb3VudFByb2Nmcygp
+IGVycm9yIHsKIAogZnVuYyBhY3RpdmF0ZUxvb3BiYWNrKCkgZXJyb3IgewogCWNtZHMgOj0gW11b
+XXN0cmluZ3sKLQkJeyJpcCIsICJsaW5rIiwgInNldCIsICJsbyIsICJ1cCJ9LAorCQl7Ii91c3Iv
+YmluL2lwIiwgImxpbmsiLCAic2V0IiwgImxvIiwgInVwIn0sCiAJfQogCWlmIGVyciA6PSBjb21t
+b24uRXhlY3Mob3MuU3RkZXJyLCBvcy5FbnZpcm9uKCksIGNtZHMpOyBlcnIgIT0gbmlsIHsKIAkJ
+cmV0dXJuIGZtdC5FcnJvcmYoImV4ZWN1dGluZyAldjogJXciLCBjbWRzLCBlcnIpCkBAIC0xNTQs
+MTAgKzE1NCwxMCBAQCBmdW5jIGFjdGl2YXRlTG9vcGJhY2soKSBlcnJvciB7CiAKIGZ1bmMgYWN0
+aXZhdGVEZXYoZGV2LCBpcCBzdHJpbmcsIG5ldG1hc2sgaW50LCBnYXRld2F5IHN0cmluZywgbXR1
+IGludCkgZXJyb3IgewogCWNtZHMgOj0gW11bXXN0cmluZ3sKLQkJeyJpcCIsICJsaW5rIiwgInNl
+dCIsIGRldiwgInVwIn0sCi0JCXsiaXAiLCAibGluayIsICJzZXQiLCAiZGV2IiwgZGV2LCAibXR1
+Iiwgc3RyY29udi5JdG9hKG10dSl9LAotCQl7ImlwIiwgImFkZHIiLCAiYWRkIiwgaXAgKyAiLyIg
+KyBzdHJjb252Lkl0b2EobmV0bWFzayksICJkZXYiLCBkZXZ9LAotCQl7ImlwIiwgInJvdXRlIiwg
+ImFkZCIsICJkZWZhdWx0IiwgInZpYSIsIGdhdGV3YXksICJkZXYiLCBkZXZ9LAorCQl7Ii91c3Iv
+YmluL2lwIiwgImxpbmsiLCAic2V0IiwgZGV2LCAidXAifSwKKwkJeyIvdXNyL2Jpbi9pcCIsICJs
+aW5rIiwgInNldCIsICJkZXYiLCBkZXYsICJtdHUiLCBzdHJjb252Lkl0b2EobXR1KX0sCisJCXsi
+L3Vzci9iaW4vaXAiLCAiYWRkciIsICJhZGQiLCBpcCArICIvIiArIHN0cmNvbnYuSXRvYShuZXRt
+YXNrKSwgImRldiIsIGRldn0sCisJCXsiL3Vzci9iaW4vaXAiLCAicm91dGUiLCAiYWRkIiwgImRl
+ZmF1bHQiLCAidmlhIiwgZ2F0ZXdheSwgImRldiIsIGRldn0sCiAJfQogCWlmIGVyciA6PSBjb21t
+b24uRXhlY3Mob3MuU3RkZXJyLCBvcy5FbnZpcm9uKCksIGNtZHMpOyBlcnIgIT0gbmlsIHsKIAkJ
+cmV0dXJuIGZtdC5FcnJvcmYoImV4ZWN1dGluZyAldjogJXciLCBjbWRzLCBlcnIpCmRpZmYgLS1n
+aXQgYS9wa2cvbmV0d29yay9wYXJlbnR1dGlscy9wYXJlbnR1dGlscy5nbyBiL3BrZy9uZXR3b3Jr
+L3BhcmVudHV0aWxzL3BhcmVudHV0aWxzLmdvCmluZGV4IDE4MWNhMDQuLjM5YWU2M2MgMTAwNjQ0
+Ci0tLSBhL3BrZy9uZXR3b3JrL3BhcmVudHV0aWxzL3BhcmVudHV0aWxzLmdvCisrKyBiL3BrZy9u
+ZXR3b3JrL3BhcmVudHV0aWxzL3BhcmVudHV0aWxzLmdvCkBAIC0xMCw4ICsxMCw4IEBAIGltcG9y
+dCAoCiAKIGZ1bmMgUHJlcGFyZVRhcChjaGlsZFBJRCBpbnQsIGNoaWxkTmV0TnNQYXRoIHN0cmlu
+ZywgdGFwIHN0cmluZykgZXJyb3IgewogCWNtZHMgOj0gW11bXXN0cmluZ3sKLQkJbnNlbnRlcihj
+aGlsZFBJRCwgY2hpbGROZXROc1BhdGgsIFtdc3RyaW5neyJpcCIsICJ0dW50YXAiLCAiYWRkIiwg
+Im5hbWUiLCB0YXAsICJtb2RlIiwgInRhcCJ9KSwKLQkJbnNlbnRlcihjaGlsZFBJRCwgY2hpbGRO
+ZXROc1BhdGgsIFtdc3RyaW5neyJpcCIsICJsaW5rIiwgInNldCIsIHRhcCwgInVwIn0pLAorCQlu
+c2VudGVyKGNoaWxkUElELCBjaGlsZE5ldE5zUGF0aCwgW11zdHJpbmd7Ii91c3IvYmluL2lwIiwg
+InR1bnRhcCIsICJhZGQiLCAibmFtZSIsIHRhcCwgIm1vZGUiLCAidGFwIn0pLAorCQluc2VudGVy
+KGNoaWxkUElELCBjaGlsZE5ldE5zUGF0aCwgW11zdHJpbmd7Ii91c3IvYmluL2lwIiwgImxpbmsi
+LCAic2V0IiwgdGFwLCAidXAifSksCiAJfQogCWlmIGVyciA6PSBjb21tb24uRXhlY3Mob3MuU3Rk
+ZXJyLCBvcy5FbnZpcm9uKCksIGNtZHMpOyBlcnIgIT0gbmlsIHsKIAkJcmV0dXJuIGZtdC5FcnJv
+cmYoImV4ZWN1dGluZyAldjogJXciLCBjbWRzLCBlcnIpCkBAIC0yMCw3ICsyMCw3IEBAIGZ1bmMg
+UHJlcGFyZVRhcChjaGlsZFBJRCBpbnQsIGNoaWxkTmV0TnNQYXRoIHN0cmluZywgdGFwIHN0cmlu
+ZykgZXJyb3IgewogfQogCiBmdW5jIG5zZW50ZXIoY2hpbGRQSUQgaW50LCBjaGlsZE5ldE5zUGF0
+aCBzdHJpbmcsIGNtZCBbXXN0cmluZykgW11zdHJpbmcgewotCWZ1bGxDbWQgOj0gW11zdHJpbmd7
+Im5zZW50ZXIiLCAiLXQiLCBzdHJjb252Lkl0b2EoY2hpbGRQSUQpfQorCWZ1bGxDbWQgOj0gW11z
+dHJpbmd7Ii91c3IvYmluL25zZW50ZXIiLCAiLXQiLCBzdHJjb252Lkl0b2EoY2hpbGRQSUQpfQog
+CWlmIGNoaWxkTmV0TnNQYXRoICE9ICIiIHsKIAkJZnVsbENtZCA9IGFwcGVuZChmdWxsQ21kLCAi
+LW4iK2NoaWxkTmV0TnNQYXRoKQogCX0gZWxzZSB7CmRpZmYgLS1naXQgYS9wa2cvcGFyZW50L3Bh
+cmVudC5nbyBiL3BrZy9wYXJlbnQvcGFyZW50LmdvCmluZGV4IDJmYmVkNzguLmQ3NmQwZjAgMTAw
+NjQ0Ci0tLSBhL3BrZy9wYXJlbnQvcGFyZW50LmdvCisrKyBiL3BrZy9wYXJlbnQvcGFyZW50Lmdv
+CkBAIC00MzgsMTIgKzQzOCwxMiBAQCBmdW5jIHNldHVwVUlER0lETWFwKHBpZCBpbnQsIHN1Ymlk
+U291cmNlIFN1YmlkU291cmNlKSBlcnJvciB7CiAJCXJldHVybiBmbXQuRXJyb3JmKCJmYWlsZWQg
+dG8gY29tcHV0ZSB1aWQvZ2lkIG1hcDogJXciLCBlcnIpCiAJfQogCXBpZFMgOj0gc3RyY29udi5J
+dG9hKHBpZCkKLQljbWQgOj0gZXhlYy5Db21tYW5kKCJuZXd1aWRtYXAiLCBhcHBlbmQoW11zdHJp
+bmd7cGlkU30sIHVBcmdzLi4uKS4uLikKKwljbWQgOj0gZXhlYy5Db21tYW5kKCIvdXNyL2Jpbi9u
+ZXd1aWRtYXAiLCBhcHBlbmQoW11zdHJpbmd7cGlkU30sIHVBcmdzLi4uKS4uLikKIAlvdXQsIGVy
+ciA6PSBjbWQuQ29tYmluZWRPdXRwdXQoKQogCWlmIGVyciAhPSBuaWwgewogCQlyZXR1cm4gZm10
+LkVycm9yZigibmV3dWlkbWFwICVzICV2IGZhaWxlZDogJXM6ICV3IiwgcGlkUywgdUFyZ3MsIHN0
+cmluZyhvdXQpLCBlcnIpCiAJfQotCWNtZCA9IGV4ZWMuQ29tbWFuZCgibmV3Z2lkbWFwIiwgYXBw
+ZW5kKFtdc3RyaW5ne3BpZFN9LCBnQXJncy4uLikuLi4pCisJY21kID0gZXhlYy5Db21tYW5kKCIv
+dXNyL2Jpbi9uZXdnaWRtYXAiLCBhcHBlbmQoW11zdHJpbmd7cGlkU30sIGdBcmdzLi4uKS4uLikK
+IAlvdXQsIGVyciA9IGNtZC5Db21iaW5lZE91dHB1dCgpCiAJaWYgZXJyICE9IG5pbCB7CiAJCXJl
+dHVybiBmbXQuRXJyb3JmKCJuZXdnaWRtYXAgJXMgJXYgZmFpbGVkOiAlczogJXciLCBwaWRTLCBn
+QXJncywgc3RyaW5nKG91dCksIGVycikK
+PATCH_B64
+RUN base64 -d /tmp/rootlesskit-runtime-v2.patch.b64 > /tmp/rootlesskit-runtime-v2.patch \
+    && git apply --check /tmp/rootlesskit-runtime-v2.patch \
+    && git apply /tmp/rootlesskit-runtime-v2.patch
 RUN go get golang.org/x/crypto@v0.55.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
@@ -258,8 +300,8 @@ RUN cp /usr/bin/buildkit-runc /out/buildkit-runc \
     && test "$(/runtime/buildkitd --version)" = "buildkitd github.com/moby/buildkit v0.32.2-loom.1 991535e0973488b6a429096d21fa13f81f2d89d8" \
     && test "$(/runtime/rootlesskit --version)" = "rootlesskit version 3.1.0" \
     && case "$TARGETARCH" in \
-        amd64) buildctl_sha256=850722004a245c2599c9472a85863fb4ce4e44deb3e4e8eacb705dc59552b147; buildkitd_sha256=0fcdc1aa3454419a72615fe2e306d4bcf47ac7c61430e78b36fdad2ebea59dc5; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
-        arm64) buildctl_sha256=38ec6be685e56e42ca836a527f54757f493a945f8da84113b1c91772de3ba055; buildkitd_sha256=93783b021da7c1e337b5940f05fc2924871916083171f1fe1c1fe973ac744d81; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
+        amd64) buildctl_sha256=b2dc3eb537b912717670347cf449ca501e769d5a6beeebaad0aab8abb7f495e1; buildkitd_sha256=0e01e2cac7df591ac129ee86543ac36bc6ef08b50aee8550f5675675208564e7; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
+        arm64) buildctl_sha256=8913f65a380be955abe4f5a155970ece8a2b3a26408c16431e806963e6acc97a; buildkitd_sha256=fded12c1a4ab70a21278dc860a1d000bca68421e9f45a9e0fcf1e1807ae19c03; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
         *) exit 1 ;; \
     esac \
     && printf '%s  %s\n' \

@@ -27,8 +27,8 @@
     "amd64": {
       "platform": "linux/amd64",
       "members": {
-        "buildctl": "850722004a245c2599c9472a85863fb4ce4e44deb3e4e8eacb705dc59552b147",
-        "buildkitd": "0fcdc1aa3454419a72615fe2e306d4bcf47ac7c61430e78b36fdad2ebea59dc5",
+        "buildctl": "b2dc3eb537b912717670347cf449ca501e769d5a6beeebaad0aab8abb7f495e1",
+        "buildkitd": "0e01e2cac7df591ac129ee86543ac36bc6ef08b50aee8550f5675675208564e7",
         "buildkit-runc": "b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c",
         "rootlesskit": "b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db",
         "rootlessctl": "5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96",
@@ -39,8 +39,8 @@
     "arm64": {
       "platform": "linux/arm64",
       "members": {
-        "buildctl": "38ec6be685e56e42ca836a527f54757f493a945f8da84113b1c91772de3ba055",
-        "buildkitd": "93783b021da7c1e337b5940f05fc2924871916083171f1fe1c1fe973ac744d81",
+        "buildctl": "8913f65a380be955abe4f5a155970ece8a2b3a26408c16431e806963e6acc97a",
+        "buildkitd": "fded12c1a4ab70a21278dc860a1d000bca68421e9f45a9e0fcf1e1807ae19c03",
         "buildkit-runc": "1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441",
         "rootlesskit": "5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2",
         "rootlessctl": "d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94",

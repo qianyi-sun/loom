@@ -415,6 +415,281 @@ func TestExecutorStartFailsClosedWhenDaemonReadinessNeverArrives(t *testing.T) {
 	}
 }
 
+func TestExecutorStartFailureRemovesPartialStateBeforeLaunch(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return errors.New("idmap helper preflight failed") }
+
+	if err := executor.Start(context.Background()); err == nil {
+		t.Fatal("Start() succeeded, want preflight failure")
+	}
+	if executor.started || executor.daemon != nil {
+		t.Fatal("Start() left daemon state after preflight failure")
+	}
+	assertExecutorStateRemoved(t, fixture.jobRoot)
+}
+
+func TestExecutorCloseAggregatesErrorsAndStillCleansState(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return &Process{PID: 4646, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+
+	signalCalls := 0
+	waitCalls := 0
+	cgroupCalls := 0
+	cleanupCalls := 0
+	executorSignalProcess = func(*Process, os.Signal) error {
+		signalCalls++
+		return errors.New("signal failed")
+	}
+	executorWaitProcess = func(*Process) error {
+		waitCalls++
+		return errors.New("wait failed")
+	}
+	executorCgroupEmpty = func(int) (bool, error) {
+		cgroupCalls++
+		return false, errors.New("cgroup empty check failed")
+	}
+	executorCleanupCgroup = func(int) error {
+		cleanupCalls++
+		return errors.New("child cgroup cleanup failed")
+	}
+
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	err = executor.Close(context.Background())
+	if err == nil {
+		t.Fatal("Close() succeeded, want aggregated cleanup errors")
+	}
+	for _, want := range []string{"signal failed", "wait failed", "cgroup empty check failed", "child cgroup cleanup failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Close() error %q missing %q", err.Error(), want)
+		}
+	}
+	if signalCalls != 1 || waitCalls != 1 || cgroupCalls != 1 || cleanupCalls != 1 {
+		t.Fatalf("cleanup calls signal=%d wait=%d cgroup=%d cleanup=%d, want all once", signalCalls, waitCalls, cgroupCalls, cleanupCalls)
+	}
+	if executor.started || executor.daemon != nil {
+		t.Fatal("Close() left executor marked started after cleanup failure")
+	}
+	assertExecutorStateRemoved(t, fixture.jobRoot)
+}
+
+func TestExecutorBuildFailureRemovesPartialOCIOutput(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	component := BuildComponent{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components:   []BuildComponent{component},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return &Process{PID: 4747, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	outputPath := filepath.Join(fixture.jobRoot, "oci", component.Name+".tar")
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error {
+		if err := os.WriteFile(outputPath, []byte("partial build output\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", outputPath, err)
+		}
+		return errors.New("buildctl failed")
+	}
+	if _, err := executor.Build(context.Background(), component); err == nil {
+		t.Fatal("Build() succeeded, want buildctl failure")
+	}
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial OCI output survived buildctl failure: %v", err)
+	}
+
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error {
+		if err := os.WriteFile(outputPath, []byte("invalid oci tar\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", outputPath, err)
+		}
+		return nil
+	}
+	executorValidateOCIOutput = func(string, string) (OCIOutput, error) {
+		return OCIOutput{}, errors.New("oci validation failed")
+	}
+	if _, err := executor.Build(context.Background(), component); err == nil {
+		t.Fatal("Build() succeeded, want OCI validation failure")
+	}
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial OCI output survived validation failure: %v", err)
+	}
+}
+
+func TestBuildkitSocketPathEnforcesLinuxSocketLimit(t *testing.T) {
+	suffix := string(os.PathSeparator) + filepath.Join("buildkit", "buildkitd.sock")
+	rootLen := maxBuildkitUnixSocketPathBytes - len(suffix)
+	if rootLen <= 1 {
+		t.Fatalf("invalid socket path test geometry: rootLen=%d suffix=%q", rootLen, suffix)
+	}
+	boundaryRoot := string(os.PathSeparator) + strings.Repeat("a", rootLen-1)
+	path, err := buildkitSocketPath(boundaryRoot)
+	if err != nil {
+		t.Fatalf("buildkitSocketPath(boundary) error = %v", err)
+	}
+	if len(path) != maxBuildkitUnixSocketPathBytes {
+		t.Fatalf("socket path length = %d, want %d", len(path), maxBuildkitUnixSocketPathBytes)
+	}
+	if _, err := buildkitSocketPath(boundaryRoot + "x"); err == nil {
+		t.Fatal("buildkitSocketPath accepted overlength unix socket path")
+	}
+}
+
+func TestNewExecutorRejectsOverlengthBuildkitSocketPathBeforeLaunch(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	longJobRoot := filepath.Join(fixture.root, strings.Repeat("j", maxBuildkitUnixSocketPathBytes))
+	if err := os.Mkdir(longJobRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", longJobRoot, err)
+	}
+	longJobFD := openDirectoryFD(t, longJobRoot)
+	defer syscall.Close(longJobFD)
+	longJobStat := mustFstat(t, longJobFD)
+	caps := *fixture.capabilities
+	caps.JobDirectoryFD = longJobFD
+	caps.JobDirectoryDevice = uint64(longJobStat.Dev)
+	caps.JobDirectoryInode = uint64(longJobStat.Ino)
+
+	if _, err := NewExecutor(fixture.config, &caps, BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	}); err == nil {
+		t.Fatal("NewExecutor accepted overlength BuildKit unix socket path")
+	}
+}
+
+func TestExecutorWriteBuildkitConfigUsesExclusiveNoFollowCreation(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	executor := &Executor{jobRoot: fixture.jobRoot, capabilities: fixture.capabilities}
+	buildkitDir := filepath.Join(fixture.jobRoot, "buildkit")
+	if err := os.Mkdir(buildkitDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", buildkitDir, err)
+	}
+	configPath := filepath.Join(buildkitDir, "buildkitd.toml")
+	original := []byte("do-not-overwrite\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", configPath, err)
+	}
+	if _, err := executor.writeBuildkitConfig("loom-task5-unit"); err == nil {
+		t.Fatal("writeBuildkitConfig accepted existing config file")
+	}
+	if got := mustReadFile(t, configPath); !bytes.Equal(got, original) {
+		t.Fatalf("existing config overwritten: %q", got)
+	}
+
+	if err := os.Remove(configPath); err != nil {
+		t.Fatalf("Remove(%q) error = %v", configPath, err)
+	}
+	outside := filepath.Join(fixture.root, "outside-buildkitd.toml")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", outside, err)
+	}
+	if err := os.Symlink(outside, configPath); err != nil {
+		t.Fatalf("Symlink(%q, %q) error = %v", outside, configPath, err)
+	}
+	if _, err := executor.writeBuildkitConfig("loom-task5-unit"); err == nil {
+		t.Fatal("writeBuildkitConfig followed symlink config path")
+	}
+	if got := string(mustReadFile(t, outside)); got != "outside\n" {
+		t.Fatalf("outside target overwritten through symlink: %q", got)
+	}
+}
+
+func TestNativeFixtureArchitectureAllowsNativeLinuxAMD64AndARM64(t *testing.T) {
+	tests := []struct {
+		goos   string
+		goarch string
+		want   bool
+	}{
+		{goos: "linux", goarch: "amd64", want: true},
+		{goos: "linux", goarch: "arm64", want: true},
+		{goos: "linux", goarch: "ppc64le", want: false},
+		{goos: "darwin", goarch: "arm64", want: false},
+	}
+	for _, tt := range tests {
+		if got := nativeFixtureArchitectureSupported(tt.goos, tt.goarch); got != tt.want {
+			t.Fatalf("nativeFixtureArchitectureSupported(%q, %q) = %v, want %v", tt.goos, tt.goarch, got, tt.want)
+		}
+	}
+}
+
+func TestExecutorCloseLeavesBorrowedCapabilityFDsOpen(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return &Process{PID: 4848, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	executorSignalProcess = func(*Process, os.Signal) error { return nil }
+	executorWaitProcess = func(*Process) error { return nil }
+	executorCgroupEmpty = func(int) (bool, error) { return true, nil }
+	executorCleanupCgroup = func(int) error { return nil }
+
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := executor.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := validateDirectoryDescriptor(fixture.capabilities.JobDirectoryFD); err != nil {
+		t.Fatalf("borrowed job fd was closed by executor: %v", err)
+	}
+	if _, err := validateDirectoryDescriptor(fixture.capabilities.BuildEgressFD); err != nil {
+		t.Fatalf("borrowed cgroup fd was closed by executor: %v", err)
+	}
+}
+
 func TestExecutorHostIDMapHelpersUseFixedRootOwnedSetIDPaths(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root is required to create root-owned setid helper fixtures")
@@ -470,15 +745,15 @@ func TestExecutorHostIDMapHelpersUseFixedRootOwnedSetIDPaths(t *testing.T) {
 }
 
 func TestNativeBuildFixtureExecutesRootlessBuildKitInExactCgroup(t *testing.T) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skip("native rootless BuildKit fixture is only asserted on linux/amd64 in this task")
+	if !nativeFixtureArchitectureSupported(runtime.GOOS, runtime.GOARCH) {
+		t.Skip("native rootless BuildKit fixture is only asserted on native linux/amd64 and linux/arm64")
 	}
 	runtimeRoot := os.Getenv("LOOM_TASK_IMAGE_BUILDER_NATIVE_RUNTIME")
 	if runtimeRoot == "" {
 		t.Skip("LOOM_TASK_IMAGE_BUILDER_NATIVE_RUNTIME not set; exact seven-member rootless runtime fixture unavailable")
 	}
 	runtimeRoot = filepath.Clean(runtimeRoot)
-	runtimeMembers := loadNativeRuntimeMembers(t, runtimeRoot)
+	runtimeMembers := loadNativeRuntimeMembers(t, runtimeRoot, runtime.GOARCH)
 	requireNativeRootlessPrerequisites(t)
 
 	jobParent, err := os.MkdirTemp("/tmp", "lt5-")
@@ -568,7 +843,7 @@ func TestNativeBuildFixtureExecutesRootlessBuildKitInExactCgroup(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("Build() error = %v", result.err)
 	}
-	if result.output.TopLevelDigest == "" || result.output.FileSHA256 == "" || result.output.Architecture != "amd64" {
+	if result.output.TopLevelDigest == "" || result.output.FileSHA256 == "" || result.output.Architecture != runtime.GOARCH {
 		t.Fatalf("unexpected OCI output: %#v", result.output)
 	}
 	assertOCIOutputContainsNativeRunProof(t, result.output.Path)
@@ -595,9 +870,13 @@ type nativeRuntimeManifest struct {
 	} `json:"architectures"`
 }
 
-func loadNativeRuntimeMembers(t *testing.T, runtimeRoot string) map[string]ExecutableMember {
+func nativeFixtureArchitectureSupported(goos string, goarch string) bool {
+	return goos == "linux" && (goarch == "amd64" || goarch == "arm64")
+}
+
+func loadNativeRuntimeMembers(t *testing.T, runtimeRoot string, arch string) map[string]ExecutableMember {
 	t.Helper()
-	expected := nativeRuntimeManifestHashes(t, "amd64")
+	expected := nativeRuntimeManifestHashes(t, arch)
 	entries, err := os.ReadDir(runtimeRoot)
 	if err != nil {
 		t.Fatalf("ReadDir(%q) error = %v", runtimeRoot, err)
@@ -762,7 +1041,7 @@ func main() {
 	}
 	outputPath := filepath.Join(root, "proof-run")
 	cmd := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", outputPath, sourcePath)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build proof-run error = %v\n%s", err, output)
@@ -1204,7 +1483,13 @@ type executorFixture struct {
 
 func newExecutorFixture(t *testing.T) executorFixture {
 	t.Helper()
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "lt5.")
+	if err != nil {
+		t.Fatalf("MkdirTemp(/tmp, lt5.) error = %v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(root)
+	})
 	jobRoot := filepath.Join(root, "job")
 	buildRoot := filepath.Join(root, "build-egress")
 	if err := os.Mkdir(jobRoot, 0o755); err != nil {
