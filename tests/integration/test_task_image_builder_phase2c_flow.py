@@ -283,17 +283,23 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         maximum_bytes=settings.bundle_maximum_bytes,
         url_expiry_seconds=settings.bundle_url_expiry_seconds,
     )
+
+    def flow_now() -> datetime:
+        if "authority_api_start" in authority_events:
+            return NOW + timedelta(seconds=61)
+        return NOW + timedelta(seconds=30)
+
     app = create_app(
         settings,
         verifier=TaskImagePrincipalVerifier.from_file(settings.principals_file),
-        now_factory=lambda: NOW + timedelta(seconds=30),
+        now_factory=flow_now,
         bundle_capability_provider=provider,
     )
 
     with TestClient(app) as client:
         service, ledger, _peer, _slurm, guard_events = _service(
             tmp_path,
-            now_factory=lambda: NOW + timedelta(seconds=30),
+            now_factory=flow_now,
         )
         service._uuid = _phase2c_uuid_factory().__next__  # type: ignore[method-assign]
         _peer.executable_sha256 = SUPERVISOR_SHA256
@@ -419,7 +425,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
     assert "PASS: TestSupervisorExternalGuardFlow" in result.stdout
     assert "sentinel" not in result.stdout
     assert "X-Amz-Signature" not in result.stdout
-    assert {"authority_api_challenge", "authority_api_attach", "authority_api_exchange", "authority_api_claim", "authority_api_bundle", "authority_api_start", "authority_api_release"}.issubset(set(authority_events))
+    assert {"authority_api_challenge", "authority_api_attach", "authority_api_exchange", "authority_api_renew", "authority_api_claim", "authority_api_bundle", "authority_api_start", "authority_api_release"}.issubset(set(authority_events))
     assert "storage_cleanup" not in guard_events
 
     engine = create_async_engine(postgres_url)

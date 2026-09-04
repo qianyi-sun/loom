@@ -22,6 +22,7 @@ type BuildPlan struct {
 	Architecture              string
 	Frontend                  string
 	NetworkMode               string
+	BuildTimeout              time.Duration
 	AllowInsecureEntitlements bool
 	Binds                     []string
 	Devices                   []string

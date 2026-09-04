@@ -180,6 +180,58 @@ def _exchange(ledger: GuardLedger) -> None:
     )
 
 
+def _record_completed_renewal(ledger: GuardLedger) -> dict[str, object]:
+    attestation = {
+        "schema_version": 1,
+        "attestation_id": str(RENEWAL),
+        "grant_id": str(GRANT),
+        "generation": 2,
+        "node_name": "trt-gb10-1",
+        "node_boot_id": "66666666-6666-6666-6666-666666666666",
+        "slurm_cluster_id": "gb10",
+        "slurm_job_id": "12345",
+        "cgroup_path": "/sys/fs/cgroup/slurm/job_12345/step_batch/user/task_0",
+        "cgroup_inode": 987654,
+        "attachment": _proof()["attachment"],
+        "issued_at": "2026-09-02T16:00:15Z",
+        "expires_at": "2026-09-02T16:01:15Z",
+    }
+    public_renewal = {
+        "schema_version": 1,
+        "renewal_id": str(RENEWAL),
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token_sha256": DIGEST_A,
+        "attestation": attestation,
+        "observed_at": "2026-09-02T16:00:15Z",
+    }
+    renewal_sha = ledger.document_sha256(public_renewal)
+    ledger.record_pending_renewal(
+        GRANT,
+        renewal_id=RENEWAL,
+        current_session_id=SESSION,
+        current_session_generation=1,
+        current_session_wire_sha256=DIGEST_B,
+        public_renewal=public_renewal,
+        public_renewal_sha256=renewal_sha,
+    )
+    ledger.record_renewal(
+        GRANT,
+        renewal_id=RENEWAL,
+        public_renewal_sha256=renewal_sha,
+        session_id=NEXT_SESSION,
+        session_generation=2,
+        session_public_binding_sha256=DIGEST_A,
+        session_token_sha256=DIGEST_B,
+        session_wire_sha256=REQUEST_SHA256,
+        session_expires_at="2026-09-02T16:10:15Z",
+        attestation_sha256=ledger.document_sha256(attestation),
+        attestation_expires_at="2026-09-02T16:01:15Z",
+    )
+    return public_renewal
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("request-digest", "challenge-nonce", "attachment-ids"),
@@ -680,6 +732,34 @@ def test_finish_persists_typed_nonsecret_cleanup_and_moves_to_finishing(
             cleanup_sha256=ledger.document_sha256(cleanup | {"mounts": 1}),
         )
     assert caught.value.code == "ledger_replay_conflict"
+    ledger.close()
+
+
+def test_finish_after_completed_renewal_clears_replay_document_before_finishing(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _exchange(ledger)
+    _record_completed_renewal(ledger)
+    cleanup = {
+        "descendant_processes": 0,
+        "mounts": 0,
+        "sockets": 0,
+        "open_files": 0,
+    }
+
+    finished = ledger.record_finish(
+        GRANT,
+        operation_id=UUID("88888888-8888-4888-8888-888888888888"),
+        cleanup=cleanup,
+        cleanup_sha256=ledger.document_sha256(cleanup),
+    )
+
+    document = finished.document()
+    assert finished.state == "finishing"
+    assert document["pending_renewal_public"] is None
+    assert document["pending_renewal_public_sha256"] is None
+    assert document["renewal_public_binding_sha256"] is not None
     ledger.close()
 
 

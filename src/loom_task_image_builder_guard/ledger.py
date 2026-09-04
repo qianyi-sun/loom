@@ -1333,6 +1333,9 @@ class GuardLedger:
         ):
             raise GuardError("ledger_finish_invalid")
         document.update(expected)
+        if document["renewal_public_binding_sha256"] is not None:
+            document["pending_renewal_public"] = None
+            document["pending_renewal_public_sha256"] = None
         document["state"] = "finishing"
         return self._write(document, prior=prior)
 

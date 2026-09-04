@@ -304,10 +304,9 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 	}
 	s.executor = executor
 	defer func() {
-		if cleanupErr := s.closeExecutor(executor); cleanupErr != nil {
+		if cleanupErr := s.closeActiveExecutor(executor); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
-		s.executor = nil
 	}()
 	if err := executor.Start(s.ctx); err != nil {
 		s.record(BuildOutcomeContainmentFailure, "executor_start_failed", claim.firstComponent())
@@ -352,19 +351,33 @@ func (s *orchestratorState) closeExecutor(executor BuildExecutor) error {
 	return nil
 }
 
+func (s *orchestratorState) closeActiveExecutor(executor BuildExecutor) error {
+	if executor == nil || s.executor != executor {
+		return nil
+	}
+	err := s.closeExecutor(executor)
+	s.executor = nil
+	return err
+}
+
 type buildResult struct {
 	component BuildComponent
 	output    OCIOutput
 	err       error
 }
 
+var errBuildTimedOut = errors.New("build timed out")
+
 func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
 	leaseTimer := s.clock.NewTimer(durationUntil(s.clock.Now(), heartbeatAt(s.clock.Now(), lease.LeaseExpiresAt)))
 	defer leaseTimer.Stop()
 	renewTimer := s.clock.NewTimer(durationUntil(s.clock.Now(), renewalAt(s.clock.Now(), s.session.ExpiresAt)))
 	defer renewTimer.Stop()
+	buildDeadline := s.clock.Now().Add(s.claimData.Plan.BuildTimeout)
+	buildTimer := s.clock.NewTimer(s.claimData.Plan.BuildTimeout)
+	defer buildTimer.Stop()
 	for _, component := range s.claimData.Plan.Components {
-		buildCtx, cancelBuild := context.WithCancel(s.ctx)
+		buildCtx, cancelBuild := context.WithCancelCause(s.ctx)
 		result := make(chan buildResult, 1)
 		go func(component BuildComponent) {
 			output, err := s.executor.Build(buildCtx, component)
@@ -373,32 +386,45 @@ func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
 		for {
 			select {
 			case <-s.ctx.Done():
-				cancelBuild()
-				<-result
+				cancelBuild(s.ctx.Err())
+				s.fenced = true
 				s.record(BuildOutcomeCancelled, "cancelled", component.Name)
-				return errors.Join(s.ctx.Err(), s.failLease("containment"))
+				return errors.Join(s.ctx.Err(), s.failLease("containment"), s.closeActiveExecutor(s.executor))
+			case <-buildTimer.C():
+				cancelBuild(errBuildTimedOut)
+				s.fenced = true
+				s.record(BuildOutcomeTransientFailure, "build_timeout", component.Name)
+				return errors.Join(safeError("build_timeout"), s.failLease("containment"), s.closeActiveExecutor(s.executor))
 			case <-renewTimer.C():
 				if err := s.renew(); err != nil {
-					cancelBuild()
-					<-result
+					cancelBuild(err)
 					s.fenced = true
 					s.record(BuildOutcomeLeaseLost, "renew_failed", component.Name)
-					return errors.Join(safeError("renew_failed"), err, s.failLease("containment"))
+					return errors.Join(safeError("renew_failed"), err, s.failLease("containment"), s.closeActiveExecutor(s.executor))
 				}
 				renewTimer.Stop()
 				renewTimer = s.clock.NewTimer(durationUntil(s.clock.Now(), renewalAt(s.clock.Now(), s.session.ExpiresAt)))
 			case <-leaseTimer.C():
 				if err := s.heartbeat(); err != nil {
-					cancelBuild()
-					<-result
+					cancelBuild(err)
 					s.fenced = true
 					s.record(BuildOutcomeLeaseLost, "heartbeat_failed", component.Name)
-					return errors.Join(safeError("heartbeat_failed"), err, s.failLease("containment"))
+					return errors.Join(safeError("heartbeat_failed"), err, s.failLease("containment"), s.closeActiveExecutor(s.executor))
 				}
 				leaseTimer.Stop()
 				leaseTimer = s.clock.NewTimer(durationUntil(s.clock.Now(), heartbeatAt(s.clock.Now(), s.claimData.LeaseExpiresAtPtr)))
 			case got := <-result:
-				cancelBuild()
+				cancelBuild(nil)
+				if s.ctx.Err() != nil {
+					s.fenced = true
+					s.record(BuildOutcomeCancelled, "cancelled", got.component.Name)
+					return errors.Join(s.ctx.Err(), s.failLease("containment"), s.closeActiveExecutor(s.executor))
+				}
+				if errors.Is(context.Cause(buildCtx), errBuildTimedOut) || !s.clock.Now().Before(buildDeadline) {
+					s.fenced = true
+					s.record(BuildOutcomeTransientFailure, "build_timeout", got.component.Name)
+					return errors.Join(safeError("build_timeout"), s.failLease("containment"), s.closeActiveExecutor(s.executor))
+				}
 				if got.err != nil {
 					return s.handleBuildError(got)
 				}
@@ -488,9 +514,11 @@ func (s *orchestratorState) releaseLease() error {
 	if err != nil {
 		return errCleanupAmbiguous
 	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), s.cleanupGrace)
+	defer cancel()
 	var releaseErr error
 	err = s.sessionManager.WithCurrent(func(current *SecretBuffer) error {
-		_, releaseErr = s.o.Guard.Release(s.ctx, s.o.GrantID, operationID, s.claimData.MaterializationID, s.claimData.AttemptID, s.claimData.LeaseEpoch, current)
+		_, releaseErr = s.o.Guard.Release(cleanupCtx, s.o.GrantID, operationID, s.claimData.MaterializationID, s.claimData.AttemptID, s.claimData.LeaseEpoch, current)
 		return releaseErr
 	})
 	if err != nil {
@@ -507,8 +535,10 @@ func (s *orchestratorState) failLease(kind string) error {
 	if err != nil {
 		return errCleanupAmbiguous
 	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), s.cleanupGrace)
+	defer cancel()
 	err = s.sessionManager.WithCurrent(func(current *SecretBuffer) error {
-		_, err := s.o.Guard.Fail(s.ctx, s.o.GrantID, operationID, s.claimData.MaterializationID, s.claimData.AttemptID, s.claimData.LeaseEpoch, kind, current)
+		_, err := s.o.Guard.Fail(cleanupCtx, s.o.GrantID, operationID, s.claimData.MaterializationID, s.claimData.AttemptID, s.claimData.LeaseEpoch, kind, current)
 		return err
 	})
 	if err != nil {
@@ -611,7 +641,7 @@ func renewalAt(now time.Time, expires time.Time) time.Time {
 		return now
 	}
 	remaining := expires.Sub(now)
-	beforeOneThirdRemaining := expires.Add(-(remaining / 3))
+	beforeOneThirdRemaining := now.Add(remaining / 3)
 	beforeFifteenSeconds := expires.Add(-15 * time.Second)
 	if beforeOneThirdRemaining.Before(beforeFifteenSeconds) {
 		return beforeOneThirdRemaining
@@ -813,6 +843,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 		Architecture: architecture,
 		Frontend:     "dockerfile.v0",
 		NetworkMode:  "sandbox",
+		BuildTimeout: time.Duration(w.BuildTimeoutSeconds * float64(time.Second)),
 		Components:   components,
 	}, nil
 }

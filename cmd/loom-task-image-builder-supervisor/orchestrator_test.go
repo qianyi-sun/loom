@@ -132,6 +132,196 @@ func TestOrchestratorRenewalFailureCancelsActiveBuildAndFencesOutput(t *testing.
 	h.wantOutcome(t, BuildOutcomeLeaseLost, "renew_failed")
 }
 
+// Break caught: session renewal waits until two-thirds of the remaining lifetime has elapsed.
+func TestRenewalAtUsesEarlierOneThirdTargetOrSafetyMargin(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		expires time.Time
+		want    time.Time
+	}{
+		{name: "long lifetime uses one third from now", expires: testNow.Add(90 * time.Second), want: testNow.Add(30 * time.Second)},
+		{name: "short lifetime still uses one third from now", expires: testNow.Add(30 * time.Second), want: testNow.Add(10 * time.Second)},
+		{name: "expired renews immediately", expires: testNow.Add(-time.Second), want: testNow},
+		{name: "sub safety margin renews immediately through past target", expires: testNow.Add(9 * time.Second), want: testNow.Add(-6 * time.Second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renewalAt(testNow, tc.expires); !got.Equal(tc.want) {
+				t.Fatalf("renewalAt() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Break caught: SIGINT/SIGTERM cancellation waits forever for a Build that ignores context cancellation.
+func TestOrchestratorSignalCancellationClosesNonCooperativeExecutorAndFailsWithFreshContext(t *testing.T) {
+	h := newOrchestratorHarness(t)
+	h.guard.rejectCanceledFailContext = true
+	ctx, cancel := context.WithCancel(context.Background())
+	buildStarted := make(chan struct{})
+	h.executor.blockBuild = func(ctx context.Context, component string) (OCIOutput, error) {
+		close(buildStarted)
+		<-h.executor.closed()
+		return h.executor.outputs[component], nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.orchestrator().Run(ctx) }()
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("build did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() succeeded, want cancellation failure")
+		}
+		if strings.Contains(err.Error(), "fail_failed") {
+			t.Fatalf("Run() used canceled context for Fail: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() waited for non-cooperative Build instead of closing executor")
+	}
+	h.wantEvents(t, []string{
+		"project", "exchange", "claim", "bundle", "download", "start", "executor_start", "build:task",
+		"fail:containment", "executor_close", "caps_close", "finish",
+	})
+	if h.handoff.accepted != nil {
+		t.Fatalf("handoff accepted output after cancellation: %#v", h.handoff.accepted)
+	}
+	if got := h.executor.closeCalls; got != 1 {
+		t.Fatalf("executor Close calls = %d, want 1", got)
+	}
+	h.wantOutcome(t, BuildOutcomeCancelled, "cancelled")
+}
+
+// Break caught: renewal loss waits forever for a Build that ignores context cancellation.
+func TestOrchestratorRenewalFailureClosesNonCooperativeExecutorBeforeFencing(t *testing.T) {
+	h := newOrchestratorHarness(t)
+	h.guard.sessionExpires = testNow.Add(2 * time.Minute)
+	h.guard.leaseExpires = testNow.Add(10 * time.Minute)
+	h.guard.claimMutation.AuthorizationExpiresAt = "2026-09-03T12:02:00Z"
+	h.guard.renewErr = errors.New("transport down with token loom_tibs_SECRET")
+	buildStarted := make(chan struct{})
+	h.executor.blockBuild = func(ctx context.Context, component string) (OCIOutput, error) {
+		close(buildStarted)
+		<-h.executor.closed()
+		return h.executor.outputs[component], nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.orchestrator().Run(context.Background()) }()
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("build did not start")
+	}
+	h.clock.advance(40 * time.Second)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() succeeded, want renewal failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() waited for non-cooperative Build after renewal loss")
+	}
+	h.wantEvents(t, []string{
+		"project", "exchange", "claim", "bundle", "download", "start", "executor_start", "build:task",
+		"renew", "fail:containment", "executor_close", "caps_close", "finish",
+	})
+	if h.handoff.accepted != nil {
+		t.Fatalf("handoff accepted output after renewal loss: %#v", h.handoff.accepted)
+	}
+	if got := h.executor.closeCalls; got != 1 {
+		t.Fatalf("executor Close calls = %d, want 1", got)
+	}
+	h.wantOutcome(t, BuildOutcomeLeaseLost, "renew_failed")
+}
+
+// Break caught: heartbeat loss waits forever for a Build that ignores context cancellation.
+func TestOrchestratorHeartbeatFailureClosesNonCooperativeExecutorBeforeFencing(t *testing.T) {
+	h := newOrchestratorHarness(t)
+	h.guard.heartbeatErr = errors.New("lease rejected")
+	h.guard.sessionExpires = testNow.Add(10 * time.Minute)
+	buildStarted := make(chan struct{})
+	h.executor.blockBuild = func(ctx context.Context, component string) (OCIOutput, error) {
+		close(buildStarted)
+		<-h.executor.closed()
+		return h.executor.outputs[component], nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.orchestrator().Run(context.Background()) }()
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("build did not start")
+	}
+	h.clock.advance(31 * time.Second)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() succeeded, want heartbeat failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() waited for non-cooperative Build after heartbeat loss")
+	}
+	h.wantEvents(t, []string{
+		"project", "exchange", "claim", "bundle", "download", "start", "executor_start", "build:task",
+		"heartbeat", "fail:containment", "executor_close", "caps_close", "finish",
+	})
+	if h.handoff.accepted != nil {
+		t.Fatalf("handoff accepted output after heartbeat loss: %#v", h.handoff.accepted)
+	}
+	if got := h.executor.closeCalls; got != 1 {
+		t.Fatalf("executor Close calls = %d, want 1", got)
+	}
+	h.wantOutcome(t, BuildOutcomeLeaseLost, "heartbeat_failed")
+}
+
+// Break caught: authority-derived build timeout is parsed but not enforced during execution.
+func TestOrchestratorBuildTimeoutClosesExecutorFailsLeaseAndRejectsLateOutput(t *testing.T) {
+	h := newOrchestratorHarness(t)
+	h.guard.claimMutation.BuildTimeoutSeconds = 2
+	h.guard.claimMutation.AuthorizationExpiresAt = "2026-09-03T12:10:00Z"
+	buildStarted := make(chan struct{})
+	h.executor.blockBuild = func(ctx context.Context, component string) (OCIOutput, error) {
+		close(buildStarted)
+		<-h.executor.closed()
+		return h.executor.outputs[component], nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.orchestrator().Run(context.Background()) }()
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("build did not start")
+	}
+	h.clock.advance(3 * time.Second)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() succeeded, want build timeout")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not enforce authority-derived build timeout")
+	}
+	h.wantEvents(t, []string{
+		"project", "exchange", "claim", "bundle", "download", "start", "executor_start", "build:task",
+		"fail:containment", "executor_close", "caps_close", "finish",
+	})
+	if h.handoff.accepted != nil {
+		t.Fatalf("handoff accepted late output after build timeout: %#v", h.handoff.accepted)
+	}
+	h.wantOutcome(t, BuildOutcomeTransientFailure, "build_timeout")
+}
+
 // Break caught: lease lost after local output is reported as built.
 func TestOrchestratorLeaseLossAfterOutputFailsInsteadOfPublishing(t *testing.T) {
 	h := newOrchestratorHarness(t)
@@ -522,6 +712,8 @@ type fakeOrchestratorGuard struct {
 	proofSHA256       string
 	failureKinds      []string
 	finishIDs         []string
+
+	rejectCanceledFailContext bool
 }
 
 func (g *fakeOrchestratorGuard) Project(ctx context.Context, grantID string) (*AllocationCapabilities, error) {
@@ -604,6 +796,9 @@ func (g *fakeOrchestratorGuard) Release(ctx context.Context, grantID string, ope
 func (g *fakeOrchestratorGuard) Fail(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, failureKind string, current *SecretBuffer) (*LeaseResponse, error) {
 	g.h.events = append(g.h.events, "fail:"+failureKind)
 	g.failureKinds = append(g.failureKinds, failureKind)
+	if g.rejectCanceledFailContext && ctx.Err() != nil {
+		return nil, errors.New("fail used canceled context")
+	}
 	if g.failErr != nil {
 		return nil, g.failErr
 	}
@@ -741,6 +936,8 @@ type fakeOrchestratorExecutor struct {
 	buildErr   map[string]error
 	closeErr   error
 	closeCalls int
+	closeOnce  sync.Once
+	closeCh    chan struct{}
 	afterBuild func(string)
 	blockBuild func(context.Context, string) (OCIOutput, error)
 }
@@ -767,7 +964,19 @@ func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildCom
 func (e *fakeOrchestratorExecutor) Close(ctx context.Context) error {
 	e.h.events = append(e.h.events, "executor_close")
 	e.closeCalls++
+	e.closeOnce.Do(func() {
+		if e.closeCh != nil {
+			close(e.closeCh)
+		}
+	})
 	return e.closeErr
+}
+
+func (e *fakeOrchestratorExecutor) closed() <-chan struct{} {
+	if e.closeCh == nil {
+		e.closeCh = make(chan struct{})
+	}
+	return e.closeCh
 }
 
 type fakePublicationHandoff struct {
