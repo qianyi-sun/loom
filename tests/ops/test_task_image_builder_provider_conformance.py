@@ -496,7 +496,7 @@ def test_runbook_conformance_flags_match_safe_cli() -> None:
     assert completed.returncode == 0
     assert command is not None
     documented_flags = set(re.findall(r"--[a-z][a-z-]*", command.group("body")))
-    actual_flags = set(re.findall(r"--[a-z][a-z-]*", help_text)) - {"--help"}
+    actual_flags = set(re.findall(r"--[a-z][a-z-]*", help_text)) - {"--help", "--live"}
     assert documented_flags == actual_flags
 
 
@@ -724,58 +724,6 @@ class _FakeLiveProbeRunner:
         )
 
 
-class _FakeLiveSystem:
-    def __init__(self, *, fail_label: str | None = None) -> None:
-        self.fail_label = fail_label
-        self.labels: list[str] = []
-        self.commands: dict[str, list[tuple[str, ...]]] = {}
-
-    def _record(self, label: str) -> None:
-        self.labels.append(label)
-        if label == self.fail_label:
-            raise OSError(label)
-
-    def read_bytes(self, path: Path, *, label: str, maximum: int) -> bytes:
-        self._record(label)
-        return path.read_bytes()[:maximum]
-
-    def read_text(self, path: Path, *, label: str, maximum: int) -> str:
-        self._record(label)
-        if path == Path("/etc/subuid") or path == Path("/etc/subgid"):
-            return "loom-builder:3000000:65536\n"
-        return path.read_text(encoding="utf-8")[:maximum]
-
-    def run(self, command: tuple[str, ...], *, label: str, timeout: int) -> str:
-        del timeout
-        self._record(label)
-        self.commands.setdefault(label, []).append(command)
-        return {
-            "live_native_static_supervisor": "Elf file type is EXEC\nProgram Headers: LOAD R E\n",
-            "live_supervisor_module_metadata": (
-                "path\tgithub.com/qianyi-sun/loom/cmd/loom-task-image-builder-supervisor\n"
-                "build\t-trimpath=true\n"
-                "build\tCGO_ENABLED=0\n"
-                "build\tGOOS=linux\n"
-            ),
-            "live_project_quota_readback": "Project quota on /tmp/loom-provider\n",
-            "live_clone3_scratch_cgroup": "clone3:ok cgroup:attached\n",
-            "live_rootlesskit_buildkit_flags": (
-                "--net=slirp4netns\n"
-                "--disable-host-loopback\n"
-                "--copy-up=/etc\n"
-                "--oci-worker-no-process-sandbox\n"
-                "--oci-worker-snapshotter=fuse-overlayfs\n"
-                "--oci-worker-net=none\n"
-            ),
-            "live_no_cache_oci_fixture": "exported digest sha256:" + "1" * 64 + "\ncache:false\n",
-            "live_process_ancestry": "systemd\nloom-task-builder-supervisor\nrootlesskit\nbuildkitd\n",
-            "live_network_denial": "tcp-egress:denied\nudp-egress:denied\nmetadata:denied\n",
-            "live_cleanup": "scratch-empty:yes\ncgroup-removed:yes\nstorage-empty:yes\n",
-            "live_fail_closed_guard_restart": "guard-restart:denied\nsupervisor-exit:nonzero\n",
-            "live_no_slurm_or_foreign_cgroup": "cgroup-owner:loom-provider\nslurm:no\nforeign:no\n",
-        }[label]
-
-
 def _live_runner_request(tmp_path: Path) -> object:
     from scripts.ops.task_image_builder_provider_conformance import LiveProbeRequest
 
@@ -797,61 +745,14 @@ def _live_runner_request(tmp_path: Path) -> object:
     )
 
 
-def test_default_live_probe_runner_performs_all_required_raw_probes(tmp_path: Path) -> None:
-    from scripts.ops.task_image_builder_provider_conformance import DefaultLiveProbeRunner
-
-    system = _FakeLiveSystem()
-
-    checks = DefaultLiveProbeRunner(system=system).run(_live_runner_request(tmp_path))
-
-    assert tuple(check.id for check in checks) == _REQUIRED_LIVE_CHECK_IDS
-    assert set(_REQUIRED_LIVE_CHECK_IDS) <= set(system.labels)
-    assert "live_runtime_transitive_provenance" in system.labels
-
-
-def test_default_live_probe_runner_uses_real_probe_semantics_not_markers(
-    tmp_path: Path,
-) -> None:
-    from scripts.ops.task_image_builder_provider_conformance import DefaultLiveProbeRunner
-
-    system = _FakeLiveSystem()
-    request = _live_runner_request(tmp_path)
-
-    DefaultLiveProbeRunner(system=system).run(request)
-
-    clone_script = system.commands["live_clone3_scratch_cgroup"][0][2]
-    network_script = system.commands["live_network_denial"][0][2]
-    cleanup_script = system.commands["live_cleanup"][0][2]
-    restart_script = system.commands["live_fail_closed_guard_restart"][0][2]
-    ancestry_command = system.commands["live_process_ancestry"][0]
-
-    assert "SYS_clone3" in clone_script
-    assert "CLONE_INTO_CGROUP" in clone_script
-    assert "write(str(os.getpid()))" not in clone_script
-    assert "network-denial-probe" not in network_script
-    assert "socket." in network_script
-    assert "cleanup-probe" not in cleanup_script
-    assert "os.listdir" in cleanup_script
-    assert "print('guard-restart-probe')" not in restart_script
-    assert "subprocess.run" in restart_script
-    assert ancestry_command[0:2] == ("python3", "-c")
-    assert str(request.staged_release / "bin/loom-task-builder-supervisor") in " ".join(ancestry_command)
-
-
-@pytest.mark.parametrize("failed_probe", _REQUIRED_LIVE_CHECK_IDS)
-def test_default_live_probe_runner_rejects_each_failed_raw_probe(
-    tmp_path: Path,
-    failed_probe: str,
-) -> None:
+def test_default_live_probe_runner_is_phase2c_fail_closed(tmp_path: Path) -> None:
     from scripts.ops.task_image_builder_provider_conformance import (
         DefaultLiveProbeRunner,
         ProviderConformanceError,
     )
 
-    with pytest.raises(ProviderConformanceError, match=failed_probe):
-        DefaultLiveProbeRunner(system=_FakeLiveSystem(fail_label=failed_probe)).run(
-            _live_runner_request(tmp_path)
-        )
+    with pytest.raises(ProviderConformanceError, match="Phase 2C live conformance is unavailable"):
+        DefaultLiveProbeRunner().run(_live_runner_request(tmp_path))
 
 
 def _patch_live_conformance_verifiers(monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -864,7 +765,6 @@ def _patch_live_conformance_verifiers(monkeypatch: pytest.MonkeyPatch) -> Path:
         release_sha256=release_sha256,
     )
     monkeypatch.setattr(conformance_module.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(conformance_module.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(conformance_module, "_release_from_path", lambda _path, *, live: release)
     monkeypatch.setattr(conformance_module, "_verify_authority", lambda _root: _digest(b"authority"))
     monkeypatch.setattr(conformance_module, "_verify_host_release", lambda _root: _digest(b"host"))
@@ -888,7 +788,10 @@ def test_live_conformance_requires_every_task7_probe_and_stays_nonproduction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from scripts.ops.task_image_builder_provider_conformance import conform
+    from scripts.ops.task_image_builder_provider_conformance import (
+        ProviderConformanceError,
+        conform,
+    )
 
     staged_release = _patch_live_conformance_verifiers(monkeypatch)
     scratch = tmp_path / "scratch"
@@ -899,28 +802,19 @@ def test_live_conformance_requires_every_task7_probe_and_stays_nonproduction(
     scratch_cgroup.mkdir()
     runner = _FakeLiveProbeRunner(_REQUIRED_LIVE_CHECK_IDS)
 
-    report = conform(
-        staged_release,
-        live=True,
-        root=Path("/"),
-        source_root=ROOT,
-        scratch_root=scratch,
-        storage_root=storage,
-        scratch_cgroup_root=scratch_cgroup,
-        live_probe_runner=runner,
-    )
-    document = report.as_dict()
+    with pytest.raises(ProviderConformanceError, match="Phase 2C live conformance is unavailable"):
+        conform(
+            staged_release,
+            live=True,
+            root=Path("/"),
+            source_root=ROOT,
+            scratch_root=scratch,
+            storage_root=storage,
+            scratch_cgroup_root=scratch_cgroup,
+            live_probe_runner=runner,
+        )
 
-    assert document["production_ready"] is False
-    assert document["blockers"] == ["phase2_guard_provider_release_missing"]
-    check_ids = {item["id"] for item in document["checks"]}
-    assert set(_REQUIRED_LIVE_CHECK_IDS) <= check_ids
-    assert len(runner.requests) == 1
-    request = runner.requests[0]
-    assert request.staged_release == staged_release
-    assert request.scratch_root == scratch
-    assert request.storage_root == storage
-    assert request.scratch_cgroup_root == scratch_cgroup
+    assert runner.requests == []
 
 
 @pytest.mark.parametrize("missing", _REQUIRED_LIVE_CHECK_IDS)
@@ -945,7 +839,7 @@ def test_live_conformance_rejects_missing_task7_probe(
         tuple(item for item in _REQUIRED_LIVE_CHECK_IDS if item != missing)
     )
 
-    with pytest.raises(ProviderConformanceError, match=missing):
+    with pytest.raises(ProviderConformanceError, match="Phase 2C live conformance is unavailable"):
         conform(
             staged_release,
             live=True,
@@ -963,7 +857,11 @@ def test_live_conformance_uses_the_default_production_probe_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts.ops import task_image_builder_provider_conformance as conformance_module
-    from scripts.ops.task_image_builder_provider_conformance import ConformanceCheck, conform
+    from scripts.ops.task_image_builder_provider_conformance import (
+        ConformanceCheck,
+        ProviderConformanceError,
+        conform,
+    )
 
     staged_release = _patch_live_conformance_verifiers(monkeypatch)
     scratch = tmp_path / "scratch"
@@ -991,18 +889,18 @@ def test_live_conformance_uses_the_default_production_probe_runner(
         lambda: runner,
     )
 
-    report = conform(
-        staged_release,
-        live=True,
-        root=Path("/"),
-        source_root=ROOT,
-        scratch_root=scratch,
-        storage_root=storage,
-        scratch_cgroup_root=scratch_cgroup,
-    )
+    with pytest.raises(ProviderConformanceError, match="Phase 2C live conformance is unavailable"):
+        conform(
+            staged_release,
+            live=True,
+            root=Path("/"),
+            source_root=ROOT,
+            scratch_root=scratch,
+            storage_root=storage,
+            scratch_cgroup_root=scratch_cgroup,
+        )
 
-    assert runner.called is True
-    assert report.production_ready is False
+    assert runner.called is False
 
 
 @pytest.mark.parametrize(
@@ -1028,7 +926,7 @@ def test_live_conformance_rejects_slurm_or_foreign_cgroup_targets(
     scratch.mkdir()
     storage.mkdir()
 
-    with pytest.raises(ProviderConformanceError, match="scratch cgroup"):
+    with pytest.raises(ProviderConformanceError, match="Phase 2C live conformance is unavailable"):
         conform(
             staged_release,
             live=True,

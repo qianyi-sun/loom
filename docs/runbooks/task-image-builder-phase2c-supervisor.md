@@ -62,20 +62,15 @@ directory, and writes a mode-0600 staging receipt. It must not call `systemctl`,
 render a live unit, publish a `current` link, change provider policy, or
 advertise `loom_rootless_buildkit`.
 
-## Conformance
+## Offline conformance
 
-Run conformance only against an explicit staged digest directory and explicit
-empty scratch roots:
+Run conformance only against an explicit staged digest directory:
 
 ```bash
 python3 scripts/ops/task_image_builder_provider_conformance.py \
   --staged-release "$STAGED_RELEASE_DIR" \
   --source-root "$REVIEWED_SOURCE_ROOT" \
-  --root / \
-  --scratch-root "$EMPTY_SCRATCH_ROOT" \
-  --storage-root "$EMPTY_STORAGE_ROOT" \
-  --scratch-cgroup-root "$EMPTY_SCRATCH_CGROUP_ROOT" \
-  --live
+  --root /
 ```
 
 Expected output keeps:
@@ -85,9 +80,16 @@ Expected output keeps:
 - no live activation path, unit, socket, feature, current link, credential, or
   BPF pin
 
-Treat any production-ready result, stale Slurm feature, non-empty scratch root,
-cleanup residue, missing project quota, missing subuid/subgid, runtime flag
-drift, or process ancestry ambiguity as a failed Phase 2C conformance result.
+`--live` is intentionally fail-closed in Phase 2C. The approved Phase 2C
+boundary forbids live guard configuration, credentials, sockets, and BPF pins,
+so this script cannot honestly prove exact launched PIDs, scratch cgroup
+inode/descendants, staged binary argv, no-cache OCI output, attributable BPF
+denial counters, cleanup readback, or guard-restart/lost-attestation behavior.
+Those live checks require a later controller ruling or a later increment that
+explicitly authorizes the guard surfaces needed to collect them.
+
+Treat any production-ready result, stale Slurm feature, live probe pass claim,
+or live provider surface as a failed Phase 2C conformance result.
 
 ## Rollback and cleanup
 

@@ -157,7 +157,7 @@
     },
     {
       "path": "scripts/ops/task_image_builder_provider_conformance.py",
-      "sha256": "0abe3d5b13faf936e3c467b30b1f3d9f515a1bf1b5f841a3d8f15ba0f757dc14",
+      "sha256": "11960a515dd308257120d58f5a767683d43497fa9fcee5da462315a271a7e6ec",
       "destination": "ops/task_image_builder_provider_conformance.py",
       "mode": "0555"
     }

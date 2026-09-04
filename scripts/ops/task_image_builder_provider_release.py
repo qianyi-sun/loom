@@ -18,7 +18,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
-from uuid import uuid4
 
 Architecture = Literal["x86_64", "aarch64"]
 
@@ -26,6 +25,8 @@ _SPEC = Path("deploy/task-image-builder/provider-release-v1.json")
 _SPEC_SCHEMA = "loom.task-image-builder-provider-release-spec/v1"
 _BUNDLE_SCHEMA = "loom.task-image-builder-provider-bundle/v1"
 _MANIFEST = "release-manifest.json"
+_SET_MANIFEST = "provider-release-set-manifest.json"
+_SET_SCHEMA = "loom.task-image-builder-provider-release-set/v1"
 _MAX_BYTES = 16 * 1024 * 1024
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -660,6 +661,36 @@ def _publish_sidecar(path: Path, payload: bytes) -> None:
                 pass
 
 
+def _copy_release_leaf(release: ProviderRelease, destination: Path, *, architecture: Architecture) -> None:
+    del architecture
+    try:
+        shutil.copytree(release.directory, destination, symlinks=False)
+    except OSError as exc:
+        raise ProviderReleaseError("release set leaf copy failed") from exc
+
+
+def _release_set_manifest(staged: Mapping[Architecture, ProviderRelease]) -> tuple[str, bytes, dict[str, object]]:
+    identity: dict[str, object] = {
+        "schema": _SET_SCHEMA,
+        "architectures": {
+            architecture: {
+                "architecture": architecture,
+                "path": release.release_sha256,
+                "release_manifest_sha256": _digest(
+                    _read_regular(release.manifest_path, maximum=_MAX_JSON_BYTES)
+                ),
+                "release_sha256": release.release_sha256,
+            }
+            for architecture, release in sorted(staged.items())
+        },
+    }
+    release_set_sha256 = _digest(_canonical(identity))
+    manifest = dict(identity)
+    manifest["release_set_sha256"] = release_set_sha256
+    manifest_payload = _canonical(manifest)
+    return release_set_sha256, manifest_payload, manifest
+
+
 def _build_supervisor_in_container(
     source_root: Path,
     architecture: Architecture,
@@ -892,6 +923,7 @@ def build_certified_releases(
         output_root = _validate_root(output_root, "output root")
     staging = Path(tempfile.mkdtemp(prefix=".provider-release-set.", dir=output_root))
     staging.chmod(0o755)
+    final_candidate: Path | None = None
     try:
         staged: dict[Architecture, ProviderRelease] = {}
         for architecture in _ARCHITECTURES:
@@ -903,40 +935,47 @@ def build_certified_releases(
                 runtime_root=runtime_roots[architecture],
                 build_supervisor=build_supervisor,
             )
+        release_set_sha256, release_set_payload, _release_set = _release_set_manifest(staged)
+        release_set_directory = output_root / release_set_sha256
+        if release_set_directory.exists() or release_set_directory.is_symlink():
+            raise ProviderReleaseError("release destination collision")
         for release in staged.values():
             if (output_root / release.release_sha256).exists() or (
                 output_root / f"{release.release_sha256}.manifest.json"
             ).exists():
                 raise ProviderReleaseError("release destination collision")
-        published: dict[Architecture, ProviderRelease] = {}
+        final_candidate = Path(
+            tempfile.mkdtemp(prefix=".provider-release-set-final.", dir=output_root)
+        )
+        final_candidate.chmod(0o755)
+        for architecture in _ARCHITECTURES:
+            release = staged[architecture]
+            _copy_release_leaf(
+                release,
+                final_candidate / release.release_sha256,
+                architecture=architecture,
+            )
+        _write_file(final_candidate / _SET_MANIFEST, release_set_payload, 0o444)
+        _seal_release_tree(final_candidate)
         try:
-            for architecture, release in staged.items():
-                directory = output_root / release.release_sha256
-                sidecar_path = output_root / f"{release.release_sha256}.manifest.json"
-                release.directory.chmod(0o755)
-                release.directory.rename(directory)
-                directory.chmod(0o555)
-                release.sidecar_path.rename(sidecar_path)
-                published[architecture] = ProviderRelease(
-                    release_sha256=release.release_sha256,
-                    directory=directory,
-                    manifest_path=directory / _MANIFEST,
-                    sidecar_path=sidecar_path,
-                    manifest=release.manifest,
-                )
-        except OSError as exc:
-            conflict = output_root / f".provider-release-set-conflict.{uuid4()}"
-            conflict.mkdir(mode=0o700)
-            for release in published.values():
-                if release.directory.exists():
-                    release.directory.chmod(0o755)
-                    release.directory.rename(conflict / release.directory.name)
-                if release.sidecar_path.exists():
-                    release.sidecar_path.rename(conflict / release.sidecar_path.name)
+            _rename_noreplace(final_candidate, release_set_directory)
+        except ProviderReleaseError as exc:
             raise ProviderReleaseError("release set publication failed") from exc
-        return published
+        return {
+            architecture: ProviderRelease(
+                release_sha256=release.release_sha256,
+                directory=release_set_directory / release.release_sha256,
+                manifest_path=release_set_directory / release.release_sha256 / _MANIFEST,
+                sidecar_path=release_set_directory / release.release_sha256 / _MANIFEST,
+                manifest=release.manifest,
+            )
+            for architecture, release in staged.items()
+        }
+    except ProviderReleaseError:
+        raise
+    except OSError as exc:
+        raise ProviderReleaseError("release set publication failed") from exc
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)

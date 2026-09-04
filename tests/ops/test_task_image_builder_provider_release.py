@@ -508,6 +508,19 @@ def test_certified_release_builds_both_architectures_twice_all_or_nothing(
 
     assert sorted(result) == ["aarch64", "x86_64"]
     assert all(release.directory.exists() for release in result.values())
+    visible = [item for item in (tmp_path / "out").iterdir() if not item.name.startswith(".")]
+    assert len(visible) == 1
+    release_set = visible[0]
+    assert release_set.is_dir()
+    set_manifest = json.loads((release_set / "provider-release-set-manifest.json").read_bytes())
+    assert set_manifest["schema"] == "loom.task-image-builder-provider-release-set/v1"
+    assert set_manifest["release_set_sha256"] == release_set.name
+    assert set(set_manifest["architectures"]) == {"x86_64", "aarch64"}
+    for architecture, release in result.items():
+        assert release.directory == release_set / release.release_sha256
+        assert release.sidecar_path == release.directory / "release-manifest.json"
+        assert set_manifest["architectures"][architecture]["release_sha256"] == release.release_sha256
+        assert (release.directory / "release-manifest.json").exists()
     assert calls == ["x86_64", "x86_64", "aarch64", "aarch64"]
 
 
@@ -536,24 +549,22 @@ def test_certified_release_refuses_whole_publication_when_any_architecture_drift
     assert not list((tmp_path / "out").glob("*/release-manifest.json"))
 
 
-def test_certified_release_removes_partial_publication_when_second_move_fails(
+def test_certified_release_final_rename_failure_leaves_no_visible_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from scripts.ops import task_image_builder_provider_release as release_module
+
     source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
     output_root = tmp_path / "out"
-    original_rename = Path.rename
-    published_directories = 0
+    original_rename = release_module._rename_noreplace
 
-    def fail_second_directory_publish(path: Path, target: Path) -> Path:
-        nonlocal published_directories
-        if path.is_dir() and target.parent == output_root and not target.name.startswith("."):
-            published_directories += 1
-            if published_directories == 2:
-                raise OSError("injected second architecture publish failure")
-        return original_rename(path, target)
+    def fail_final_publish(path: Path, target: Path) -> None:
+        if path.name.startswith(".provider-release-set-final."):
+            raise release_module.ProviderReleaseError("injected final publish failure")
+        original_rename(path, target)
 
-    monkeypatch.setattr(Path, "rename", fail_second_directory_publish)
+    monkeypatch.setattr(release_module, "_rename_noreplace", fail_final_publish)
 
     with pytest.raises(ProviderReleaseError, match="publication failed"):
         build_certified_releases(
@@ -567,12 +578,115 @@ def test_certified_release_removes_partial_publication_when_second_move_fails(
             ),
         )
 
-    assert not [
-        item for item in output_root.iterdir() if item.is_dir() and not item.name.startswith(".")
-    ]
-    preserved = list(output_root.glob(".provider-release-set-conflict.*"))
+    assert [item for item in output_root.iterdir() if not item.name.startswith(".")] == []
+    preserved = list(output_root.glob(".provider-release-set-final.*"))
     assert len(preserved) == 1
     assert list(preserved[0].rglob("release-manifest.json"))
+
+
+def test_certified_release_never_exposes_architecture_siblings_at_output_root(
+    tmp_path: Path,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+
+    releases = build_certified_releases(
+        source,
+        output_root,
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: _elf_payload(
+            62 if arch == "x86_64" else 183,
+            "supervisor",
+        ),
+    )
+
+    visible = sorted(item.name for item in output_root.iterdir() if not item.name.startswith("."))
+    assert len(visible) == 1
+    release_set = output_root / visible[0]
+    assert set(release.directory.parent for release in releases.values()) == {release_set}
+    assert not any((output_root / release.release_sha256).exists() for release in releases.values())
+    assert not any((output_root / f"{release.release_sha256}.manifest.json").exists() for release in releases.values())
+
+
+@pytest.mark.parametrize(
+    "failure_step",
+    (
+        "set-directory",
+        "x86-leaf-copy",
+        "aarch64-leaf-copy",
+        "set-manifest",
+        "seal-set",
+        "final-rename",
+    ),
+)
+def test_certified_release_failures_before_final_rename_leave_only_hidden_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_step: str,
+) -> None:
+    from scripts.ops import task_image_builder_provider_release as release_module
+
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    output_root = tmp_path / "out"
+    original_copy_leaf = release_module._copy_release_leaf
+    original_write_file = release_module._write_file
+    original_seal_tree = release_module._seal_release_tree
+    original_rename = release_module._rename_noreplace
+
+    def fail_copy_leaf(
+        release: object,
+        target_path: Path,
+        *,
+        architecture: Architecture,
+    ) -> None:
+        if failure_step == "x86-leaf-copy" and architecture == "x86_64":
+            raise release_module.ProviderReleaseError("injected x86 leaf copy failure")
+        if failure_step == "aarch64-leaf-copy" and architecture == "aarch64":
+            raise release_module.ProviderReleaseError("injected aarch64 leaf copy failure")
+        original_copy_leaf(release, target_path, architecture=architecture)
+
+    def fail_mkdtemp(*, prefix: str, dir: Path | str | None = None) -> str:
+        if failure_step == "set-directory":
+            raise OSError("injected release set directory failure")
+        return original_mkdtemp(prefix=prefix, dir=dir)
+
+    def fail_write_file(path: Path, payload: bytes, mode: int) -> None:
+        if failure_step == "set-manifest" and path.name == "provider-release-set-manifest.json":
+            raise release_module.ProviderReleaseError("injected set manifest failure")
+        original_write_file(path, payload, mode)
+
+    def fail_seal_tree(path: Path) -> None:
+        if failure_step == "seal-set" and path.name.startswith(".provider-release-set-final."):
+            raise release_module.ProviderReleaseError("injected seal failure")
+        original_seal_tree(path)
+
+    def fail_rename(source_path: Path, destination_path: Path) -> None:
+        if failure_step == "final-rename" and source_path.name.startswith(".provider-release-set-final."):
+            raise release_module.ProviderReleaseError("injected final rename failure")
+        original_rename(source_path, destination_path)
+
+    original_mkdtemp = release_module.tempfile.mkdtemp
+    monkeypatch.setattr(release_module, "_copy_release_leaf", fail_copy_leaf)
+    monkeypatch.setattr(release_module.tempfile, "mkdtemp", fail_mkdtemp)
+    monkeypatch.setattr(release_module, "_write_file", fail_write_file)
+    monkeypatch.setattr(release_module, "_seal_release_tree", fail_seal_tree)
+    monkeypatch.setattr(release_module, "_rename_noreplace", fail_rename)
+
+    with pytest.raises((release_module.ProviderReleaseError, OSError)):
+        build_certified_releases(
+            source,
+            output_root,
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=lambda _src, arch: _elf_payload(
+                62 if arch == "x86_64" else 183,
+                "supervisor",
+            ),
+        )
+
+    visible = [item for item in output_root.iterdir() if not item.name.startswith(".")]
+    assert visible == []
 
 
 def test_release_assembler_cli_requires_both_architecture_inputs() -> None:
