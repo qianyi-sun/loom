@@ -349,6 +349,89 @@ def test_preflight_verifies_archive_and_publishes_nothing(tmp_path: Path) -> Non
     assert not _mapped(installer, profile.profile_path).exists()
 
 
+def test_preflight_accepts_nonempty_cgroup_controller_pseudofile_with_zero_stat_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    controllers = _mapped(installer, Path("/sys/fs/cgroup/cgroup.controllers"))
+    controller_identity = (controllers.stat().st_dev, controllers.stat().st_ino)
+    real_fstat = os.fstat
+
+    def zero_sized_controller(descriptor: int) -> os.stat_result:
+        observed = real_fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) != controller_identity:
+            return observed
+        values = list(observed)
+        values[6] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", zero_sized_controller)
+
+    receipt = installer.preflight(archive)
+
+    assert receipt["operation"] == "preflight"
+    assert not _mapped(installer, profile.release_root).exists()
+
+
+def test_kernel_pseudofile_reader_rejects_payload_larger_than_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controllers = tmp_path / "cgroup.controllers"
+    controllers.write_bytes(b"x" * 4097)
+    controller_identity = (controllers.stat().st_dev, controllers.stat().st_ino)
+    real_fstat = os.fstat
+
+    def zero_sized_controller(descriptor: int) -> os.stat_result:
+        observed = real_fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) != controller_identity:
+            return observed
+        values = list(observed)
+        values[6] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", zero_sized_controller)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="managed_file_invalid",
+    ):
+        runtime_installer._read_kernel_regular(controllers, maximum=4096)
+
+
+def test_kernel_pseudofile_reader_rejects_identity_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controllers = tmp_path / "cgroup.controllers"
+    controllers.write_bytes(b"cpu memory pids\n")
+    controller_identity = (controllers.stat().st_dev, controllers.stat().st_ino)
+    target_observations = 0
+    real_fstat = os.fstat
+
+    def changed_controller(descriptor: int) -> os.stat_result:
+        nonlocal target_observations
+        observed = real_fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) != controller_identity:
+            return observed
+        target_observations += 1
+        values = list(observed)
+        values[6] = 0
+        if target_observations == 2:
+            values[1] += 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", changed_controller)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="managed_file_invalid",
+    ):
+        runtime_installer._read_kernel_regular(controllers, maximum=4096)
+
+
 def _traversal(entries: list[ArchiveEntry]) -> None:
     entries[0] = replace(entries[0], name="../runsc")
 
