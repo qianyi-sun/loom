@@ -25,6 +25,7 @@ import httpx
 
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
+from loom_worker.trial_cancellation_watchdog import TrialOwnershipSnapshot
 
 EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
 _MAX_STEP_TOKEN_TTL_SEC = 30_000
@@ -1245,8 +1246,6 @@ class HttpControlPlaneClient:
 
     async def get_trial_ownership(self, trial_id: UUID) -> TrialOwnershipSnapshot:
         """Fetch CP ownership fields for the live-worker revoke watchdog (#1491)."""
-        from loom_worker.trial_cancellation_watchdog import TrialOwnershipSnapshot
-
         client, owned = self._http()
         try:
             r = await client.get(
