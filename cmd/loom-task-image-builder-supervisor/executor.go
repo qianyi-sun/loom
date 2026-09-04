@@ -53,6 +53,7 @@ type Executor struct {
 const (
 	buildkitFuseOverlayFSBinaryEnv = "BUILDKIT_FUSE_OVERLAYFS_BINARY"
 	maxBuildkitUnixSocketPathBytes = 104
+	linuxOpenPathFlag              = 0x200000
 	hostNewuidmapPath              = "/usr/bin/newuidmap"
 	hostNewgidmapPath              = "/usr/bin/newgidmap"
 	hostNsenterPath                = "/usr/bin/nsenter"
@@ -133,12 +134,16 @@ func (e *Executor) Start(ctx context.Context) (err error) {
 	if e.started {
 		return errors.New("executor already started")
 	}
+	statePrepared := false
 	defer func() {
 		if err == nil {
 			return
 		}
-		if cleanupErr := e.cleanupState(); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup partial executor state: %w", cleanupErr))
+		if statePrepared {
+			cleanupErr := e.cleanupState()
+			if cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup partial executor state: %w", cleanupErr))
+			}
 		}
 		e.daemon = nil
 		e.started = false
@@ -146,6 +151,7 @@ func (e *Executor) Start(ctx context.Context) (err error) {
 	if err := e.prepareStateDirs(); err != nil {
 		return err
 	}
+	statePrepared = true
 	if err := executorVerifyHostIDMapHelpers(); err != nil {
 		return err
 	}
@@ -196,6 +202,13 @@ func (e *Executor) Start(ctx context.Context) (err error) {
 	}
 	process, err := executorLaunchInCgroup(ctx, e.config.Runtime.RootlessKit, argv, env, e.capabilities.BuildEgressFD)
 	if err != nil {
+		return err
+	}
+	if err := e.verifyDaemonCgroup(process); err != nil {
+		if process != nil {
+			_ = process.Kill()
+			_ = executorWaitProcess(process)
+		}
 		return err
 	}
 	e.daemon = process
@@ -295,6 +308,16 @@ func (e *Executor) waitForBuildkitReady(ctx context.Context) error {
 	}
 }
 
+func (e *Executor) verifyDaemonCgroup(process *Process) error {
+	if process == nil || process.PID <= 0 {
+		return errors.New("rootlesskit launch result invalid")
+	}
+	if process.CgroupDevice != e.capabilities.BuildEgressDevice || process.CgroupInode != e.capabilities.BuildEgressInode {
+		return errors.New("rootlesskit launched outside exact build egress cgroup")
+	}
+	return nil
+}
+
 func (e *Executor) stopDaemon(ctx context.Context) error {
 	var errs []error
 	if e.daemon != nil {
@@ -329,16 +352,14 @@ func (e *Executor) waitForDaemonExit(ctx context.Context) error {
 	case err := <-done:
 		return err
 	case <-time.After(executorShutdownTimeout):
-		killErr := e.daemon.Kill()
-		select {
-		case err := <-done:
-			return errors.Join(killErr, err)
-		case <-ctx.Done():
-			return errors.Join(killErr, ctx.Err())
-		}
 	case <-ctx.Done():
-		killErr := e.daemon.Kill()
-		return errors.Join(killErr, ctx.Err())
+	}
+	killErr := e.daemon.Kill()
+	select {
+	case err := <-done:
+		return errors.Join(killErr, err)
+	case <-time.After(executorShutdownTimeout):
+		return errors.Join(killErr, errors.New("daemon did not exit after SIGKILL"))
 	}
 }
 
@@ -449,13 +470,16 @@ func (e *Executor) cleanupState() error {
 }
 
 func executorStateDirs(jobRoot string) []string {
-	return []string{
-		filepath.Join(jobRoot, "buildkit"),
-		filepath.Join(jobRoot, "buildkit-root"),
-		filepath.Join(jobRoot, "rootlesskit"),
-		filepath.Join(jobRoot, "tmp"),
-		filepath.Join(jobRoot, "home"),
+	names := executorStateDirNames()
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		paths = append(paths, filepath.Join(jobRoot, name))
 	}
+	return paths
+}
+
+func executorStateDirNames() []string {
+	return []string{"buildkit", "buildkit-root", "rootlesskit", "tmp", "home"}
 }
 
 func mountPointsBelow(root string) ([]string, error) {
@@ -481,20 +505,57 @@ func decodeMountInfoField(path string) string {
 	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(path)
 }
 
-func (e *Executor) prepareStateDirs() error {
-	for _, name := range []string{"buildkit", "buildkit-root", "rootlesskit", "tmp", "home"} {
-		if err := e.ensureJobSubdirectory(name); err != nil {
+func (e *Executor) prepareStateDirs() (err error) {
+	for _, name := range executorStateDirNames() {
+		if err := e.requireStatePathAbsent(name); err != nil {
 			return err
 		}
+	}
+	created := []string{}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, e.cleanupCreatedStateDirs(created))
+		}
+	}()
+	for _, name := range executorStateDirNames() {
+		if err = e.createJobStateDirectory(name); err != nil {
+			return err
+		}
+		created = append(created, name)
 	}
 	return nil
 }
 
-func (e *Executor) ensureJobSubdirectory(name string) error {
+func validateExecutorStateDirName(name string) error {
 	if name == "" || strings.ContainsRune(name, os.PathSeparator) || name == "." || name == ".." {
 		return errors.New("executor state directory name invalid")
 	}
-	if err := syscall.Mkdirat(e.capabilities.JobDirectoryFD, name, 0o700); err != nil && !errors.Is(err, syscall.EEXIST) {
+	return nil
+}
+
+func (e *Executor) requireStatePathAbsent(name string) error {
+	if err := validateExecutorStateDirName(name); err != nil {
+		return err
+	}
+	fd, err := syscall.Openat(e.capabilities.JobDirectoryFD, name, linuxOpenPathFlag|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err == nil {
+		syscall.Close(fd)
+		return fmt.Errorf("executor state path already exists: %s", name)
+	}
+	if errors.Is(err, syscall.ENOENT) {
+		return nil
+	}
+	return err
+}
+
+func (e *Executor) createJobStateDirectory(name string) error {
+	if err := validateExecutorStateDirName(name); err != nil {
+		return err
+	}
+	if err := syscall.Mkdirat(e.capabilities.JobDirectoryFD, name, 0o700); err != nil {
+		if errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("executor state path already exists: %s", name)
+		}
 		return err
 	}
 	fd, err := syscall.Openat(e.capabilities.JobDirectoryFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
@@ -513,6 +574,26 @@ func (e *Executor) ensureJobSubdirectory(name string) error {
 		return errors.New("executor state directory mode invalid")
 	}
 	return nil
+}
+
+func (e *Executor) cleanupCreatedStateDirs(names []string) error {
+	var errs []error
+	for index := len(names) - 1; index >= 0; index-- {
+		path := filepath.Join(e.jobRoot, names[index])
+		mounts, err := mountPointsBelow(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if len(mounts) != 0 {
+			errs = append(errs, fmt.Errorf("mounts survived below executor state %q: %s", path, strings.Join(mounts, ", ")))
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func buildkitSocketPath(jobRoot string) (string, error) {

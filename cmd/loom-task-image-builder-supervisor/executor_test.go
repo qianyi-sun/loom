@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestExecutorStartUsesExactRootlessKitAndBuildKitFlagsInBuildEgressCgroup(t 
 		launchedArgv = append([]string(nil), argv...)
 		launchedEnv = append([]string(nil), env...)
 		launchedCgroupFD = cgroupFD
-		return &Process{PID: 4242, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4242), nil
 	}
 	executorRunBuildctl = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) error {
 		readinessProbes++
@@ -149,6 +150,63 @@ func TestExecutorStartUsesExactRootlessKitAndBuildKitFlagsInBuildEgressCgroup(t 
 	}
 }
 
+func TestExecutorStartRejectsRootlessKitInDescendantCgroup(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	plan := BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, plan)
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	descendant := filepath.Join(fixture.buildRoot, "descendant")
+	if err := os.Mkdir(descendant, 0o755); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", descendant, err)
+	}
+	descendantFD := openDirectoryFD(t, descendant)
+	defer syscall.Close(descendantFD)
+	descendantStat := mustFstat(t, descendantFD)
+
+	readinessProbes := 0
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		if cgroupFD != fixture.capabilities.BuildEgressFD {
+			t.Fatalf("launch cgroup fd = %d, want %d", cgroupFD, fixture.capabilities.BuildEgressFD)
+		}
+		return &Process{
+			PID:              4243,
+			ExecutableSHA256: executable.SHA256,
+			CgroupDevice:     uint64(descendantStat.Dev),
+			CgroupInode:      uint64(descendantStat.Ino),
+		}, nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error {
+		readinessProbes++
+		return nil
+	}
+	executorSignalProcess = func(*Process, os.Signal) error { return nil }
+	executorWaitProcess = func(*Process) error { return nil }
+	executorCgroupEmpty = func(int) (bool, error) { return true, nil }
+	executorCleanupCgroup = func(int) error { return nil }
+
+	err = executor.Start(context.Background())
+	if err == nil {
+		_ = executor.Close(context.Background())
+		t.Fatal("Start() accepted RootlessKit in descendant cgroup")
+	}
+	if !strings.Contains(err.Error(), "rootlesskit launched outside exact build egress cgroup") {
+		t.Fatalf("Start() error = %v, want exact cgroup rejection", err)
+	}
+	if readinessProbes != 0 {
+		t.Fatalf("readiness probes = %d, want no BuildKit probe after exact cgroup rejection", readinessProbes)
+	}
+}
+
 func TestExecutorRejectsPolicyEscapeMutations(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	valid := BuildPlan{
@@ -202,7 +260,7 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4242, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4242), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 	if err := executor.Start(context.Background()); err != nil {
@@ -281,7 +339,7 @@ func TestExecutorCloseTerminatesDaemonAndRejectsSurvivors(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4343, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4343), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 	executorSignalProcess = func(process *Process, signal os.Signal) error {
@@ -327,7 +385,7 @@ func TestExecutorCloseTerminatesDaemonAndRejectsSurvivors(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4444, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4444), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 	executorWaitProcess = func(*Process) error { return nil }
@@ -358,7 +416,7 @@ func TestExecutorCloseRejectsUnexpectedDaemonExitStatus(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4445, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4445), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 	executorSignalProcess = func(*Process, os.Signal) error { return nil }
@@ -369,6 +427,136 @@ func TestExecutorCloseRejectsUnexpectedDaemonExitStatus(t *testing.T) {
 	}
 	if err := executor.Close(context.Background()); err == nil {
 		t.Fatal("Close() accepted unexpected daemon exit status")
+	}
+}
+
+func TestExecutorCloseReapsDaemonDespiteCancelledContext(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4540), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	executorSignalProcess = func(*Process, os.Signal) error { return nil }
+	waitStarted := make(chan struct{})
+	releaseWait := make(chan struct{})
+	closeRelease := func() {
+		select {
+		case <-releaseWait:
+		default:
+			close(releaseWait)
+		}
+	}
+	defer closeRelease()
+	var startedOnce sync.Once
+	executorWaitProcess = func(*Process) error {
+		startedOnce.Do(func() { close(waitStarted) })
+		<-releaseWait
+		return nil
+	}
+	executorCgroupEmpty = func(int) (bool, error) { return true, nil }
+	executorCleanupCgroup = func(int) error { return nil }
+	executorShutdownTimeout = 20 * time.Millisecond
+	executorShutdownPoll = time.Millisecond
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- executor.Close(ctx)
+	}()
+
+	select {
+	case <-waitStarted:
+	case err := <-errCh:
+		t.Fatalf("Close() returned before daemon wait was reaped: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not start daemon wait")
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("Close() returned before daemon wait was released: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	closeRelease()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Close() error after daemon reap = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not finish after daemon wait was released")
+	}
+}
+
+func TestExecutorCloseTimesOutIfDaemonUnreapedAfterKill(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components: []BuildComponent{
+			{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4541), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	executorSignalProcess = func(*Process, os.Signal) error { return nil }
+	releaseWait := make(chan struct{})
+	closeRelease := func() {
+		select {
+		case <-releaseWait:
+		default:
+			close(releaseWait)
+		}
+	}
+	defer closeRelease()
+	executorWaitProcess = func(*Process) error {
+		<-releaseWait
+		return nil
+	}
+	executorCgroupEmpty = func(int) (bool, error) { return true, nil }
+	executorCleanupCgroup = func(int) error { return nil }
+	executorShutdownTimeout = 5 * time.Millisecond
+	executorShutdownPoll = time.Millisecond
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- executor.Close(context.Background())
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "daemon did not exit after SIGKILL") {
+			t.Fatalf("Close() error = %v, want bounded SIGKILL reap timeout", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		closeRelease()
+		<-errCh
+		t.Fatal("Close() remained blocked after SIGKILL with live caller context")
 	}
 }
 
@@ -389,7 +577,7 @@ func TestExecutorStartFailsClosedWhenDaemonReadinessNeverArrives(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4545, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4545), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error {
 		return errors.New("daemon unavailable")
@@ -439,6 +627,67 @@ func TestExecutorStartFailureRemovesPartialStateBeforeLaunch(t *testing.T) {
 	assertExecutorStateRemoved(t, fixture.jobRoot)
 }
 
+func TestExecutorStartRejectsPreexistingStateDirectoriesBeforeLaunch(t *testing.T) {
+	for _, staleName := range []string{"buildkit", "buildkit-root", "rootlesskit", "tmp", "home"} {
+		t.Run(staleName, func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			staleDir := filepath.Join(fixture.jobRoot, staleName)
+			if err := os.Mkdir(staleDir, 0o700); err != nil {
+				t.Fatalf("Mkdir(%q) error = %v", staleDir, err)
+			}
+			marker := filepath.Join(staleDir, "stale-cache-marker")
+			if err := os.WriteFile(marker, []byte("stale\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile(%q) error = %v", marker, err)
+			}
+			executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+				Architecture: "amd64",
+				Components: []BuildComponent{
+					{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewExecutor() error = %v", err)
+			}
+
+			launchCalled := false
+			restoreExecutorHooks(t)
+			executorVerifyHostIDMapHelpers = func() error { return nil }
+			stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+			executorLaunchInCgroup = func(_ context.Context, executable ExecutableMember, _ []string, _ []string, _ int) (*Process, error) {
+				launchCalled = true
+				return exactCgroupProcess(fixture, executable, 4542), nil
+			}
+			executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+			executorWaitProcess = func(*Process) error { return nil }
+			executorCgroupEmpty = func(int) (bool, error) { return true, nil }
+			executorCleanupCgroup = func(int) error { return nil }
+
+			err = executor.Start(context.Background())
+			if err == nil {
+				_ = executor.Close(context.Background())
+				t.Fatal("Start() accepted preexisting executor state directory")
+			}
+			if !strings.Contains(err.Error(), "executor state path already exists") {
+				t.Fatalf("Start() error = %v, want stale state rejection", err)
+			}
+			if launchCalled {
+				t.Fatal("Start() launched daemon after detecting preexisting state")
+			}
+			if got := string(mustReadFile(t, marker)); got != "stale\n" {
+				t.Fatalf("preexisting state marker changed: %q", got)
+			}
+			for _, stateDir := range executorStateDirs(fixture.jobRoot) {
+				if stateDir == staleDir {
+					continue
+				}
+				if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Start() created state dir %q after stale-state rejection: %v", stateDir, err)
+				}
+			}
+		})
+	}
+}
+
 func TestExecutorCloseAggregatesErrorsAndStillCleansState(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
@@ -455,7 +704,7 @@ func TestExecutorCloseAggregatesErrorsAndStillCleansState(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4646, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4646), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 
@@ -516,7 +765,7 @@ func TestExecutorBuildFailureRemovesPartialOCIOutput(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4747, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4747), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 	if err := executor.Start(context.Background()); err != nil {
@@ -668,7 +917,7 @@ func TestExecutorCloseLeavesBorrowedCapabilityFDsOpen(t *testing.T) {
 	executorVerifyHostIDMapHelpers = func() error { return nil }
 	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
 	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
-		return &Process{PID: 4848, ExecutableSHA256: executable.SHA256, CgroupInode: fixture.capabilities.BuildEgressInode}, nil
+		return exactCgroupProcess(fixture, executable, 4848), nil
 	}
 	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
 	executorSignalProcess = func(*Process, os.Signal) error { return nil }
@@ -1470,6 +1719,15 @@ func assertExecutorStateRemoved(t *testing.T, jobRoot string) {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("executor state path %q survived cleanup: %v", path, err)
 		}
+	}
+}
+
+func exactCgroupProcess(fixture executorFixture, executable ExecutableMember, pid int) *Process {
+	return &Process{
+		PID:              pid,
+		ExecutableSHA256: executable.SHA256,
+		CgroupDevice:     fixture.capabilities.BuildEgressDevice,
+		CgroupInode:      fixture.capabilities.BuildEgressInode,
 	}
 }
 

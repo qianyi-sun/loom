@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestDownloadBundleMaterializesVerifiedFilesWithExactTLSAndNoProxy(t *testing.T) {
@@ -43,6 +45,69 @@ func TestDownloadBundleMaterializesVerifiedFilesWithExactTLSAndNoProxy(t *testin
 	}
 	assertFilePayloadAndMode(t, filepath.Join(workspace, "context/Dockerfile"), files["/bundle/context/Dockerfile"], 0o444)
 	assertFilePayloadAndMode(t, filepath.Join(workspace, "context/app"), files["/bundle/context/app"], 0o400)
+}
+
+func TestDownloadBundleRejectsBaseURLUserinfoBeforeNetwork(t *testing.T) {
+	payload := []byte("FROM scratch\n")
+	var called atomic.Bool
+	server := bundleTLSServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+		_, _ = w.Write(payload)
+	})
+	defer server.Close()
+	workspace := t.TempDir()
+	workspaceFD := openDirectoryFD(t, workspace)
+	defer syscall.Close(workspaceFD)
+	capabilityValue := bundleCapability(t, server, []TaskImageBundleFileV1{
+		bundleFile("Dockerfile", "/bundle/Dockerfile", payload, 0o444),
+	}, int64(len(payload)))
+	capabilityValue.BaseURL = strings.Replace(server.URL, "https://", "https://bundle-user:bundle-secret@", 1)
+	capability := bundleSecret(t, capabilityValue)
+	defer capability.Close()
+
+	_, err := DownloadBundle(context.Background(), capability, workspaceFD)
+	if err == nil {
+		t.Fatal("DownloadBundle() accepted base URL userinfo")
+	}
+	if strings.Contains(err.Error(), "bundle-secret") || strings.Contains(err.Error(), "bundle-user") {
+		t.Fatalf("DownloadBundle() leaked URL userinfo in error: %v", err)
+	}
+	if called.Load() {
+		t.Fatal("DownloadBundle() contacted server before rejecting URL userinfo")
+	}
+}
+
+func TestDownloadBundleRedactsRequestURLFromHTTPFailure(t *testing.T) {
+	payload := []byte("FROM scratch\n")
+	server := bundleTLSServer(t, map[string][]byte{"/unused": payload}, nil)
+	defer server.Close()
+	workspace := t.TempDir()
+	workspaceFD := openDirectoryFD(t, workspace)
+	defer syscall.Close(workspaceFD)
+	secretPath := "/bundle/secret-url-material/Dockerfile"
+	capabilityValue := bundleCapability(t, server, []TaskImageBundleFileV1{
+		bundleFile("Dockerfile", secretPath, payload, 0o444),
+	}, int64(len(payload)))
+	capabilityValue.BaseURL = "https://127.0.0.1:1"
+	capability := bundleSecret(t, capabilityValue)
+	defer capability.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := DownloadBundle(ctx, capability, workspaceFD)
+	if err == nil {
+		t.Fatal("DownloadBundle() succeeded, want HTTP request failure")
+	}
+	errorText := err.Error()
+	for _, forbidden := range []string{"secret-url-material", secretPath, capabilityValue.BaseURL} {
+		if strings.Contains(errorText, forbidden) {
+			t.Fatalf("DownloadBundle() leaked sealed URL material %q in error: %v", forbidden, err)
+		}
+	}
+	if !strings.Contains(errorText, "bundle download request failed") {
+		t.Fatalf("DownloadBundle() error = %v, want redacted download failure", err)
+	}
 }
 
 func TestDownloadBundleRejectsRedirectTLSDowngradeTraversalSymlinkAndMetadataDrift(t *testing.T) {

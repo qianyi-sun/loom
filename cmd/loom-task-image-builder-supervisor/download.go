@@ -84,13 +84,14 @@ func DownloadBundle(ctx context.Context, sealedCapability *SecretBuffer, workspa
 		targetURL.RawPath = ""
 		targetURL.RawQuery = ""
 		targetURL.Fragment = ""
+		targetURL.User = nil
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
 		if err != nil {
-			return nil, err
+			return nil, errors.New("bundle download request invalid")
 		}
 		response, err := client.Do(request)
 		if err != nil {
-			return nil, err
+			return nil, errors.New("bundle download request failed")
 		}
 		if response.StatusCode != http.StatusOK {
 			response.Body.Close()
@@ -197,9 +198,9 @@ func validateBundleCapability(capability TaskImageBundleCapabilityV1) error {
 func bundleHTTPClient(capability TaskImageBundleCapabilityV1) (*http.Client, *url.URL, error) {
 	base, err := url.Parse(capability.BaseURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.New("bundle base URL invalid")
 	}
-	if base.Scheme != "https" || base.Host == "" || capability.ServerName == "" || strings.Contains(capability.ServerName, "/") {
+	if base.Scheme != "https" || base.Host == "" || base.User != nil || capability.ServerName == "" || strings.Contains(capability.ServerName, "/") {
 		return nil, nil, errors.New("bundle TLS authority invalid")
 	}
 	roots := x509.NewCertPool()
