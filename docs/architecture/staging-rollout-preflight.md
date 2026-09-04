@@ -61,6 +61,18 @@ complete Tier 0–2 assessment. No other error is retried, and a second expiry
 fails closed. This bounded replay lets a cold image build outlive early
 evidence without treating arbitrary validation or infrastructure failures as
 transient.
+If a dependency expires before a consumer starts, the DAG refuses the consumer.
+Broker `preflight`, `start`, and `start --dry-run` report
+`preflight-dependency-expired` with the validated consumer `check_id`, expired
+`dependency_ids`, declared `stage`, candidate SHA and mutation epoch. Their JSON
+failed-check report has `assessment_complete=false`:
+it is an incomplete diagnostic, not a full assessment or admission authority.
+The formal installer's existing failed-check normalizer accepts this report and
+returns `status=blocked`; its normalized digest identifies the diagnostic only.
+No request or backup is created. This includes a cold image build outlasting an
+ earlier credential or candidate check's TTL. For requestless `preflight`, the
+ diagnostic is emitted only if the bounded fresh-authority replay also expires.
+ The diagnostic does not extend TTLs or expose arbitrary exception messages.
 
 Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
 digest-addressed `PreflightAssessment`; no preliminary request or backup job may

@@ -495,6 +495,42 @@ def _staged_preflight_request(
     )
 
 
+def _assess_preflight(
+    dependencies: BrokerDependencies,
+    candidate: CandidateBinding,
+    mutation_epoch: int,
+) -> PreflightAssessment | None:
+    """Render only typed, bounded assessment interruptions for public callers."""
+    assert dependencies.assess_preflight is not None
+    try:
+        return dependencies.assess_preflight(candidate, mutation_epoch)
+    except DependencyExpiredError as exc:
+        # Use the installer's existing failed-check report contract. This is an
+        # incomplete diagnostic, never a passing or persisted assessment.
+        _write_json(
+            dependencies.stderr,
+            {
+                "assessment_complete": False,
+                "candidate_sha": candidate.resolved_sha,
+                "mutation_epoch": mutation_epoch,
+                "passed": False,
+                "checks": [
+                    {
+                        "name": "preflight-dependency-expired",
+                        "passed": False,
+                        "check_id": exc.check_id,
+                        "dependency_ids": list(exc.dependency_ids),
+                        "stage": exc.stage.value,
+                        "remediation": (
+                            "obtain fresh dependency evidence through protected preflight"
+                        ),
+                    }
+                ],
+            },
+        )
+        return None
+
+
 def _preflight_only(
     dependencies: BrokerDependencies,
     caller: CallerIdentity,
@@ -512,7 +548,7 @@ def _preflight_only(
     if assess_preflight is None or read_mutation_epoch is None:
         return _safe_error(dependencies, "deep rollout preflight is not configured")
 
-    def assess_once() -> tuple[CandidateBinding, int, PreflightAssessment] | None:
+    def assess_once(*, report_expiry: bool = False) -> tuple[CandidateBinding, int, PreflightAssessment] | None:
         report = dependencies.preflight()
         if not report.passed:
             _write_json(dependencies.stderr, report.to_dict())
@@ -521,13 +557,19 @@ def _preflight_only(
         mutation_epoch = read_mutation_epoch()
         if type(mutation_epoch) is not int or mutation_epoch < 0:
             raise ValueError("staging mutation epoch is invalid")
-        assessment = assess_preflight(candidate, mutation_epoch)
+        assessment = (
+            _assess_preflight(dependencies, candidate, mutation_epoch)
+            if report_expiry
+            else assess_preflight(candidate, mutation_epoch)
+        )
+        if assessment is None:
+            return None
         return candidate, mutation_epoch, assessment
 
     try:
         result = assess_once()
     except DependencyExpiredError:
-        result = assess_once()
+        result = assess_once(report_expiry=True)
     if result is None:
         return 1
     candidate, mutation_epoch, assessment = result
@@ -771,7 +813,9 @@ def _start_staged(
     mutation_epoch = dependencies.read_mutation_epoch()
     if type(mutation_epoch) is not int or mutation_epoch < 0:
         raise ValueError("staging mutation epoch is invalid")
-    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    assessment = _assess_preflight(dependencies, candidate, mutation_epoch)
+    if assessment is None:
+        return 1
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1
