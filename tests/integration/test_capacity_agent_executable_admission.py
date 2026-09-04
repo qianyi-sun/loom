@@ -697,9 +697,14 @@ async def test_protected_admission_abandonment_rejects_existing_executable_claim
 ) -> None:
     """Catch cleanup withdrawing an assignment after its claim committed."""
 
-    registration, configuration, claim, closure, assigned, _intent_id = (
-        await _prepare_abandonment_claim_race(capacity_guard_database)
-    )
+    (
+        registration,
+        configuration,
+        claim,
+        closure,
+        assigned,
+        _intent_id,
+    ) = await _prepare_abandonment_claim_race(capacity_guard_database)
     async with _serializable_executor_session(capacity_guard_database) as session:
         admitted = await ExecutableAdmissionStore(
             session,
@@ -822,11 +827,7 @@ async def test_never_converged_tombstone_sql_rejects_untrusted_local_binding(
     if binding_update:
         proposal_update["shapes"] = (
             proposal.shapes[0].model_copy(
-                update={
-                    "binding": proposal.shapes[0].binding.model_copy(
-                        update=binding_update
-                    )
-                }
+                update={"binding": proposal.shapes[0].binding.model_copy(update=binding_update)}
             ),
         )
     changed = proposal.model_copy(update=proposal_update)
@@ -874,9 +875,7 @@ async def test_never_converged_tombstone_sql_rejects_untrusted_later_shape(
             "binding": first_request.binding.model_copy(
                 update={
                     "intent_id": uuid4(),
-                    "shape_instance_id": (
-                        f"{first_request.binding.shape_instance_id}-second"
-                    ),
+                    "shape_instance_id": (f"{first_request.binding.shape_instance_id}-second"),
                 }
             )
         }
@@ -891,14 +890,11 @@ async def test_never_converged_tombstone_sql_rejects_untrusted_later_shape(
     second_shape = first.shapes[0].model_copy(
         update={
             "binding": second_request.binding,
-            "bootstrap_registration_epoch": (
-                second_request.bootstrap_registration_epoch
-            ),
+            "bootstrap_registration_epoch": (second_request.bootstrap_registration_epoch),
         }
     )
     proposal = ExecutableAdmissionPlanProposalV2.model_validate(
-        first.model_dump(mode="python")
-        | {"shapes": (first.shapes[0], second_shape)}
+        first.model_dump(mode="python") | {"shapes": (first.shapes[0], second_shape)}
     )
     closure = ExecutableAdmissionPlanClosureV2(
         closure_id=uuid4(),
@@ -1023,10 +1019,7 @@ async def test_never_converged_tombstone_exactly_replays_and_blocks_later_prepar
     assert first.acknowledgement.disposition_kind == "never-converged"
     tombstone = first.disposition
     exact_registration = AgentRegistrationV1.model_validate(
-        {
-            field: getattr(tombstone, field)
-            for field in AgentRegistrationV1.model_fields
-        }
+        {field: getattr(tombstone, field) for field in AgentRegistrationV1.model_fields}
     )
     with pytest.raises(DBAPIError, match=r"tombstone payload changed"):
         async with _serializable_agent_session(capacity_guard_database) as session:
@@ -1153,9 +1146,7 @@ async def test_prepare_and_never_converged_tombstone_allow_only_one_commit(
     tombstone_task: asyncio.Task[object] | None = None
     try:
         async with _owner_session(capacity_guard_database) as (_, _, blocker):
-            blocker_pid = (
-                await blocker.execute(text("SELECT pg_backend_pid()"))
-            ).scalar_one()
+            blocker_pid = (await blocker.execute(text("SELECT pg_backend_pid()"))).scalar_one()
             await blocker.execute(
                 text(
                     "SELECT singleton_id FROM loom_capacity_guard.agent_runtime_authority "
@@ -1222,9 +1213,14 @@ async def test_claim_first_serializes_plan_abandonment_before_withdrawal(
 ) -> None:
     """Catch cleanup missing a claim that is committing behind its lifecycle lock."""
 
-    registration, configuration, claim, closure, assigned, intent_id = (
-        await _prepare_abandonment_claim_race(capacity_guard_database)
-    )
+    (
+        registration,
+        configuration,
+        claim,
+        closure,
+        assigned,
+        intent_id,
+    ) = await _prepare_abandonment_claim_race(capacity_guard_database)
     loop = asyncio.get_running_loop()
     claim_pid: asyncio.Future[int] = loop.create_future()
     cleanup_pid: asyncio.Future[int] = loop.create_future()
@@ -2523,7 +2519,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0026"
+    assert version == "guard_0027"
     assert evidence == 1
 
 

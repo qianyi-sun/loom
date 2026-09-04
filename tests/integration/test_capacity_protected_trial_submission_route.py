@@ -173,9 +173,10 @@ async def test_runtime_submission_is_hidden_until_guard_verified_readiness(
                 submission=submission,
                 public_requires_caps=public_requires_caps,
             )
-            async with async_sessionmaker(
-                agent_engine, expire_on_commit=False
-            )() as session, session.begin():
+            async with (
+                async_sessionmaker(agent_engine, expire_on_commit=False)() as session,
+                session.begin(),
+            ):
                 hidden = await capture_lifecycle_demand_observation(
                     session,
                     registration=registration,
@@ -189,9 +190,10 @@ async def test_runtime_submission_is_hidden_until_guard_verified_readiness(
                 protected_attempt_id=receipt.protected_attempt_id,
             )
             assert readiness.replayed is False
-            async with async_sessionmaker(
-                agent_engine, expire_on_commit=False
-            )() as session, session.begin():
+            async with (
+                async_sessionmaker(agent_engine, expire_on_commit=False)() as session,
+                session.begin(),
+            ):
                 visible = await capture_lifecycle_demand_observation(
                     session,
                     registration=registration,
@@ -257,9 +259,10 @@ async def test_runtime_submission_is_hidden_until_guard_verified_readiness(
         )
         try:
             with pytest.raises(DBAPIError, match="public trial binding drifted"):
-                async with async_sessionmaker(
-                    drift_engine, expire_on_commit=False
-                )() as session, session.begin():
+                async with (
+                    async_sessionmaker(drift_engine, expire_on_commit=False)() as session,
+                    session.begin(),
+                ):
                     await capture_lifecycle_demand_observation(
                         session,
                         registration=registration,
@@ -342,13 +345,16 @@ async def test_runtime_submission_rejects_missing_logical_pool_binding(
         finally:
             await runtime_engine.dispose()
         with admin_engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM public.trials "
-                    "WHERE idempotency_key = :idempotency_key"
-                ),
-                {"idempotency_key": submission.idempotency_key},
-            ).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM public.trials "
+                        "WHERE idempotency_key = :idempotency_key"
+                    ),
+                    {"idempotency_key": submission.idempotency_key},
+                ).scalar_one()
+                == 0
+            )
     finally:
         admin_engine.dispose()
 
@@ -432,9 +438,10 @@ async def test_runtime_readiness_refuses_incomplete_task_image_prerequisites(
                     trial_id=receipt.trial_id,
                     protected_attempt_id=receipt.protected_attempt_id,
                 )
-            async with async_sessionmaker(
-                agent_engine, expire_on_commit=False
-            )() as session, session.begin():
+            async with (
+                async_sessionmaker(agent_engine, expire_on_commit=False)() as session,
+                session.begin(),
+            ):
                 hidden = await capture_lifecycle_demand_observation(
                     session,
                     registration=registration,
@@ -446,14 +453,17 @@ async def test_runtime_readiness_refuses_incomplete_task_image_prerequisites(
             await agent_engine.dispose()
             await runtime_engine.dispose()
         with admin_engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM "
-                    "loom_capacity_guard.protected_runtime_trial_readiness "
-                    "WHERE trial_id = :trial_id"
-                ),
-                {"trial_id": submission.trial_id},
-            ).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM "
+                        "loom_capacity_guard.protected_runtime_trial_readiness "
+                        "WHERE trial_id = :trial_id"
+                    ),
+                    {"trial_id": submission.trial_id},
+                ).scalar_one()
+                == 0
+            )
     finally:
         admin_engine.dispose()
 
@@ -469,9 +479,7 @@ async def test_guard_0023_downgrade_refuses_persisted_runtime_origin(
     admin_engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with admin_engine.begin() as connection:
-            connection.execute(
-                insert(Team).values(id=team_id, name=f"downgrade-{team_id}")
-            )
+            connection.execute(insert(Team).values(id=team_id, name=f"downgrade-{team_id}"))
             connection.execute(insert(TeamQuota).values(team_id=team_id))
             connection.execute(
                 insert(Task).values(
@@ -550,20 +558,25 @@ async def test_guard_0023_downgrade_refuses_persisted_runtime_origin(
         ):
             command.downgrade(cfg, "guard_0022")
         with admin_engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT version_num FROM "
-                    "loom_capacity_guard.capacity_guard_alembic_version"
-                )
-            ).scalar_one() == "guard_0026"
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM "
-                    "loom_capacity_guard.protected_runtime_trial_submissions "
-                    "WHERE trial_id = :trial_id"
-                ),
-                {"trial_id": submission.trial_id},
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0027"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM "
+                        "loom_capacity_guard.protected_runtime_trial_submissions "
+                        "WHERE trial_id = :trial_id"
+                    ),
+                    {"trial_id": submission.trial_id},
+                ).scalar_one()
+                == 1
+            )
     finally:
         admin_engine.dispose()
 
@@ -944,9 +957,10 @@ def test_protected_idempotency_replay_repairs_task_images_and_readiness(
                 isolation_level="SERIALIZABLE",
             )
             try:
-                async with async_sessionmaker(
-                    engine, expire_on_commit=False
-                )() as session, session.begin():
+                async with (
+                    async_sessionmaker(engine, expire_on_commit=False)() as session,
+                    session.begin(),
+                ):
                     observation = await capture_lifecycle_demand_observation(
                         session,
                         registration=registration,
@@ -1121,9 +1135,10 @@ def test_protected_idempotency_replay_repairs_model_switch_and_readiness(
                 isolation_level="SERIALIZABLE",
             )
             try:
-                async with async_sessionmaker(
-                    engine, expire_on_commit=False
-                )() as session, session.begin():
+                async with (
+                    async_sessionmaker(engine, expire_on_commit=False)() as session,
+                    session.begin(),
+                ):
                     observation = await capture_lifecycle_demand_observation(
                         session,
                         registration=registration,

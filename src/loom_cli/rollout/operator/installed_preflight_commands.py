@@ -16,11 +16,52 @@ from .manifest_apply_contract import (
     server_side_all_namespaces_schema_validation_argv,
     server_side_apply_argv,
 )
+from .protected_controller_prerequisite_component import capacity_executor_image_digest
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _BOOT_ID_PROBE = ("cat", "/proc/sys/kernel/random/boot_id")
 GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS = 1740
+_GB10_CONTROLLER_MAX_INPUT_BYTES = 8 * 1024 * 1024
+_OLDLAB_CONTROLLER_MAX_INPUT_BYTES = 8 * 1024 * 1024
+_OLDLAB_CONTROLLER_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
+_OLDLAB_CONTROLLER_OPERATIONS = frozenset(
+    {
+        "converge-prerequisite",
+        "converge-prepared-files",
+        "disable-prepared-timer",
+        "discover-controller",
+        "enable-prepared-timer",
+        "observe-credential",
+        "observe-prepared",
+        "observe-prerequisite",
+        "publish-credential",
+        "run-prepared-tick",
+    }
+)
+_OLDLAB_CONTROLLER_PREFIX = (
+    "/usr/bin/docker",
+    "run",
+    "--rm",
+    "--user",
+    "0:0",
+    "--privileged",
+    "--pid=host",
+    "--network=none",
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700",
+    "--mount",
+    "type=bind,src=/,dst=/host,bind-propagation=rslave",
+    "--entrypoint",
+    "/usr/local/bin/python",
+)
+_OLDLAB_CONTROLLER_SUFFIX = (
+    "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
+    "--host-root",
+    "/host",
+    "--operation",
+)
 
 
 class CommandResult(Protocol):
@@ -123,12 +164,46 @@ class InstalledPreflightCommands:
 
         if (
             not payload
-            or len(payload.encode()) > 4 * 1024 * 1024
+            or len(payload.encode()) > _GB10_CONTROLLER_MAX_INPUT_BYTES
             or type(timeout) is not int
             or not 1 <= timeout <= GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS
         ):
             raise ValueError("GB10 supervisor controller payload is invalid")
         return self._execute(argv, input=payload, timeout=timeout)
+
+    def oldlab_controller(
+        self,
+        argv: Sequence[str],
+        payload: str,
+    ) -> CommandResult:
+        """Run only the executor installer's fixed OLDLAB host-namespace channel."""
+
+        command = tuple(argv)
+        try:
+            encoded = payload.encode("ascii")
+            capacity_executor_image_digest(command[len(_OLDLAB_CONTROLLER_PREFIX)])
+        except (IndexError, UnicodeEncodeError, ValueError) as exc:
+            raise ValueError("OLDLAB controller payload is invalid") from exc
+        if (
+            not encoded
+            or len(encoded) > _OLDLAB_CONTROLLER_MAX_INPUT_BYTES
+            or not payload.endswith("\n")
+        ):
+            raise ValueError("OLDLAB controller payload is invalid")
+        if (
+            len(command) != len(_OLDLAB_CONTROLLER_PREFIX) + 1 + len(_OLDLAB_CONTROLLER_SUFFIX) + 1
+            or command[: len(_OLDLAB_CONTROLLER_PREFIX)] != _OLDLAB_CONTROLLER_PREFIX
+            or command[len(_OLDLAB_CONTROLLER_PREFIX) + 1 : -1] != _OLDLAB_CONTROLLER_SUFFIX
+            or command[-1] not in _OLDLAB_CONTROLLER_OPERATIONS
+        ):
+            raise ValueError("OLDLAB controller command is outside authority")
+        result = self._execute(command, input=payload, timeout=1500)
+        if (
+            len(result.stdout.encode("utf-8")) > _OLDLAB_CONTROLLER_MAX_OUTPUT_BYTES
+            or len(result.stderr.encode("utf-8")) > _OLDLAB_CONTROLLER_MAX_OUTPUT_BYTES
+        ):
+            raise RuntimeError("OLDLAB controller output is too large")
+        return result
 
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""

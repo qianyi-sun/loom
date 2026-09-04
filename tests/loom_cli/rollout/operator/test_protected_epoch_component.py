@@ -4,9 +4,13 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout.operator.checkpoint_database_authority import (
+    DatabaseAuthorityEvidence,
+)
 from loom_cli.rollout.operator.protected_apply_journal import ComponentState
 from loom_cli.rollout.operator.protected_epoch_component import (
     KubernetesProtectedEpochComponent,
@@ -14,11 +18,33 @@ from loom_cli.rollout.operator.protected_epoch_component import (
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan as _base_plan
 
 
-def _plan(tmp_path: Path):  # type: ignore[no-untyped-def]
+def _plan(tmp_path: Path, *, schema_revision: str = "0069"):  # type: ignore[no-untyped-def]
+    base = _base_plan(tmp_path)
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision=schema_revision,
+        capacity_guard_schema_revision=base.capacity_guard_schema_revision,
+        configuration_epoch=base.manager_configuration_epoch,  # type: ignore[arg-type]
+        configuration_digest=base.manager_configuration_digest,  # type: ignore[arg-type]
+        authority_incarnation=UUID(str(base.manager_authority_incarnation)),
+        writer_epoch=base.manager_writer_epoch,  # type: ignore[arg-type]
+        execution_state=base.manager_execution_state,  # type: ignore[arg-type]
+        execution_epoch=base.manager_execution_epoch,  # type: ignore[arg-type]
+        execution_manifest_sha256=base.manager_execution_manifest_sha256,
+        executable_new_capacity_ceiling=(
+            base.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+        ),
+        increase_freeze=base.manager_increase_freeze,  # type: ignore[arg-type]
+    )
     return replace(
-        _base_plan(tmp_path),
-        schema_revision="0069",
+        base,
+        schema_revision=schema_revision,
         migration_target_revision="0072",
+        checkpoint_component_sha256={
+            **dict(base.checkpoint_component_sha256 or {}),
+            "database_authority": authority.digest,
+        },
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
     )
 
 
@@ -117,9 +143,7 @@ def test_epoch_component_fails_closed_on_concurrent_or_malformed_state(tmp_path:
 
 def test_epoch_component_bootstraps_only_after_legacy_schema_migration(tmp_path: Path) -> None:
     plan = replace(
-        _plan(tmp_path),
-        schema_revision="0065",
-        migration_target_revision="0072",
+        _plan(tmp_path, schema_revision="0065"),
         starting_mutation_epoch=0,
     )
     runner = Runner(None)
@@ -133,6 +157,6 @@ def test_epoch_component_bootstraps_only_after_legacy_schema_migration(tmp_path:
     authority.apply(plan)
     assert authority.classify(plan).state is ComponentState.EXACT
 
-    nonlegacy = replace(plan, schema_revision="0069")
+    nonlegacy = replace(_plan(tmp_path), starting_mutation_epoch=0)
     runner.record = None
     assert authority.classify(nonlegacy).state is ComponentState.DRIFTED

@@ -25,6 +25,7 @@ from loom_cli.rollout.preflight_pipeline import (
     PreflightAssessmentDriftError,
     PreflightAssessmentDriftReason,
     PreflightPipeline,
+    PreflightRehearsal,
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
@@ -108,7 +109,11 @@ def _bindings(*, epoch: int = 7) -> AttestationBindings:
     )
 
 
-def _registry(*, failed_check: str | None = None) -> PreflightRegistry:
+def _registry(
+    *,
+    failed_check: str | None = None,
+    calls: list[str] | None = None,
+) -> PreflightRegistry:
     manifest = load_coverage_manifest()
     checks: list[RegisteredCheck] = []
     for entry in manifest.checks:
@@ -116,6 +121,8 @@ def _registry(*, failed_check: str | None = None) -> PreflightRegistry:
             continue
 
         def probe(_context: CheckContext, *, check_id: str = entry.check_id) -> CheckProbe:
+            if calls is not None:
+                calls.append(check_id)
             evidence: dict[str, object] = {}
             for field in (EvidenceField("result", "string"),):
                 evidence[field.name] = {
@@ -161,6 +168,56 @@ def _context(registry: PreflightRegistry) -> CheckContext:
         if "secret" in key:
             bindings[key] = {"admin": f"sha256:{'d' * 64}"}
     return CheckContext(bindings)  # type: ignore[arg-type]
+
+
+def test_pipeline_completes_only_deferred_execution_prerequisite(
+    tmp_path: Path,
+) -> None:
+    """Catch rerunning isolated rehearsal mutations after lease publication."""
+    calls: list[str] = []
+    registry = _registry(
+        failed_check="execution.prerequisites",
+        calls=calls,
+    )
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    rehearsal = pipeline.rehearse(context=context)
+    deferred = next(
+        execution
+        for execution in rehearsal.executions
+        if execution.check_id == "execution.prerequisites"
+    )
+    assert not deferred.passed
+    assert rehearsal.passed
+
+    calls.clear()
+    late_registry = _registry(calls=calls)
+    late_check = next(
+        check for check in late_registry.checks if check.spec.check_id == "execution.prerequisites"
+    )
+    completed = pipeline.complete_deferred_execution(
+        context=context,
+        rehearsal=rehearsal,
+        check=late_check,
+    )
+
+    assert isinstance(completed, PreflightRehearsal)
+    assert completed.passed
+    assert all(execution.passed for execution in completed.executions)
+    assert calls == ["execution.prerequisites"]
+    assert {
+        execution.check_id: execution.evidence_hash
+        for execution in completed.executions
+        if execution.check_id != "execution.prerequisites"
+    } == {
+        execution.check_id: execution.evidence_hash
+        for execution in rehearsal.executions
+        if execution.check_id != "execution.prerequisites"
+    }
 
 
 def test_pipeline_reports_every_independent_blocker(tmp_path: Path) -> None:

@@ -876,7 +876,7 @@ def test_guard_0023_refuses_downgrade_with_protected_public_projection(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0026"
+                == "guard_0027"
             )
             assert (
                 connection.execute(
@@ -1104,6 +1104,23 @@ def _protected_cp_app(
         )
         runtime_url_file.chmod(0o600)
         values["LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"] = str(runtime_url_file)
+
+    async def idle_background_loop(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    for name in (
+        "run_crash_detector_loop",
+        "run_live_preview_reconciler_loop",
+        "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop",
+        "run_service_execution_materializer_loop",
+        "run_worker_pool_autoscaler_loop",
+    ):
+        monkeypatch.setattr(
+            f"loom_control_plane.app.{name}",
+            idle_background_loop,
+            raising=False,
+        )
     for key, value in values.items():
         monkeypatch.setenv(key, value)
     return create_app(ControlPlaneSettings(_env_file=None))
@@ -2553,12 +2570,8 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
                 {"trial_id": seeded.trial_id},
             )
 
-        assert asyncio.run(
-            _reclaim_expired_protected_trials(capacity_guard_database)
-        ) == 1
-        assert asyncio.run(
-            _reclaim_expired_protected_trials(capacity_guard_database)
-        ) == 0
+        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 1
+        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 0
 
         with engine.connect() as connection:
             state = (
@@ -2606,9 +2619,7 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
@@ -2623,9 +2634,7 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
             "old_lifecycle_state": "cancelled-terminal",
             "claim_high_water": 1,
             "terminal_high_water": 1,
-            "execution_generation": (
-                seeded.first_attempt["execution_generation"] + 1
-            ),
+            "execution_generation": (seeded.first_attempt["execution_generation"] + 1),
             "attempt_sequence": 1,
             "next_lifecycle_state": "pending-unassigned",
             "public_attempt_count": 1,
@@ -2661,9 +2670,7 @@ def test_protected_prestart_timeout_at_retry_ceiling_closes_terminally(
                 {"trial_id": seeded.trial_id},
             )
 
-        assert asyncio.run(
-            _reclaim_expired_protected_trials(capacity_guard_database)
-        ) == 1
+        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 1
         with engine.connect() as connection:
             state = (
                 connection.execute(
@@ -2693,9 +2700,7 @@ def test_protected_prestart_timeout_at_retry_ceiling_closes_terminally(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
@@ -2749,12 +2754,15 @@ def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
                 {"worker_id": seeded.worker.worker.worker_id},
             )
 
-        assert asyncio.run(
-            _reclaim_expired_protected_trials(
-                capacity_guard_database,
-                claimed_without_start_expiry_sec=None,
+        assert (
+            asyncio.run(
+                _reclaim_expired_protected_trials(
+                    capacity_guard_database,
+                    claimed_without_start_expiry_sec=None,
+                )
             )
-        ) == 1
+            == 1
+        )
 
         with engine.connect() as connection:
             state = (
@@ -2784,9 +2792,7 @@ def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
@@ -2855,9 +2861,7 @@ def test_protected_user_cancel_closes_claim_exactly_once(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
@@ -2887,9 +2891,7 @@ def test_competing_protected_terminal_updates_close_claim_once(
     )
 
     async def race_terminal_updates() -> list[int]:
-        engine = create_async_engine(
-            make_url(_value(capacity_guard_database, "admin_url"))
-        )
+        engine = create_async_engine(make_url(_value(capacity_guard_database, "admin_url")))
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
         async def update_state(target: str) -> int:
@@ -2946,9 +2948,7 @@ def test_competing_protected_terminal_updates_close_claim_once(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
@@ -3008,9 +3008,9 @@ def test_protected_stale_running_timeout_closes_claim_terminally(
             connection.execute(
                 text(
                     "UPDATE public.tasks SET config = "
-                    "'{\"task\": {\"id\": \"protected-timeout\"}, "
-                    "\"agent\": {\"name\": \"opencode\", "
-                    "\"timeout_sec\": 10.0}}'::jsonb "
+                    '\'{"task": {"id": "protected-timeout"}, '
+                    '"agent": {"name": "opencode", '
+                    '"timeout_sec": 10.0}}\'::jsonb '
                     "WHERE id = (SELECT task_id FROM public.trials "
                     "WHERE id = :trial_id)"
                 ),
@@ -3064,9 +3064,7 @@ def test_protected_stale_running_timeout_closes_claim_terminally(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
@@ -3138,16 +3136,14 @@ def test_guard_0026_refuses_downgrade_with_requeueable_protected_claim(
                     ),
                     {
                         "trial_id": seeded.trial_id,
-                        "first_attempt_id": seeded.first_attempt[
-                            "protected_attempt_id"
-                        ],
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
                     },
                 )
                 .mappings()
                 .one()
             )
         assert dict(state) == {
-            "version_num": "guard_0026",
+            "version_num": "guard_0027",
             "state": "claimed",
             "reservation_state": "active",
             "lifecycle_state": "assigned",
@@ -3516,6 +3512,7 @@ def test_configured_protected_mixed_principal_routes_preserve_non_worker_callers
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    asyncio.run(_seed_protected_worker(capacity_guard_database))
     family_bearer = _seed_bearer(
         capacity_guard_database,
         raw="protected-test-family-orchestrator",

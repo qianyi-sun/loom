@@ -15,8 +15,10 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
 )
 from loom_cli.rollout.preflight_coverage import load_coverage_manifest
+from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
+from loom_cli.rollout.preflight_registered_checks import build_execution_prerequisite_check
 from loom_cli.rollout.preflight_runtime import CandidatePreflightRuntime
-from loom_cli.rollout.rehearsal_readiness import RehearsalResult
+from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS, RehearsalResult
 from tests.loom_cli.rollout.test_rehearsal_restore_evidence import _checkpoint
 
 
@@ -104,11 +106,16 @@ def _runtime(tmp_path: Path) -> CandidatePreflightRuntime:
                 blockers={},
             )
 
-        return {
-            entry.check_id: action(entry.check_id)
-            for entry in load_coverage_manifest().checks
-            if entry.tier == 3
-        }
+        return {check_id: action(check_id) for check_id in REHEARSAL_CHECK_IDS}
+
+    def execution_prerequisite_check(lease):
+        return build_execution_prerequisite_check(
+            lambda _lease: {},
+            lease=lease,
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate.resolved_tree or "",
+            mutation_epoch=17,
+        )
 
     return CandidatePreflightRuntime(
         candidate=candidate,
@@ -118,6 +125,7 @@ def _runtime(tmp_path: Path) -> CandidatePreflightRuntime:
         bindings={
             "candidate.base.sha": candidate.approved_base_sha or "none",
             "candidate.sha": candidate.resolved_sha,
+            "candidate.tree": candidate.resolved_tree or "",
             "candidate.source-mode": candidate.source_mode,
             "environment": "staging",
             "namespace": "loom-staging",
@@ -126,6 +134,7 @@ def _runtime(tmp_path: Path) -> CandidatePreflightRuntime:
         },
         rehearsal_actions=actions,
         rehearsal_identity=identity,
+        execution_prerequisite_check_factory=execution_prerequisite_check,
     )
 
 
@@ -156,7 +165,19 @@ def test_checkpoint_plan_runs_only_exact_bound_rehearsal_actions(tmp_path: Path)
     )
 
     tier3 = [execution for execution in executions if execution.tier == 3]
-    assert tier3 and all(execution.passed for execution in tier3)
+    assert tier3
+    assert all(
+        execution.passed for execution in tier3 if execution.check_id != "execution.prerequisites"
+    )
+    prerequisite = next(
+        execution for execution in tier3 if execution.check_id == "execution.prerequisites"
+    )
+    assert not prerequisite.passed
+    assert PreflightRehearsal.from_executions(
+        registry_digest=plan.registry.registry_digest,
+        coverage_digest=plan.registry.coverage_digest,
+        executions=executions,
+    ).passed
     cleanup = next(execution for execution in tier3 if execution.check_id == "rehearsal.cleanup")
     assert cleanup.evidence["cleanup-verified"] is True
 
@@ -193,6 +214,7 @@ def test_runtime_rejects_missing_input_candidate_or_checkpoint_drift(tmp_path: P
             },
             rehearsal_actions=runtime.rehearsal_actions,
             rehearsal_identity=runtime.rehearsal_identity,
+            execution_prerequisite_check_factory=(runtime.execution_prerequisite_check_factory),
         )
 
 
@@ -213,6 +235,7 @@ def test_runtime_refreshes_probe_sessions_without_changing_check_identity(tmp_pa
         bindings=original.bindings,
         rehearsal_actions=original.rehearsal_actions,
         rehearsal_identity=original.rehearsal_identity,
+        execution_prerequisite_check_factory=(original.execution_prerequisite_check_factory),
         refresh_static_checks=refresh,
     )
     after_init = calls
@@ -240,5 +263,6 @@ def test_runtime_rejects_refreshed_check_contract_drift(tmp_path: Path) -> None:
             bindings=original.bindings,
             rehearsal_actions=original.rehearsal_actions,
             rehearsal_identity=original.rehearsal_identity,
+            execution_prerequisite_check_factory=(original.execution_prerequisite_check_factory),
             refresh_static_checks=drifted,
         )

@@ -1,6 +1,6 @@
 """Bind one verified critical checkpoint to isolated restore evidence.
 
-This module is the only authority that may translate a schema-v2 rollout
+This module is the only authority that may translate a schema-3 rollout
 checkpoint into a reusable :class:`BackupLease`.  A completed manifest alone
 is deliberately insufficient: the exact PostgreSQL dump and immutable object
 inventory must also be proven restorable by an isolated rehearsal.
@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
+from uuid import UUID
 
 from loom_cli.cluster_backup_guard import (
     BackupTraversalLimits,
@@ -26,6 +28,11 @@ from loom_cli.cluster_backup_guard import (
 
 from .backup import VerifiedBackup
 from .backup_lease import BackupLease
+from .checkpoint_database_authority import (
+    DatabaseAuthorityError,
+    DatabaseAuthorityEvidence,
+)
+from .protected_secret_inventory import SecretInventoryError, inspect_secret_inventory
 from .rollout_checkpoint import ImmutableObjectInventory
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -33,7 +40,8 @@ _REQUEST_ID_RE = re.compile(r"^req-[a-z0-9][a-z0-9-]{7,63}$")
 _EVIDENCE_ID_RE = re.compile(r"^restore-[a-z0-9][a-z0-9-]{7,63}$")
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_INVENTORY_BYTES = 16 * 1024 * 1024
-_COMPONENTS = ("k8s_secrets", "object_inventory", "postgres")
+_MAX_AUTHORITY_BYTES = 64 * 1024
+_COMPONENTS = ("database_authority", "k8s_secrets", "object_inventory", "postgres")
 
 
 class CheckpointLeaseError(RuntimeError):
@@ -130,7 +138,7 @@ def _component_hashes(manifest: Mapping[str, object]) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class CriticalCheckpointEvidence:
-    """Strictly parsed identity of one immutable schema-v2 checkpoint."""
+    """Strictly parsed identity of one immutable schema-3 checkpoint."""
 
     request_id: str
     manifest_path: Path
@@ -142,6 +150,18 @@ class CriticalCheckpointEvidence:
     db_snapshot_identity: str
     schema_revision: str
     object_inventory_root: str
+    database_authority_digest: str
+    public_schema_revision: str
+    capacity_guard_schema_revision: str | None
+    manager_configuration_epoch: int
+    manager_configuration_digest: str
+    manager_authority_incarnation: UUID
+    manager_writer_epoch: int
+    manager_execution_state: str
+    manager_execution_epoch: int
+    manager_execution_manifest_sha256: None
+    manager_executable_new_capacity_ceiling: int
+    manager_increase_freeze: bool
     created_at: datetime
 
     def __post_init__(self) -> None:
@@ -158,12 +178,33 @@ class CriticalCheckpointEvidence:
             is None
             or not self.schema_revision
             or _SHA256_RE.fullmatch(self.object_inventory_root) is None
+            or _SHA256_RE.fullmatch(self.database_authority_digest) is None
             or self.created_at.tzinfo is None
             or self.created_at.utcoffset() is None
         ):
             raise ValueError("critical checkpoint evidence is invalid")
-        if set(self.component_sha256) != set(_COMPONENTS) or any(
-            _SHA256_RE.fullmatch(value) is None for value in self.component_sha256.values()
+        try:
+            authority = DatabaseAuthorityEvidence(
+                public_schema_revision=self.public_schema_revision,
+                capacity_guard_schema_revision=self.capacity_guard_schema_revision,
+                configuration_epoch=self.manager_configuration_epoch,
+                configuration_digest=self.manager_configuration_digest,
+                authority_incarnation=self.manager_authority_incarnation,
+                writer_epoch=self.manager_writer_epoch,
+                execution_state=self.manager_execution_state,
+                execution_epoch=self.manager_execution_epoch,
+                execution_manifest_sha256=self.manager_execution_manifest_sha256,
+                executable_new_capacity_ceiling=(self.manager_executable_new_capacity_ceiling),
+                increase_freeze=self.manager_increase_freeze,
+            )
+        except ValueError as exc:
+            raise ValueError("critical checkpoint database authority is invalid") from exc
+        if authority.digest != self.database_authority_digest:
+            raise ValueError("critical checkpoint database authority digest is invalid")
+        if (
+            set(self.component_sha256) != set(_COMPONENTS)
+            or any(_SHA256_RE.fullmatch(value) is None for value in self.component_sha256.values())
+            or self.component_sha256["database_authority"] != self.database_authority_digest
         ):
             raise ValueError("critical checkpoint component authority is invalid")
 
@@ -172,6 +213,7 @@ class CriticalCheckpointEvidence:
         payload = {
             "component_sha256": dict(self.component_sha256),
             "created_at": self.created_at.isoformat(),
+            "database_authority_digest": self.database_authority_digest,
             "db_snapshot_identity": self.db_snapshot_identity,
             "environment": self.environment,
             "manifest_path": str(self.manifest_path),
@@ -181,6 +223,19 @@ class CriticalCheckpointEvidence:
             "object_inventory_root": self.object_inventory_root,
             "request_id": self.request_id,
             "schema_revision": self.schema_revision,
+            "database_authority": {
+                "authority_incarnation": str(self.manager_authority_incarnation),
+                "capacity_guard_schema_revision": self.capacity_guard_schema_revision,
+                "configuration_digest": self.manager_configuration_digest,
+                "configuration_epoch": self.manager_configuration_epoch,
+                "executable_new_capacity_ceiling": (self.manager_executable_new_capacity_ceiling),
+                "execution_epoch": self.manager_execution_epoch,
+                "execution_manifest_sha256": (self.manager_execution_manifest_sha256),
+                "execution_state": self.manager_execution_state,
+                "increase_freeze": self.manager_increase_freeze,
+                "public_schema_revision": self.public_schema_revision,
+                "writer_epoch": self.manager_writer_epoch,
+            },
             "schema_version": 1,
         }
         return hashlib.sha256(
@@ -204,6 +259,20 @@ class RestoreVerificationEvidence:
     namespace: str
     report_sha256: str
     verified_at: datetime
+    checkpoint_schema_version: int | None = None
+    component_sha256: Mapping[str, str] | None = None
+    database_authority_digest: str | None = None
+    public_schema_revision: str | None = None
+    capacity_guard_schema_revision: str | None = None
+    manager_configuration_epoch: int | None = None
+    manager_configuration_digest: str | None = None
+    manager_authority_incarnation: UUID | None = None
+    manager_writer_epoch: int | None = None
+    manager_execution_state: str | None = None
+    manager_execution_epoch: int | None = None
+    manager_execution_manifest_sha256: str | None = None
+    manager_executable_new_capacity_ceiling: int | None = None
+    manager_increase_freeze: bool | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -227,6 +296,213 @@ class RestoreVerificationEvidence:
             or self.verified_at.utcoffset() is None
         ):
             raise ValueError("restore verification evidence is invalid")
+        if self.checkpoint_schema_version is None:
+            if self.component_sha256 is not None or any(
+                value is not None
+                for value in (
+                    self.database_authority_digest,
+                    self.public_schema_revision,
+                    self.capacity_guard_schema_revision,
+                    self.manager_configuration_epoch,
+                    self.manager_configuration_digest,
+                    self.manager_authority_incarnation,
+                    self.manager_writer_epoch,
+                    self.manager_execution_state,
+                    self.manager_execution_epoch,
+                    self.manager_execution_manifest_sha256,
+                    self.manager_executable_new_capacity_ceiling,
+                    self.manager_increase_freeze,
+                )
+            ):
+                raise ValueError("historical restore evidence cannot carry schema-3 authority")
+            return
+        components = dict(self.component_sha256 or {})
+        try:
+            authority = DatabaseAuthorityEvidence(
+                public_schema_revision=self.public_schema_revision,  # type: ignore[arg-type]
+                capacity_guard_schema_revision=self.capacity_guard_schema_revision,
+                configuration_epoch=self.manager_configuration_epoch,  # type: ignore[arg-type]
+                configuration_digest=self.manager_configuration_digest,  # type: ignore[arg-type]
+                authority_incarnation=self.manager_authority_incarnation,  # type: ignore[arg-type]
+                writer_epoch=self.manager_writer_epoch,  # type: ignore[arg-type]
+                execution_state=self.manager_execution_state,  # type: ignore[arg-type]
+                execution_epoch=self.manager_execution_epoch,  # type: ignore[arg-type]
+                execution_manifest_sha256=self.manager_execution_manifest_sha256,  # type: ignore[arg-type]
+                executable_new_capacity_ceiling=(
+                    self.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+                ),
+                increase_freeze=self.manager_increase_freeze,  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("restore schema-3 database authority is invalid") from exc
+        if (
+            self.checkpoint_schema_version != 3
+            or set(components) != set(_COMPONENTS)
+            or any(_SHA256_RE.fullmatch(value) is None for value in components.values())
+            or authority.digest != self.database_authority_digest
+            or components["database_authority"] != self.database_authority_digest
+            or components["postgres"] != self.db_snapshot_identity.removeprefix("pgdump-sha256:")
+            or self.public_schema_revision != self.schema_revision
+        ):
+            raise ValueError("restore schema-3 authority binding is invalid")
+        object.__setattr__(self, "component_sha256", MappingProxyType(components))
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "checkpoint_evidence_sha256": self.checkpoint_evidence_sha256,
+            "db_snapshot_identity": self.db_snapshot_identity,
+            "environment": self.environment,
+            "manifest_sha256": self.manifest_sha256,
+            "mutation_epoch": self.mutation_epoch,
+            "namespace": self.namespace,
+            "object_inventory_root": self.object_inventory_root,
+            "report_sha256": self.report_sha256,
+            "request_id": self.request_id,
+            "schema_revision": self.schema_revision,
+            "schema_version": 1 if self.checkpoint_schema_version is None else 2,
+            "verification_id": self.verification_id,
+            "verified_at": self.verified_at.isoformat(),
+        }
+        if self.checkpoint_schema_version is not None:
+            payload.update(_restore_authority_payload(self))
+        return payload
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> RestoreVerificationEvidence:
+        common = {
+            "checkpoint_evidence_sha256",
+            "db_snapshot_identity",
+            "environment",
+            "manifest_sha256",
+            "mutation_epoch",
+            "namespace",
+            "object_inventory_root",
+            "report_sha256",
+            "request_id",
+            "schema_revision",
+            "schema_version",
+            "verification_id",
+            "verified_at",
+        }
+        new_fields = set(_restore_authority_payload_fields())
+        schema_version = value.get("schema_version")
+        if (
+            schema_version not in {1, 2}
+            or set(value) != common | (new_fields if schema_version == 2 else set())
+            or type(value.get("mutation_epoch")) is not int
+            or any(
+                not isinstance(value.get(field), str)
+                for field in common - {"mutation_epoch", "schema_version"}
+            )
+        ):
+            raise ValueError("restore verification evidence schema is invalid")
+        try:
+            verified_at = datetime.fromisoformat(value["verified_at"])  # type: ignore[arg-type]
+            authority = _parse_restore_authority(value) if schema_version == 2 else {}
+        except (TypeError, ValueError) as exc:
+            raise ValueError("restore verification evidence schema is invalid") from exc
+        return cls(
+            verification_id=value["verification_id"],  # type: ignore[arg-type]
+            request_id=value["request_id"],  # type: ignore[arg-type]
+            checkpoint_evidence_sha256=value["checkpoint_evidence_sha256"],  # type: ignore[arg-type]
+            manifest_sha256=value["manifest_sha256"],  # type: ignore[arg-type]
+            db_snapshot_identity=value["db_snapshot_identity"],  # type: ignore[arg-type]
+            object_inventory_root=value["object_inventory_root"],  # type: ignore[arg-type]
+            mutation_epoch=value["mutation_epoch"],  # type: ignore[arg-type]
+            schema_revision=value["schema_revision"],  # type: ignore[arg-type]
+            environment=value["environment"],  # type: ignore[arg-type]
+            namespace=value["namespace"],  # type: ignore[arg-type]
+            report_sha256=value["report_sha256"],  # type: ignore[arg-type]
+            verified_at=verified_at,
+            **authority,  # type: ignore[arg-type]
+        )
+
+
+def _restore_authority_payload_fields() -> tuple[str, ...]:
+    return (
+        "checkpoint_schema_version",
+        "component_sha256",
+        "database_authority_digest",
+        "public_schema_revision",
+        "capacity_guard_schema_revision",
+        "manager_configuration_epoch",
+        "manager_configuration_digest",
+        "manager_authority_incarnation",
+        "manager_writer_epoch",
+        "manager_execution_state",
+        "manager_execution_epoch",
+        "manager_execution_manifest_sha256",
+        "manager_executable_new_capacity_ceiling",
+        "manager_increase_freeze",
+    )
+
+
+def _restore_authority_payload(evidence: RestoreVerificationEvidence) -> dict[str, object]:
+    return {
+        "checkpoint_schema_version": evidence.checkpoint_schema_version,
+        "component_sha256": dict(evidence.component_sha256 or {}),
+        "database_authority_digest": evidence.database_authority_digest,
+        "public_schema_revision": evidence.public_schema_revision,
+        "capacity_guard_schema_revision": evidence.capacity_guard_schema_revision,
+        "manager_configuration_epoch": evidence.manager_configuration_epoch,
+        "manager_configuration_digest": evidence.manager_configuration_digest,
+        "manager_authority_incarnation": str(evidence.manager_authority_incarnation),
+        "manager_writer_epoch": evidence.manager_writer_epoch,
+        "manager_execution_state": evidence.manager_execution_state,
+        "manager_execution_epoch": evidence.manager_execution_epoch,
+        "manager_execution_manifest_sha256": evidence.manager_execution_manifest_sha256,
+        "manager_executable_new_capacity_ceiling": (
+            evidence.manager_executable_new_capacity_ceiling
+        ),
+        "manager_increase_freeze": evidence.manager_increase_freeze,
+    }
+
+
+def _parse_restore_authority(value: Mapping[str, object]) -> dict[str, object]:
+    components = value["component_sha256"]
+    guard = value["capacity_guard_schema_revision"]
+    integers = (
+        "checkpoint_schema_version",
+        "manager_configuration_epoch",
+        "manager_writer_epoch",
+        "manager_execution_epoch",
+        "manager_executable_new_capacity_ceiling",
+    )
+    strings = (
+        "database_authority_digest",
+        "public_schema_revision",
+        "manager_configuration_digest",
+        "manager_authority_incarnation",
+        "manager_execution_state",
+    )
+    if (
+        not isinstance(components, Mapping)
+        or not all(
+            isinstance(key, str) and isinstance(item, str) for key, item in components.items()
+        )
+        or any(type(value[field]) is not int for field in integers)
+        or any(not isinstance(value[field], str) for field in strings)
+        or (guard is not None and not isinstance(guard, str))
+        or value["manager_execution_manifest_sha256"] is not None
+        or type(value["manager_increase_freeze"]) is not bool
+    ):
+        raise ValueError("restore verification evidence schema is invalid")
+    return {
+        "checkpoint_schema_version": value["checkpoint_schema_version"],
+        "component_sha256": dict(components),
+        "database_authority_digest": value["database_authority_digest"],
+        "public_schema_revision": value["public_schema_revision"],
+        "capacity_guard_schema_revision": guard,
+        "manager_configuration_epoch": value["manager_configuration_epoch"],
+        "manager_configuration_digest": value["manager_configuration_digest"],
+        "manager_authority_incarnation": UUID(value["manager_authority_incarnation"]),  # type: ignore[arg-type]
+        "manager_writer_epoch": value["manager_writer_epoch"],
+        "manager_execution_state": value["manager_execution_state"],
+        "manager_execution_epoch": value["manager_execution_epoch"],
+        "manager_execution_manifest_sha256": None,
+        "manager_executable_new_capacity_ceiling": value["manager_executable_new_capacity_ceiling"],
+        "manager_increase_freeze": value["manager_increase_freeze"],
+    }
 
 
 def inspect_critical_checkpoint(
@@ -271,8 +547,8 @@ def inspect_critical_checkpoint(
         ),
         label="checkpoint manifest",
     )
-    if manifest.get("schema_version") != 2:
-        raise CheckpointLeaseError("rollout checkpoint must use schema version 2")
+    if manifest.get("schema_version") != 3:
+        raise CheckpointLeaseError("rollout checkpoint must use schema version 3")
     component_sha256 = _component_hashes(manifest)
     root = backup.manifest_path.parent
     components = manifest["components"]
@@ -281,6 +557,7 @@ def inspect_critical_checkpoint(
         "k8s_secrets": root / "secrets",
         "object_inventory": root / "object-inventory.json",
         "postgres": root / "postgres" / "loom.dump",
+        "database_authority": root / "database-authority.json",
     }
     for name, expected_path in expected_paths.items():
         component = components[name]
@@ -309,6 +586,23 @@ def inspect_critical_checkpoint(
         or inventory.namespace != namespace
     ):
         raise CheckpointLeaseError("checkpoint object inventory identity drifted")
+    authority_payload = _read_private_regular_file(
+        expected_paths["database_authority"],
+        expected_owner_uid=expected_owner_uid,
+        max_bytes=_MAX_AUTHORITY_BYTES,
+        label="checkpoint database authority",
+    )
+    if hashlib.sha256(authority_payload).hexdigest() != component_sha256["database_authority"]:
+        raise CheckpointLeaseError("checkpoint database authority digest drifted")
+    try:
+        authority = DatabaseAuthorityEvidence.from_dict(
+            _json_object(authority_payload, label="checkpoint database authority")
+        )
+        inspect_secret_inventory(root / "secrets", expected_owner_uid=expected_owner_uid)
+    except (DatabaseAuthorityError, SecretInventoryError) as exc:
+        raise CheckpointLeaseError("checkpoint private authority is invalid") from exc
+    if inventory.schema_revision != authority.public_schema_revision:
+        raise CheckpointLeaseError("checkpoint database revision authority drifted")
     created_at_raw = manifest.get("created_at")
     if not isinstance(created_at_raw, str):
         raise CheckpointLeaseError("checkpoint creation time is invalid")
@@ -342,6 +636,18 @@ def inspect_critical_checkpoint(
         db_snapshot_identity=f"pgdump-sha256:{component_sha256['postgres']}",
         schema_revision=inventory.schema_revision,
         object_inventory_root=inventory.inventory_root,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(authority.executable_new_capacity_ceiling),
+        manager_increase_freeze=authority.increase_freeze,
         created_at=created_at,
     )
 
@@ -365,6 +671,21 @@ def build_restore_verified_lease(
         restore.schema_revision == checkpoint.schema_revision,
         restore.environment == checkpoint.environment,
         restore.namespace == checkpoint.namespace,
+        restore.checkpoint_schema_version == 3,
+        dict(restore.component_sha256 or {}) == dict(checkpoint.component_sha256),
+        restore.database_authority_digest == checkpoint.database_authority_digest,
+        restore.public_schema_revision == checkpoint.public_schema_revision,
+        restore.capacity_guard_schema_revision == checkpoint.capacity_guard_schema_revision,
+        restore.manager_configuration_epoch == checkpoint.manager_configuration_epoch,
+        restore.manager_configuration_digest == checkpoint.manager_configuration_digest,
+        restore.manager_authority_incarnation == checkpoint.manager_authority_incarnation,
+        restore.manager_writer_epoch == checkpoint.manager_writer_epoch,
+        restore.manager_execution_state == checkpoint.manager_execution_state,
+        restore.manager_execution_epoch == checkpoint.manager_execution_epoch,
+        restore.manager_execution_manifest_sha256 == checkpoint.manager_execution_manifest_sha256,
+        restore.manager_executable_new_capacity_ceiling
+        == checkpoint.manager_executable_new_capacity_ceiling,
+        restore.manager_increase_freeze == checkpoint.manager_increase_freeze,
     }
     if checks != {True}:
         raise CheckpointLeaseError("restore verification does not match checkpoint authority")
@@ -382,6 +703,22 @@ def build_restore_verified_lease(
         created_at=checkpoint.created_at,
         expires_at=expires_at,
         restore_verified_at=restore.verified_at,
+        checkpoint_schema_version=3,
+        database_authority_digest=checkpoint.database_authority_digest,
+        public_schema_revision=checkpoint.public_schema_revision,
+        capacity_guard_schema_revision=checkpoint.capacity_guard_schema_revision,
+        manager_configuration_epoch=checkpoint.manager_configuration_epoch,
+        manager_configuration_digest=checkpoint.manager_configuration_digest,
+        manager_authority_incarnation=checkpoint.manager_authority_incarnation,
+        manager_writer_epoch=checkpoint.manager_writer_epoch,
+        manager_execution_state=checkpoint.manager_execution_state,
+        manager_execution_epoch=checkpoint.manager_execution_epoch,
+        manager_execution_manifest_sha256=checkpoint.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(
+            checkpoint.manager_executable_new_capacity_ceiling
+        ),
+        manager_increase_freeze=checkpoint.manager_increase_freeze,
+        restore_report_sha256=restore.report_sha256,
     )
 
 

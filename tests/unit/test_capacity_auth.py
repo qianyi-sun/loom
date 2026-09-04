@@ -33,11 +33,6 @@ def _operator(token: str = "operator-secret") -> dict[str, object]:
             "capacity:configure:fleet",
             "capacity:configure:subject",
             "capacity:configure:activate",
-            "capacity:execution:activate",
-            "capacity:execution:abort",
-            "capacity:execution:drain",
-            "capacity:execution:prepare",
-            "capacity:execution:retire",
             "capacity:reconcile",
             "capacity:read",
         ],
@@ -100,6 +95,31 @@ def test_registry_verifies_hash_without_storing_raw_token(tmp_path: Path) -> Non
     assert reporter.subject_incarnation == SUBJECT_INCARNATION
     assert reporter.demand_reporter_incarnation == REPORTER_INCARNATION
     assert "operator-secret" not in path.read_text(encoding="utf-8")
+
+
+def test_registry_accepts_distinct_configuration_rollback_scope(tmp_path: Path) -> None:
+    verifier = CapacityPrincipalVerifier.from_file(
+        _write_registry(
+            tmp_path / "rollback-principals.json",
+            [
+                {
+                    **_operator("rollback-operator-secret"),
+                    "token_sha256": _digest("rollback-operator-secret"),
+                    "scopes": [
+                        "capacity:configure:activate",
+                        "capacity:configure:rollback",
+                        "capacity:read",
+                        "capacity:reconcile",
+                    ],
+                }
+            ],
+        )
+    )
+
+    operator = verifier.verify_bearer("Bearer rollback-operator-secret")
+
+    assert "capacity:configure:activate" in operator.scopes
+    assert "capacity:configure:rollback" in operator.scopes
 
 
 def test_registry_requires_exact_pool_executor_generation(
@@ -211,6 +231,20 @@ def test_execution_transition_principal_must_be_unbound(
     with pytest.raises(PrincipalRegistryError, match="execution transition"):
         CapacityPrincipalVerifier.from_file(
             _write_registry(tmp_path / "bound-transition.json", [principal])
+        )
+
+
+def test_execution_transition_principal_must_be_single_purpose(tmp_path: Path) -> None:
+    principal = _operator()
+    principal["scopes"] = [
+        "capacity:execution:prepare",
+        "capacity:execution:activate",
+        "capacity:reconcile",
+    ]
+
+    with pytest.raises(PrincipalRegistryError, match="single-purpose"):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(tmp_path / "combined-transition.json", [principal])
         )
 
 

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.protected_apply_journal import ComponentState
 from loom_cli.rollout.operator.protected_migration_component import (
     KubernetesProtectedMigrationComponent,
@@ -19,10 +21,36 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import (
 )
 
 
+def _rebind_schema3_authority(plan, *, schema_revision: str):
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision=schema_revision,
+        capacity_guard_schema_revision=plan.capacity_guard_schema_revision,
+        configuration_epoch=plan.manager_configuration_epoch,  # type: ignore[arg-type]
+        configuration_digest=plan.manager_configuration_digest,  # type: ignore[arg-type]
+        authority_incarnation=UUID(str(plan.manager_authority_incarnation)),
+        writer_epoch=plan.manager_writer_epoch,  # type: ignore[arg-type]
+        execution_state=plan.manager_execution_state,  # type: ignore[arg-type]
+        execution_epoch=plan.manager_execution_epoch,  # type: ignore[arg-type]
+        execution_manifest_sha256=plan.manager_execution_manifest_sha256,
+        executable_new_capacity_ceiling=(
+            plan.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+        ),
+        increase_freeze=plan.manager_increase_freeze,  # type: ignore[arg-type]
+    )
+    checkpoint_components = dict(plan.checkpoint_component_sha256 or {})
+    checkpoint_components["database_authority"] = authority.digest
+    return replace(
+        plan,
+        schema_revision=schema_revision,
+        public_schema_revision=authority.public_schema_revision,
+        database_authority_digest=authority.digest,
+        checkpoint_component_sha256=checkpoint_components,
+    )
+
+
 def _plan(tmp_path: Path):  # type: ignore[no-untyped-def]
     return replace(
-        _base_plan(tmp_path),
-        schema_revision="0069",
+        _rebind_schema3_authority(_base_plan(tmp_path), schema_revision="0069"),
         migration_target_revision="0072",
     )
 
@@ -121,8 +149,7 @@ def test_migration_component_rejects_schema_or_manifest_drift(tmp_path: Path) ->
 
 def test_legacy_migration_observation_remains_epoch_zero(tmp_path: Path) -> None:
     plan = replace(
-        _published_plan(tmp_path),
-        schema_revision="0065",
+        _rebind_schema3_authority(_published_plan(tmp_path), schema_revision="0065"),
         starting_mutation_epoch=0,
     )
     authority = KubernetesProtectedMigrationComponent(

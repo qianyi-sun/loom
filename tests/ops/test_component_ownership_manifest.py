@@ -909,7 +909,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
         )
         == []
     )
-    assert len(rollout_images) == 11
+    assert len(rollout_images) == 12
 
 
 def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
@@ -926,7 +926,7 @@ def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
     primary_names = {entry["image_name"] for entry in primary}
     auxiliary_names = {entry["image_name"] for entry in auxiliary}
 
-    assert len(primary) == 10
+    assert len(primary) == 12
     assert len(auxiliary) == 2
     assert not primary_names & auxiliary_names
     assert auxiliary_names == {
@@ -952,7 +952,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
     assert all(entry["context"] == "." for entry in matrix)
 
 
-def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> None:
+def test_capacity_manager_image_has_narrow_ownership_and_primary_rollout_role() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     component = next(
         component
@@ -963,7 +963,7 @@ def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> No
     assert component.dockerfile == "deploy/Dockerfile.capacity-manager"
     assert component.release_digest == "loom-capacity-manager"
     assert component.runtime_policy == "start"
-    assert component.rollout_role == "none"
+    assert component.rollout_role == "primary"
     assert {
         ".dockerignore",
         "README.md",
@@ -1258,7 +1258,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
         lane="runtime-payload",
     )
 
-    assert len(lane_paths) == 11
+    assert len(lane_paths) == 12
     policy_paths = {
         path
         for policy in manifest.execution_policies
@@ -1268,7 +1268,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
             policy=policy.id,
         )
     }
-    assert len(policy_paths) == 11
+    assert len(policy_paths) == 12
     assert policy_paths == set(lane_paths)
     assert all(
         manifest.test_owner_for_path(path).execution_policy is not None for path in policy_paths

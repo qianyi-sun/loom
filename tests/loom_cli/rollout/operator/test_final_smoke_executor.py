@@ -19,6 +19,9 @@ from loom_cli.rollout.operator.final_smoke_executor import FinalSmokeExecutor
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 
+_ORACLE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
+_MODEL_TASK_ID = "loom-smoke/gb10-direct-completion-hello-world"
+
 
 class _Transport:
     base_url = "https://yylx.world/dev"
@@ -35,7 +38,7 @@ def _oracle_authority() -> AdminSmokeAuthority:
         represented_username="devansh",
         team_id="11111111-1111-4111-8111-111111111111",
         admin_actor="codex-v1-release-gate",
-        task_id="loom-smoke/gb10-oracle-hello-world",
+        task_id=_ORACLE_TASK_ID,
         required_worker_pool="gb10",
         agent="oracle",
     )
@@ -44,6 +47,7 @@ def _oracle_authority() -> AdminSmokeAuthority:
 def _model_authority() -> AdminSmokeAuthority:
     return replace(
         _oracle_authority(),
+        task_id=_MODEL_TASK_ID,
         agent="direct-completion",
         agent_model=ModelSpec(
             provider="yibu",
@@ -105,6 +109,7 @@ def _terminal(
     batch_id: str,
     batch_name: str,
     *,
+    task_id: str = _ORACLE_TASK_ID,
     trial_config: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
@@ -115,7 +120,7 @@ def _terminal(
             "username": "devansh",
             "team_id": "11111111-1111-4111-8111-111111111111",
         },
-        "task_filter": {"task_ids": ["loom-smoke/gb10-oracle-hello-world"]},
+        "task_filter": {"task_ids": [task_id]},
         "trial_config": trial_config or {"agent_name": "oracle", "agent_model": None},
         "required_worker_pools": ["gb10"],
         "state": "finished",
@@ -129,7 +134,7 @@ def _model_trial(trial_id: str, *, llm_calls_count: int = 1) -> dict[str, object
     observed = llm_calls_count > 0
     return {
         "id": trial_id,
-        "task_id": "loom-smoke/gb10-oracle-hello-world",
+        "task_id": _MODEL_TASK_ID,
         "team_id": "11111111-1111-4111-8111-111111111111",
         "batch_id": "batch-1",
         "state": "succeeded",
@@ -197,7 +202,7 @@ def _model_smoke_request(
         if path == "/api/v1/benchmarks":
             return 200, b'{"items":[{"id":"loom-smoke"}]}'
         if path.startswith("/api/v1/tasks/"):
-            return 200, b'{"id":"loom-smoke/gb10-oracle-hello-world"}'
+            return 200, json.dumps({"id": _MODEL_TASK_ID}).encode()
         if path.startswith("/api/v1/batches?"):
             return 200, b'{"items":[]}'
         if path == "/api/v1/admin/batches/on-behalf":
@@ -209,6 +214,7 @@ def _model_smoke_request(
             value = _terminal(
                 "batch-1",
                 "rollout-1111111111111111-1",
+                task_id=_MODEL_TASK_ID,
                 trial_config=_model_trial_config(),
             )
             value["expected_trial_count"] = 2

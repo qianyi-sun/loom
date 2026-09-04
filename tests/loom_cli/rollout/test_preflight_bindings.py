@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import MappingProxyType
+from uuid import UUID
 
 import pytest
 
@@ -15,6 +17,10 @@ from loom_cli.rollout.external_supervisor_readiness import (
     TASK_IMAGE_BUILDER_SCRIPT_PATH,
 )
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
+from loom_cli.rollout.operator.protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisiteStore,
+)
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
@@ -22,9 +28,13 @@ from loom_cli.rollout.preflight_contract import (
     CheckExecution,
     CheckOperation,
     CheckOutcome,
+    PreflightAttestation,
     StageCapability,
     external_supervisor_transition_digest,
     external_supervisor_unit_set_digest,
+)
+from tests.loom_cli.rollout.operator.protected_execution_prerequisite_fixtures import (
+    execution_prerequisite_artifact as _artifact,
 )
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
@@ -49,7 +59,7 @@ def _execution(check_id: str, evidence: dict[str, object]) -> CheckExecution:
     )
 
 
-def _executions() -> tuple[CheckExecution, ...]:
+def _executions(*, include_execution_prerequisites: bool = True) -> tuple[CheckExecution, ...]:
     predecessor_units = {
         "loom-autoscaler-gb10-staging.service": "a" * 64,
         "loom-autoscaler-gb10-staging.timer": "b" * 64,
@@ -69,7 +79,7 @@ def _executions() -> tuple[CheckExecution, ...]:
         "loom-task-image-builder-oldlab-staging.timer": "6" * 64,
     }
     all_target_units = {**target_units, **oldlab_target_units}
-    return (
+    executions = (
         _execution(
             "candidate.identity",
             {"resolved-sha": "a" * 40, "resolved-tree": "b" * 40},
@@ -184,6 +194,27 @@ def _executions() -> tuple[CheckExecution, ...]:
             {"cleanup-verified": True, "protected-mutation": False},
         ),
     )
+    if not include_execution_prerequisites:
+        return executions
+    return (
+        *executions,
+        _execution(
+            "execution.prerequisites",
+            {
+                "schema-version": 1,
+                "artifact-path": f"/var/lib/loom/execution-prerequisites/{'1' * 64}.json",
+                "artifact-sha256": "1" * 64,
+                "core-artifact-bundle-sha256": "2" * 64,
+                "execution-policy-sha256": "3" * 64,
+                "executor-profile-seed-sha256": "4" * 64,
+                "manager-route-sha256": "5" * 64,
+                "access-metadata-sha256": "6" * 64,
+                "coexistence-witness-sha256": "7" * 64,
+                "legacy-writer-sha256": "8" * 64,
+                "rollback-evidence-sha256": "9" * 64,
+            },
+        ),
+    )
 
 
 def _context(*, candidate_sha: str = "a" * 40) -> CheckContext:
@@ -206,18 +237,75 @@ def _context(*, candidate_sha: str = "a" * 40) -> CheckContext:
     )
 
 
+def _schema_three_lease() -> BackupLease:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0067",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
+    return BackupLease(
+        lease_id="lease-restored01",
+        source_request_id="req-restored01",
+        manifest_sha256="a" * 64,
+        component_sha256={
+            "database_authority": authority.digest,
+            "k8s_secrets": "e" * 64,
+            "object_inventory": "c" * 64,
+            "postgres": "b" * 64,
+        },
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="pgdump-sha256:" + "b" * 64,
+        schema_revision="0067",
+        object_inventory_root="d" * 64,
+        created_at=NOW,
+        restore_verified_at=NOW + timedelta(minutes=1),
+        expires_at=NOW + timedelta(hours=2),
+        checkpoint_schema_version=3,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
+        restore_report_sha256="f" * 64,
+    )
+
+
 def test_derives_complete_bindings_only_from_exact_evidence() -> None:
-    bindings = derive_attestation_bindings(_context(), _executions())
+    lease = _schema_three_lease()
+    bindings = derive_attestation_bindings(
+        _context(),
+        _executions(),
+        backup_lease=lease,
+    )
     assert bindings.candidate_sha == "a" * 40
     assert bindings.candidate_tree == "b" * 40
     assert bindings.browser_image_digest == f"sha256:{'e' * 64}"
     assert bindings.secret_metadata_fingerprints == {"admin": f"sha256:{'d' * 64}"}
     assert bindings.staging_mutation_epoch == 7
-    assert bindings.backup_lease_id == "req-known-good"
-    assert bindings.backup_lease_digest == "6" * 64
-    assert bindings.backup_manifest_sha256 == "7" * 64
-    assert bindings.backup_component_set_digest == "8" * 64
-    assert bindings.object_inventory_root == "9" * 64
+    assert bindings.backup_lease_id == lease.lease_id
+    assert bindings.backup_lease_digest == lease.evidence_digest
+    assert bindings.backup_manifest_sha256 == lease.manifest_sha256
+    assert bindings.backup_component_set_digest == component_set_digest(lease.component_sha256)
+    assert bindings.object_inventory_root == lease.object_inventory_root
+    assert bindings.restore_report_sha256 == lease.restore_report_sha256
+    assert type(bindings).from_dict(bindings.to_dict()) == bindings
     assert bindings.supervisor_predecessor_kind == "canonical"
     assert bindings.supervisor_predecessor_unit_set_digest == (
         external_supervisor_unit_set_digest(bindings.supervisor_predecessor_unit_sha256)
@@ -253,7 +341,7 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     } == {"gx10-01c7", "TRT-EAI-OLDLAB-1"}
     assert (
         controller_bindings["gx10-01c7/transition-digest"]
-        != (controller_bindings["TRT-EAI-OLDLAB-1/transition-digest"])
+        != controller_bindings["TRT-EAI-OLDLAB-1/transition-digest"]
     )
     assert controller_bindings["gx10-01c7/unit-directory"] == GB10_CANONICAL_UNIT_DIR
     assert controller_bindings["TRT-EAI-OLDLAB-1/unit-directory"] == PROTECTED_CANONICAL_UNIT_DIR
@@ -319,25 +407,15 @@ def test_binding_derivation_rejects_incomplete_supervisor_controller_evidence() 
         incomplete.append(_execution(execution.check_id, evidence))
 
     with pytest.raises(ValueError, match="controller coverage"):
-        derive_attestation_bindings(_context(), incomplete)
+        derive_attestation_bindings(
+            _context(),
+            incomplete,
+            backup_lease=_schema_three_lease(),
+        )
 
 
 def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:
-    lease = BackupLease(
-        lease_id="lease-restored01",
-        source_request_id="req-restored01",
-        manifest_sha256="a" * 64,
-        component_sha256={"postgres": "b" * 64, "object_inventory": "c" * 64},
-        environment="staging",
-        namespace="loom-staging",
-        mutation_epoch=7,
-        db_snapshot_identity="pgdump-sha256:" + "b" * 64,
-        schema_revision="0067",
-        object_inventory_root="d" * 64,
-        created_at=NOW,
-        restore_verified_at=NOW + timedelta(minutes=1),
-        expires_at=NOW + timedelta(hours=2),
-    )
+    lease = _schema_three_lease()
 
     bindings = derive_attestation_bindings(
         _context(),
@@ -352,18 +430,108 @@ def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:
     assert bindings.db_snapshot_identity == lease.db_snapshot_identity
     assert bindings.schema_revision == lease.schema_revision
     assert bindings.object_inventory_root == lease.object_inventory_root
+    assert bindings.checkpoint_schema_version == 3
+    assert bindings.checkpoint_component_sha256 == lease.component_sha256
+    assert bindings.database_authority_digest == lease.database_authority_digest
+    assert bindings.manager_configuration_digest == lease.manager_configuration_digest
+
+
+def test_execution_prerequisite_evidence_is_bound_into_new_attestation_schema(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact()
+    store = ProtectedExecutionPrerequisiteStore(tmp_path, service_uid=tmp_path.stat().st_uid)
+    publication = store.publish(artifact)
+    executions = (
+        *_executions(include_execution_prerequisites=False),
+        _execution("execution.prerequisites", store.attestation_evidence(publication)),
+    )
+
+    bindings = derive_attestation_bindings(
+        _context(),
+        executions,
+        backup_lease=_schema_three_lease(),
+    )
+
+    assert bindings.execution_prerequisite_schema_version == 1
+    assert bindings.execution_prerequisite_artifact_path == str(publication.path)
+    assert bindings.execution_prerequisite_artifact_sha256 == artifact.artifact_sha256
+    assert bindings.execution_policy_sha256 == artifact.execution_policy_sha256
+    assert bindings.executor_profile_seed_sha256 == artifact.executor_profile_seed_sha256
+    assert bindings.execution_manager_route_sha256 == artifact.manager_route_sha256
+    assert bindings.execution_access_metadata_sha256 == artifact.credential_metadata_manifest_sha256
+    assert bindings.execution_coexistence_witness_sha256 == artifact.witness_manifest_sha256
+    assert bindings.execution_legacy_writer_sha256 == artifact.legacy_writer_manifest_sha256
+    assert bindings.execution_rollback_evidence_sha256 == artifact.rollback_evidence_sha256
+    assert bindings.execution_core_artifact_bundle_sha256 == artifact.core_artifact_bundle_sha256
+    assert bindings == type(bindings).from_dict(bindings.to_dict())
+
+
+def test_execution_prerequisite_attestation_schema_round_trips(tmp_path: Path) -> None:
+    artifact = _artifact()
+    store = ProtectedExecutionPrerequisiteStore(tmp_path, service_uid=tmp_path.stat().st_uid)
+    publication = store.publish(artifact)
+    executions = (
+        *_executions(include_execution_prerequisites=False),
+        _execution("execution.prerequisites", store.attestation_evidence(publication)),
+    )
+    bindings = derive_attestation_bindings(
+        _context(),
+        executions,
+        backup_lease=_schema_three_lease(),
+    )
+
+    attestation = PreflightAttestation.issue(
+        bindings=bindings,
+        executions=executions,
+        issued_at=NOW + timedelta(minutes=1),
+        registry_digest="4" * 64,
+        coverage_digest="5" * 64,
+    )
+
+    assert attestation.schema_version == 5
+    assert PreflightAttestation.from_dict(attestation.to_dict()) == attestation
+
+
+def test_new_schema_three_checkpoint_attestation_requires_execution_prerequisites() -> None:
+    executions = _executions(include_execution_prerequisites=False)
+
+    with pytest.raises(ValueError, match="attestation binding evidence is incomplete"):
+        derive_attestation_bindings(
+            _context(),
+            executions,
+            backup_lease=_schema_three_lease(),
+        )
+
+
+def test_new_attestation_bindings_require_a_schema_three_lease() -> None:
+    with pytest.raises(ValueError, match="schema-3 backup lease"):
+        derive_attestation_bindings(_context(), _executions())
 
 
 def test_rejects_candidate_drift_and_incomplete_cleanup() -> None:
     with pytest.raises(ValueError, match="candidate evidence drifted"):
-        derive_attestation_bindings(_context(candidate_sha="9" * 40), _executions())
+        derive_attestation_bindings(
+            _context(candidate_sha="9" * 40),
+            _executions(),
+            backup_lease=_schema_three_lease(),
+        )
     executions = list(_executions())
-    executions[-1] = replace(
-        executions[-1],
+    cleanup_index = next(
+        index
+        for index, execution in enumerate(executions)
+        if execution.check_id == "rehearsal.cleanup"
+    )
+    executions[cleanup_index] = replace(
+        executions[cleanup_index],
         evidence=MappingProxyType({"cleanup-verified": False, "protected-mutation": False}),
     )
     with pytest.raises(ValueError, match="cleanup evidence"):
-        derive_attestation_bindings(_context(), executions)
+        derive_attestation_bindings(
+            _context(),
+            executions,
+            backup_lease=_schema_three_lease(),
+        )
 
 
 def test_rejects_absent_external_supervisor_predecessor_evidence() -> None:
@@ -391,4 +559,8 @@ def test_rejects_absent_external_supervisor_predecessor_evidence() -> None:
     )
 
     with pytest.raises(ValueError, match="not authoritative"):
-        derive_attestation_bindings(_context(), executions)
+        derive_attestation_bindings(
+            _context(),
+            executions,
+            backup_lease=_schema_three_lease(),
+        )

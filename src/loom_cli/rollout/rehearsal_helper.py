@@ -92,6 +92,20 @@ def _verify_checkpoint(plan: RehearsalPlan) -> None:
         or checkpoint.db_snapshot_identity != plan.db_snapshot_identity
         or checkpoint.object_inventory_root != plan.object_inventory_root
         or checkpoint.schema_revision != plan.schema_revision
+        or dict(checkpoint.component_sha256) != dict(plan.checkpoint_component_sha256 or {})
+        or checkpoint.database_authority_digest != plan.database_authority_digest
+        or checkpoint.public_schema_revision != plan.public_schema_revision
+        or checkpoint.capacity_guard_schema_revision != plan.capacity_guard_schema_revision
+        or checkpoint.manager_configuration_epoch != plan.manager_configuration_epoch
+        or checkpoint.manager_configuration_digest != plan.manager_configuration_digest
+        or checkpoint.manager_authority_incarnation != plan.manager_authority_incarnation
+        or checkpoint.manager_writer_epoch != plan.manager_writer_epoch
+        or checkpoint.manager_execution_state != plan.manager_execution_state
+        or checkpoint.manager_execution_epoch != plan.manager_execution_epoch
+        or checkpoint.manager_execution_manifest_sha256 != plan.manager_execution_manifest_sha256
+        or checkpoint.manager_executable_new_capacity_ceiling
+        != plan.manager_executable_new_capacity_ceiling
+        or checkpoint.manager_increase_freeze != plan.manager_increase_freeze
     ):
         raise ValueError("rehearsal helper checkpoint identity drifted")
 

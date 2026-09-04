@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
+from uuid import UUID
 
 from loom_cli.cluster_config import validate_container_registry_prefixes
 from loom_cli.rollout.admin_smoke_contract import (
@@ -23,6 +24,7 @@ from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -124,6 +126,20 @@ class RehearsalPlan:
     container_registry: str = ""
     container_registry_push: str = ""
     registry_digests: Mapping[str, str] = field(default_factory=dict)
+    checkpoint_schema_version: int | None = None
+    checkpoint_component_sha256: Mapping[str, str] | None = None
+    database_authority_digest: str | None = None
+    public_schema_revision: str | None = None
+    capacity_guard_schema_revision: str | None = None
+    manager_configuration_epoch: int | None = None
+    manager_configuration_digest: str | None = None
+    manager_authority_incarnation: UUID | None = None
+    manager_writer_epoch: int | None = None
+    manager_execution_state: str | None = None
+    manager_execution_epoch: int | None = None
+    manager_execution_manifest_sha256: str | None = None
+    manager_executable_new_capacity_ceiling: int | None = None
+    manager_increase_freeze: bool | None = None
 
     def __post_init__(self) -> None:
         validate_container_registry_prefixes(
@@ -134,9 +150,10 @@ class RehearsalPlan:
         registry_digests = dict(self.registry_digests)
         supervisor_script_sha256 = dict(self.external_supervisor_script_sha256)
         supervisor_unit_sha256 = dict(self.external_supervisor_unit_sha256)
+        checkpoint_components = dict(self.checkpoint_component_sha256 or {})
         try:
-            expected_supervisor_script_paths = (
-                protected_external_supervisor_script_paths_for_units(supervisor_unit_sha256)
+            expected_supervisor_script_paths = protected_external_supervisor_script_paths_for_units(
+                supervisor_unit_sha256
             )
         except ValueError as exc:
             raise ValueError("rehearsal plan identity is invalid") from exc
@@ -211,9 +228,64 @@ class RehearsalPlan:
             )
         ):
             raise ValueError("rehearsal plan identity is invalid")
+        if self.checkpoint_schema_version is None:
+            if self.checkpoint_component_sha256 is not None or any(
+                value is not None
+                for value in (
+                    self.database_authority_digest,
+                    self.public_schema_revision,
+                    self.capacity_guard_schema_revision,
+                    self.manager_configuration_epoch,
+                    self.manager_configuration_digest,
+                    self.manager_authority_incarnation,
+                    self.manager_writer_epoch,
+                    self.manager_execution_state,
+                    self.manager_execution_epoch,
+                    self.manager_execution_manifest_sha256,
+                    self.manager_executable_new_capacity_ceiling,
+                    self.manager_increase_freeze,
+                )
+            ):
+                raise ValueError("historical rehearsal plan cannot carry schema-3 authority")
+        else:
+            try:
+                authority = DatabaseAuthorityEvidence(
+                    public_schema_revision=self.public_schema_revision,  # type: ignore[arg-type]
+                    capacity_guard_schema_revision=self.capacity_guard_schema_revision,
+                    configuration_epoch=self.manager_configuration_epoch,  # type: ignore[arg-type]
+                    configuration_digest=self.manager_configuration_digest,  # type: ignore[arg-type]
+                    authority_incarnation=self.manager_authority_incarnation,  # type: ignore[arg-type]
+                    writer_epoch=self.manager_writer_epoch,  # type: ignore[arg-type]
+                    execution_state=self.manager_execution_state,  # type: ignore[arg-type]
+                    execution_epoch=self.manager_execution_epoch,  # type: ignore[arg-type]
+                    execution_manifest_sha256=self.manager_execution_manifest_sha256,  # type: ignore[arg-type]
+                    executable_new_capacity_ceiling=(
+                        self.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+                    ),
+                    increase_freeze=self.manager_increase_freeze,  # type: ignore[arg-type]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("rehearsal plan schema-3 authority is invalid") from exc
+            if (
+                self.checkpoint_schema_version != 3
+                or set(checkpoint_components)
+                != {"database_authority", "k8s_secrets", "object_inventory", "postgres"}
+                or authority.digest != self.database_authority_digest
+                or checkpoint_components["database_authority"] != self.database_authority_digest
+                or checkpoint_components["postgres"]
+                != self.db_snapshot_identity.removeprefix("pgdump-sha256:")
+                or self.public_schema_revision != self.schema_revision
+            ):
+                raise ValueError("rehearsal plan schema-3 authority binding is invalid")
         self.resources.require_isolated()
         object.__setattr__(self, "image_digests", MappingProxyType(image_digests))
         object.__setattr__(self, "registry_digests", MappingProxyType(registry_digests))
+        if self.checkpoint_component_sha256 is not None:
+            object.__setattr__(
+                self,
+                "checkpoint_component_sha256",
+                MappingProxyType(checkpoint_components),
+            )
         object.__setattr__(
             self,
             "external_supervisor_script_sha256",
@@ -233,7 +305,7 @@ class RehearsalPlan:
 
     def to_record(self) -> dict[str, object]:
         """Return the strict secret-free plan consumed by the installed helper."""
-        return {
+        payload: dict[str, object] = {
             "artifact_bundle_sha256": self.artifact_bundle_sha256,
             "artifact_descriptor_path": str(self.artifact_descriptor_path),
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
@@ -273,14 +345,17 @@ class RehearsalPlan:
             "production_defaults_path": str(self.production_defaults_path),
             "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 9,
+            "schema_version": 9 if self.checkpoint_schema_version is None else 10,
             "smoke_authority": self.smoke_authority.to_record(),
         }
+        if self.checkpoint_schema_version is not None:
+            payload.update(_rehearsal_checkpoint_payload(self))
+        return payload
 
     @classmethod
     def from_record(cls, value: Mapping[str, object]) -> RehearsalPlan:
         """Parse the one strict plan schema accepted by the installed helper."""
-        expected = {
+        historical = {
             "artifact_bundle_sha256",
             "artifact_descriptor_path",
             "browser_report_schema_sha256",
@@ -317,6 +392,9 @@ class RehearsalPlan:
             "schema_version",
             "smoke_authority",
         }
+        schema_three_fields = set(_rehearsal_checkpoint_payload_fields())
+        schema_version = value.get("schema_version")
+        expected = historical | (schema_three_fields if schema_version == 10 else set())
         resources = value.get("resources")
         smoke_authority = value.get("smoke_authority")
         image_digests = value.get("image_digests")
@@ -327,7 +405,7 @@ class RehearsalPlan:
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 9
+            or schema_version not in {9, 10}
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
@@ -382,6 +460,7 @@ class RehearsalPlan:
             for field in ("database", "namespace", "object_prefix", "route", "systemd_unit")
         ):
             raise ValueError("rehearsal plan schema is invalid")
+        authority = _parse_rehearsal_checkpoint_payload(value) if schema_version == 10 else {}
         return cls(
             candidate_sha=str(value["candidate_sha"]),
             candidate_tree=str(value["candidate_tree"]),
@@ -431,6 +510,7 @@ class RehearsalPlan:
             gb10_authority=GB10RehearsalAuthority.from_record(
                 _mapping_field(value, "gb10_authority")
             ),
+            **authority,  # type: ignore[arg-type]
         )
 
 
@@ -602,8 +682,7 @@ class RehearsalActionSource:
             or bool(artifacts.registry_digests) != bool(self.container_registry)
             or (
                 bool(artifacts.registry_digests)
-                and migration.registry_digest
-                != artifacts.registry_digests["loom-control-plane"]
+                and migration.registry_digest != artifacts.registry_digests["loom-control-plane"]
             )
         ):
             raise ValueError("rehearsal candidate or checkpoint authority is invalid")
@@ -655,6 +734,22 @@ class RehearsalActionSource:
             resources=resources,
             smoke_authority=self.smoke_authority,
             gb10_authority=self.gb10_authority,
+            checkpoint_schema_version=3,
+            checkpoint_component_sha256=checkpoint.component_sha256,
+            database_authority_digest=checkpoint.database_authority_digest,
+            public_schema_revision=checkpoint.public_schema_revision,
+            capacity_guard_schema_revision=checkpoint.capacity_guard_schema_revision,
+            manager_configuration_epoch=checkpoint.manager_configuration_epoch,
+            manager_configuration_digest=checkpoint.manager_configuration_digest,
+            manager_authority_incarnation=checkpoint.manager_authority_incarnation,
+            manager_writer_epoch=checkpoint.manager_writer_epoch,
+            manager_execution_state=checkpoint.manager_execution_state,
+            manager_execution_epoch=checkpoint.manager_execution_epoch,
+            manager_execution_manifest_sha256=checkpoint.manager_execution_manifest_sha256,
+            manager_executable_new_capacity_ceiling=(
+                checkpoint.manager_executable_new_capacity_ceiling
+            ),
+            manager_increase_freeze=checkpoint.manager_increase_freeze,
         )
 
     def _isolation_id(
@@ -675,7 +770,9 @@ class RehearsalActionSource:
             "container_registry": self.container_registry,
             "container_registry_push": self.container_registry_push,
             "checkpoint_evidence_sha256": checkpoint.evidence_digest,
+            "checkpoint_component_sha256": dict(checkpoint.component_sha256),
             "checkpoint_manifest_sha256": checkpoint.manifest_sha256,
+            "database_authority_digest": checkpoint.database_authority_digest,
             "image_artifact_sha256": artifacts.artifact_digest,
             "registry_digests": dict(artifacts.registry_digests),
             "image_tag": candidate.image_tag,
@@ -693,12 +790,105 @@ class RehearsalActionSource:
             "route_origin": self.route_origin,
             "gb10_authority": self.gb10_authority.to_record(),
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 9,
+            "schema_version": 10,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         return f"rehearsal-{digest[:24]}"
+
+
+def _rehearsal_checkpoint_payload_fields() -> tuple[str, ...]:
+    return (
+        "checkpoint_schema_version",
+        "checkpoint_component_sha256",
+        "database_authority_digest",
+        "public_schema_revision",
+        "capacity_guard_schema_revision",
+        "manager_configuration_epoch",
+        "manager_configuration_digest",
+        "manager_authority_incarnation",
+        "manager_writer_epoch",
+        "manager_execution_state",
+        "manager_execution_epoch",
+        "manager_execution_manifest_sha256",
+        "manager_executable_new_capacity_ceiling",
+        "manager_increase_freeze",
+    )
+
+
+def _rehearsal_checkpoint_payload(plan: RehearsalPlan) -> dict[str, object]:
+    return {
+        "checkpoint_schema_version": plan.checkpoint_schema_version,
+        "checkpoint_component_sha256": dict(plan.checkpoint_component_sha256 or {}),
+        "database_authority_digest": plan.database_authority_digest,
+        "public_schema_revision": plan.public_schema_revision,
+        "capacity_guard_schema_revision": plan.capacity_guard_schema_revision,
+        "manager_configuration_epoch": plan.manager_configuration_epoch,
+        "manager_configuration_digest": plan.manager_configuration_digest,
+        "manager_authority_incarnation": str(plan.manager_authority_incarnation),
+        "manager_writer_epoch": plan.manager_writer_epoch,
+        "manager_execution_state": plan.manager_execution_state,
+        "manager_execution_epoch": plan.manager_execution_epoch,
+        "manager_execution_manifest_sha256": plan.manager_execution_manifest_sha256,
+        "manager_executable_new_capacity_ceiling": plan.manager_executable_new_capacity_ceiling,
+        "manager_increase_freeze": plan.manager_increase_freeze,
+    }
+
+
+def _parse_rehearsal_checkpoint_payload(value: Mapping[str, object]) -> dict[str, object]:
+    components = value.get("checkpoint_component_sha256")
+    guard = value.get("capacity_guard_schema_revision")
+    if (
+        not isinstance(components, Mapping)
+        or not all(
+            isinstance(key, str) and isinstance(item, str) for key, item in components.items()
+        )
+        or any(
+            type(value.get(field)) is not int
+            for field in (
+                "checkpoint_schema_version",
+                "manager_configuration_epoch",
+                "manager_writer_epoch",
+                "manager_execution_epoch",
+                "manager_executable_new_capacity_ceiling",
+            )
+        )
+        or any(
+            not isinstance(value.get(field), str)
+            for field in (
+                "database_authority_digest",
+                "public_schema_revision",
+                "manager_configuration_digest",
+                "manager_authority_incarnation",
+                "manager_execution_state",
+            )
+        )
+        or (guard is not None and not isinstance(guard, str))
+        or value.get("manager_execution_manifest_sha256") is not None
+        or type(value.get("manager_increase_freeze")) is not bool
+    ):
+        raise ValueError("rehearsal plan schema is invalid")
+    try:
+        incarnation = UUID(str(value["manager_authority_incarnation"]))
+    except ValueError as exc:
+        raise ValueError("rehearsal plan schema is invalid") from exc
+    return {
+        "checkpoint_schema_version": value["checkpoint_schema_version"],
+        "checkpoint_component_sha256": dict(components),
+        "database_authority_digest": value["database_authority_digest"],
+        "public_schema_revision": value["public_schema_revision"],
+        "capacity_guard_schema_revision": guard,
+        "manager_configuration_epoch": value["manager_configuration_epoch"],
+        "manager_configuration_digest": value["manager_configuration_digest"],
+        "manager_authority_incarnation": incarnation,
+        "manager_writer_epoch": value["manager_writer_epoch"],
+        "manager_execution_state": value["manager_execution_state"],
+        "manager_execution_epoch": value["manager_execution_epoch"],
+        "manager_execution_manifest_sha256": None,
+        "manager_executable_new_capacity_ceiling": value["manager_executable_new_capacity_ceiling"],
+        "manager_increase_freeze": value["manager_increase_freeze"],
+    }
 
 
 __all__ = [

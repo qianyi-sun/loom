@@ -26,9 +26,7 @@ def test_editable_root_images_install_neutral_bundle_checksum_first() -> None:
         checksum_install = "pip install --no-cache-dir -e ./packages/loom-bundle-checksum"
         assert checksum_install in text, dockerfile
         install_lines = [
-            line.strip().removeprefix("RUN ")
-            for line in text.splitlines()
-            if "pip install" in line
+            line.strip().removeprefix("RUN ") for line in text.splitlines() if "pip install" in line
         ]
         checksum_index = next(
             index for index, line in enumerate(install_lines) if line.startswith(checksum_install)
@@ -67,7 +65,13 @@ def test_service_image_exposes_immutable_build_revision_to_runtime() -> None:
 def test_control_plane_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
 
-    assert "chmod -R a+rX ./src ./migrations" in text
+    assert "chmod -R a+rX ./src ./migrations ./capacity_guard_migrations" in text
+
+
+def test_control_plane_image_contains_capacity_guard_migrations() -> None:
+    text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
+
+    assert "COPY capacity_guard_migrations ./capacity_guard_migrations" in text
 
 
 def test_gateway_source_is_readable_by_declared_nonroot_workloads() -> None:
@@ -79,10 +83,7 @@ def test_gateway_source_is_readable_by_declared_nonroot_workloads() -> None:
 def test_service_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.service").read_text()
 
-    assert (
-        "chmod -R a+rX ./src ./packages ./migrations ./capacity_guard_migrations"
-        in text
-    )
+    assert "chmod -R a+rX ./src ./packages ./migrations ./capacity_guard_migrations" in text
 
 
 def test_service_image_contains_capacity_guard_migrations() -> None:

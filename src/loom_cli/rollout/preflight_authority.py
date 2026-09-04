@@ -9,6 +9,7 @@ from datetime import datetime
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.operator.rehearsal_attestor import (
+    ExecutionPrerequisiteCheckFactory,
     RehearsalLeaseAttestor,
     RehearsalStore,
 )
@@ -28,6 +29,7 @@ class CandidatePreflightPlan:
     context: CheckContext
     current_bindings: AttestationBindings | None = None
     reusable_attestation_digest: str | None = None
+    execution_prerequisite_check_factory: ExecutionPrerequisiteCheckFactory | None = None
 
     def __post_init__(self) -> None:
         if self.registry.through_tier != 3:
@@ -112,6 +114,7 @@ class CandidatePreflightAuthorizer:
             assessment=assessment,
             store=rehearsal_store,
             now=self._now,
+            execution_prerequisite_check_factory=(plan.execution_prerequisite_check_factory),
         )
 
     def _pipeline(self, plan: CandidatePreflightPlan) -> PreflightPipeline:
@@ -127,5 +130,6 @@ __all__ = [
     "CandidatePreflightAuthorizer",
     "CandidatePreflightPlan",
     "CheckpointPreflightPlanner",
+    "ExecutionPrerequisiteCheckFactory",
     "PreflightPlanner",
 ]

@@ -12,6 +12,7 @@ from loom_cli.rollout.operator.backup import BackupError
 from loom_cli.rollout.operator.checkpoint_lease import build_restore_verified_lease
 from loom_cli.rollout.operator.rehearsal_attestor import RehearsalLeaseAttestor
 from loom_cli.rollout.operator.worker import _backup_failure_code
+from loom_cli.rollout.preflight_contract import RegisteredCheck
 from loom_cli.rollout.preflight_pipeline import (
     PreflightAssessment,
     PreflightBlocker,
@@ -43,6 +44,7 @@ class FakePipeline:
     def __init__(self, rehearsal: PreflightRehearsal) -> None:
         self.rehearsal = rehearsal
         self.attested = False
+        self.completed = False
 
     def rehearse(self, **_kwargs: object) -> PreflightRehearsal:
         return self.rehearsal
@@ -50,6 +52,10 @@ class FakePipeline:
     def attest(self, **_kwargs: object) -> object:
         self.attested = True
         return SimpleNamespace(attestation_digest="e" * 64)
+
+    def complete_deferred_execution(self, **_kwargs: object) -> PreflightRehearsal:
+        self.completed = True
+        return self.rehearsal
 
 
 def test_attestor_persists_rehearsal_before_restore_and_binds_lease(
@@ -66,6 +72,10 @@ def test_attestor_persists_rehearsal_before_restore_and_binds_lease(
         assessment=cast(PreflightAssessment, object()),
         store=store,
         now=lambda: NOW,
+        execution_prerequisite_check_factory=lambda _lease: cast(
+            RegisteredCheck,
+            object(),
+        ),
     )
     request = replace(
         _request(),
@@ -92,6 +102,7 @@ def test_attestor_persists_rehearsal_before_restore_and_binds_lease(
     digest = attestor.publish_attestation(checkpoint, lease, request)
 
     assert store.rehearsal == rehearsal
+    assert pipeline.completed
     assert pipeline.attested
     assert digest == "e" * 64
 

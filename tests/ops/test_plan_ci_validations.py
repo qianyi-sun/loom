@@ -541,6 +541,7 @@ def test_rollout_module_changes_are_protected_staging_authority() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/instruction.md",
         "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
         "unowned-runtime/new-input-two.bin",
         "unowned-runtime/new-input.bin",

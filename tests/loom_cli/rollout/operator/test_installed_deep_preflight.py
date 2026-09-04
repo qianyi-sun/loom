@@ -33,6 +33,9 @@ from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
 from loom_cli.rollout.operator.installed_deep_preflight import InstalledDeepPreflightComposition
 from loom_cli.rollout.operator.installed_preflight_inputs import InstalledPreflightInputs
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
+from loom_cli.rollout.operator.protected_execution_prerequisite_source import (
+    ProtectedExecutionPrerequisiteSourceError,
+)
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     PROTECTED_USER_UNIT_DIR,
     ServiceRuntimeStatus,
@@ -151,6 +154,7 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
         image=lambda *_args: SimpleNamespace(),
         manifest_schema_dry_run=lambda *_args: SimpleNamespace(),
         manifest_server_dry_run=lambda *_args: SimpleNamespace(),
+        oldlab_controller=lambda *_args: SimpleNamespace(),
         readonly_json=lambda *_args: SimpleNamespace(),
         rehearsal_helper=lambda *_args: SimpleNamespace(),
         simple=lambda *_args: SimpleNamespace(),
@@ -168,6 +172,17 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
         ),
     )
     captured: dict[str, object] = {}
+
+    class PublisherFactory:
+        def __call__(self, *_args: object):
+            def unavailable(_lease: object, _images: object) -> dict[str, object]:
+                raise ProtectedExecutionPrerequisiteSourceError(
+                    "protected execution prerequisites are unavailable before detached artifacts"
+                )
+
+            return unavailable
+
+    publisher_factory = PublisherFactory()
 
     class Source:
         def __init__(self, **kwargs: object) -> None:
@@ -298,6 +313,63 @@ spec:
     )
     monkeypatch.setattr(
         installed_deep_preflight_factory,
+        "SubprocessProtectedApplyCommandRunner",
+        lambda **kwargs: captured.setdefault(
+            "protected_runner",
+            SimpleNamespace(
+                **kwargs,
+                environment={
+                    "HOME": "/var/lib/loom-staging-rollout",
+                    "KUBECONFIG": "/var/lib/loom-staging-rollout/kubeconfig",
+                },
+                capture_stdout=lambda *_args, **_kwargs: b"{}\n",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "KubernetesProtectedStagingCapacityRuntime",
+        lambda **kwargs: captured.setdefault(
+            "protected_capacity_runtime",
+            SimpleNamespace(
+                credentials_root=tmp_path / "protected-capacity/credentials",
+                read_credential_seed=lambda: {},
+                read_execution_credential_bundle=lambda: object(),
+                construction=kwargs,
+            ),
+        ),
+    )
+
+    class GB10Controller:
+        controller_prerequisite_authority_sha256 = "7" * 64
+
+        def invoke_controller_prerequisite(self, *_args: object) -> SimpleNamespace:
+            return SimpleNamespace(returncode=1, stdout="", stderr="unavailable")
+
+    gb10_controller = GB10Controller()
+    gb10_controller_builds: list[dict[str, object]] = []
+
+    def build_gb10_controller(**kwargs: object) -> GB10Controller:
+        gb10_controller_builds.append(kwargs)
+        return gb10_controller
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "build_fixed_gb10_external_supervisor_transport",
+        build_gb10_controller,
+    )
+
+    def prerequisite_factory(**kwargs: object) -> PublisherFactory:
+        captured["prerequisite_factory"] = kwargs
+        return publisher_factory
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledExecutionPrerequisitePublisherFactory",
+        prerequisite_factory,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
         "staging_smoke_authority",
         lambda _config: SimpleNamespace(),
     )
@@ -370,6 +442,65 @@ spec:
     assert captured["composition"]["manifest_image_names"] == frozenset(  # type: ignore[index]
         expected_manifest_images
     )
+    prerequisite_factory = captured["composition"][  # type: ignore[index]
+        "execution_prerequisite_publisher_factory"
+    ]
+    assert prerequisite_factory is publisher_factory
+    prerequisite_inputs = captured["prerequisite_factory"]
+    assert isinstance(prerequisite_inputs, dict)
+    assert prerequisite_inputs["container_registry"] == cluster.container_registry
+    assert callable(prerequisite_inputs["manager_configuration_source"])
+    assert callable(prerequisite_inputs["configuration_seed_source"])
+    assert callable(prerequisite_inputs["staging_protected_admission_source"])
+    authority_source_factory = prerequisite_inputs["authority_source_factory"]
+    assert callable(authority_source_factory)
+    executor_image = "registry.invalid/loom-capacity-executor@sha256:" + "9" * 64
+    execution_authority = authority_source_factory(candidate, executor_image)
+    assert isinstance(
+        execution_authority,
+        installed_deep_preflight_factory.InstalledExecutionAuthoritySource,
+    )
+    assert execution_authority.publication_reader == (
+        installed_deep_preflight_factory.InstalledExecutionAuthorityReader(
+            path=Path(
+                "/var/lib/loom-staging-rollout/protected-capacity/"
+                "execution-authority/issue-906.json"
+            ),
+            expected_uid=995,
+            expected_gid=2007,
+        )
+    )
+    assert execution_authority.credential_bundle_reader == (
+        captured["protected_capacity_runtime"].read_execution_credential_bundle  # type: ignore[union-attr]
+    )
+    assert isinstance(
+        execution_authority.witness_exports_source,
+        installed_deep_preflight_factory.KubernetesExecutionWitnessExportsSource,
+    )
+    assert execution_authority.witness_exports_source.runner is captured["protected_runner"]
+    assert set(execution_authority.controller_transports) == {"gb10", "oldlab"}
+    assert execution_authority.controller_transports["gb10"].controller is gb10_controller  # type: ignore[attr-defined]
+    oldlab_transport = execution_authority.controller_transports["oldlab"]
+    assert oldlab_transport.invoke.image == executor_image  # type: ignore[attr-defined]
+    assert oldlab_transport.invoke.run is commands.oldlab_controller  # type: ignore[attr-defined]
+    assert gb10_controller_builds == [
+        {
+            "candidate_sha": candidate.resolved_sha,
+            "candidate_tree": candidate.resolved_tree,
+            "run": commands.gb10_supervisor_controller,
+        }
+    ]
+    unavailable_publisher = prerequisite_factory(
+        candidate,
+        8,
+        RuntimePurpose.ADMISSION,
+        None,
+    )
+    with pytest.raises(
+        ProtectedExecutionPrerequisiteSourceError,
+        match="unavailable before detached artifacts",
+    ):
+        unavailable_publisher(object(), object())
     smoke_source = captured["readonly_authority"]["smoke_authority_evidence"]  # type: ignore[index]
     assert callable(smoke_source)
     assert smoke_source() is smoke_evidence
@@ -479,6 +610,19 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
     def manifest_post_image_pin(rendered: str) -> str:
         return rendered + "# installed-composition-post-image-pin-sentinel\n"
 
+    prerequisite_factory_calls: list[tuple[object, int, RuntimePurpose, object]] = []
+
+    def prerequisite_publisher_factory(
+        found_candidate: CandidateBinding,
+        found_epoch: int,
+        found_purpose: RuntimePurpose,
+        found_artifacts: object,
+    ):
+        prerequisite_factory_calls.append(
+            (found_candidate, found_epoch, found_purpose, found_artifacts)
+        )
+        return lambda _lease, _images: {}
+
     composition = InstalledDeepPreflightComposition(
         config=config,
         service_uid=501,
@@ -537,6 +681,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
             lambda *_inner: {},
             lambda *_inner: ("rehearsal-exact", "9" * 64),
         ),
+        execution_prerequisite_publisher_factory=prerequisite_publisher_factory,
         final_gate_run=lambda *_args: command(),
         read_mutation_epoch=lambda: 9,
         read_database_schema_revision=lambda: "0074",
@@ -554,6 +699,12 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
 
     assert admission.loaded_artifacts is None
     assert detached.loaded_artifacts is not None
+    assert callable(admission.execution_prerequisite_publisher)
+    assert callable(detached.execution_prerequisite_publisher)
+    assert prerequisite_factory_calls == [
+        (candidate, 9, RuntimePurpose.ADMISSION, None),
+        (candidate, 9, RuntimePurpose.DETACHED_REHEARSAL, detached.loaded_artifacts),
+    ]
     assert admission.manifest_post_image_pin is manifest_post_image_pin
     assert detached.manifest_post_image_pin is manifest_post_image_pin
     assert artifacts.calls == [
