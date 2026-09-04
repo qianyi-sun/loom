@@ -186,26 +186,20 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
 def test_ci_wires_phase2c_supervisor_go_checks_explicitly() -> None:
     steps = {
         step.get("name"): str(step.get("run", ""))
-        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"][
-            "steps"
-        ]
+        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
     }
 
     assert steps["gofmt supervisor"] == (
         "out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)\n"
         'if [ -n "$out" ]; then\n'
         '  echo "$out"\n'
-        "  echo \"gofmt found supervisor issues; run "
-        "\\`gofmt -w ./cmd/loom-task-image-builder-supervisor\\` to fix\"\n"
+        '  echo "gofmt found supervisor issues; run '
+        '\\`gofmt -w ./cmd/loom-task-image-builder-supervisor\\` to fix"\n'
         "  exit 1\n"
         "fi\n"
     )
-    assert steps["go vet supervisor"] == (
-        "go vet ./cmd/loom-task-image-builder-supervisor"
-    )
-    assert steps["go test supervisor"] == (
-        "go test -race ./cmd/loom-task-image-builder-supervisor"
-    )
+    assert steps["go vet supervisor"] == ("go vet ./cmd/loom-task-image-builder-supervisor")
+    assert steps["go test supervisor"] == ("go test -race ./cmd/loom-task-image-builder-supervisor")
 
 
 def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> None:
