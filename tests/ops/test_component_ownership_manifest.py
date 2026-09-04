@@ -546,6 +546,26 @@ def test_repository_manifest_owns_every_dockerfile_and_test() -> None:
     } == payload_dockerfiles
 
 
+def test_phase2c_rootless_runtime_recipe_is_owned_without_release_publication() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    dockerfile = "deploy/task-image-builder/Dockerfile.rootless-runtime-v2"
+
+    owners = manifest.component_owners_for_path(dockerfile)
+
+    assert len(owners) == 1
+    owner = owners[0]
+    assert owner.id == "task-image-builder-rootless-runtime-v2"
+    assert owner.kind == "runtime-payload-image"
+    assert owner.build_context == "deploy/task-image-builder"
+    assert owner.release_digest is None
+    assert owner.runtime_policy == "runtime-payload"
+    assert component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=(dockerfile,),
+        force_all=False,
+    ) == ()
+
+
 def test_validator_requires_any_docker_marked_pytest_module_in_docker_lane(
     tmp_path: Path,
 ) -> None:
