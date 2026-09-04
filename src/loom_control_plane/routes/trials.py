@@ -789,6 +789,7 @@ async def get_trial(
         "team_id": str(row.team_id),
         "task_id": row.task_id,
         "state": row.state,
+        "worker_id": str(row.worker_id) if row.worker_id is not None else None,
         "failure_reason": row.failure_reason,
         "submitted_at": row.submitted_at.isoformat(),
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,

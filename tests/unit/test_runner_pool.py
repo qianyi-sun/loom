@@ -61,6 +61,55 @@ async def test_cancel_all() -> None:
     assert pool.in_flight == 0
 
 
+async def test_spawn_same_key_cancels_prior_task() -> None:
+    pool = RunnerPool(max_concurrent=2)
+    started: list[str] = []
+    cancelled: list[str] = []
+    gate = asyncio.Event()
+
+    async def first() -> None:
+        started.append("first")
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            cancelled.append("first")
+            raise
+
+    async def second() -> None:
+        started.append("second")
+        await asyncio.sleep(0)
+
+    await pool.spawn(first(), key="trial-a")
+    await asyncio.sleep(0)
+    assert pool.in_flight == 1
+    await pool.spawn(second(), key="trial-a")
+    await pool.wait_all(timeout=1.0)
+    assert cancelled == ["first"]
+    assert started == ["first", "second"]
+    assert pool.in_flight == 0
+
+
+async def test_spawn_different_keys_do_not_cancel_each_other() -> None:
+    pool = RunnerPool(max_concurrent=2)
+    gate = asyncio.Event()
+    alive = 0
+
+    async def held() -> None:
+        nonlocal alive
+        alive += 1
+        await gate.wait()
+        alive -= 1
+
+    await pool.spawn(held(), key="a")
+    await pool.spawn(held(), key="b")
+    await asyncio.sleep(0)
+    assert pool.in_flight == 2
+    assert alive == 2
+    gate.set()
+    await pool.wait_all()
+    assert pool.in_flight == 0
+
+
 async def test_fatal_worker_health_error_stops_future_claim_admission() -> None:
     pool = RunnerPool(max_concurrent=1)
 

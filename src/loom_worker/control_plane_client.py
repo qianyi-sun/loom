@@ -1243,11 +1243,10 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
-    async def get_trial_state(self, trial_id: UUID) -> str:
-        """Fetch the current CP-side state for ``trial_id``. Used by the
-        worker's cancellation watchdog (#360) to detect operator-driven
-        cancels and cascade an ``asyncio.CancelledError`` into the running
-        trial task."""
+    async def get_trial_ownership(self, trial_id: UUID) -> TrialOwnershipSnapshot:
+        """Fetch CP ownership fields for the live-worker revoke watchdog (#1491)."""
+        from loom_worker.trial_cancellation_watchdog import TrialOwnershipSnapshot
+
         client, owned = self._http()
         try:
             r = await client.get(
@@ -1256,10 +1255,32 @@ class HttpControlPlaneClient:
             )
             r.raise_for_status()
             body = r.json()
-            return str(body["state"])
+            raw_worker_id = body.get("worker_id")
+            worker_id: UUID | None
+            if raw_worker_id is None or raw_worker_id == "":
+                worker_id = None
+            else:
+                worker_id = UUID(str(raw_worker_id))
+            raw_attempt = body.get("attempt_count")
+            attempt_count = (
+                int(raw_attempt) if isinstance(raw_attempt, int) else None
+            )
+            return TrialOwnershipSnapshot(
+                state=str(body["state"]),
+                worker_id=worker_id,
+                attempt_count=attempt_count,
+            )
         finally:
             if owned:
                 await client.aclose()
+
+    async def get_trial_state(self, trial_id: UUID) -> str:
+        """Fetch the current CP-side state for ``trial_id``.
+
+        Prefer :meth:`get_trial_ownership` for new revoke logic; this helper
+        remains for callers that only need the state string.
+        """
+        return (await self.get_trial_ownership(trial_id)).state
 
     async def get_task_bundle(self, task_id: str) -> dict[str, Any]:
         """Fetch full TaskConfig + checksum + source by `task_id`."""

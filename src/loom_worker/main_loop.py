@@ -1578,13 +1578,16 @@ async def _spawn_trial(
                 runner.run(),
                 trial_id=trial_id,
                 cp_client=cp_client,
+                owner_worker_id=worker_id,
+                claimed_attempt_count=attempt_count,
                 poll_interval_sec=settings.trial_cancel_poll_interval_sec,
                 hard_deadline_sec=hard_deadline_sec,
+                on_cancel=runner.interrupt_attempt,
             )
         except asyncio.CancelledError:
-            # Watchdog fired (cp_cancelled or hard_deadline). Trial.run's
-            # own CancelledError handler already recorded the terminal
-            # state; propagate so the outer task cleanup fires.
+            # Watchdog fired (cancel / ownership revoke / hard_deadline).
+            # Trial.run's own CancelledError handler already recorded what
+            # it could; propagate so the outer task cleanup frees the seat.
             raise
         except WorkerUnhealthyError:
             logger.critical(
@@ -1619,7 +1622,7 @@ async def _spawn_trial(
             if family_state_mount is not None:
                 family_state_mount.cleanup()
 
-    await pool.spawn(_setup_run_and_cleanup())
+    await pool.spawn(_setup_run_and_cleanup(), key=str(trial_id))
 
 
 async def _run_pre_start_heartbeat(
