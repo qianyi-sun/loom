@@ -36,7 +36,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/config_test.go",
-        "sha256": "cd52f3a234c68d00d2df4496b593ff8c99e9e0d4ff2b1ba16c5b71b247224262"
+        "sha256": "e1e63a1eb1ac3229fec0b18a2ae29d627d0b378979157cdf1b6fa087c84d2caf"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/download.go",
@@ -100,11 +100,11 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/protocol.go",
-        "sha256": "8e6de614b923c1b0c5b45526a63d44b0d86a32909b8b54da6a632809e9017329"
+        "sha256": "f3daadab7e05d72c79a82892d749f2f4e46880a75276762d5706e81e55be119f"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/protocol_test.go",
-        "sha256": "71b76b5fb1518f05e6cdd758b68cf0c19777d8bc59ed7d05d1e5d69d8b30d89a"
+        "sha256": "677369949039fda5e9d420a2ea8f513e940b24f33d2058713734b3d7ab348737"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/secret.go",
@@ -124,8 +124,8 @@
       }
     ],
     "sha256": {
-      "x86_64": "9102b1a1f20501e6b73db7de3d00a9a38cfa58b38c6601f4cc0a6c52401f0fb2",
-      "aarch64": "e172457cac1956776e73400feff814f0ca91e4c38ec074f5c55c50ca965f3d2c"
+      "x86_64": "8fb4c8eeeeeee16ca4c72667c86808bf3a3c41600bbc2275231ea0f2a00a5e1c",
+      "aarch64": "189cef34a8063159c90a3e383e1c7768963ffed5b6372083cbf133ca21472e05"
     }
   },
   "configs": [
