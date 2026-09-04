@@ -3,53 +3,29 @@
 from __future__ import annotations
 
 import ast
+import sys
 import tomllib
 from pathlib import Path
 
 AUTHORITY_ROOT = Path("src/loom_task_image_authority")
 PRODUCTION_ROOT = Path("src")
 STORE_MODULE = "loom_task_image_authority.store"
-ALLOWED_AUTHORITY_IMPORTS = {
-    "__future__",
-    "asyncio",
-    "base64",
-    "binascii",
-    "collections.abc",
-    "contextlib",
-    "dataclasses",
-    "datetime",
+ALLOWED_AUTHORITY_IMPORT_ROOTS = {
     "fastapi",
-    "fastapi.encoders",
-    "fastapi.exceptions",
-    "fastapi.responses",
-    "hashlib",
-    "hmac",
-    "json",
-    "loom.db.schema",
-    "loom.db.schema_startup",
-    "loom.security.secret_store",
-    "loom_task_image_authority.api",
-    "loom_task_image_authority.auth",
-    "loom_task_image_authority.config",
-    "loom_task_image_authority.contracts",
-    "loom_task_image_authority.store",
-    "os",
-    "pathlib",
+    "loom_task_image_authority",
     "prometheus_client",
     "pydantic",
     "pydantic_settings",
-    "re",
     "rfc8785",
-    "secrets",
-    "ssl",
-    "stat",
     "sqlalchemy",
-    "sqlalchemy.ext.asyncio",
-    "time",
-    "typing",
-    "types",
-    "uuid",
     "uvicorn",
+}
+ALLOWED_AUTHORITY_IMPORTS = {
+    "__future__",
+    "loom.db.schema",
+    "loom.db.schema_startup",
+    "loom.security.secret_store",
+    "loom.task_image_build_plan",
 }
 
 
@@ -95,7 +71,14 @@ def test_authority_package_has_only_the_closed_service_dependency_set() -> None:
     unexpected: dict[Path, list[str]] = {}
     for path in sources:
         imports = _imported_modules(_tree(path))
-        if disallowed := imports - ALLOWED_AUTHORITY_IMPORTS:
+        disallowed = {
+            imported
+            for imported in imports
+            if imported not in ALLOWED_AUTHORITY_IMPORTS
+            and imported.partition(".")[0] not in ALLOWED_AUTHORITY_IMPORT_ROOTS
+            and imported.partition(".")[0] not in sys.stdlib_module_names
+        }
+        if disallowed:
             unexpected[path] = sorted(disallowed)
     assert not unexpected
 

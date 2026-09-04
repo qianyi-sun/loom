@@ -7,7 +7,7 @@ import hmac
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
 import rfc8785
@@ -30,7 +30,6 @@ from loom_task_image_authority.bundle_capability import (
     TaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityV1,
 )
-from loom_task_image_authority.store import TaskImageBuildSessionAuthorization
 
 DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS = 300.0
 MAX_SESSION_MATERIALIZATION_LEASE_SECONDS = 15 * 60.0
@@ -52,6 +51,27 @@ class TaskImageSessionMaterializationAuthorizationError(RuntimeError):
 
 class TaskImageSessionMaterializationConflictError(RuntimeError):
     """A claim, operation identity, or lease binding no longer matches."""
+
+
+class TaskImageBuildSessionAuthorization(Protocol):
+    """Structural session authority contract accepted from the projection store."""
+
+    grant_id: UUID
+    session_id: UUID
+    session_generation: int
+    authority_version: Literal[1, 2]
+    builder_release_sha256: str | None
+    supervisor_executable_sha256: str
+    purpose: Literal["production", "shadow"]
+    shadow_campaign_id: UUID | None
+    environment: str
+    pool_id: str
+    cpu_arch: Literal["x86_64", "arm64"]
+    attestation_generation: int
+    attestation_sha256: str
+    attestation_expires_at: datetime
+    session_expires_at: datetime
+    grant_expires_at: datetime
 
 
 def _utc(value: datetime) -> datetime:
