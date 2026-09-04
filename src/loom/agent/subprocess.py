@@ -29,6 +29,7 @@ from loom_launcher.adapter import AgentAdapter, SandboxAccess
 from loom_launcher.adapter import ExecHandle as LauncherExecHandle
 from loom_launcher.adapter import ModelSpec as LauncherModelSpec
 
+from loom.attempt_deadline import AttemptDeadline
 from loom.driver.base import Driver
 from loom.driver.base import ExecHandle as DriverExecHandle
 from loom.errors import AgentError
@@ -206,6 +207,17 @@ class SubprocessAgent:
     # spec §6.1 typical step_timeout.
     step_token_ttl_sec: int = 1800
     request_params: dict[str, object] = field(default_factory=dict)
+    _attempt_deadline: AttemptDeadline | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _active_exec_handle: DriverExecHandle | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _active_step_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.name = self.adapter.name
@@ -213,6 +225,21 @@ class SubprocessAgent:
         # Protocol expects `frozenset[OS]` (a Literal alias). They're
         # structurally identical at runtime.
         self.supports_os = cast(frozenset[OS], self.adapter.supports_os)
+
+    def begin_attempt(self, deadline: AttemptDeadline) -> None:
+        self._attempt_deadline = deadline
+
+    async def aclose_attempt(self) -> None:
+        """Interrupt the exact subprocess owned by the active attempt."""
+
+        handle = self._active_exec_handle
+        step_id = self._active_step_id
+        if handle is not None and step_id is not None:
+            await _kill_exec_handle(
+                handle,
+                adapter_name=self.adapter.name,
+                step_id=step_id,
+            )
 
     async def run(
         self,
@@ -227,12 +254,24 @@ class SubprocessAgent:
         # 1. Mint a step-scoped JWT (Plan 9). Errors here are fatal: we
         # can't run the agent without a Gateway-acceptable bearer.
         try:
-            step_token = await self.cp_client.mint_step_token(
-                team_id=self.team_id,
-                trial_id=self.trial_id,
-                step_id=step_id,
-                ttl_sec=self.step_token_ttl_sec,
-            )
+            if self._attempt_deadline is None:
+                step_token = await self.cp_client.mint_step_token(
+                    team_id=self.team_id,
+                    trial_id=self.trial_id,
+                    step_id=step_id,
+                    ttl_sec=self.step_token_ttl_sec,
+                )
+            else:
+                grant = await self.cp_client.mint_attempt_step_token(
+                    team_id=self.team_id,
+                    trial_id=self.trial_id,
+                    step_id=step_id,
+                    ttl_sec=self.step_token_ttl_sec,
+                    attempt_deadline_wall_clock=(
+                        self._attempt_deadline.wall_deadline
+                    ),
+                )
+                step_token = grant.token
         except Exception as exc:
             raise AgentError(
                 f"{self.adapter.name}: failed to mint step token: {exc}",
@@ -273,11 +312,15 @@ class SubprocessAgent:
         )
 
         # 3. Streaming exec inside the sandbox.
+        if self._attempt_deadline is not None:
+            self._attempt_deadline.require_remaining()
         driver_handle = await env.exec_streaming(
             argv,
             env_vars=env_vars,
             cwd=cwd,
         )
+        self._active_exec_handle = driver_handle
+        self._active_step_id = step_id
         stderr_task = asyncio.create_task(_collect_stream_tail(driver_handle.stderr))
 
         # 4. Build the launcher-side ExecHandle with SandboxAccess wired in.
@@ -341,6 +384,9 @@ class SubprocessAgent:
                 )
             await _cancel_tail_task(stderr_task)
             raise
+        finally:
+            self._active_exec_handle = None
+            self._active_step_id = None
 
         if rc != 0:
             detail = f"{self.adapter.name} exited rc={rc} on step {step_id}"

@@ -173,31 +173,59 @@ def test_provider_transport_disconnect_message_classification_is_idempotent():
     assert msg.count(prefix) == 1
 
 
-def test_textual_credential_scope_401_is_actionable_and_redacted() -> None:
+def test_textual_structured_credential_scope_is_actionable_and_redacted() -> None:
     result = classify_failure_message(
-        "litellm.AuthenticationError: Error code: 401 - "
-        "{'detail': 'not authorized'} Authorization: Bearer secret-token"
+        "litellm.AuthenticationError: Error code: 403 - "
+        "{'detail': {'code': 'missing_scope', 'required_scope': 'llm:call'}} "
+        "Authorization: Bearer secret-token"
     )
 
     assert result is not None
     reason, msg = result
-    assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == ("Loom gateway rejected a credential without llm:call scope (HTTP 401).")
+    assert reason == FailureReason.STEP_CREDENTIAL_SCOPE_INVALID
+    assert msg == (
+        "Loom gateway rejected a step credential without llm:call scope (HTTP 403)."
+    )
     assert "secret-token" not in msg
 
 
 def test_textual_expired_step_jwt_401_is_distinct_and_redacted() -> None:
     result = classify_failure_message(
         "litellm.AuthenticationError: Error code: 401 - "
-        "{'detail': 'invalid bearer token'} "
+        "{'detail': {'code': 'invalid_or_expired_bearer'}} "
         "Authorization: Bearer loom_step_secret-token"
     )
 
     assert result is not None
     reason, msg = result
-    assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == ("Loom gateway rejected an invalid or expired step token (HTTP 401).")
+    assert reason == FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED
+    assert msg == (
+        "Loom gateway rejected an invalid or expired step credential (HTTP 401)."
+    )
     assert "secret-token" not in msg
+
+
+def test_textual_signed_deadline_code_is_agent_timeout() -> None:
+    result = classify_failure_message(
+        "litellm.APIError: Error code: 504 - "
+        "{'detail': {'code': 'agent_timeout', "
+        "'reason': 'attempt_deadline_reached'}}"
+    )
+
+    assert result == (
+        FailureReason.AGENT_TIMEOUT,
+        "Agent attempt reached its signed deadline.",
+    )
+
+
+def test_legacy_ambiguous_auth_text_does_not_infer_scope_cause() -> None:
+    assert (
+        classify_failure_message(
+            "litellm.AuthenticationError: Error code: 401 - "
+            "{'detail': 'not authorized'}"
+        )
+        is None
+    )
 
 
 def test_timeout_error_classification_is_phase_dependent():
@@ -224,15 +252,18 @@ def test_unclassified_http_401_is_provider_error():
     assert reason == FailureReason.PROVIDER_ERROR
 
 
-def test_http_401_scope_rejection_is_gateway_error_and_redacted():
+def test_http_403_scope_rejection_has_structured_failure_reason():
     reason, msg = classify_failure(
         _http_status_error(
-            401,
-            '{"detail":"not authorized","token":"loom_worker_supersecret"}',
+            403,
+            '{"detail":{"code":"missing_scope","required_scope":"llm:call"},'
+            '"token":"loom_worker_supersecret"}',
         ),
     )
-    assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == ("Loom gateway rejected a credential without llm:call scope (HTTP 401).")
+    assert reason == FailureReason.STEP_CREDENTIAL_SCOPE_INVALID
+    assert msg == (
+        "Loom gateway rejected a step credential without llm:call scope (HTTP 403)."
+    )
     assert "supersecret" not in msg
 
 
@@ -240,12 +271,27 @@ def test_http_401_expired_step_jwt_is_distinct_and_redacted():
     reason, msg = classify_failure(
         _http_status_error(
             401,
-            '{"detail":"invalid bearer token","token":"loom_step_supersecret"}',
+            '{"detail":{"code":"invalid_or_expired_bearer"},'
+            '"token":"loom_step_supersecret"}',
         ),
     )
-    assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == ("Loom gateway rejected an invalid or expired step token (HTTP 401).")
+    assert reason == FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED
+    assert msg == (
+        "Loom gateway rejected an invalid or expired step credential (HTTP 401)."
+    )
     assert "supersecret" not in msg
+
+
+def test_http_signed_deadline_code_is_agent_timeout():
+    reason, msg = classify_failure(
+        _http_status_error(
+            504,
+            '{"detail":{"code":"agent_timeout",'
+            '"reason":"attempt_deadline_reached"}}',
+        ),
+    )
+    assert reason == FailureReason.AGENT_TIMEOUT
+    assert msg == "Agent attempt reached its signed deadline."
 
 
 def test_http_429_is_provider_error():

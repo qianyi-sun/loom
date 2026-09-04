@@ -44,6 +44,17 @@ def test_failure_reason_includes_provider_transport_disconnect():
     )
 
 
+def test_failure_reason_includes_step_credential_failures():
+    assert (
+        FailureReason.STEP_CREDENTIAL_INVALID_OR_EXPIRED.value
+        == "step_credential_invalid_or_expired"
+    )
+    assert (
+        FailureReason.STEP_CREDENTIAL_SCOPE_INVALID.value
+        == "step_credential_scope_invalid"
+    )
+
+
 def test_failure_reason_includes_missing_required_artifacts():
     assert (
         FailureReason.MISSING_REQUIRED_ARTIFACTS.value

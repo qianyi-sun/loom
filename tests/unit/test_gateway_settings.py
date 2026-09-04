@@ -17,9 +17,11 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOOM_GW_ANTHROPIC_API_KEY", "ak-test")
     monkeypatch.setenv("LOOM_GW_OPENAI_API_KEY", "ok-test")
     monkeypatch.setenv("LOOM_GW_BIND_PORT", "9000")
+    monkeypatch.setenv("LOOM_GW_LEGACY_ATTEMPT_DEADLINE_COMPAT_SEC", "0")
     s = GatewaySettings(_env_file=None)
     assert str(s.db_url).startswith("postgresql")
     assert s.anthropic_api_key is not None
     assert s.anthropic_api_key.get_secret_value() == "ak-test"
     assert s.bind_port == 9000
     assert s.log_level == "info"
+    assert s.legacy_attempt_deadline_compat_sec == 0

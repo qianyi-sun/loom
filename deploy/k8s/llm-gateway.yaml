@@ -63,6 +63,8 @@ spec:
                   name: loom-secrets
                   key: huggingface-api-key
                   optional: true
+            - name: LOOM_GW_LEGACY_ATTEMPT_DEADLINE_COMPAT_SEC
+              value: "86400.0"
             - name: LOOM_GW_LLM_RETRY_BASE_BACKOFF_SEC
               value: "0.5"
             - name: LOOM_GW_LLM_RETRY_BUDGET_SEC

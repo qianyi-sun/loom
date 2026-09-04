@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -887,6 +888,7 @@ class _EpisodeCheckpointBody(BaseModel):
     last_call_ordinal: int = Field(ge=0)
     last_seq: int = Field(ge=0)
     tmux_session_id: str | None = None
+    attempt_deadline_wall_clock: datetime | None = None
 
 
 async def _terminus_principal(
@@ -973,15 +975,24 @@ async def post_episode_checkpoint(
     from loom_control_plane.terminus_recovery import write_episode_checkpoint
 
     async with request.app.state.session_factory() as session:
-        trial_team = (
+        trial_row = (
             await session.execute(
-                select(TrialRow.team_id).where(TrialRow.id == trial_id),
+                select(TrialRow).where(TrialRow.id == trial_id).with_for_update(),
             )
         ).scalar_one_or_none()
-        if trial_team is None:
+        if trial_row is None:
             raise HTTPException(status_code=404, detail="trial not found")
-        if ctx.team_id is not None and trial_team != ctx.team_id:
+        if ctx.team_id is not None and trial_row.team_id != ctx.team_id:
             raise HTTPException(status_code=403, detail="trial belongs to another team")
+        if trial_row.state not in {"claimed", "running"}:
+            raise HTTPException(status_code=409, detail="trial_terminal")
+        attempt_deadline = payload.attempt_deadline_wall_clock
+        if attempt_deadline is not None:
+            if attempt_deadline.tzinfo is None or attempt_deadline.utcoffset() is None:
+                raise HTTPException(status_code=422, detail="attempt_deadline_timezone_required")
+            attempt_deadline = attempt_deadline.astimezone(UTC)
+            if datetime.now(UTC) >= attempt_deadline:
+                raise HTTPException(status_code=409, detail="attempt_deadline_elapsed")
         row = await write_episode_checkpoint(
             session,
             execution_id=payload.execution_id,
@@ -992,5 +1003,8 @@ async def post_episode_checkpoint(
             last_seq=payload.last_seq,
             tmux_session_id=payload.tmux_session_id,
         )
+        if attempt_deadline is not None and datetime.now(UTC) >= attempt_deadline:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="attempt_deadline_elapsed")
         await session.commit()
     return {"id": str(row.id), "version": row.version, "checksum": row.checksum}

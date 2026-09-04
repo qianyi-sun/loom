@@ -119,6 +119,16 @@ _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {
         "provider",
         ["Retry the run and run provider preflight if transport disconnects repeat."],
     ),
+    "step_credential_invalid_or_expired": (
+        "gateway",
+        "platform",
+        ["Inspect the attempt deadline and step credential lifecycle."],
+    ),
+    "step_credential_scope_invalid": (
+        "gateway",
+        "platform",
+        ["Inspect the step credential scopes minted for this attempt."],
+    ),
 }
 
 
