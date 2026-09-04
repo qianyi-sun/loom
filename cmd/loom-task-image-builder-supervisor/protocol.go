@@ -19,6 +19,18 @@ type GuardClient struct {
 
 var requiredGuardUID = uint32(0)
 
+var (
+	unixConnect = func(fd int, sa syscall.Sockaddr) error {
+		return syscall.Connect(fd, sa)
+	}
+	unixSendmsgN = func(fd int, payload []byte, oob []byte, to syscall.Sockaddr, flags int) (int, error) {
+		return syscall.SendmsgN(fd, payload, oob, to, flags)
+	}
+	unixRecvmsg = func(fd int, payload []byte, oob []byte, flags int) (int, int, int, syscall.Sockaddr, error) {
+		return syscall.Recvmsg(fd, payload, oob, flags)
+	}
+)
+
 type AllocationCapabilities struct {
 	Bootstrap          *SecretBuffer
 	ProofSHA256        string
@@ -422,7 +434,7 @@ func (c *GuardClient) connect(ctx context.Context) (int, time.Time, error) {
 		syscall.Close(fd)
 		return -1, time.Time{}, err
 	}
-	if err := syscall.Connect(fd, &syscall.SockaddrUnix{Name: c.socketPath}); err != nil {
+	if err := connectWithRetry(fd, &syscall.SockaddrUnix{Name: c.socketPath}); err != nil {
 		syscall.Close(fd)
 		return -1, time.Time{}, wrapDeadline(ctx, err)
 	}
@@ -596,7 +608,7 @@ func sendLocalPacket(fd int, request map[string]any, rights []int) error {
 	if len(rights) > 0 {
 		oob = append(oob, syscall.UnixRights(rights...)...)
 	}
-	written, err := syscall.SendmsgN(fd, payload, oob, nil, 0)
+	written, err := sendmsgNWithRetry(fd, payload, oob, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -609,7 +621,7 @@ func sendLocalPacket(fd int, request map[string]any, rights []int) error {
 func receiveLocalPacket(fd int, maximum int) ([]byte, []int, *syscall.Ucred, int, error) {
 	payload := make([]byte, maximum)
 	oob := make([]byte, syscall.CmsgSpace(4*4)+syscall.CmsgSpace(syscall.SizeofUcred))
-	n, oobn, flags, _, err := syscall.Recvmsg(fd, payload, oob, syscall.MSG_CMSG_CLOEXEC)
+	n, oobn, flags, _, err := recvmsgWithRetry(fd, payload, oob, syscall.MSG_CMSG_CLOEXEC)
 	if err != nil {
 		return nil, nil, nil, 0, err
 	}
@@ -720,4 +732,31 @@ func wrapDeadline(ctx context.Context, err error) error {
 		return context.DeadlineExceeded
 	}
 	return err
+}
+
+func connectWithRetry(fd int, sa syscall.Sockaddr) error {
+	for {
+		err := unixConnect(fd, sa)
+		if !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+	}
+}
+
+func sendmsgNWithRetry(fd int, payload []byte, oob []byte, to syscall.Sockaddr, flags int) (int, error) {
+	for {
+		written, err := unixSendmsgN(fd, payload, oob, to, flags)
+		if !errors.Is(err, syscall.EINTR) {
+			return written, err
+		}
+	}
+}
+
+func recvmsgWithRetry(fd int, payload []byte, oob []byte, flags int) (int, int, int, syscall.Sockaddr, error) {
+	for {
+		n, oobn, recvFlags, sa, err := unixRecvmsg(fd, payload, oob, flags)
+		if !errors.Is(err, syscall.EINTR) {
+			return n, oobn, recvFlags, sa, err
+		}
+	}
 }
