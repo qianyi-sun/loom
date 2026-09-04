@@ -1694,9 +1694,14 @@ def _build_archive(
     def add_bytes(tar: tarfile.TarFile, name: str, data: bytes) -> None:
         checksums.append((name, _add_tar_bytes(tar, name, data)))
 
+    def add_stream(tar: tarfile.TarFile, name: str, body: Any, size: int) -> str:
+        digest = _add_tar_stream(tar, name, body, size)
+        checksums.append((name, digest))
+        return digest
+
     def add_ref(tar: tarfile.TarFile, name: str, ref: ObjectRef) -> None:
         body, size = _get_object_stream(client, ref)
-        checksums.append((name, _add_tar_stream(tar, name, body, size)))
+        add_stream(tar, name, body, size)
 
     def add_bundle_file(
         tar: tarfile.TarFile,
@@ -1785,6 +1790,7 @@ def _build_archive(
                     client=client,
                     add_bytes=add_bytes,
                     add_ref=add_ref,
+                    add_stream=add_stream,
                     selected=selected,
                     trajectory_events_by_trial=trajectory_events_by_trial or {},
                     tasks_by_id=tasks_by_id or {},
@@ -2067,6 +2073,7 @@ def _add_raw_harbor_entries(
     client: Any,
     add_bytes: Any,
     add_ref: Any,
+    add_stream: Any,
     selected: list[SelectedTrial],
     trajectory_events_by_trial: dict[UUID, list[Any]],
     tasks_by_id: dict[str, Task],
@@ -2326,7 +2333,7 @@ def _add_raw_harbor_entries(
                 kind="task_bundle",
             )
             archive_path = f"task_bundles/{task_id}/{rel}"
-            digest = _add_tar_stream(tar, archive_path, body, size)
+            digest = add_stream(tar, archive_path, body, size)
             task_bundle_files.append(
                 {
                     "task_id": task_id,
