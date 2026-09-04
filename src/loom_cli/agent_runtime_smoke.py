@@ -15,12 +15,14 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from loom_service.agent_catalog import AgentEntry, list_agents, resolve_agents
+from loom_worker.control_plane_client import StepTokenGrant
 
 SmokeState = Literal["passed", "failed"]
 AgentSmokeRunner = Callable[..., Awaitable["AgentRuntimeSmokeItem"]]
@@ -332,6 +334,22 @@ class _StepTokenClient:
         ttl_sec: int,
     ) -> str:
         return "loom_step_smoke-token"
+
+    async def mint_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime,
+    ) -> StepTokenGrant:
+        del team_id, trial_id, step_id, ttl_sec
+        return StepTokenGrant(
+            token="loom_step_smoke-token",
+            expires_at=attempt_deadline_wall_clock + timedelta(seconds=300),
+            attempt_deadline_wall_clock=attempt_deadline_wall_clock,
+        )
 
 
 def _failure_item(
