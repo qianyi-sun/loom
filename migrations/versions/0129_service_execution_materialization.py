@@ -126,23 +126,9 @@ def upgrade() -> None:
           )
         """
     )
-    op.execute(
-        """
-        UPDATE public.execution_leases
-           SET materialization_state = 'pending',
-               materialization_next_attempt_at = output_committed_at
-         WHERE output_commit_state = 'committed';
-
-        CREATE INDEX execution_leases_materialization_queue_idx
-          ON public.execution_leases
-            (materialization_next_attempt_at, output_committed_at, id)
-          WHERE materialization_state IN ('pending','running')
-        ;
-        CREATE INDEX execution_leases_source_cleanup_queue_idx
-          ON public.execution_leases (source_retain_until, id)
-          WHERE source_cleanup_state IN ('retained','running')
-        """
-    )
+    # Historical committed leases may already be deleted. Install the 0129-aware
+    # mutation guard before backfilling them so only the new materialization fields
+    # can change on otherwise immutable deleted rows.
     op.execute(
         r"""
         CREATE OR REPLACE FUNCTION validate_execution_lease_mutation() RETURNS trigger
@@ -313,6 +299,23 @@ def upgrade() -> None:
           );
           RETURN NULL;
         END $$;
+        """
+    )
+    op.execute(
+        """
+        UPDATE public.execution_leases
+           SET materialization_state = 'pending',
+               materialization_next_attempt_at = output_committed_at
+         WHERE output_commit_state = 'committed';
+
+        CREATE INDEX execution_leases_materialization_queue_idx
+          ON public.execution_leases
+            (materialization_next_attempt_at, output_committed_at, id)
+          WHERE materialization_state IN ('pending','running')
+        ;
+        CREATE INDEX execution_leases_source_cleanup_queue_idx
+          ON public.execution_leases (source_retain_until, id)
+          WHERE source_cleanup_state IN ('retained','running')
         """
     )
 
