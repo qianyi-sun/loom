@@ -271,6 +271,268 @@ func TestProtocolRetriesInterruptedResponseReceive(t *testing.T) {
 	}
 }
 
+func TestProtocolRetriesInterruptedConnectWithFreshSocket(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"finishing","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"33333333-3333-4333-8333-333333333333"}`), nil)
+		ackPayload, _, _, _ := receiveSeqpacket(t, connFD, 4096)
+		assertExactJSON(t, ackPayload, `{"operation":"ack","response_id":"22222222-2222-4222-8222-222222222222","schema":"`+localSchema+`"}`)
+	})
+	defer server.Close()
+
+	previousSocket := unixSocket
+	previousSetsockopt := unixSetsockoptInt
+	previousConnect := unixConnect
+	defer func() {
+		unixSocket = previousSocket
+		unixSetsockoptInt = previousSetsockopt
+		unixConnect = previousConnect
+	}()
+	socketCalls := 0
+	connectCalls := 0
+	unixSocket = func(domain int, typ int, proto int) (int, error) {
+		socketCalls++
+		return previousSocket(domain, typ, proto)
+	}
+	unixSetsockoptInt = func(fd int, level int, opt int, value int) error {
+		return previousSetsockopt(fd, level, opt, value)
+	}
+	unixConnect = func(fd int, sa syscall.Sockaddr) error {
+		connectCalls++
+		if connectCalls == 1 {
+			return syscall.EINTR
+		}
+		return previousConnect(fd, sa)
+	}
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	if err := client.Finish(context.Background(), "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", map[string]int{
+		"descendant_processes": 0,
+		"mounts":               0,
+		"sockets":              0,
+		"open_files":           0,
+	}); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if connectCalls < 2 {
+		t.Fatalf("connect calls = %d, want retry after EINTR", connectCalls)
+	}
+	if socketCalls < 2 {
+		t.Fatalf("socket calls = %d, want fresh socket after interrupted connect", socketCalls)
+	}
+}
+
+func TestProtocolInterruptedConnectPreservesAbsoluteDeadline(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	received := make(chan bool, 1)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		received <- tryReceiveSeqpacket(connFD, 4096, 250*time.Millisecond)
+	})
+	defer func() {
+		fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+		if err == nil {
+			_ = syscall.Connect(fd, &syscall.SockaddrUnix{Name: socketPath})
+			syscall.Close(fd)
+		}
+		server.Close()
+	}()
+
+	previousSocket := unixSocket
+	previousSetsockopt := unixSetsockoptInt
+	previousConnect := unixConnect
+	defer func() {
+		unixSocket = previousSocket
+		unixSetsockoptInt = previousSetsockopt
+		unixConnect = previousConnect
+	}()
+	socketCalls := 0
+	connectCalls := 0
+	unixSocket = func(domain int, typ int, proto int) (int, error) {
+		socketCalls++
+		return previousSocket(domain, typ, proto)
+	}
+	unixSetsockoptInt = func(fd int, level int, opt int, value int) error {
+		return previousSetsockopt(fd, level, opt, value)
+	}
+	unixConnect = func(fd int, sa syscall.Sockaddr) error {
+		connectCalls++
+		if connectCalls <= 3 {
+			time.Sleep(40 * time.Millisecond)
+			return syscall.EINTR
+		}
+		return previousConnect(fd, sa)
+	}
+
+	client := NewGuardClient(socketPath, 4096, 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+
+	err := client.Finish(ctx, "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", map[string]int{
+		"descendant_processes": 0,
+		"mounts":               0,
+		"sockets":              0,
+		"open_files":           0,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Finish() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 220*time.Millisecond {
+		t.Fatalf("Finish() elapsed = %v, want bounded by absolute deadline", elapsed)
+	}
+	if connectCalls < 3 {
+		t.Fatalf("connect calls = %d, want repeated EINTR retries before deadline", connectCalls)
+	}
+	if socketCalls < 3 {
+		t.Fatalf("socket calls = %d, want fresh sockets for interrupted connect retries", socketCalls)
+	}
+	select {
+	case got := <-received:
+		if got {
+			t.Fatal("request was sent after connect deadline expired")
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestProtocolInterruptedRequestSendPreservesAbsoluteDeadline(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	received := make(chan bool, 1)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		received <- tryReceiveSeqpacket(connFD, 4096, 250*time.Millisecond)
+	})
+	defer server.Close()
+
+	previousSendmsg := unixSendmsgN
+	defer func() { unixSendmsgN = previousSendmsg }()
+	calls := 0
+	unixSendmsgN = func(fd int, payload []byte, oob []byte, to syscall.Sockaddr, flags int) (int, error) {
+		calls++
+		if calls <= 3 {
+			time.Sleep(40 * time.Millisecond)
+			return 0, syscall.EINTR
+		}
+		return previousSendmsg(fd, payload, oob, to, flags)
+	}
+
+	client := NewGuardClient(socketPath, 4096, 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+
+	err := client.Finish(ctx, "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", map[string]int{
+		"descendant_processes": 0,
+		"mounts":               0,
+		"sockets":              0,
+		"open_files":           0,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Finish() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 220*time.Millisecond {
+		t.Fatalf("Finish() elapsed = %v, want bounded by absolute deadline", elapsed)
+	}
+	if got := <-received; got {
+		t.Fatal("request was sent after deadline expired")
+	}
+}
+
+func TestProtocolInterruptedResponseReceivePreservesAbsoluteDeadline(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+		time.Sleep(300 * time.Millisecond)
+	})
+	defer server.Close()
+
+	previousRecvmsg := unixRecvmsg
+	defer func() { unixRecvmsg = previousRecvmsg }()
+	calls := 0
+	unixRecvmsg = func(fd int, payload []byte, oob []byte, flags int) (int, int, int, syscall.Sockaddr, error) {
+		calls++
+		if calls <= 3 {
+			time.Sleep(40 * time.Millisecond)
+			return 0, 0, 0, nil, syscall.EINTR
+		}
+		return previousRecvmsg(fd, payload, oob, flags)
+	}
+
+	client := NewGuardClient(socketPath, 4096, 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+
+	err := client.Finish(ctx, "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", map[string]int{
+		"descendant_processes": 0,
+		"mounts":               0,
+		"sockets":              0,
+		"open_files":           0,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Finish() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 220*time.Millisecond {
+		t.Fatalf("Finish() elapsed = %v, want bounded by absolute deadline", elapsed)
+	}
+	if calls < 3 {
+		t.Fatalf("recvmsg calls = %d, want repeated EINTR retries before deadline", calls)
+	}
+}
+
+func TestProtocolRetriesInterruptedExchangeSendWithoutDuplicatingRights(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		payload, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+		if len(rights) != 1 {
+			t.Fatalf("received %d rights, want 1", len(rights))
+		}
+		closeRights(rights)
+		assertExactJSON(t, payload, `{"exchange_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation":"exchange","proof_sha256":"`+strings.Repeat("a", 64)+`","schema":"`+localSchema+`"}`)
+		if tryReceiveSeqpacket(connFD, 4096, 50*time.Millisecond) {
+			t.Fatal("duplicate request packet received after send retry")
+		}
+		sessionFD := createMemfdFixture(t, "session", []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"`+runtimeSessionArch()+`","session_token":"sentinel-secret-text","generation":2,"attestation_generation":2,"attestation_sha256":"`+strings.Repeat("b", 64)+`","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`), requiredMemfdSeals, true)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"session","response_id":"44444444-4444-4444-8444-444444444444","grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","session_generation":2,"session_public_binding_sha256":"`+strings.Repeat("c", 64)+`"}`), []int{sessionFD})
+		syscall.Close(sessionFD)
+		ackPayload, _, _, _ := receiveSeqpacket(t, connFD, 4096)
+		assertExactJSON(t, ackPayload, `{"operation":"ack","response_id":"44444444-4444-4444-8444-444444444444","schema":"`+localSchema+`"}`)
+	})
+	defer server.Close()
+
+	previousSendmsg := unixSendmsgN
+	defer func() { unixSendmsgN = previousSendmsg }()
+	calls := 0
+	unixSendmsgN = func(fd int, payload []byte, oob []byte, to syscall.Sockaddr, flags int) (int, error) {
+		calls++
+		if calls == 1 {
+			return 0, syscall.EINTR
+		}
+		return previousSendmsg(fd, payload, oob, to, flags)
+	}
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	bootstrapFD := createMemfdFixture(t, "bootstrap", []byte(`{"schema_version":1,"grant_id":"11111111-1111-4111-8111-111111111111","bootstrap_token":"sentinel-secret-text"}`), requiredMemfdSeals, true)
+	bootstrap, err := NewSecretBuffer(bootstrapFD, 64*1024)
+	if err != nil {
+		t.Fatalf("NewSecretBuffer() error = %v", err)
+	}
+	defer bootstrap.Close()
+	session, err := client.Exchange(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", strings.Repeat("a", 64), bootstrap)
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	session.Secret.Close()
+	if calls < 2 {
+		t.Fatalf("sendmsg calls = %d, want retry after EINTR", calls)
+	}
+}
+
 func TestProtocolRejectsTruncatedOrInvalidResponses(t *testing.T) {
 	t.Parallel()
 	useTestProtocolPolicy(t)
@@ -677,6 +939,17 @@ func receiveSeqpacket(t *testing.T, connFD int, maximum int) ([]byte, []int, *sy
 		}
 	}
 	return payload[:n], rights, creds, flags
+}
+
+func tryReceiveSeqpacket(connFD int, maximum int, timeout time.Duration) bool {
+	timeval := syscall.NsecToTimeval(timeout.Nanoseconds())
+	if err := syscall.SetsockoptTimeval(connFD, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &timeval); err != nil {
+		return false
+	}
+	payload := make([]byte, maximum)
+	oob := make([]byte, syscall.CmsgSpace(4*4)+syscall.CmsgSpace(syscall.SizeofUcred))
+	n, _, _, _, err := syscall.Recvmsg(connFD, payload, oob, syscall.MSG_CMSG_CLOEXEC)
+	return err == nil && n > 0
 }
 
 func sendSeqpacket(t *testing.T, connFD int, payload []byte, rights []int) {

@@ -20,6 +20,12 @@ type GuardClient struct {
 var requiredGuardUID = uint32(0)
 
 var (
+	unixSocket = func(domain int, typ int, proto int) (int, error) {
+		return syscall.Socket(domain, typ, proto)
+	}
+	unixSetsockoptInt = func(fd int, level int, opt int, value int) error {
+		return syscall.SetsockoptInt(fd, level, opt, value)
+	}
 	unixConnect = func(fd int, sa syscall.Sockaddr) error {
 		return syscall.Connect(fd, sa)
 	}
@@ -395,11 +401,11 @@ func (c *GuardClient) roundTrip(ctx context.Context, request map[string]any, rig
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := sendLocalPacket(fd, request, rights); err != nil {
+	if err := sendLocalPacket(fd, deadline, request, rights); err != nil {
 		syscall.Close(fd)
-		return nil, nil, err
+		return nil, nil, wrapDeadline(ctx, err)
 	}
-	payload, receivedRights, credentials, flags, err := receiveLocalPacket(fd, c.maxPacketBytes)
+	payload, receivedRights, credentials, flags, err := receiveLocalPacket(fd, deadline, c.maxPacketBytes)
 	if err != nil {
 		syscall.Close(fd)
 		return nil, nil, wrapDeadline(ctx, err)
@@ -418,38 +424,43 @@ func (c *GuardClient) roundTrip(ctx context.Context, request map[string]any, rig
 }
 
 func (c *GuardClient) connect(ctx context.Context) (int, time.Time, error) {
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return -1, time.Time{}, err
-	}
-	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1); err != nil {
-		syscall.Close(fd)
-		return -1, time.Time{}, err
-	}
 	deadline := time.Now().Add(c.ackTimeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
-	if err := applySocketDeadline(fd, deadline); err != nil {
-		syscall.Close(fd)
-		return -1, time.Time{}, err
+	for {
+		if deadlineExceeded(deadline) {
+			return -1, time.Time{}, wrapDeadline(ctx, syscall.EAGAIN)
+		}
+		fd, err := unixSocket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+		if err != nil {
+			return -1, time.Time{}, err
+		}
+		if err := unixSetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1); err != nil {
+			syscall.Close(fd)
+			return -1, time.Time{}, err
+		}
+		if err := applySocketDeadline(fd, deadline); err != nil {
+			syscall.Close(fd)
+			return -1, time.Time{}, err
+		}
+		if err := unixConnect(fd, &syscall.SockaddrUnix{Name: c.socketPath}); err != nil {
+			syscall.Close(fd)
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			return -1, time.Time{}, wrapDeadline(ctx, err)
+		}
+		return fd, deadline, nil
 	}
-	if err := connectWithRetry(fd, &syscall.SockaddrUnix{Name: c.socketPath}); err != nil {
-		syscall.Close(fd)
-		return -1, time.Time{}, wrapDeadline(ctx, err)
-	}
-	return fd, deadline, nil
 }
 
 func (c *GuardClient) sendAck(fd int, responseID string, deadline time.Time) error {
 	if !isCanonicalNonZeroUUID(responseID) {
 		return errors.New("ack response id invalid")
 	}
-	if err := applySocketDeadline(fd, deadline); err != nil {
-		return err
-	}
 	defer syscall.Close(fd)
-	return sendLocalPacket(fd, map[string]any{
+	return sendLocalPacket(fd, deadline, map[string]any{
 		"schema":      localSchema,
 		"operation":   "ack",
 		"response_id": responseID,
@@ -599,7 +610,7 @@ func (c *GuardClient) leaseOperation(ctx context.Context, operation string, gran
 	return &response, nil
 }
 
-func sendLocalPacket(fd int, request map[string]any, rights []int) error {
+func sendLocalPacket(fd int, deadline time.Time, request map[string]any, rights []int) error {
 	payload, err := encodeCanonicalJSON(request)
 	if err != nil {
 		return err
@@ -608,7 +619,7 @@ func sendLocalPacket(fd int, request map[string]any, rights []int) error {
 	if len(rights) > 0 {
 		oob = append(oob, syscall.UnixRights(rights...)...)
 	}
-	written, err := sendmsgNWithRetry(fd, payload, oob, nil, 0)
+	written, err := sendmsgNWithRetry(fd, deadline, payload, oob, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -618,10 +629,10 @@ func sendLocalPacket(fd int, request map[string]any, rights []int) error {
 	return nil
 }
 
-func receiveLocalPacket(fd int, maximum int) ([]byte, []int, *syscall.Ucred, int, error) {
+func receiveLocalPacket(fd int, deadline time.Time, maximum int) ([]byte, []int, *syscall.Ucred, int, error) {
 	payload := make([]byte, maximum)
 	oob := make([]byte, syscall.CmsgSpace(4*4)+syscall.CmsgSpace(syscall.SizeofUcred))
-	n, oobn, flags, _, err := recvmsgWithRetry(fd, payload, oob, syscall.MSG_CMSG_CLOEXEC)
+	n, oobn, flags, _, err := recvmsgWithRetry(fd, deadline, payload, oob, syscall.MSG_CMSG_CLOEXEC)
 	if err != nil {
 		return nil, nil, nil, 0, err
 	}
@@ -734,17 +745,18 @@ func wrapDeadline(ctx context.Context, err error) error {
 	return err
 }
 
-func connectWithRetry(fd int, sa syscall.Sockaddr) error {
-	for {
-		err := unixConnect(fd, sa)
-		if !errors.Is(err, syscall.EINTR) {
-			return err
-		}
-	}
+func deadlineExceeded(deadline time.Time) bool {
+	return !time.Now().Before(deadline)
 }
 
-func sendmsgNWithRetry(fd int, payload []byte, oob []byte, to syscall.Sockaddr, flags int) (int, error) {
+func sendmsgNWithRetry(fd int, deadline time.Time, payload []byte, oob []byte, to syscall.Sockaddr, flags int) (int, error) {
 	for {
+		if deadlineExceeded(deadline) {
+			return 0, syscall.EAGAIN
+		}
+		if err := applySocketDeadline(fd, deadline); err != nil {
+			return 0, err
+		}
 		written, err := unixSendmsgN(fd, payload, oob, to, flags)
 		if !errors.Is(err, syscall.EINTR) {
 			return written, err
@@ -752,8 +764,14 @@ func sendmsgNWithRetry(fd int, payload []byte, oob []byte, to syscall.Sockaddr, 
 	}
 }
 
-func recvmsgWithRetry(fd int, payload []byte, oob []byte, flags int) (int, int, int, syscall.Sockaddr, error) {
+func recvmsgWithRetry(fd int, deadline time.Time, payload []byte, oob []byte, flags int) (int, int, int, syscall.Sockaddr, error) {
 	for {
+		if deadlineExceeded(deadline) {
+			return 0, 0, 0, nil, syscall.EAGAIN
+		}
+		if err := applySocketDeadline(fd, deadline); err != nil {
+			return 0, 0, 0, nil, err
+		}
 		n, oobn, recvFlags, sa, err := unixRecvmsg(fd, payload, oob, flags)
 		if !errors.Is(err, syscall.EINTR) {
 			return n, oobn, recvFlags, sa, err
