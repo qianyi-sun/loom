@@ -83,6 +83,9 @@ spec:
   - from:
     - podSelector:
         matchLabels:
+          app: loom-control-plane
+    - podSelector:
+        matchLabels:
           app: loom-service
     - podSelector:
         matchLabels:
@@ -166,6 +169,13 @@ spec:
     - port: 8080
       protocol: TCP
   egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
+      protocol: TCP
   - to:
     - podSelector:
         matchLabels:

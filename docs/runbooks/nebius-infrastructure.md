@@ -317,6 +317,15 @@ checked polling, claim TTL, concurrency, and source-retention settings. A
 restart reclaims expired materialization leases from PostgreSQL; no operator
 must reconnect a completed Batch or copy artifacts manually.
 
+The canonical materializer also needs the namespace-local control-plane to
+MinIO TCP 9000 path: both control-plane egress and MinIO ingress must admit it.
+The repository NetworkPolicy and CLI render include this connection. If compute
+and output commit succeed but materialization retries with an S3 connection
+timeout, compare a control-plane MinIO health probe with the service's probe and
+check both policy directions. Reconcile the corrected repository policy, then
+let the existing materialization outbox retry; do not rerun the model, rewrite
+Trial state, or remove the retained source bundle to recover the transfer.
+
 Uploaded TaskSets retain the source `task.toml` identity while registering the
 Task under a team/TaskSet-qualified catalog ID. Canonical trajectory events and
 ATIF use the Trial's referenced catalog Task ID; comparing it directly with the
