@@ -77,6 +77,9 @@ class AuthContext:
     scopes: list[str]
     team_id: UUID | None
     expires_at: datetime | None
+    # Absolute wall-clock boundary signed into attempt-bound step JWTs. This
+    # must never contain a process-local monotonic-clock value.
+    attempt_deadline_wall_clock: datetime | None = None
     # Plan 9 additive optional fields. Populated by the JWT branch;
     # remain None for DB-backed tokens.
     trial_id: UUID | None = None
@@ -133,7 +136,7 @@ BearerValidationReason = Literal[
     "valid",
     "missing",
     "malformed",
-    "invalid",
+    "invalid_signature",
     "expired",
 ]
 
@@ -175,6 +178,8 @@ def mint_step_jwt(
     step_id: str,
     ttl_sec: int,
     signing_key: str,
+    issued_at: datetime | None = None,
+    attempt_deadline_wall_clock: datetime | None = None,
     provider_connection_id: UUID | None = None,
     provider_connection_id_bound: bool = False,
     step_jwt_id: UUID | None = None,
@@ -206,16 +211,35 @@ def mint_step_jwt(
     if (trial_id is None) == (execution_attempt_id is None):
         raise ValueError("exactly one token subject is required")
 
-    now = datetime.now(UTC)
+    now = issued_at if issued_at is not None else datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("step JWT issued_at must be timezone-aware")
+    now = now.astimezone(UTC).replace(microsecond=0)
+    expires_at = now + timedelta(seconds=ttl_sec)
+    if attempt_deadline_wall_clock is not None:
+        if (
+            attempt_deadline_wall_clock.tzinfo is None
+            or attempt_deadline_wall_clock.utcoffset() is None
+        ):
+            raise ValueError("attempt deadline must be timezone-aware wall-clock time")
+        attempt_deadline_wall_clock = attempt_deadline_wall_clock.astimezone(UTC)
+        if attempt_deadline_wall_clock <= now:
+            raise ValueError("attempt deadline has already elapsed")
+        if expires_at < attempt_deadline_wall_clock + timedelta(seconds=300):
+            raise ValueError("step JWT expiry must cover attempt deadline plus 300 seconds")
+        if ttl_sec > 30_000:
+            raise ValueError("attempt-bound step JWT TTL exceeds 30000 seconds")
     payload: dict[str, object] = {
         "iss": "loom-control-plane",
         "sub": "step-session",
         "team_id": str(team_id),
         "step_id": step_id,
-        "exp": int((now + timedelta(seconds=ttl_sec)).timestamp()),
+        "exp": int(expires_at.timestamp()),
         "iat": int(now.timestamp()),
         "scopes": ["llm:call"],
     }
+    if attempt_deadline_wall_clock is not None:
+        payload["attempt_deadline_wall_clock"] = attempt_deadline_wall_clock.isoformat()
     if trial_id is not None:
         payload["trial_id"] = str(trial_id)
         payload["subject_kind"] = "trial"
@@ -328,6 +352,33 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     if (raw_trial_id is None) == (raw_execution_attempt_id is None):
         raise jwt.InvalidTokenError("step JWT must carry exactly one subject")
     try:
+        attempt_deadline_wall_clock: datetime | None = None
+        raw_attempt_deadline = payload.get("attempt_deadline_wall_clock")
+        if raw_attempt_deadline is not None:
+            if not isinstance(raw_attempt_deadline, str):
+                raise ValueError("invalid attempt deadline claim")
+            attempt_deadline_wall_clock = datetime.fromisoformat(
+                raw_attempt_deadline.replace("Z", "+00:00")
+            )
+            if (
+                attempt_deadline_wall_clock.tzinfo is None
+                or attempt_deadline_wall_clock.utcoffset() is None
+            ):
+                raise ValueError("attempt deadline claim must be timezone-aware")
+            attempt_deadline_wall_clock = attempt_deadline_wall_clock.astimezone(UTC)
+            issued_at = payload.get("iat")
+            expires_at = payload.get("exp")
+            if (
+                not isinstance(issued_at, int)
+                or isinstance(issued_at, bool)
+                or not isinstance(expires_at, int)
+                or isinstance(expires_at, bool)
+                or attempt_deadline_wall_clock.timestamp() <= issued_at
+                or expires_at - issued_at > 30_000
+                or expires_at
+                < (attempt_deadline_wall_clock + timedelta(seconds=300)).timestamp()
+            ):
+                raise ValueError("invalid attempt deadline lifetime")
         step_jwt_id = UUID(payload["jti"]) if isinstance(payload.get("jti"), str) else None
         execution_attempt_lease_epoch = payload.get("execution_attempt_lease_epoch")
         if execution_attempt_lease_epoch is not None and (
@@ -411,13 +462,14 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
             ):
                 raise ValueError("invalid service execution JWT lifetime")
     except (TypeError, ValueError) as exc:
-        raise jwt.InvalidTokenError("invalid execution-attempt JWT authority") from exc
+        raise jwt.InvalidTokenError("invalid step JWT authority") from exc
     return AuthContext(
         token_hash=b"",  # synthetic — no DB row
         type="step_session",
         scopes=list(payload.get("scopes", [])),
         team_id=UUID(payload["team_id"]),
         expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
+        attempt_deadline_wall_clock=attempt_deadline_wall_clock,
         trial_id=UUID(raw_trial_id) if isinstance(raw_trial_id, str) else None,
         execution_attempt_id=(
             UUID(raw_execution_attempt_id) if isinstance(raw_execution_attempt_id, str) else None
@@ -482,7 +534,7 @@ async def validate_bearer_token(
     """Validate a Bearer token and return a credential-free reason code.
 
     `signing_key` enables the step-JWT branch; if None, JWTs always
-    return ``invalid`` (effectively disabling that path). DB-backed tokens
+    return ``invalid_signature`` (effectively disabling that path). DB-backed tokens
     are unaffected by `signing_key`. `allow_family_orchestrator` is a
     narrow opt-in for the Control Plane step-token exchange; it remains
     false for every other bearer-token consumer.
@@ -519,13 +571,13 @@ async def validate_bearer_token(
     # JWT branch
     if raw.startswith(_STEP_JWT_PREFIX):
         if signing_key is None:
-            return BearerValidationResult(context=None, reason="invalid")
+            return BearerValidationResult(context=None, reason="invalid_signature")
         try:
             context = verify_step_jwt(raw, signing_key=signing_key)
         except jwt.ExpiredSignatureError:
             return BearerValidationResult(context=None, reason="expired")
         except jwt.PyJWTError:
-            return BearerValidationResult(context=None, reason="invalid")
+            return BearerValidationResult(context=None, reason="invalid_signature")
         return BearerValidationResult(context=context, reason="valid")
 
     # DB-backed branch for team/worker credentials plus narrowly opted-in
@@ -539,9 +591,9 @@ async def validate_bearer_token(
         )
     ).scalar_one_or_none()
     if row is None:
-        return BearerValidationResult(context=None, reason="invalid")
+        return BearerValidationResult(context=None, reason="invalid_signature")
     if row.type == "admin" or any(scope.startswith("admin:") for scope in row.scopes):
-        return BearerValidationResult(context=None, reason="invalid")
+        return BearerValidationResult(context=None, reason="invalid_signature")
     if row.type == "readonly_probe":
         if (
             not allow_readonly_probe
@@ -549,7 +601,7 @@ async def validate_bearer_token(
             or list(row.scopes) != ["read:own"]
             or row.created_by_user_id is not None
         ):
-            return BearerValidationResult(context=None, reason="invalid")
+            return BearerValidationResult(context=None, reason="invalid_signature")
     elif row.type == "family_orchestrator":
         if (
             not allow_family_orchestrator
@@ -557,11 +609,11 @@ async def validate_bearer_token(
             or list(row.scopes) != ["family:evolve"]
             or row.created_by_user_id is not None
         ):
-            return BearerValidationResult(context=None, reason="invalid")
+            return BearerValidationResult(context=None, reason="invalid_signature")
     elif row.type not in {"team", "worker"}:
-        return BearerValidationResult(context=None, reason="invalid")
+        return BearerValidationResult(context=None, reason="invalid_signature")
     if row.revoked_at is not None:
-        return BearerValidationResult(context=None, reason="invalid")
+        return BearerValidationResult(context=None, reason="invalid_signature")
     if row.expires_at is not None and row.expires_at < datetime.now(UTC):
         return BearerValidationResult(context=None, reason="expired")
 

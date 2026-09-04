@@ -15,7 +15,10 @@ class _UnusedSession:
     pass
 
 
-@pytest.mark.parametrize("reason", ["missing", "malformed", "invalid", "expired"])
+@pytest.mark.parametrize(
+    "reason",
+    ["missing", "malformed", "invalid_signature", "expired"],
+)
 async def test_invalid_bearer_reasons_share_one_public_401_contract(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

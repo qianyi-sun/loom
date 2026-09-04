@@ -304,7 +304,9 @@ async def test_non_bearer_header_returns_none(db_session: AsyncSession):
 
 async def test_unknown_token_returns_none(db_session: AsyncSession):
     assert await verify_bearer_token(db_session, "Bearer unknown") is None
-    assert (await validate_bearer_token(db_session, "Bearer unknown")).reason == "invalid"
+    assert (
+        await validate_bearer_token(db_session, "Bearer unknown")
+    ).reason == "invalid_signature"
 
 
 async def test_expired_token_rejected(db_session: AsyncSession):

@@ -15,6 +15,8 @@ import hashlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
 from uuid import UUID
@@ -25,6 +27,85 @@ from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
 
 EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
+_MAX_STEP_TOKEN_TTL_SEC = 30_000
+_STEP_TOKEN_DEADLINE_GRACE_SEC = 300
+
+
+def _parse_wall_clock_timestamp(value: object, *, field_name: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an RFC 3339 string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an RFC 3339 string") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+@dataclass(frozen=True)
+class StepTokenGrant:
+    """Signed step credential plus its server-authoritative lifetime."""
+
+    token: str
+    expires_at: datetime
+    attempt_deadline_wall_clock: datetime | None
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> StepTokenGrant:
+        token = payload.get("token")
+        if not isinstance(token, str) or not token.startswith("loom_step_"):
+            raise ValueError("step-token response did not contain a Loom step token")
+        expires_at = _parse_wall_clock_timestamp(
+            payload.get("expires_at"),
+            field_name="expires_at",
+        )
+        raw_deadline = payload.get("attempt_deadline_wall_clock")
+        deadline = (
+            _parse_wall_clock_timestamp(
+                raw_deadline,
+                field_name="attempt_deadline_wall_clock",
+            )
+            if raw_deadline is not None
+            else None
+        )
+        if deadline is not None and expires_at < deadline + timedelta(
+            seconds=_STEP_TOKEN_DEADLINE_GRACE_SEC
+        ):
+            raise ValueError("step-token response does not cover the attempt deadline")
+        return cls(
+            token=token,
+            expires_at=expires_at,
+            attempt_deadline_wall_clock=deadline,
+        )
+
+
+def _validate_step_token_deadline_request(
+    *,
+    attempt_deadline_wall_clock: datetime,
+    ttl_sec: int,
+    now: datetime | None = None,
+) -> datetime:
+    if not isinstance(attempt_deadline_wall_clock, datetime):
+        raise ValueError("attempt deadline must be timezone-aware wall-clock time")
+    if (
+        attempt_deadline_wall_clock.tzinfo is None
+        or attempt_deadline_wall_clock.utcoffset() is None
+    ):
+        raise ValueError("attempt deadline must be timezone-aware wall-clock time")
+    deadline = attempt_deadline_wall_clock.astimezone(UTC)
+    observed_at = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    remaining_sec = (deadline - observed_at).total_seconds()
+    if remaining_sec <= 0:
+        raise ValueError("attempt deadline has already elapsed")
+    required_ttl_sec = ceil(remaining_sec) + _STEP_TOKEN_DEADLINE_GRACE_SEC
+    if required_ttl_sec > _MAX_STEP_TOKEN_TTL_SEC:
+        raise ValueError("attempt deadline requires a step-token TTL above 30000 seconds")
+    if ttl_sec < required_ttl_sec:
+        raise ValueError("step-token TTL does not cover attempt deadline plus 300 seconds")
+    if ttl_sec > _MAX_STEP_TOKEN_TTL_SEC:
+        raise ValueError("step-token TTL exceeds 30000 seconds")
+    return deadline
 
 
 class StepTokenClient(Protocol):
@@ -36,6 +117,16 @@ class StepTokenClient(Protocol):
         step_id: str,
         ttl_sec: int,
     ) -> str: ...
+
+    async def mint_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime,
+    ) -> StepTokenGrant: ...
 
 
 class ExecutionAttemptStepTokenClient(Protocol):
@@ -1196,21 +1287,75 @@ class HttpControlPlaneClient:
         """Mint a step-scoped JWT the agent presents to the Gateway as its
         bearer token (Plan 11 + Plan 9 Task 4). Returns the raw
         `loom_step_<jwt>` string."""
+        payload = await self._request_step_token_payload(
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id=step_id,
+            ttl_sec=ttl_sec,
+            attempt_deadline_wall_clock=None,
+        )
+        return str(payload["token"])
+
+    async def mint_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime,
+    ) -> StepTokenGrant:
+        """Mint a credential bound to an absolute attempt wall-clock deadline.
+
+        The preflight rejects lifetimes that cannot fit under the 30,000-second
+        token ceiling before any HTTP request is dispatched. Callers must
+        translate a monotonic attempt budget to wall-clock time at the attempt
+        boundary; process-local monotonic values are never sent on the wire.
+        """
+        deadline = _validate_step_token_deadline_request(
+            attempt_deadline_wall_clock=attempt_deadline_wall_clock,
+            ttl_sec=ttl_sec,
+        )
+        payload = await self._request_step_token_payload(
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id=step_id,
+            ttl_sec=ttl_sec,
+            attempt_deadline_wall_clock=deadline,
+        )
+        grant = StepTokenGrant.from_payload(payload)
+        if grant.attempt_deadline_wall_clock != deadline:
+            raise ValueError("step-token response changed the attempt deadline")
+        return grant
+
+    async def _request_step_token_payload(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        attempt_deadline_wall_clock: datetime | None,
+    ) -> Mapping[str, Any]:
         client, owned = self._http()
         try:
+            body: dict[str, Any] = {
+                "team_id": str(team_id),
+                "trial_id": str(trial_id),
+                "step_id": step_id,
+                "ttl_sec": ttl_sec,
+            }
+            if attempt_deadline_wall_clock is not None:
+                body["attempt_deadline_wall_clock"] = (
+                    attempt_deadline_wall_clock.isoformat()
+                )
             r = await client.post(
                 "/admin/step-tokens",
                 headers=self._headers,
-                json={
-                    "team_id": str(team_id),
-                    "trial_id": str(trial_id),
-                    "step_id": step_id,
-                    "ttl_sec": ttl_sec,
-                },
+                json=body,
             )
             r.raise_for_status()
-            body = r.json()
-            return str(body["token"])
+            return r.json()  # type: ignore[no-any-return]
         finally:
             if owned:
                 await client.aclose()
