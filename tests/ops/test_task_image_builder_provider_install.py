@@ -30,12 +30,12 @@ def _digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _elf_payload(machine: int, label: str) -> bytes:
+def _elf_payload(machine: int, label: str, *, elf_type: int = 3) -> bytes:
     ident = b"\x7fELF" + bytes((2, 1, 1, 0)) + bytes(8)
     return (
         _ELF_HEADER.pack(
             ident,
-            3,
+            elf_type,
             machine,
             1,
             0,
@@ -60,12 +60,24 @@ def _write(path: Path, payload: bytes, mode: int) -> None:
     path.chmod(mode)
 
 
-def _guard_release(root: Path) -> tuple[Path, str]:
+def _guard_release(root: Path, *, release_spec_sha256: str) -> tuple[Path, str]:
     release_root = root / "guard-release"
-    files = {
-        "loom-task-image-builder-guard.pyz": (_elf_payload(62, "guard"), 0o555),
-        "guard-network-v1.bpf.o": (_elf_payload(247, "bpf"), 0o444),
-        "guard-network-v1.bpf.build.json": (
+    map_schema = _canonical(
+        {
+            "schema": "loom.task-image-builder-guard-bpf-maps/v1",
+            "maps": [],
+        }
+    )
+    bpf_object = _elf_payload(247, "bpf", elf_type=1)
+    files = (
+        ("bpftool", _elf_payload(62, "bpftool"), 0o555),
+        (
+            "guard-network-map-schema-v1.json",
+            map_schema,
+            0o444,
+        ),
+        (
+            "guard-network-v1.bpf.build.json",
             _canonical(
                 {
                     "schema": "loom.task-image-builder-guard-bpf-build/v1",
@@ -74,16 +86,9 @@ def _guard_release(root: Path) -> tuple[Path, str]:
                     "clang_version": "clang version fixture",
                     "target": "bpfel",
                     "source_sha256": "2" * 64,
-                    "object_sha256": _digest(_elf_payload(247, "bpf")),
-                    "object_size": len(_elf_payload(247, "bpf")),
-                    "map_schema_sha256": _digest(
-                        _canonical(
-                            {
-                                "schema": "loom.task-image-builder-guard-bpf-maps/v1",
-                                "maps": [],
-                            }
-                        )
-                    ),
+                    "object_sha256": _digest(bpf_object),
+                    "object_size": len(bpf_object),
+                    "map_schema_sha256": _digest(map_schema),
                     "program_sections": [],
                     "program_symbols": [],
                     "map_symbols": [],
@@ -91,31 +96,42 @@ def _guard_release(root: Path) -> tuple[Path, str]:
             ),
             0o444,
         ),
-        "guard-network-map-schema-v1.json": (
-            _canonical(
-                {
-                    "schema": "loom.task-image-builder-guard-bpf-maps/v1",
-                    "maps": [],
-                }
-            ),
+        (
+            "guard-network-v1.bpf.o",
+            bpf_object,
             0o444,
         ),
-        "loom-task-image-builder-node-guard.service": (b"[Unit]\n[Service]\n", 0o444),
-    }
+        (
+            "loom-task-image-builder-node-guard.service",
+            (
+                ROOT / "deploy/task-image-builder/loom-task-image-builder-node-guard.service"
+            ).read_bytes(),
+            0o444,
+        ),
+        ("loom-task-image-builder-guard.pyz", _elf_payload(62, "guard"), 0o555),
+    )
     identity = {
-        "schema": "loom.task-image-builder-guard-bundle/v1",
         "architecture": "x86_64",
         "files": [
-            {"path": name, "mode": f"{mode:04o}", "sha256": _digest(payload)}
-            for name, (payload, mode) in sorted(files.items())
+            {
+                "mode": f"{mode:04o}",
+                "path": name,
+                "sha256": _digest(payload),
+                "size": len(payload),
+            }
+            for name, payload, mode in files
         ],
+        "interpreter": "/usr/bin/python3 -I -B",
+        "release_spec_sha256": release_spec_sha256,
+        "schema": "loom.task-image-builder-guard-bundle/v1",
     }
     guard_digest = _digest(_canonical(identity))
     release = release_root / guard_digest
-    for name, (payload, mode) in files.items():
+    for name, payload, mode in files:
         _write(release / name, payload, mode)
     manifest = {**identity, "release_sha256": guard_digest}
     _write(release / "release-manifest.json", _canonical(manifest), 0o444)
+    release.chmod(0o555)
     return release, guard_digest
 
 
@@ -145,7 +161,16 @@ def _source_bundle(tmp_path: Path) -> tuple[Path, Path]:
     scripts.mkdir(parents=True)
     cmd.mkdir(parents=True)
 
-    guard_release, guard_digest = _guard_release(tmp_path)
+    guard_spec_payload = _canonical(
+        {
+            "schema": "loom.task-image-builder-guard-release-spec/v1",
+            "version": 1,
+        }
+    )
+    guard_release, guard_digest = _guard_release(
+        tmp_path,
+        release_spec_sha256=_digest(guard_spec_payload),
+    )
     runtime_root = _runtime_tree(tmp_path)
     runtime_members = {
         name: _digest((runtime_root / "runtime" / name).read_bytes())
@@ -202,7 +227,7 @@ def _source_bundle(tmp_path: Path) -> tuple[Path, Path]:
 
     _write(
         deploy / "guard-release-v1.json",
-        _canonical({"guard_release_sha256": guard_digest}),
+        guard_spec_payload,
         0o444,
     )
     _write(deploy / "host-release-v2.json", _canonical(host_release), 0o444)

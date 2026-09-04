@@ -19,6 +19,21 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
+if __package__ in {None, ""}:
+    from task_image_builder_guard_release import (  # type: ignore[import-not-found]
+        GuardReleaseError as _GuardReleaseError,
+    )
+    from task_image_builder_guard_release import (
+        verify_release_directory as _verify_guard_release_directory,
+    )
+else:
+    from scripts.ops.task_image_builder_guard_release import (
+        GuardReleaseError as _GuardReleaseError,
+    )
+    from scripts.ops.task_image_builder_guard_release import (
+        verify_release_directory as _verify_guard_release_directory,
+    )
+
 Architecture = Literal["x86_64", "aarch64"]
 
 _SPEC = Path("deploy/task-image-builder/provider-release-v1.json")
@@ -42,13 +57,23 @@ _RUNTIME_MEMBERS = (
     "slirp4netns",
     "fuse-overlayfs",
 )
-_GUARD_MEMBERS = (
+_GUARD_INTERPRETER = "/usr/bin/python3 -I -B"
+_GUARD_MEMBER_LAYOUT = (
+    ("bpftool", 0o555),
     "guard-network-map-schema-v1.json",
     "guard-network-v1.bpf.build.json",
     "guard-network-v1.bpf.o",
-    "loom-task-image-builder-guard.pyz",
     "loom-task-image-builder-node-guard.service",
+    ("loom-task-image-builder-guard.pyz", 0o555),
 )
+_GUARD_MEMBERS = tuple(
+    item[0] if isinstance(item, tuple) else item
+    for item in _GUARD_MEMBER_LAYOUT
+)
+_GUARD_MEMBER_MODES = {
+    item[0] if isinstance(item, tuple) else item: item[1] if isinstance(item, tuple) else 0o444
+    for item in _GUARD_MEMBER_LAYOUT
+}
 _RELEASE_MANIFEST_KEYS = {
     "architecture",
     "authority_contract_version",
@@ -459,72 +484,26 @@ def _read_json_path(path: Path, *, label: str) -> dict[str, object]:
     return value
 
 
-def _load_guard_release(path: Path, *, architecture: Architecture, expected_release_sha256: str) -> dict[str, bytes]:
-    if (
-        path.name != expected_release_sha256
-        or len(expected_release_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in expected_release_sha256)
-        or expected_release_sha256 == "0" * 64
-    ):
-        raise ProviderReleaseError("guard release directory identity is invalid")
-    manifest_path = path / _MANIFEST
-    manifest_payload = _read_regular(manifest_path, maximum=_MAX_JSON_BYTES)
+def _load_guard_release(
+    path: Path,
+    *,
+    architecture: Architecture,
+    expected_release_sha256: str,
+    expected_release_spec_sha256: str,
+) -> dict[str, tuple[int, bytes]]:
     try:
-        manifest = json.loads(manifest_payload, object_pairs_hook=_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
-        raise ProviderReleaseError("guard release manifest is invalid") from exc
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema") != "loom.task-image-builder-guard-bundle/v1"
-        or set(manifest) != {"architecture", "files", "release_sha256", "schema"}
-        or _canonical(manifest) != manifest_payload
-        or manifest.get("architecture") != architecture
-        or manifest.get("release_sha256") != expected_release_sha256
-        or not isinstance(manifest.get("files"), list)
-    ):
-        raise ProviderReleaseError("guard release manifest is invalid")
-    identity = dict(manifest)
-    identity.pop("release_sha256", None)
-    if _digest(_canonical(identity)) != expected_release_sha256:
-        raise ProviderReleaseError("guard release digest is invalid")
-    try:
-        entries = sorted(path.iterdir(), key=lambda item: item.name)
-    except OSError as exc:
-        raise ProviderReleaseError("guard release directory is unavailable") from exc
-    if {item.name for item in entries} != {*_GUARD_MEMBERS, _MANIFEST}:
-        raise ProviderReleaseError("guard release inventory is invalid")
-    expected_files = cast(list[object], manifest["files"])
-    expected_names = tuple(sorted(_GUARD_MEMBERS))
-    if len(expected_files) != len(expected_names):
-        raise ProviderReleaseError("guard release file manifest is invalid")
-    payloads: dict[str, bytes] = {}
-    for record, name in zip(expected_files, expected_names, strict=True):
-        mode = 0o555 if name.endswith(".pyz") else 0o444
-        if (
-            not isinstance(record, dict)
-            or set(record) != {"mode", "path", "sha256"}
-            or record.get("path") != name
-            or record.get("mode") != f"{mode:04o}"
-            or not isinstance(record.get("sha256"), str)
-        ):
-            raise ProviderReleaseError("guard release file manifest is invalid")
-        item = path / name
-        payload = _read_regular(
-            item,
-            maximum=_MAX_BYTES,
-            executable=mode == 0o555,
+        release = _verify_guard_release_directory(
+            path,
+            expected_release_sha256=expected_release_sha256,
+            expected_architecture=architecture,
         )
-        try:
-            metadata = item.lstat()
-        except OSError as exc:
-            raise ProviderReleaseError("guard release member is unavailable") from exc
-        if (
-            stat.S_IMODE(metadata.st_mode) != mode
-            or _digest(payload) != record["sha256"]
-        ):
-            raise ProviderReleaseError("guard release member differs from manifest")
-        payloads[name] = payload
-    return payloads
+    except _GuardReleaseError as exc:
+        raise ProviderReleaseError(str(exc)) from exc
+    if release.manifest.get("release_spec_sha256") != expected_release_spec_sha256:
+        raise ProviderReleaseError("guard release differs from reviewed specification")
+    if tuple(name for name, _mode, _payload in release.members) != _GUARD_MEMBERS:
+        raise ProviderReleaseError("guard release inventory is invalid")
+    return {name: (mode, payload) for name, mode, payload in release.members}
 
 
 def _runtime_member_destination(name: str) -> str:
@@ -878,6 +857,7 @@ def build_release(
         guard_dir,
         architecture=architecture,
         expected_release_sha256=spec.guard_bundle_sha256[architecture],
+        expected_release_spec_sha256=spec.guard_release_sha256,
     )
     runtime_payloads, runtime_release, runtime_x_crypto, toolchain_image = _load_runtime(
         runtime_manifest_path,
@@ -911,7 +891,8 @@ def build_release(
             )
         )
     for name in _GUARD_MEMBERS:
-        members.append((name, 0o555 if name.endswith(".pyz") else 0o444, guard_members[name]))
+        mode, payload = guard_members[name]
+        members.append((name, mode, payload))
     members.extend(
         [
             ("bin/loom-task-builder-supervisor", 0o555, supervisor_payload),
@@ -1101,25 +1082,45 @@ def _guard_member_records(
     )
 
 
+def _guard_member_payload_records(
+    members: tuple[tuple[str, int, bytes], ...],
+) -> tuple[tuple[str, int, str, int], ...]:
+    records = {
+        name: (name, mode, _digest(payload), len(payload))
+        for name, mode, payload in members
+        if name in _GUARD_MEMBERS
+    }
+    return tuple(records[name] for name in _GUARD_MEMBERS if name in records)
+
+
 def _guard_bundle_identity_sha256(
-    guard_records: tuple[tuple[str, int, str], ...],
+    guard_records: tuple[tuple[str, int, str, int], ...],
     *,
     architecture: Architecture,
+    release_spec_sha256: str,
 ) -> str:
-    expected_names = tuple(sorted(_GUARD_MEMBERS))
-    if tuple(name for name, _mode, _sha256 in guard_records) != expected_names:
+    expected_names = _GUARD_MEMBERS
+    if tuple(name for name, _mode, _sha256, _size in guard_records) != expected_names:
         raise ProviderReleaseError("release guard member inventory is invalid")
     files: list[dict[str, object]] = []
-    for name, mode, digest in guard_records:
-        expected_mode = 0o555 if name.endswith(".pyz") else 0o444
-        if mode != expected_mode or not _is_sha256(digest):
+    for name, mode, digest, size in guard_records:
+        if mode != _GUARD_MEMBER_MODES[name] or not _is_sha256(digest) or size <= 0:
             raise ProviderReleaseError("release guard member identity is invalid")
-        files.append({"path": name, "mode": f"{mode:04o}", "sha256": digest})
+        files.append(
+            {
+                "mode": f"{mode:04o}",
+                "path": name,
+                "sha256": digest,
+                "size": size,
+            }
+        )
     return _digest(
         _canonical(
             {
                 "architecture": architecture,
                 "files": files,
+                "interpreter": _GUARD_INTERPRETER,
+                "release_spec_sha256": release_spec_sha256,
                 "schema": "loom.task-image-builder-guard-bundle/v1",
             }
         )
@@ -1286,6 +1287,7 @@ def verify_release_directory_against_spec(
     ) = _read_reviewed_spec(source_root, architecture=expected_architecture)
     member_records = _verified_member_records(release)
     guard_records = _guard_member_records(member_records)
+    guard_payload_records = _guard_member_payload_records(release.members)
     if (
         release.manifest.get("release_spec_sha256") != _digest(spec_payload)
         or release.manifest.get("architecture") != expected_architecture
@@ -1297,8 +1299,9 @@ def verify_release_directory_against_spec(
         or release.manifest.get("guard_release_sha256")
         != spec.guard_bundle_sha256[expected_architecture]
         or _guard_bundle_identity_sha256(
-            guard_records,
+            guard_payload_records,
             architecture=expected_architecture,
+            release_spec_sha256=spec.guard_release_sha256,
         )
         != spec.guard_bundle_sha256[expected_architecture]
     ):
