@@ -284,7 +284,9 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 name="loom-cp-service-execution-scheduler",
             )
         service_execution_materializer_task: asyncio.Task[None] | None = None
+        service_execution_materializer_stop_event: asyncio.Event | None = None
         if settings.service_execution_materializer_enabled:
+            service_execution_materializer_stop_event = asyncio.Event()
             service_execution_materializer_task = asyncio.create_task(
                 run_service_execution_materializer_loop(
                     materializer=ServiceExecutionMaterializer(
@@ -303,6 +305,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                     ),
                     interval_seconds=settings.service_execution_materializer_interval_sec,
                     concurrency=settings.service_execution_materializer_concurrency,
+                    stop_event=service_execution_materializer_stop_event,
                 ),
                 name="loom-cp-service-execution-materializer",
             )
@@ -319,13 +322,13 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             if service_execution_scheduler_task is not None:
                 service_execution_scheduler_task.cancel()
             if service_execution_materializer_task is not None:
+                assert service_execution_materializer_stop_event is not None
+                service_execution_materializer_stop_event.set()
                 service_execution_materializer_task.cancel()
-            # Bound the await so a stuck task (e.g. mid-DB call when
-            # cancellation arrives, asyncpg connection takes a moment
-            # to release) doesn't block the entire lifespan shutdown —
-            # which then blocks `TestClient.__exit__`, which then
-            # blocks the test. Five seconds is generous for a task
-            # that should respond to cancel in microseconds.
+            # Give slow top-level cleanup five seconds before sending a
+            # follow-up cancellation.  On Python 3.11, wait_for still waits
+            # for cancellation cleanup to finish; loops must therefore own
+            # and drain every nested task rather than abandon it here.
             for t in (
                 crash_detector_task,
                 metrics_refresher_task,

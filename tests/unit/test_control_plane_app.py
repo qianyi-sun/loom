@@ -91,3 +91,55 @@ def test_control_plane_lifespan_configures_db_pool(
         "max_overflow": 44,
         "pool_timeout": 55.5,
     }]
+
+
+def test_control_plane_lifespan_signals_materializer_before_cancelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_control_plane import app as control_plane_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    materializer_stop_states: list[bool] = []
+
+    async def _schema_noop(_engine: object) -> int:
+        return 0
+
+    async def _background_noop(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    async def _materializer_background(**kwargs: object) -> None:
+        stop_event = kwargs.get("stop_event")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            materializer_stop_states.append(
+                isinstance(stop_event, asyncio.Event) and stop_event.is_set()
+            )
+
+    monkeypatch.setattr(control_plane_app, "_assert_schema_startup", _schema_noop)
+    monkeypatch.setattr(control_plane_app, "create_async_engine", lambda *_a, **_kw: _FakeEngine())
+    monkeypatch.setattr(control_plane_app, "build_s3_client", lambda **_: object())
+    monkeypatch.setattr(control_plane_app, "run_crash_detector_loop", _background_noop)
+    monkeypatch.setattr(control_plane_app, "run_metrics_refresher_loop", _background_noop)
+    monkeypatch.setattr(control_plane_app, "run_retry_exhausted_sweeper_loop", _background_noop)
+    monkeypatch.setattr(
+        control_plane_app,
+        "run_service_execution_materializer_loop",
+        _materializer_background,
+    )
+
+    app = control_plane_app.create_app(
+        ControlPlaneSettings(
+            _env_file=None,
+            db_url="postgresql+psycopg://loom:loom@example/loom",
+            minio_endpoint="http://minio.example",
+            minio_access_key="minio-access",
+            minio_secret_key="minio-secret",
+            step_jwt_signing_key="test-step-jwt-signing-key",
+        ),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+
+    assert materializer_stop_states == [True]
