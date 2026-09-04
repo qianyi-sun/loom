@@ -3,13 +3,36 @@
 from __future__ import annotations
 
 import ast
-import sys
 import tomllib
 from pathlib import Path
 
 AUTHORITY_ROOT = Path("src/loom_task_image_authority")
 PRODUCTION_ROOT = Path("src")
 STORE_MODULE = "loom_task_image_authority.store"
+ALLOWED_AUTHORITY_STDLIB_IMPORTS = {
+    "asyncio",
+    "base64",
+    "binascii",
+    "collections.abc",
+    "contextlib",
+    "dataclasses",
+    "datetime",
+    "hashlib",
+    "hmac",
+    "json",
+    "math",
+    "os",
+    "pathlib",
+    "re",
+    "secrets",
+    "ssl",
+    "stat",
+    "time",
+    "types",
+    "typing",
+    "urllib.parse",
+    "uuid",
+}
 ALLOWED_AUTHORITY_IMPORT_ROOTS = {
     "fastapi",
     "loom_task_image_authority",
@@ -64,6 +87,16 @@ def _imports_store(tree: ast.AST) -> bool:
     return False
 
 
+def _unexpected_authority_imports(imports: set[str]) -> set[str]:
+    return {
+        imported
+        for imported in imports
+        if imported not in ALLOWED_AUTHORITY_IMPORTS
+        and imported not in ALLOWED_AUTHORITY_STDLIB_IMPORTS
+        and imported.partition(".")[0] not in ALLOWED_AUTHORITY_IMPORT_ROOTS
+    }
+
+
 def test_authority_package_has_only_the_closed_service_dependency_set() -> None:
     sources = sorted(AUTHORITY_ROOT.glob("*.py"))
     assert sources
@@ -71,16 +104,15 @@ def test_authority_package_has_only_the_closed_service_dependency_set() -> None:
     unexpected: dict[Path, list[str]] = {}
     for path in sources:
         imports = _imported_modules(_tree(path))
-        disallowed = {
-            imported
-            for imported in imports
-            if imported not in ALLOWED_AUTHORITY_IMPORTS
-            and imported.partition(".")[0] not in ALLOWED_AUTHORITY_IMPORT_ROOTS
-            and imported.partition(".")[0] not in sys.stdlib_module_names
-        }
+        disallowed = _unexpected_authority_imports(imports)
         if disallowed:
             unexpected[path] = sorted(disallowed)
     assert not unexpected
+
+
+def test_authority_package_rejects_unreviewed_stdlib_import_roots() -> None:
+    assert _unexpected_authority_imports({"asyncio"}) == set()
+    assert _unexpected_authority_imports({"subprocess"}) == {"subprocess"}
 
 
 def test_only_the_dedicated_authority_api_imports_the_projection_store() -> None:
