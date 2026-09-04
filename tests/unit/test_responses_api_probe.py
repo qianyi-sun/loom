@@ -16,6 +16,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from loom_llm_gateway.attempt_deadline import (
+    AttemptDeadlineReachedError,
+    GatewayAttemptDeadline,
+)
 from loom_llm_gateway.responses_probe import (
     ProbeOutcome,
     classify_probe_status,
@@ -133,3 +137,45 @@ async def test_probe_posts_sentinel_model_body_to_upstream() -> None:
     assert body["model"].startswith("loom-probe")
     assert body.get("input") is not None
     assert body.get("max_output_tokens") == 1
+
+
+async def test_probe_caps_all_httpx_phases_to_attempt_remaining() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.extensions["timeout"])
+        return httpx.Response(400)
+
+    deadline = GatewayAttemptDeadline(2.0, clock=lambda: 0.0)
+    outcome = await probe_responses_api(
+        upstream_url="http://mock.example/v1/responses",
+        api_key="tok",
+        transport=httpx.MockTransport(handler),
+        deadline=deadline,
+    )
+
+    assert outcome.supported is True
+    assert captured == {
+        "connect": 2.0,
+        "read": 2.0,
+        "write": 2.0,
+        "pool": 2.0,
+    }
+
+
+async def test_expired_probe_deadline_dispatches_zero_times() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400)
+
+    with pytest.raises(AttemptDeadlineReachedError):
+        await probe_responses_api(
+            upstream_url="http://mock.example/v1/responses",
+            api_key="tok",
+            transport=httpx.MockTransport(handler),
+            deadline=GatewayAttemptDeadline(0.0, clock=lambda: 0.0),
+        )
+    assert calls == 0

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
 )
+from loom_cli.rollout.operator.protected_controller_discovery import ControllerDiscoveryRequest
 from loom_cli.rollout.operator.protected_external_supervisor_credential_transport import (
     ExternalSupervisorCredentialEvidence,
 )
@@ -30,6 +32,22 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     FixedUserSystemdControl,
     ServiceRuntimeStatus,
     TimerRuntimeStatus,
+)
+from loom_cli.rollout.operator.protected_pool_credential_transport import (
+    PoolExecutionCredentialEvidence,
+    PoolExecutionCredentialPayload,
+)
+from tests.loom_cli.rollout.operator.test_protected_capacity_execution_preparation_component import (
+    _component as _prepared_component,
+)
+from tests.loom_cli.rollout.operator.test_protected_capacity_execution_preparation_component import (
+    _controller_evidence as _prepared_evidence,
+)
+from tests.loom_cli.rollout.operator.test_protected_controller_discovery import (
+    _evidence as _controller_discovery_evidence,
+)
+from tests.loom_cli.rollout.operator.test_protected_controller_prerequisite_component import (
+    _component as _controller_prerequisite_component,
 )
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transition import (
     _artifact,
@@ -51,6 +69,10 @@ NORMAL_GB10_WORKER_HOSTS = (
     "trt-gb10-13",
     "trt-gb10-14",
     "trt-gb10-15",
+)
+_CONTROLLER_KNOWN_HOST = (
+    "[207.35.188.227]:2221,trt-gb10-1 ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIPPmaxzxeP1rWkCNslt9KKw4xbg/sSDdSqJ76zyLo1XL\n"
 )
 
 
@@ -405,6 +427,278 @@ def test_remote_credential_operations_carry_only_non_secret_fixed_evidence(
     wire = json.dumps([observe_request, publish_request, evidence.to_dict()], sort_keys=True)
     for forbidden in ("token", "certificate", "kubeconfig_bytes", "path", "command"):
         assert forbidden not in wire
+
+
+def test_remote_controller_prerequisite_uses_only_the_typed_forced_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "prerequisite").mkdir()
+    component, _fixture_transport, plan, artifact, evidence = _controller_prerequisite_component(
+        tmp_path / "prerequisite", pool_id="gb10", evidence_present=False
+    )
+    controller_artifact = _controller_artifact(tmp_path / "supervisor")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(_CONTROLLER_KNOWN_HOST, encoding="ascii")
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    run = _Run("")
+    transport = _transport(controller_artifact, run, tmp_path / "controller-ed25519")
+    request = replace(
+        component._request(plan, artifact),
+        transport_authority_sha256=transport.controller_prerequisite_authority_sha256,
+    )
+    run.response = (
+        replace(
+            evidence,
+            transport_authority_sha256=request.transport_authority_sha256,
+        )
+        .to_bytes()
+        .decode("ascii")
+    )
+
+    result = transport.invoke_controller_prerequisite(
+        "observe-prerequisite",
+        request.to_bytes(),
+    )
+
+    assert result.returncode == 0
+    envelope = json.loads(run.calls[0][1])
+    assert envelope == {
+        "candidate_sha": controller_artifact.candidate_sha,
+        "candidate_tree": controller_artifact.candidate_tree,
+        "controller_prerequisite": request.to_dict(),
+        "operation": "observe_controller_prerequisite",
+        "schema_version": 1,
+    }
+    assert run.calls[0][0][-1] == "loom-external-supervisor-v1"
+
+
+def test_remote_prepared_controller_uses_only_the_typed_forced_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_root = tmp_path / "prepared"
+    prepared_root.mkdir()
+    component, _manager, transports, plan, _artifact, _guard_calls = _prepared_component(
+        prepared_root
+    )
+    component.apply(plan)
+    initial = transports["gb10"].requests[-1][1]
+    controller_artifact = _controller_artifact(tmp_path / "supervisor")
+    assert initial.prerequisite.source_sha == controller_artifact.candidate_sha
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(_CONTROLLER_KNOWN_HOST, encoding="ascii")
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    run = _Run("")
+    transport = _transport(controller_artifact, run, tmp_path / "controller-ed25519")
+    prerequisite = replace(
+        initial.prerequisite,
+        transport_authority_sha256=transport.controller_prerequisite_authority_sha256,
+    )
+    request = replace(
+        initial,
+        transport_authority_sha256=transport.controller_prerequisite_authority_sha256,
+        prerequisite=prerequisite,
+    )
+    run.response = _prepared_evidence(request, timer=False, tick=False).to_bytes().decode("ascii")
+
+    result = transport.invoke_prepared_controller(
+        "observe-prepared",
+        request.to_bytes(),
+    )
+
+    assert result.returncode == 0
+    assert json.loads(run.calls[0][1]) == {
+        "candidate_sha": controller_artifact.candidate_sha,
+        "candidate_tree": controller_artifact.candidate_tree,
+        "operation": "observe_prepared_controller",
+        "prepared_controller": request.to_dict(),
+        "schema_version": 1,
+    }
+    assert run.calls[0][0][-1] == "loom-external-supervisor-v1"
+
+
+def test_remote_controller_discovery_uses_only_the_typed_forced_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch routing read-only discovery outside the candidate-bound SSH channel."""
+    controller_artifact = _controller_artifact(tmp_path / "supervisor")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(_CONTROLLER_KNOWN_HOST, encoding="ascii")
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    run = _Run("")
+    transport = _transport(controller_artifact, run, tmp_path / "controller-ed25519")
+    request = ControllerDiscoveryRequest(
+        schema_version=1,
+        pool_id="gb10",
+        transport_authority_sha256=transport.controller_prerequisite_authority_sha256,
+    )
+    evidence = replace(
+        _controller_discovery_evidence(pool_id="gb10"),
+        transport_authority_sha256=request.transport_authority_sha256,
+    )
+    run.response = evidence.to_bytes().decode("ascii")
+
+    result = transport.invoke_controller_prerequisite(
+        "discover-controller",
+        request.to_bytes(),
+    )
+
+    assert result.returncode == 0
+    assert json.loads(run.calls[0][1]) == {
+        "candidate_sha": controller_artifact.candidate_sha,
+        "candidate_tree": controller_artifact.candidate_tree,
+        "controller_discovery": json.loads(request.to_bytes()),
+        "operation": "discover_controller",
+        "schema_version": 1,
+    }
+    assert run.calls[0][0][-1] == "loom-external-supervisor-v1"
+
+
+def test_remote_controller_discovery_rejects_malformed_or_drifted_input_before_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch cross-pool, authority-drifted, duplicate, or oversized discovery requests."""
+    controller_artifact = _controller_artifact(tmp_path / "supervisor")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(_CONTROLLER_KNOWN_HOST, encoding="ascii")
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    run = _Run("")
+    transport = _transport(controller_artifact, run, tmp_path / "controller-ed25519")
+    authority = transport.controller_prerequisite_authority_sha256
+    canonical = ControllerDiscoveryRequest(
+        schema_version=1,
+        pool_id="gb10",
+        transport_authority_sha256=authority,
+    ).to_bytes()
+    duplicate = canonical.replace(
+        b'"pool_id":"gb10",',
+        b'"pool_id":"gb10","pool_id":"gb10",',
+    )
+    invalid = (
+        ControllerDiscoveryRequest(
+            schema_version=1,
+            pool_id="oldlab",
+            transport_authority_sha256=authority,
+        ).to_bytes(),
+        ControllerDiscoveryRequest(
+            schema_version=1,
+            pool_id="gb10",
+            transport_authority_sha256="7" * 64,
+        ).to_bytes(),
+        canonical + b" ",
+        duplicate,
+        b"{" + b"x" * (256 * 1024),
+    )
+
+    for payload in invalid:
+        with pytest.raises(ValueError, match="discovery"):
+            transport.invoke_controller_prerequisite("discover-controller", payload)
+    assert run.calls == []
+
+
+def test_remote_pool_credential_uses_only_the_typed_forced_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _controller_artifact(tmp_path / "supervisor")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(_CONTROLLER_KNOWN_HOST, encoding="ascii")
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    run = _Run("")
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+    payload = PoolExecutionCredentialPayload(
+        pool_id="gb10",
+        files={
+            "bearer-token": b"gb10-bearer-token",
+            "client-certificate.pem": b"gb10-client-certificate",
+            "client-private-key.pem": b"gb10-client-private-key",
+            "manager-ca.pem": b"gb10-manager-ca",
+            "ownership-private-key": b"gb10-ownership-private-key",
+        },
+        credential_metadata_sha256={
+            "pool-executor-gb10": "a" * 64,
+            "pool-ownership-gb10": "b" * 64,
+        },
+    )
+    evidence = PoolExecutionCredentialEvidence(
+        pool_id="gb10",
+        file_sha256={name: "c" * 64 for name in payload.files},
+        credential_metadata_sha256=payload.credential_metadata_sha256,
+        uid=991,
+        gid=991,
+        directory_mode=0o700,
+        file_mode=0o600,
+    )
+    run.response = evidence.to_bytes().decode("ascii")
+
+    result = transport.invoke_pool_credential("publish-credential", payload.to_bytes())
+
+    assert result.returncode == 0
+    envelope = json.loads(run.calls[0][1])
+    assert envelope == {
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "operation": "publish_pool_credential",
+        "pool_credential": json.loads(payload.to_bytes()),
+        "schema_version": 1,
+    }
+    assert run.calls[0][0][-1] == "loom-external-supervisor-v1"
+    wire = run.calls[0][1].encode("ascii")
+    assert all(secret not in wire for secret in payload.files.values())
+    with pytest.raises(ValueError, match="pool credential"):
+        transport.invoke_pool_credential("publish-credential", payload.to_bytes() + b" ")
+
+
+def test_controller_prerequisite_authority_binds_stable_identity_and_known_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _controller_artifact(tmp_path / "supervisor")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(_CONTROLLER_KNOWN_HOST, encoding="ascii")
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    transport = _transport(artifact, _Run("{}\n"), tmp_path / "controller-ed25519")
+
+    first = transport.controller_prerequisite_authority_sha256
+    known_hosts.write_text("# rotated metadata\n" + _CONTROLLER_KNOWN_HOST, encoding="ascii")
+    second = transport.controller_prerequisite_authority_sha256
+
+    assert len(first) == 64
+    assert first != second
+
+
+def test_controller_prerequisite_authority_rejects_missing_fixed_host_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _controller_artifact(tmp_path / "supervisor")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(
+        _CONTROLLER_KNOWN_HOST.replace("207.35.188.227", "192.0.2.10"),
+        encoding="ascii",
+    )
+    known_hosts.chmod(0o644)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS", known_hosts)
+    monkeypatch.setattr(remote, "_KNOWN_HOSTS_OWNER_UID", os.geteuid(), raising=False)
+    transport = _transport(artifact, _Run("{}\n"), tmp_path / "controller-ed25519")
+
+    with pytest.raises(ValueError, match="known-host authority"):
+        _ = transport.controller_prerequisite_authority_sha256
 
 
 def test_remote_reconcile_preserves_only_a_canonical_failure_code(tmp_path: Path) -> None:

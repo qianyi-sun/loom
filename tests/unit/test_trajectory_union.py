@@ -5,6 +5,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from loom.models.trajectory import (
+    AgentTimeoutEvent,
     ToolUseEvent,
     TrajectoryEvent,
     VerifierEndEvent,
@@ -54,6 +55,23 @@ def test_jsonl_round_trip_via_union():
     adapter = TypeAdapter(TrajectoryEvent)
     parsed = [adapter.validate_python(e) for e in events_raw]
     assert [p.kind for p in parsed] == ["step_start", "agent_thought", "tool_use"]
+
+
+def test_agent_timeout_diagnostic_round_trip() -> None:
+    parsed = TypeAdapter(TrajectoryEvent).validate_python(
+        _env(
+            kind="agent_timeout",
+            configured_timeout_sec=10.0,
+            elapsed_monotonic_sec=10.01,
+            cancellation_drain_sec=0.25,
+            transport_close_required=True,
+            task_stopped=True,
+        )
+    )
+
+    assert isinstance(parsed, AgentTimeoutEvent)
+    assert parsed.configured_timeout_sec == 10.0
+    assert parsed.task_stopped is True
 
 
 def test_union_rejects_unknown_kind():

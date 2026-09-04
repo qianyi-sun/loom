@@ -20,6 +20,7 @@ from scripts import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_PAYLOAD_PATHS = {
+    "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py",
     "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py",
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
     "tb2-task-chess-best-move/tests/test_best_move.py",
@@ -38,9 +39,10 @@ EXPECTED_PAYLOAD_PATHS = {
 SAMPLE_PAYLOAD = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
 
 EXPECTED_CASE_FIXTURES = {
-    "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py": {
-        "result.txt"
+    "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py": {
+        "answer.txt"
     },
+    "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py": {"result.txt"},
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
     "tb2-task-chess-best-move/tests/test_best_move.py": {"best_move.txt"},
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
@@ -57,9 +59,7 @@ EXPECTED_CASE_FIXTURES = {
 
 
 def _manifest() -> component_ownership.Manifest:
-    return component_ownership.load_manifest(
-        REPO_ROOT / "config/component-ownership.toml"
-    )
+    return component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
 
 def test_runtime_payload_execution_plan_exactly_covers_declared_payloads() -> None:
@@ -148,9 +148,7 @@ def test_dispatcher_propagates_test_failure_and_rejects_return_values(
 def test_seed_case_materializes_only_declared_content_and_sparse_size(tmp_path: Path) -> None:
     manifest = _manifest()
     fixture_root = tmp_path / "workspace"
-    case = manifest.execution_case(
-        "tests/fixtures/tasks/large-artifact/tests/test_payload.py"
-    )
+    case = manifest.execution_case("tests/fixtures/tasks/large-artifact/tests/test_payload.py")
 
     conformance._seed_case(case, fixture_root)
 
@@ -207,7 +205,9 @@ def test_payload_container_is_restricted_and_cleanup_is_forced(
     assert ["--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m"] == run_command[
         run_command.index("--tmpfs") :
     ][:2]
-    assert f"{REPO_ROOT / 'scripts/runtime_payload_dispatch.py'}:/runner/dispatch.py:ro" in run_command
+    assert (
+        f"{REPO_ROOT / 'scripts/runtime_payload_dispatch.py'}:/runner/dispatch.py:ro" in run_command
+    )
     assert f"{REPO_ROOT / SAMPLE_PAYLOAD}:/payload/test.py:ro" in run_command
     assert f"{tmp_path}:/workspace:ro" in run_command
     assert calls[1][:3] == ["docker", "rm", "-f"]

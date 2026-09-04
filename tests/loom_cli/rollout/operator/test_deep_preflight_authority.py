@@ -24,6 +24,7 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
     StageCapability,
 )
+from loom_cli.rollout.preflight_registered_checks import build_execution_prerequisite_check
 from loom_cli.rollout.preflight_runtime import CandidatePreflightRuntime
 
 
@@ -88,11 +89,21 @@ def _runtime(candidate: CandidateBinding, epoch: int) -> CandidatePreflightRunti
         bindings={
             "candidate.base.sha": candidate.approved_base_sha or "none",
             "candidate.sha": candidate.resolved_sha,
+            "candidate.tree": candidate.resolved_tree or "",
             "candidate.source-mode": candidate.source_mode,
+            "environment": "staging",
+            "namespace": "loom-staging",
             "staging.mutation-epoch": epoch,
         },
         rehearsal_actions=lambda *_args: {},
         rehearsal_identity=lambda *_args: ("rehearsal-exact", "d" * 64),
+        execution_prerequisite_check_factory=lambda lease: build_execution_prerequisite_check(
+            lambda _lease: {},
+            lease=lease,
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate.resolved_tree or "",
+            mutation_epoch=epoch,
+        ),
     )
 
 

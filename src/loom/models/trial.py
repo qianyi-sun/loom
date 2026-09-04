@@ -131,6 +131,8 @@ class RetryReason(StrEnum):
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     GATEWAY_ERROR = "gateway_error"
     PROVIDER_TRANSPORT_DISCONNECT = "provider_transport_disconnect"
+    STEP_CREDENTIAL_INVALID_OR_EXPIRED = "step_credential_invalid_or_expired"
+    STEP_CREDENTIAL_SCOPE_INVALID = "step_credential_scope_invalid"
     NODE_SETUP_HEALTH = "node_setup_health"
 
 

@@ -533,7 +533,7 @@ def test_executor_profile_rejects_inventory_binding_drift(change: dict[str, obje
 
 @pytest.mark.parametrize(
     "shared_fact",
-    ("slurm_cluster", "controller_host", "partition", "reporter_incarnation", "node_id"),
+    ("slurm_cluster", "controller_host", "reporter_incarnation", "node_id"),
 )
 def test_executor_profile_rejects_shared_controller_local_facts(shared_fact: str) -> None:
     profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
@@ -546,9 +546,6 @@ def test_executor_profile_rejects_shared_controller_local_facts(shared_fact: str
         oldlab["inventory"]["controller_cluster"] = gb10["slurm_cluster"]
     elif shared_fact == "controller_host":
         oldlab["controller_host"] = gb10["controller_host"]
-    elif shared_fact == "partition":
-        oldlab["partition"] = gb10["partition"]
-        oldlab["inventory"]["relevant_partitions"] = (gb10["partition"],)
     elif shared_fact == "reporter_incarnation":
         oldlab["inventory"]["reporter_incarnation"] = gb10["inventory"]["reporter_incarnation"]
     else:
@@ -556,6 +553,21 @@ def test_executor_profile_rejects_shared_controller_local_facts(shared_fact: str
 
     with pytest.raises(ValidationError, match=r"distinct|controller|inventory|partition"):
         CapacityPoolExecutorProfile.model_validate(payload)
+
+
+def test_executor_profile_accepts_same_partition_name_on_distinct_clusters() -> None:
+    """Catch treating a cluster-local partition name as a global identity."""
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    payload = profile.model_dump(mode="python")
+    gb10 = payload["pools"][0]
+    oldlab = payload["pools"][1]
+    oldlab["partition"] = gb10["partition"]
+    oldlab["inventory"]["relevant_partitions"] = (gb10["partition"],)
+
+    parsed = CapacityPoolExecutorProfile.model_validate(payload)
+
+    assert parsed.pools[0].slurm_cluster != parsed.pools[1].slurm_cluster
+    assert parsed.pools[0].partition == parsed.pools[1].partition
 
 
 @pytest.mark.parametrize(

@@ -81,6 +81,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_execution_prerequisite_check,
     build_external_supervisor_predecessor_check,
     build_final_gate_checks,
     build_gb10_candidate_source_check,
@@ -2602,6 +2603,11 @@ def test_registered_final_gates_expose_only_declared_protected_mutations() -> No
     )
     by_id = {check.spec.check_id: check for check in checks}
     assert set(by_id) == set(FINAL_CHECK_IDS)
+    assert by_id["final.protected-apply"].spec.dependencies == (
+        "execution.prerequisites",
+        "rehearsal.cleanup",
+        "manifests.field-ownership",
+    )
     assert all(check.spec.stage is StageCapability.FINAL_ONLY for check in checks)
     assert {
         check_id
@@ -2619,3 +2625,65 @@ def test_registered_final_gates_expose_only_declared_protected_mutations() -> No
     assert applied.passed and applied.evidence["protected-mutation"] is True
     smoke = by_id["final.smoke"].operations[CheckOperation.APPLY](context)
     assert smoke.passed and smoke.evidence["protected-mutation"] is True
+
+
+def test_execution_prerequisite_check_defers_until_exact_lease() -> None:
+    """Catch pre-lease publication or a contract change at late completion."""
+    calls: list[object] = []
+    evidence = {
+        "schema-version": 1,
+        "artifact-path": f"/var/lib/loom/execution-prerequisites/{'1' * 64}.json",
+        "artifact-sha256": "1" * 64,
+        "core-artifact-bundle-sha256": "2" * 64,
+        "execution-policy-sha256": "3" * 64,
+        "executor-profile-seed-sha256": "4" * 64,
+        "manager-route-sha256": "5" * 64,
+        "access-metadata-sha256": "6" * 64,
+        "coexistence-witness-sha256": "7" * 64,
+        "legacy-writer-sha256": "8" * 64,
+        "rollback-evidence-sha256": "9" * 64,
+    }
+
+    def publish(lease: BackupLease) -> dict[str, object]:
+        calls.append(lease)
+        return evidence
+
+    deferred = build_execution_prerequisite_check(
+        publish,
+        lease=None,
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        mutation_epoch=8,
+    )
+    lease = object()
+    ready = build_execution_prerequisite_check(
+        publish,
+        lease=lease,  # type: ignore[arg-type]
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": "a" * 40,
+            "candidate.tree": "b" * 40,
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "staging.mutation-epoch": 8,
+        }
+    )
+
+    deferred_probe = deferred.operations[CheckOperation.PROBE](context)
+    ready_probe = ready.operations[CheckOperation.PROBE](context)
+
+    assert not deferred_probe.passed
+    assert deferred_probe.evidence["artifact-sha256"] == "0" * 64
+    assert calls == [lease]
+    assert ready_probe == CheckProbe(passed=True, evidence=evidence)
+    assert deferred.spec.contract_digest == ready.spec.contract_digest
+    assert deferred.implementation_digest == ready.implementation_digest
+    assert deferred.spec.dependencies == (
+        "artifacts.publish",
+        "external-supervisor.predecessor",
+        "rehearsal.cleanup",
+    )

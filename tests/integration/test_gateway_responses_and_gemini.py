@@ -1126,6 +1126,26 @@ async def test_gemini_native_passthrough(gateway, postgres_url):  # type: ignore
     assert row["team_id"] == team_id
 
 
+async def test_gemini_rejects_invalid_bearer_with_shared_auth_contract(
+    gateway,
+):  # type: ignore[no-untyped-def]
+    app, _step_jwt, _team_id, _trial_id = gateway
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://gw",
+    ) as client:
+        response = await client.post(
+            "/v1beta/models/gemini-2.0-flash:generateContent",
+            headers={"Authorization": "Bearer invalid"},
+            json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+        )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+    assert response.json()["detail"] == {"code": "invalid_or_expired_bearer"}
+
+
 async def test_gemini_upstream_503_records_failed_audit_row(  # type: ignore[no-untyped-def]
     gateway,
     postgres_url,

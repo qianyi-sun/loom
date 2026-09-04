@@ -31,6 +31,7 @@ from loom_cli.rollout.preflight_registered_checks import ExternalSupervisorPrede
 from loom_cli.rollout.preflight_runtime import RehearsalActionFactory, RehearsalIdentityFactory
 from loom_cli.rollout.preflight_runtime_sources import (
     BackupAdmissionAuthority,
+    ExecutionPrerequisitePublisher,
     PreflightRuntimeSources,
 )
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
@@ -50,6 +51,10 @@ ManifestFactory = Callable[[CandidateBinding], RenderManifest]
 RehearsalFactory = Callable[
     [CandidateBinding, int, RuntimePurpose, LoadedPreflightArtifacts | None],
     tuple[RehearsalActionFactory, RehearsalIdentityFactory],
+]
+ExecutionPrerequisitePublisherFactory = Callable[
+    [CandidateBinding, int, RuntimePurpose, LoadedPreflightArtifacts | None],
+    ExecutionPrerequisitePublisher,
 ]
 
 
@@ -85,6 +90,7 @@ class InstalledDeepPreflightComposition:
     route: str
     baseline_probe_route: str
     rehearsal_factory: RehearsalFactory
+    execution_prerequisite_publisher_factory: ExecutionPrerequisitePublisherFactory
     final_gate_run: FinalGateCommandRunner
     read_mutation_epoch: Callable[[], int]
     read_database_schema_revision: Callable[[], str]
@@ -106,6 +112,7 @@ class InstalledDeepPreflightComposition:
             or not self.route.startswith("https://")
             or not self.manifest_image_names
             or not self.manifest_image_names <= {name for name, _path in ROLLOUT_IMAGES}
+            or not callable(self.execution_prerequisite_publisher_factory)
             or not 1 <= self.max_concurrency <= 32
         ):
             raise ValueError("installed deep preflight composition is invalid")
@@ -189,6 +196,14 @@ class InstalledDeepPreflightComposition:
             baseline_probe_route=self.baseline_probe_route,
             rehearsal_actions=rehearsal_actions,
             rehearsal_identity=rehearsal_identity,
+            execution_prerequisite_publisher=(
+                self.execution_prerequisite_publisher_factory(
+                    candidate,
+                    mutation_epoch,
+                    purpose,
+                    loaded,
+                )
+            ),
             now=self.now,
             importer=self.importer,
             loaded_artifacts=loaded,

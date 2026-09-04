@@ -428,7 +428,9 @@ async def test_facade_rejects_non_step_token(facade_setup) -> None:
         bogus,
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+    assert r.json()["detail"] == {"code": "invalid_or_expired_bearer"}
 
 
 async def test_facade_rejects_missing_connection_id_header(

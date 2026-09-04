@@ -60,6 +60,39 @@ def test_trial_gateway_error_diagnosis_is_human_readable_and_redacted() -> None:
     assert "X-Amz-Signature=secret" not in rendered
 
 
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "trial.step_credential_invalid_or_expired",
+        "trial.step_credential_scope_invalid",
+    ],
+)
+def test_trial_step_credential_diagnosis_is_platform_attributed(
+    reason_code: str,
+) -> None:
+    report = build_trial_diagnosis(
+        {
+            "schema_version": "1",
+            "entity": {"type": "trial", "id": "trial-credential", "team_id": "team-a"},
+            "lifecycle": {"state": "failed", "attempt_count": 1},
+            "failure": {
+                "reason_code": reason_code,
+                "category": "gateway",
+                "attribution": "platform",
+                "message": "step credential rejected",
+            },
+            "provider": {"llm_calls_count": 0, "models": []},
+            "reward": {"aggregate_reward": None},
+            "next_actions": ["Inspect the attempt deadline."],
+        }
+    )
+
+    assert report["primary_cause"]["reason_code"] == reason_code
+    assert report["primary_cause"]["category"] == "gateway"
+    assert report["primary_cause"]["attribution"] == "platform"
+    assert "platform-failure evidence" in report["impact"]
+
+
 def test_batch_diagnosis_clusters_dominant_failure_reason() -> None:
     evidence = {
         "schema_version": "1",

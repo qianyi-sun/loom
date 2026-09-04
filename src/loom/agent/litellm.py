@@ -22,6 +22,7 @@ from loom.agent.gateway_client import (
     GatewayCallResponse,
     LLMGatewayClient,
 )
+from loom.attempt_deadline import AttemptDeadline
 from loom.driver.base import Driver
 from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
@@ -54,6 +55,7 @@ class LiteLLMAgent:
     # stored credential + base_url rather than the platform default.
     provider_connection_id: str | None = None
     request_params: dict[str, Any] = field(default_factory=dict)
+    step_token_ttl_sec: int = 1800
     # #184: paths (relative to sandbox /workspace) where the agent's
     # final LLM response should be written so file-artifact benchmarks'
     # verifiers (pytest etc.) can grade it. Set by the runner from
@@ -66,9 +68,31 @@ class LiteLLMAgent:
     workdir: PurePosixPath = field(
         default_factory=lambda: PurePosixPath("/workspace"),
     )
+    _attempt_root_gateway: LLMGatewayClient | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.request_params = sanitize_request_extras(self.request_params)
+
+    def begin_attempt(self, deadline: AttemptDeadline) -> None:
+        """Bind direct-completion I/O to one fresh attempt lifecycle."""
+
+        root_gateway = self._attempt_root_gateway or self.gateway
+        self._attempt_root_gateway = root_gateway
+        if hasattr(root_gateway, "token_ttl_sec"):
+            root_gateway.token_ttl_sec = self.step_token_ttl_sec
+        binder = getattr(root_gateway, "for_attempt", None)
+        self.gateway = binder(deadline) if callable(binder) else root_gateway
+
+    async def aclose_attempt(self) -> None:
+        """Interrupt only this attempt's transport, if it owns one."""
+
+        close = getattr(self.gateway, "aclose", None)
+        if callable(close):
+            await close()
 
     async def run(
         self,

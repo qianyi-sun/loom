@@ -601,6 +601,7 @@ def _first_terminal_step_failure(
     for step in result.steps:
         verifier_result = step.verifier_result
         if step.error is not None:
+            canonical_failure = _failure_from_step_error(step.error)
             # Coding benchmark agents can exit non-zero after producing code; if
             # the verifier still produced a numeric score, keep the platform run
             # successful and let the reward carry model/agent correctness.
@@ -608,13 +609,14 @@ def _first_terminal_step_failure(
             # model-backed agents that never reached the gateway/provider.
             suppress_scored_agent_error = (
                 step.error.phase == "agent"
+                and canonical_failure[0] != FailureReason.AGENT_TIMEOUT
                 and verifier_result is not None
                 and bool(verifier_result.rewards)
                 and not is_platform_setup_agent_failure(step.error.message)
                 and not (model_backed and llm_call_count == 0)
             )
             if not suppress_scored_agent_error:
-                return _failure_from_step_error(step.error)
+                return canonical_failure
         if (
             verifier_result is not None
             and verifier_result.error is not None

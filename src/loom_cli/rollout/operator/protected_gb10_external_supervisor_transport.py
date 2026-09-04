@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,9 @@ from loom_cli.rollout.gb10_slurm_acceptance import (
     validate_gb10_slurm_acceptance,
 )
 
+from .protected_capacity_execution_preparation_component import PreparedControllerRequest
+from .protected_controller_discovery import ControllerDiscoveryRequest
+from .protected_controller_prerequisite_component import ControllerPrerequisiteRequest
 from .protected_external_supervisor_credential_transport import (
     ExternalSupervisorCredentialEvidence,
     FixedLocalExternalSupervisorCredentialTransport,
@@ -47,6 +51,7 @@ from .protected_external_supervisor_transport import (
     ServiceRuntimeStatus,
     TimerRuntimeStatus,
 )
+from .protected_pool_credential_transport import PoolExecutionCredentialPayload
 
 GB10_CONTROLLER_EXECUTION_HOST = STAGING_GB10_CONTROLLER_EXECUTION_HOST
 GB10_CONTROLLER_SSH_HOST = "207.35.188.227"
@@ -59,10 +64,12 @@ GB10_CONTROLLER_UNIT_DIR = GB10_CONTROLLER_HOME / ".config/systemd/user"
 
 _IDENTITY = Path("/var/lib/loom-staging-rollout/gb10-controller-supervisor-ed25519")
 _KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
+_KNOWN_HOSTS_OWNER_UID = 0
 _REMOTE_COMMAND = "loom-external-supervisor-v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_MAX_WIRE_BYTES = 4 * 1024 * 1024
+_MAX_WIRE_BYTES = 8 * 1024 * 1024
+_MAX_AUTHORITY_FILE_BYTES = 64 * 1024
 _CREDENTIAL_MISSING = object()
 CAPACITY_ACCEPTANCE_FAILURE_CODES = frozenset(
     {
@@ -76,9 +83,14 @@ CAPACITY_ACCEPTANCE_FAILURE_CODES = frozenset(
 
 
 class CommandResult(Protocol):
-    returncode: int
-    stdout: str
-    stderr: str
+    @property
+    def returncode(self) -> int: ...
+
+    @property
+    def stdout(self) -> str: ...
+
+    @property
+    def stderr(self) -> str: ...
 
 
 CommandRunner = Callable[[Sequence[str], str], CommandResult]
@@ -288,6 +300,9 @@ def _encode_helper_request(
     transition_digest: str | None = None,
     profile_sha256: str | None = None,
     nodes: Sequence[str] | None = None,
+    controller_discovery: ControllerDiscoveryRequest | None = None,
+    controller_prerequisite: ControllerPrerequisiteRequest | None = None,
+    prepared_controller: PreparedControllerRequest | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "candidate_sha": _sha(candidate_sha, label="GB10 controller candidate SHA"),
@@ -305,6 +320,9 @@ def _encode_helper_request(
                 transition_digest,
                 profile_sha256,
                 nodes,
+                controller_discovery,
+                controller_prerequisite,
+                prepared_controller,
             )
         ):
             raise ValueError("GB10 controller observe request is invalid")
@@ -323,6 +341,9 @@ def _encode_helper_request(
             or predecessor_authority is not None
             or profile_sha256 is not None
             or nodes is not None
+            or controller_discovery is not None
+            or controller_prerequisite is not None
+            or prepared_controller is not None
         ):
             raise ValueError("GB10 controller apply request is invalid")
         payload.update(
@@ -349,6 +370,9 @@ def _encode_helper_request(
             or attestation_digest is not None
             or transition_digest is not None
             or nodes is None
+            or controller_discovery is not None
+            or controller_prerequisite is not None
+            or prepared_controller is not None
         ):
             raise ValueError("GB10 controller capacity request is invalid")
         payload.update(
@@ -372,9 +396,89 @@ def _encode_helper_request(
                 transition_digest,
                 profile_sha256,
                 nodes,
+                controller_discovery,
+                controller_prerequisite,
+                prepared_controller,
             )
         ):
             raise ValueError("GB10 controller credential request is invalid")
+    elif operation == "discover_controller":
+        if (
+            controller_discovery is None
+            or controller_discovery.pool_id != "gb10"
+            or any(
+                item is not None
+                for item in (
+                    artifact,
+                    predecessor_authority,
+                    expected,
+                    plan_digest,
+                    attestation_digest,
+                    transition_digest,
+                    profile_sha256,
+                    nodes,
+                    controller_prerequisite,
+                    prepared_controller,
+                )
+            )
+        ):
+            raise ValueError("GB10 controller discovery request is invalid")
+        payload["controller_discovery"] = json.loads(controller_discovery.to_bytes())
+    elif operation in {
+        "observe_controller_prerequisite",
+        "converge_controller_prerequisite",
+    }:
+        if (
+            controller_prerequisite is None
+            or controller_prerequisite.pool_id != "gb10"
+            or controller_prerequisite.source_sha != candidate_sha
+            or any(
+                item is not None
+                for item in (
+                    artifact,
+                    predecessor_authority,
+                    expected,
+                    plan_digest,
+                    attestation_digest,
+                    transition_digest,
+                    profile_sha256,
+                    nodes,
+                    controller_discovery,
+                    prepared_controller,
+                )
+            )
+        ):
+            raise ValueError("GB10 controller prerequisite request is invalid")
+        payload["controller_prerequisite"] = controller_prerequisite.to_dict()
+    elif operation in {
+        "observe_prepared_controller",
+        "converge_prepared_files",
+        "enable_prepared_timer",
+        "run_prepared_tick",
+        "disable_prepared_timer",
+    }:
+        if (
+            prepared_controller is None
+            or prepared_controller.pool_id != "gb10"
+            or prepared_controller.prerequisite.source_sha != candidate_sha
+            or any(
+                item is not None
+                for item in (
+                    artifact,
+                    predecessor_authority,
+                    expected,
+                    plan_digest,
+                    attestation_digest,
+                    transition_digest,
+                    profile_sha256,
+                    nodes,
+                    controller_discovery,
+                    controller_prerequisite,
+                )
+            )
+        ):
+            raise ValueError("GB10 prepared controller request is invalid")
+        payload["prepared_controller"] = prepared_controller.to_dict()
     elif operation != "reconcile_compensations" or any(
         item is not None
         for item in (
@@ -386,12 +490,41 @@ def _encode_helper_request(
             transition_digest,
             profile_sha256,
             nodes,
+            controller_discovery,
+            controller_prerequisite,
+            prepared_controller,
         )
     ):
         raise ValueError("GB10 controller helper operation is invalid")
     rendered = _canonical_json(payload)
     if len(rendered.encode()) > _MAX_WIRE_BYTES:
         raise ValueError("GB10 controller request is too large")
+    return rendered
+
+
+def _encode_pool_credential_request(
+    *,
+    operation: str,
+    candidate_sha: str,
+    candidate_tree: str,
+    pool_credential: PoolExecutionCredentialPayload,
+) -> str:
+    if (
+        operation not in {"observe_pool_credential", "publish_pool_credential"}
+        or not isinstance(pool_credential, PoolExecutionCredentialPayload)
+        or pool_credential.pool_id != "gb10"
+    ):
+        raise ValueError("GB10 controller pool credential request is invalid")
+    payload = {
+        "candidate_sha": _sha(candidate_sha, label="GB10 controller candidate SHA"),
+        "candidate_tree": _sha(candidate_tree, label="GB10 controller candidate tree"),
+        "operation": operation,
+        "pool_credential": json.loads(pool_credential.to_bytes()),
+        "schema_version": 1,
+    }
+    rendered = _canonical_json(payload)
+    if len(rendered.encode()) > _MAX_WIRE_BYTES:
+        raise ValueError("GB10 controller pool credential request is too large")
     return rendered
 
 
@@ -600,6 +733,32 @@ class FixedGB10ExternalSupervisorTransport:
         ):
             raise ValueError("GB10 controller transport authority is invalid")
 
+    @property
+    def controller_prerequisite_authority_sha256(self) -> str:
+        """Bind prerequisite requests to the exact forced-SSH trust route."""
+
+        identity_sha256 = _stable_authority_file_sha256(
+            self.identity,
+            expected_mode=0o600,
+            expected_uid=os.geteuid(),
+        )[1]
+        known_hosts_sha256 = _controller_known_hosts_sha256(_KNOWN_HOSTS)
+        value = {
+            "candidate_sha": self.candidate_sha,
+            "candidate_tree": self.candidate_tree,
+            "channel": "forced-ssh-v1",
+            "execution_host": GB10_CONTROLLER_EXECUTION_HOST,
+            "identity_path": str(self.identity),
+            "identity_sha256": identity_sha256,
+            "known_hosts_path": str(_KNOWN_HOSTS),
+            "known_hosts_sha256": known_hosts_sha256,
+            "schema_version": 1,
+            "ssh_argv": list(self._ssh_argv()),
+        }
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+        ).hexdigest()
+
     def observe(
         self,
         artifact: ExternalSupervisorArtifact,
@@ -704,6 +863,104 @@ class FixedGB10ExternalSupervisorTransport:
             nodes=expected_nodes,
         )
 
+    def invoke_controller_prerequisite(
+        self,
+        operation: str,
+        payload: bytes,
+    ) -> CommandResult:
+        operations = {
+            "discover-controller": "discover_controller",
+            "observe-prerequisite": "observe_controller_prerequisite",
+            "converge-prerequisite": "converge_controller_prerequisite",
+        }
+        try:
+            remote_operation = operations[operation]
+            request: ControllerDiscoveryRequest | ControllerPrerequisiteRequest
+            if operation == "discover-controller":
+                request = ControllerDiscoveryRequest.from_bytes(payload)
+            else:
+                request = ControllerPrerequisiteRequest.from_bytes(payload)
+        except (KeyError, ValueError) as exc:
+            label = "discovery" if operation == "discover-controller" else "prerequisite"
+            raise ValueError(f"GB10 controller {label} request is invalid") from exc
+        if (
+            request.pool_id != "gb10"
+            or request.transport_authority_sha256 != self.controller_prerequisite_authority_sha256
+            or (
+                isinstance(request, ControllerPrerequisiteRequest)
+                and request.source_sha != self.candidate_sha
+            )
+        ):
+            label = "discovery" if operation == "discover-controller" else "prerequisite"
+            raise ValueError(f"GB10 controller {label} request is invalid")
+        rendered = _encode_helper_request(
+            operation=remote_operation,
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            controller_discovery=(
+                request if isinstance(request, ControllerDiscoveryRequest) else None
+            ),
+            controller_prerequisite=(
+                request if isinstance(request, ControllerPrerequisiteRequest) else None
+            ),
+        )
+        return self.run(self._ssh_argv(), rendered)
+
+    def invoke_prepared_controller(
+        self,
+        operation: str,
+        payload: bytes,
+    ) -> CommandResult:
+        operations = {
+            "observe-prepared": "observe_prepared_controller",
+            "converge-prepared-files": "converge_prepared_files",
+            "enable-prepared-timer": "enable_prepared_timer",
+            "run-prepared-tick": "run_prepared_tick",
+            "disable-prepared-timer": "disable_prepared_timer",
+        }
+        try:
+            request = PreparedControllerRequest.from_bytes(payload)
+            remote_operation = operations[operation]
+        except (KeyError, ValueError) as exc:
+            raise ValueError("GB10 prepared controller request is invalid") from exc
+        if (
+            request.pool_id != "gb10"
+            or request.transport_authority_sha256 != self.controller_prerequisite_authority_sha256
+            or request.prerequisite.source_sha != self.candidate_sha
+        ):
+            raise ValueError("GB10 prepared controller request is invalid")
+        rendered = _encode_helper_request(
+            operation=remote_operation,
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            prepared_controller=request,
+        )
+        return self.run(self._ssh_argv(), rendered)
+
+    def invoke_pool_credential(
+        self,
+        operation: str,
+        payload: bytes,
+    ) -> CommandResult:
+        operations = {
+            "observe-credential": "observe_pool_credential",
+            "publish-credential": "publish_pool_credential",
+        }
+        try:
+            request = PoolExecutionCredentialPayload.from_bytes(payload)
+            remote_operation = operations[operation]
+        except (KeyError, ValueError) as exc:
+            raise ValueError("GB10 controller pool credential request is invalid") from exc
+        if request.pool_id != "gb10":
+            raise ValueError("GB10 controller pool credential request is invalid")
+        rendered = _encode_pool_credential_request(
+            operation=remote_operation,
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            pool_credential=request,
+        )
+        return self.run(self._ssh_argv(), rendered)
+
     def _validate_artifact(self, artifact: ExternalSupervisorArtifact) -> None:
         _validate_controller_artifact(
             artifact,
@@ -773,6 +1030,106 @@ class FixedGB10ExternalSupervisorTransport:
             GB10_CONTROLLER_SSH_HOST,
             _REMOTE_COMMAND,
         )
+
+
+def _stable_authority_file_sha256(
+    path: Path,
+    *,
+    expected_mode: int,
+    expected_uid: int,
+) -> tuple[bytes, str]:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise ValueError("GB10 controller transport authority is unavailable") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != expected_mode
+            or before.st_uid != expected_uid
+            or before.st_nlink != 1
+            or not 0 < before.st_size <= _MAX_AUTHORITY_FILE_BYTES
+        ):
+            raise ValueError("GB10 controller transport authority metadata is unsafe")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _MAX_AUTHORITY_FILE_BYTES:
+            chunk = os.read(descriptor, min(65536, _MAX_AUTHORITY_FILE_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        after = os.fstat(descriptor)
+        stable_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        stable_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        payload = b"".join(chunks)
+        if stable_before != stable_after or not payload or len(payload) > _MAX_AUTHORITY_FILE_BYTES:
+            raise ValueError("GB10 controller transport authority changed while reading")
+        return payload, hashlib.sha256(payload).hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _controller_known_hosts_sha256(path: Path) -> str:
+    payload, digest = _stable_authority_file_sha256(
+        path,
+        expected_mode=0o644,
+        expected_uid=_KNOWN_HOSTS_OWNER_UID,
+    )
+    try:
+        lines = payload.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("GB10 controller known-host authority is invalid") from exc
+    controller_alias = f"[{GB10_CONTROLLER_SSH_HOST}]:{GB10_CONTROLLER_SSH_PORT}"
+    expected_aliases = {controller_alias, "trt-gb10-1"}
+    matches = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        aliases = set(fields[0].split(",")) if fields else set()
+        if controller_alias not in aliases:
+            continue
+        matches += 1
+        try:
+            key = base64.b64decode(fields[2], validate=True) if len(fields) == 3 else b""
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("GB10 controller known-host authority is invalid") from exc
+        if (
+            aliases != expected_aliases
+            or fields[1] != "ssh-ed25519"
+            or base64.b64encode(key).decode("ascii") != fields[2]
+            or not key.startswith(b"\x00\x00\x00\x0bssh-ed25519")
+        ):
+            raise ValueError("GB10 controller known-host authority is invalid")
+    if matches != 1:
+        raise ValueError("GB10 controller known-host authority is invalid")
+    return digest
 
 
 @dataclass(frozen=True, slots=True)

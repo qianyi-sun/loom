@@ -697,6 +697,14 @@ class ConfigurationActivationV1(StrictV1Model):
         return tuple(sorted(value, key=lambda item: item.subject_id.hex))
 
 
+class ConfigurationRollbackV1(StrictV1Model):
+    expected_configuration_epoch: PositiveQuantity
+    expected_configuration_digest: Digest
+    restore_configuration_epoch: PositiveQuantity
+    restore_configuration_digest: Digest
+    rollback_evidence_sha256: Digest
+
+
 class DemandBucketV1(StrictV1Model):
     bucket_id: Identifier
     requested_slots: PositiveQuantity
@@ -1306,6 +1314,7 @@ __all__ = [
     "ClaimSlotMatchV1",
     "ConfigurationActivationV1",
     "ConfigurationGenerationRefV1",
+    "ConfigurationRollbackV1",
     "ConfigurationSnapshotV1",
     "CurrentAssignmentV1",
     "DemandBucketV1",

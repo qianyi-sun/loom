@@ -22,6 +22,9 @@ from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope, tra
 from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.model import ActivePointer, DriverEnvelope, RequestEvent
 from loom_cli.rollout.operator.policy import sanitized_child_environment
+from loom_cli.rollout.operator.protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisiteStore,
+)
 from loom_cli.rollout.operator.readonly_database_client import ReadonlyDatabaseTunnelError
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
 from loom_cli.rollout.operator.worker import (
@@ -36,7 +39,10 @@ from loom_cli.rollout.preflight_pipeline import (
     PreflightAssessmentDriftError,
     PreflightAssessmentDriftReason,
 )
-from tests.loom_cli.rollout.operator.test_backup import RecordingRunner
+from tests.loom_cli.rollout.operator.test_backup import (
+    RecordingRunner,
+    database_authority,
+)
 from tests.loom_cli.rollout.operator.test_backup import make_config as make_backup_config
 from tests.loom_cli.rollout.operator.test_broker import fakes as broker_fakes
 from tests.loom_cli.rollout.operator.test_broker import make_config
@@ -931,6 +937,7 @@ def test_inventory_tunnel_failure_reaches_private_diagnostic_and_public_status(
         service_uid=os.getuid(),
         runner=RecordingRunner(),
         now=lambda: job.created_at,
+        database_authority_provider=database_authority,
         object_inventory_provider=lambda _created_at: (_ for _ in ()).throw(
             ReadonlyDatabaseTunnelError(
                 "credential",
@@ -1479,6 +1486,68 @@ def test_default_attempt_dependencies_release_guard_when_bootstrap_fails(
         )
 
     assert released == [REQUEST_ID]
+
+
+def test_default_dependencies_wires_execution_prerequisite_store_into_final_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a worker composition that cannot consume schema-7 attestations."""
+    from loom_cli.rollout.operator import (
+        final_gate_action_source,
+        final_gate_runner,
+        installed_deep_preflight_factory,
+        installed_detached_preflight,
+    )
+
+    config = make_config(tmp_path)
+    request_store = SimpleNamespace()
+    deep_preflight = object()
+    composition = SimpleNamespace(
+        artifact_store=object(),
+        attestation_store=object(),
+        authority=lambda: deep_preflight,
+        final_gate_run=lambda *_args, **_kwargs: SimpleNamespace(),
+        read_mutation_epoch=lambda: 7,
+        sources=lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(worker_module, "RequestStore", lambda _root: request_store)
+    monkeypatch.setattr(worker_module, "sanitized_child_environment", lambda *_a, **_k: {})
+    monkeypatch.setattr(worker_module, "SystemdUserManager", lambda *_a, **_k: object())
+    monkeypatch.setattr(worker_module, "LifecycleCoordinator", lambda *_a, **_k: object())
+    monkeypatch.setattr(worker_module.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_gid=20))
+    monkeypatch.setattr(worker_module, "BackupCreator", lambda *_a, **_k: object())
+    monkeypatch.setattr(worker_module, "BackupPayloadActivator", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "build_installed_deep_preflight_composition",
+        lambda *_a, **_k: composition,
+    )
+    monkeypatch.setattr(
+        installed_detached_preflight,
+        "build_installed_detached_preflight_runner",
+        lambda *_a, **_k: object(),
+    )
+
+    def capture_final_actions(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(final_gate_action_source, "FinalGateActionSource", capture_final_actions)
+    monkeypatch.setattr(final_gate_runner, "FinalGateRunner", lambda **_kwargs: object())
+
+    worker_module._default_dependencies(
+        config,
+        service_uid=os.geteuid(),
+        mutation_guard=object(),  # type: ignore[arg-type]
+    )
+
+    prerequisite_store = captured.get("execution_prerequisite_store")
+    assert isinstance(prerequisite_store, ProtectedExecutionPrerequisiteStore)
+    assert prerequisite_store.state_root == config.state_root
+    assert prerequisite_store.service_uid == os.geteuid()
 
 
 @pytest.mark.parametrize(

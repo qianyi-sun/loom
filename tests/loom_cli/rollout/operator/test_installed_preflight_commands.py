@@ -244,5 +244,188 @@ def test_gb10_supervisor_controller_ssh_forwards_only_bounded_typed_stdin(
     ]
     with pytest.raises(ValueError, match="payload is invalid"):
         commands.gb10_supervisor_controller(
-            ("ssh", "fixed-controller"), "x" * (4 * 1024 * 1024 + 1)
+            ("ssh", "fixed-controller"), "x" * (8 * 1024 * 1024 + 1)
         )
+
+
+def test_gb10_supervisor_controller_admits_bounded_prepared_envelope(
+    tmp_path: Path,
+) -> None:
+    input_sizes: list[int] = []
+
+    def run(_argv, **kwargs):
+        input_sizes.append(len(kwargs["input"].encode("ascii")))
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+    prepared_envelope = "x" * (4 * 1024 * 1024) + "\n"
+
+    commands.gb10_supervisor_controller(("ssh", "fixed-controller"), prepared_envelope)
+
+    assert input_sizes == [4 * 1024 * 1024 + 1]
+    with pytest.raises(ValueError, match="payload is invalid"):
+        commands.gb10_supervisor_controller(
+            ("ssh", "fixed-controller"),
+            "x" * (8 * 1024 * 1024) + "\n",
+        )
+
+
+def test_oldlab_controller_runs_only_the_fixed_host_namespace_channel(
+    tmp_path: Path,
+) -> None:
+    """Catch admitting arbitrary privileged Docker commands as OLDLAB authority."""
+    calls: list[dict[str, object]] = []
+
+    def run(argv, **kwargs):
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    argv = (
+        "/usr/bin/docker",
+        "run",
+        "--rm",
+        "--user",
+        "0:0",
+        "--privileged",
+        "--pid=host",
+        "--network=none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700",
+        "--mount",
+        "type=bind,src=/,dst=/host,bind-propagation=rslave",
+        "--entrypoint",
+        "/usr/local/bin/python",
+        image,
+        "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
+        "--host-root",
+        "/host",
+        "--operation",
+        "discover-controller",
+    )
+
+    result = commands.oldlab_controller(argv, '{"schema_version":1}\n')
+
+    assert result.stdout == "{}\n"
+    assert calls == [
+        {
+            "argv": argv,
+            "cwd": None,
+            "env": _environment(),
+            "input": '{"schema_version":1}\n',
+            "timeout": 1500,
+        }
+    ]
+    with pytest.raises(ValueError, match="OLDLAB controller command is outside authority"):
+        commands.oldlab_controller(
+            (*argv[:7], "--network=host", *argv[8:]),
+            '{"schema_version":1}\n',
+        )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "observe-prepared",
+        "converge-prepared-files",
+        "enable-prepared-timer",
+        "run-prepared-tick",
+        "disable-prepared-timer",
+    ),
+)
+def test_oldlab_controller_admits_each_fixed_prepared_installer_operation(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def run(argv, **kwargs):
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    argv = (
+        "/usr/bin/docker",
+        "run",
+        "--rm",
+        "--user",
+        "0:0",
+        "--privileged",
+        "--pid=host",
+        "--network=none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700",
+        "--mount",
+        "type=bind,src=/,dst=/host,bind-propagation=rslave",
+        "--entrypoint",
+        "/usr/local/bin/python",
+        image,
+        "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
+        "--host-root",
+        "/host",
+        "--operation",
+        operation,
+    )
+
+    commands.oldlab_controller(argv, '{"schema_version":1}\n')
+
+    assert calls[0]["argv"] == argv
+    assert calls[0]["input"] == '{"schema_version":1}\n'
+
+
+def test_oldlab_controller_bounds_payload_and_output(tmp_path: Path) -> None:
+    """Catch unbounded controller input or captured output crossing the local boundary."""
+    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    argv = (
+        "/usr/bin/docker",
+        "run",
+        "--rm",
+        "--user",
+        "0:0",
+        "--privileged",
+        "--pid=host",
+        "--network=none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700",
+        "--mount",
+        "type=bind,src=/,dst=/host,bind-propagation=rslave",
+        "--entrypoint",
+        "/usr/local/bin/python",
+        image,
+        "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
+        "--host-root",
+        "/host",
+        "--operation",
+        "observe-prerequisite",
+    )
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="x" * (2 * 1024 * 1024 + 1),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="payload is invalid"):
+        commands.oldlab_controller(argv, "x" * (8 * 1024 * 1024 + 1))
+    with pytest.raises(RuntimeError, match="output is too large"):
+        commands.oldlab_controller(argv, '{"schema_version":1}\n')

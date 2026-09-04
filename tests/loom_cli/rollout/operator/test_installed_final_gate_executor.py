@@ -27,10 +27,13 @@ from loom_cli.rollout.operator.protected_environment_state_component import (
 from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
     ExternalSupervisorCapacityError,
 )
+from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
+    KubernetesProtectedStagingCapacityRuntime,
+)
 from loom_cli.rollout.operator.staging_smoke_authority import staging_smoke_authority
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _execution_plan, _plan
 
 NORMAL_GB10_WORKER_HOSTS = (
     "trt-gb10-1",
@@ -395,7 +398,7 @@ def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:
         },
         "represented_username": "devansh",
         "required_worker_pool": "gb10",
-        "task_id": "loom-smoke/gb10-oracle-hello-world",
+        "task_id": "loom-smoke/gb10-direct-completion-hello-world",
         "team_id": "11111111-1111-4111-8111-111111111111",
     }
     assert authority.agent_model is not None
@@ -558,7 +561,371 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert environment_state.candidate_root == executor.config.runner_repo
     assert environment_state.cp_url == executor.config.cp_url
     assert environment_state.expected_env_template_sha256 == "a" * 64
+    staging_capacity = captured["staging_capacity_runtime"]
+    assert isinstance(staging_capacity, KubernetesProtectedStagingCapacityRuntime)
+    assert staging_capacity.runner.kubeconfig == PROTECTED_KUBECONFIG_PATH
+    assert staging_capacity.state_root == executor.config.state_root
+    assert staging_capacity.candidate_root == executor.config.runner_repo
+    assert staging_capacity.service_uid == os.geteuid()
+    assert staging_capacity.service_gid == os.getegid()
+    assert staging_capacity.container_registry == ""
     assert captured["service_uid"] == os.geteuid()
+
+
+def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    execution = _execution_plan(tmp_path)
+    executor = replace(
+        executor,
+        config=replace(executor.config, state_root=tmp_path / "execution-authority"),
+    )
+    plan = replace(
+        execution,
+        runner_source_sha=execution.candidate_sha,
+        runner_source_tree=execution.candidate_tree,
+    )
+    gb10_supervisor = object()
+    gb10_prerequisite_controller = object()
+
+    class _PrerequisiteTransport:
+        def observe(self, _request: object) -> None:
+            return None
+
+        def converge(self, _request: object) -> None:
+            return None
+
+    class _PoolCredentialTransport:
+        def observe(self, _request: object) -> None:
+            return None
+
+        def publish(self, _request: object) -> None:
+            return None
+
+    class _PreparedControllerTransport:
+        def observe(self, _request: object) -> None:
+            return None
+
+        def converge_files(self, _request: object) -> None:
+            return None
+
+        def enable_timer(self, _request: object) -> None:
+            return None
+
+        def run_tick(self, _request: object) -> None:
+            return None
+
+        def disable_timer(self, _request: object) -> None:
+            return None
+
+    oldlab_prerequisite = _PrerequisiteTransport()
+    gb10_prerequisite = _PrerequisiteTransport()
+    oldlab_pool_credential = _PoolCredentialTransport()
+    gb10_pool_credential = _PoolCredentialTransport()
+    oldlab_prepared = _PreparedControllerTransport()
+    gb10_prepared = _PreparedControllerTransport()
+    built_gb10: list[dict[str, object]] = []
+    built_oldlab_prerequisites: list[dict[str, object]] = []
+    built_gb10_prerequisites: list[dict[str, object]] = []
+    built_oldlab_pool_credentials: list[dict[str, object]] = []
+    built_gb10_pool_credentials: list[dict[str, object]] = []
+    built_oldlab_prepared: list[dict[str, object]] = []
+    built_gb10_prepared: list[dict[str, object]] = []
+    dependency_guard_build: dict[str, object] = {}
+    authority_reader_build: dict[str, object] = {}
+    authority_source_build: dict[str, object] = {}
+    witness_source_build: dict[str, object] = {}
+    manager_client_build: dict[str, object] = {}
+    desired_build: dict[str, object] = {}
+    captured: dict[str, object] = {}
+
+    def build_gb10(**kwargs: object) -> object:
+        built_gb10.append(kwargs)
+        return (gb10_supervisor, gb10_prerequisite_controller)[len(built_gb10) - 1]
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_external_supervisor_transport",
+        build_gb10,
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_external_supervisor_transport",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "GB10ExternalSupervisorCredentialTransport",
+        lambda _transport: object(),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "FixedLocalExternalSupervisorCredentialTransport",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_ssh_transport",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "load_cluster_config",
+        lambda _path: SimpleNamespace(container_registry="registry.example"),
+    )
+
+    def build_oldlab_prerequisite(**kwargs: object) -> object:
+        built_oldlab_prerequisites.append(kwargs)
+        return oldlab_prerequisite
+
+    def build_gb10_prerequisite(**kwargs: object) -> object:
+        built_gb10_prerequisites.append(kwargs)
+        return gb10_prerequisite
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_oldlab_controller_prerequisite_transport",
+        build_oldlab_prerequisite,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_controller_prerequisite_transport",
+        build_gb10_prerequisite,
+        raising=False,
+    )
+
+    def build_oldlab_pool_credential(**kwargs: object) -> object:
+        built_oldlab_pool_credentials.append(kwargs)
+        return oldlab_pool_credential
+
+    def build_gb10_pool_credential(**kwargs: object) -> object:
+        built_gb10_pool_credentials.append(kwargs)
+        return gb10_pool_credential
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_oldlab_pool_credential_transport",
+        build_oldlab_pool_credential,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_pool_credential_transport",
+        build_gb10_pool_credential,
+        raising=False,
+    )
+
+    def build_oldlab_prepared(**kwargs: object) -> object:
+        built_oldlab_prepared.append(kwargs)
+        return oldlab_prepared
+
+    def build_gb10_prepared(**kwargs: object) -> object:
+        built_gb10_prepared.append(kwargs)
+        return gb10_prepared
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_oldlab_prepared_controller_transport",
+        build_oldlab_prepared,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_prepared_controller_transport",
+        build_gb10_prepared,
+        raising=False,
+    )
+
+    def dependency_guard(_plan: object, _artifact: object) -> str:
+        return "d" * 64
+
+    def build_dependency_guard(**kwargs: object) -> object:
+        dependency_guard_build.update(kwargs)
+        return dependency_guard
+
+    monkeypatch.setattr(
+        installed_module,
+        "ProtectedExecutionPreparationDependencyGuard",
+        build_dependency_guard,
+        raising=False,
+    )
+
+    def authority_reader() -> object:
+        return object()
+
+    def build_authority_reader(**kwargs: object) -> object:
+        authority_reader_build.update(kwargs)
+        return authority_reader
+
+    monkeypatch.setattr(
+        installed_module,
+        "InstalledExecutionAuthorityReader",
+        build_authority_reader,
+        raising=False,
+    )
+    authority_result = object()
+
+    def build_authority_source(**kwargs: object) -> object:
+        authority_source_build.update(kwargs)
+        return lambda desired: authority_result if desired is desired_result else None
+
+    monkeypatch.setattr(
+        installed_module,
+        "InstalledExecutionAuthoritySource",
+        build_authority_source,
+        raising=False,
+    )
+
+    def witness_source() -> dict[str, object]:
+        return {}
+
+    def build_witness_source(runner: object) -> object:
+        witness_source_build["runner"] = runner
+        return witness_source
+
+    monkeypatch.setattr(
+        installed_module,
+        "KubernetesExecutionWitnessExportsSource",
+        build_witness_source,
+        raising=False,
+    )
+    active_configuration = object()
+
+    class _ManagerClient:
+        def get_configuration(self) -> object:
+            return active_configuration
+
+    class _ManagerClientContext:
+        def __enter__(self) -> object:
+            return _ManagerClient()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def open_manager_client(**kwargs: object) -> object:
+        manager_client_build.update(kwargs)
+        return _ManagerClientContext()
+
+    monkeypatch.setattr(
+        installed_module,
+        "open_protected_capacity_manager_client",
+        open_manager_client,
+        raising=False,
+    )
+    desired_result = object()
+
+    def derive_desired(**kwargs: object) -> object:
+        desired_build.update(kwargs)
+        return desired_result
+
+    monkeypatch.setattr(
+        installed_module,
+        "derive_protected_staging_capacity_configuration",
+        derive_desired,
+        raising=False,
+    )
+    seed = {"schema_version": 1}
+    monkeypatch.setattr(
+        KubernetesProtectedStagingCapacityRuntime,
+        "read_credential_seed",
+        lambda _runtime: seed,
+    )
+
+    class _ProtectedExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def __call__(self, *_args: object) -> str:
+            return "dispatched"
+
+    monkeypatch.setattr(
+        installed_module, "MigrationEpochProtectedApplyExecutor", _ProtectedExecutor
+    )
+
+    assert executor("final.protected-apply", CheckOperation.APPLY, plan) == "dispatched"
+    staging_capacity = captured["staging_capacity_runtime"]
+    assert staging_capacity.controller_prerequisite_transports == {
+        "oldlab": oldlab_prerequisite,
+        "gb10": gb10_prerequisite,
+    }
+    assert staging_capacity.pool_credential_transports == {
+        "oldlab": oldlab_pool_credential,
+        "gb10": gb10_pool_credential,
+    }
+    assert staging_capacity.prepared_controller_transports == {
+        "oldlab": oldlab_prepared,
+        "gb10": gb10_prepared,
+    }
+    assert staging_capacity.execution_preparation_dependency_guard is dependency_guard
+    desired_source = dependency_guard_build["desired_configuration_source"]
+    assert callable(desired_source)
+    assert desired_source(plan) is desired_result
+    assert manager_client_build == {
+        "runner": staging_capacity.runner,
+        "credentials_root": staging_capacity.credentials_root,
+        "service_uid": os.geteuid(),
+        "service_gid": os.getegid(),
+    }
+    assert desired_build == {
+        "active_document": active_configuration,
+        "seed_values": seed,
+        "target_generation": plan.starting_mutation_epoch + 1,
+    }
+    authority_source = dependency_guard_build["authority_source"]
+    assert callable(authority_source)
+    assert authority_source(desired_result) is authority_result
+    assert authority_reader_build == {
+        "path": Path(
+            "/var/lib/loom-staging-rollout/protected-capacity/execution-authority/issue-906.json"
+        ),
+        "expected_uid": os.geteuid(),
+        "expected_gid": os.getegid(),
+    }
+    assert authority_source_build["publication_reader"] is authority_reader
+    assert authority_source_build["controller_transports"] == {
+        "oldlab": oldlab_prerequisite,
+        "gb10": gb10_prerequisite,
+    }
+    credential_reader = authority_source_build["credential_bundle_reader"]
+    assert getattr(credential_reader, "__self__", None) is staging_capacity
+    assert witness_source_build == {"runner": staging_capacity.runner}
+    assert authority_source_build["witness_exports_source"] is witness_source
+    assert built_oldlab_prerequisites == [
+        {
+            "image": ("ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "1" * 64),
+            "run": executor._controller_prerequisite_run,
+        }
+    ]
+    assert built_gb10_prerequisites == [{"controller": gb10_prerequisite_controller}]
+    assert built_oldlab_pool_credentials == [
+        {
+            "image": ("ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "1" * 64),
+            "run": executor._controller_prerequisite_run,
+        }
+    ]
+    assert built_gb10_pool_credentials == [{"controller": gb10_prerequisite_controller}]
+    assert built_oldlab_prepared == [
+        {
+            "image": ("ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "1" * 64),
+            "run": executor._controller_prerequisite_run,
+        }
+    ]
+    assert built_gb10_prepared == [{"controller": gb10_prerequisite_controller}]
+    assert built_gb10 == [
+        {
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "run": executor._supervisor_ssh_run,
+        },
+        {
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "run": executor._controller_prerequisite_run,
+        },
+    ]
 
 
 def test_capacity_executor_binds_exact_profile_nodes_and_epoch(tmp_path: Path) -> None:

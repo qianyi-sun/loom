@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from loom_capacity_manager.contracts import (
     MAX_QUANTITY,
     CapacityContractError,
+    ConfigurationRollbackV1,
     DemandSnapshotV1,
     FairnessCursorV1,
     FleetManifestV1,
@@ -55,6 +56,30 @@ def test_unknown_version_extra_field_float_and_bool_fail_closed() -> None:
     ):
         with pytest.raises(ValidationError):
             ResourceVectorV1.model_validate(valid | patch)
+
+
+def test_configuration_rollback_contract_rejects_missing_extra_and_invalid_fields() -> None:
+    valid = {
+        "schema_version": 1,
+        "expected_configuration_epoch": 2,
+        "expected_configuration_digest": "1" * 64,
+        "restore_configuration_epoch": 1,
+        "restore_configuration_digest": "2" * 64,
+        "rollback_evidence_sha256": "3" * 64,
+    }
+
+    for patch in (
+        {"unexpected": 1},
+        {"rollback_evidence_sha256": "not-a-digest"},
+        {"expected_configuration_epoch": 0},
+    ):
+        with pytest.raises(ValidationError):
+            ConfigurationRollbackV1.model_validate(valid | patch)
+
+    missing = dict(valid)
+    missing.pop("restore_configuration_digest")
+    with pytest.raises(ValidationError):
+        ConfigurationRollbackV1.model_validate(missing)
 
 
 def test_canonical_digest_ignores_mapping_insertion_order() -> None:

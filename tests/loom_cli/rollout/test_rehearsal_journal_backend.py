@@ -31,6 +31,8 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
         object_inventory_root="f" * 64,
         schema_revision="0066",
         image_digests={
+            "loom-capacity-executor": "sha256:" + "e" * 64,
+            "loom-capacity-manager": "sha256:" + "d" * 64,
             "loom-control-plane": "sha256:" + "8" * 64,
             "loom-egress-xds": "sha256:" + "3" * 64,
             "loom-execution-actuator": "sha256:" + "b" * 64,

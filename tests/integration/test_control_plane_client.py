@@ -1009,7 +1009,7 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
                     task_id="t",
                     config={},
                     requires_caps={},
-                    state="succeeded",
+                    state="running",
                     worker_id=wid,
                     result={},
                 )
@@ -1100,7 +1100,7 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
                     task_id="t",
                     config={},
                     requires_caps={},
-                    state="succeeded",
+                    state="running",
                     worker_id=wid,
                     result={},
                 )
@@ -1193,7 +1193,7 @@ async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # ty
                     task_id="t",
                     config={},
                     requires_caps={},
-                    state="succeeded",
+                    state="running",
                     worker_id=worker_id,
                     result={},
                 )

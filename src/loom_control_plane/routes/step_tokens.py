@@ -13,7 +13,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from loom.auth import AuthContext, mint_step_jwt, verify_bearer_token
@@ -51,6 +51,16 @@ OptionalExecutionGenerationHeader = Annotated[
 ]
 
 
+def _execution_attempt_step_token_ttl(timeout_seconds: int) -> int:
+    ttl_sec = timeout_seconds + 300
+    if ttl_sec > _MAX_STEP_TOKEN_TTL_SEC:
+        raise HTTPException(
+            status_code=409,
+            detail="execution_attempt_ttl_exceeded",
+        )
+    return ttl_sec
+
+
 class _IssueStepTokenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -59,16 +69,39 @@ class _IssueStepTokenRequest(BaseModel):
     execution_attempt_id: UUID | None = None
     step_id: str = Field(min_length=1, max_length=64)
     ttl_sec: int = Field(gt=0, le=_MAX_STEP_TOKEN_TTL_SEC)
+    attempt_deadline_wall_clock: datetime | None = None
     # Only the dedicated family-orchestrator credential may set this field.
     # Presence is significant: explicit null means the evolver must use the
     # platform route even when the completed trial used a BYO connection.
     provider_connection_id: UUID | None = None
+
+    @field_validator("attempt_deadline_wall_clock", mode="before")
+    @classmethod
+    def deadline_must_use_wall_clock_wire_format(cls, value: object) -> object:
+        if value is not None and not isinstance(value, (str, datetime)):
+            raise ValueError("attempt deadline must be an RFC 3339 wall-clock timestamp")
+        return value
+
+    @field_validator("attempt_deadline_wall_clock")
+    @classmethod
+    def deadline_must_be_timezone_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("attempt deadline must be timezone-aware")
+        return value.astimezone(UTC)
 
     @model_validator(mode="after")
     def exactly_one_subject(self) -> _IssueStepTokenRequest:
         if (self.trial_id is None) == (self.execution_attempt_id is None):
             raise ValueError("exactly one step-token subject is required")
         return self
+
+
+class _IssueStepTokenResponse(BaseModel):
+    token: str
+    expires_at: datetime
+    attempt_deadline_wall_clock: datetime | None
 
 
 async def _step_token_principal(
@@ -154,9 +187,21 @@ async def issue_step_token(
     lease_token: OptionalLeaseTokenHeader = None,
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
-) -> dict[str, str]:
+) -> _IssueStepTokenResponse:
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
+    minted_at = datetime.now(UTC).replace(microsecond=0)
+    expires_at = minted_at + timedelta(seconds=payload.ttl_sec)
+    attempt_deadline = payload.attempt_deadline_wall_clock
+    if attempt_deadline is not None:
+        if attempt_deadline <= minted_at:
+            raise HTTPException(status_code=409, detail="attempt_deadline_elapsed")
+        required_expiry = attempt_deadline + timedelta(seconds=300)
+        required_ttl_sec = (required_expiry - minted_at).total_seconds()
+        if required_ttl_sec > _MAX_STEP_TOKEN_TTL_SEC:
+            raise HTTPException(status_code=409, detail="attempt_deadline_ttl_exceeded")
+        if expires_at < required_expiry:
+            raise HTTPException(status_code=409, detail="attempt_deadline_not_covered")
     ctx = principal
     if ctx is not None:
         ctx = bind_protected_worker_auth(ctx, protected_worker_session)
@@ -336,7 +381,7 @@ async def issue_step_token(
             timeout_seconds = container_node.get("timeout_seconds")
             if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
                 raise HTTPException(status_code=409, detail="execution_attempt_spec_unavailable")
-            expected_ttl = min(timeout_seconds + 300, _MAX_STEP_TOKEN_TTL_SEC)
+            expected_ttl = _execution_attempt_step_token_ttl(timeout_seconds)
             if payload.ttl_sec != expected_ttl:
                 raise HTTPException(status_code=409, detail="execution_attempt_ttl_mismatch")
             control_refs = execution_spec.get("control_binding_snapshots")
@@ -416,6 +461,8 @@ async def issue_step_token(
         step_id=payload.step_id,
         ttl_sec=payload.ttl_sec,
         signing_key=signing_key,
+        issued_at=minted_at,
+        attempt_deadline_wall_clock=attempt_deadline,
         provider_connection_id=effective_provider_connection_id,
         provider_connection_id_bound=(
             family_evolver_request
@@ -461,8 +508,8 @@ async def issue_step_token(
                 )
             )
             await audit_session.commit()
-    expires_at = datetime.now(UTC) + timedelta(seconds=payload.ttl_sec)
-    return {
-        "token": token,
-        "expires_at": expires_at.isoformat(),
-    }
+    return _IssueStepTokenResponse(
+        token=token,
+        expires_at=expires_at,
+        attempt_deadline_wall_clock=attempt_deadline,
+    )

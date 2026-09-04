@@ -26,12 +26,14 @@ from loom_cli.rollout.preflight_contract import (
     CheckOperation,
     EvidenceValue,
     PreflightAttestation,
+    RegisteredCheck,
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
 _CHECKPOINT_TRANSITION_CHECK_IDS = frozenset(
     {"backup.lease-eligibility", "backup.rotation-capacity"}
 )
+_DEFERRED_REHEARSAL_CHECK_IDS = frozenset({"execution.prerequisites"})
 
 
 class PreflightAssessmentDriftReason(StrEnum):
@@ -291,7 +293,9 @@ class PreflightRehearsal:
         blockers = tuple(
             PreflightBlocker.from_execution(execution)
             for execution in stable
-            if not execution.passed and execution.check_id not in _CHECKPOINT_TRANSITION_CHECK_IDS
+            if not execution.passed
+            and execution.check_id
+            not in _CHECKPOINT_TRANSITION_CHECK_IDS | _DEFERRED_REHEARSAL_CHECK_IDS
         )
         rehearsal = cls(
             registry_digest=registry_digest,
@@ -468,6 +472,72 @@ class PreflightPipeline:
         )
         self._store.publish(attestation)
         return attestation
+
+    def complete_deferred_execution(
+        self,
+        *,
+        context: CheckContext,
+        rehearsal: PreflightRehearsal,
+        check: RegisteredCheck,
+    ) -> PreflightRehearsal:
+        """Run only the lease-dependent prerequisite using fresh prior authority."""
+
+        rehearsal.require_integrity()
+        original_checks = {item.spec.check_id: item for item in self._registry.checks}
+        prior = {execution.check_id: execution for execution in rehearsal.executions}
+        check_id = check.spec.check_id
+        original = original_checks.get(check_id)
+        deferred = prior.get(check_id)
+        if (
+            check_id not in _DEFERRED_REHEARSAL_CHECK_IDS
+            or original is None
+            or deferred is None
+            or deferred.passed
+            or rehearsal.registry_digest != self._registry.registry_digest
+            or rehearsal.coverage_digest != self._registry.coverage_digest
+            or set(prior) != set(original_checks)
+            or any(
+                not execution.passed
+                for current_id, execution in prior.items()
+                if current_id != check_id
+            )
+            or check.spec.contract_digest != original.spec.contract_digest
+            or check.implementation_digest != original.implementation_digest
+        ):
+            raise ValueError("deferred preflight execution authority is invalid")
+        late_registry = PreflightRegistry.build(
+            tuple(
+                check if current.spec.check_id == check_id else current
+                for current in self._registry.checks
+            ),
+            through_tier=3,
+        )
+        if (
+            late_registry.registry_digest != self._registry.registry_digest
+            or late_registry.coverage_digest != self._registry.coverage_digest
+        ):
+            raise ValueError("deferred preflight check changed registry authority")
+        completed_executions = late_registry.dag(max_concurrency=self._max_concurrency).run(
+            context,
+            operation=CheckOperation.PROBE,
+            through_tier=3,
+            now=self._clock,
+            prior_executions={
+                current_id: execution
+                for current_id, execution in prior.items()
+                if current_id != check_id
+            },
+        )
+        completed = next(
+            execution for execution in completed_executions if execution.check_id == check_id
+        )
+        if not completed.passed:
+            raise ValueError("deferred preflight execution did not pass")
+        return PreflightRehearsal.from_executions(
+            registry_digest=self._registry.registry_digest,
+            coverage_digest=self._registry.coverage_digest,
+            executions=completed_executions,
+        )
 
     def assess(
         self,

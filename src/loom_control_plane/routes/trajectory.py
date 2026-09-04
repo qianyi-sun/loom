@@ -46,15 +46,16 @@ router = APIRouter()
 # worker that retries after a partial ack gets `inserted=N` reflecting
 # only the rows that actually landed, with no error on dupes.
 #
-# Worker fence: the row is gated on `worker_id = :worker_id` matching
-# the trial's current owner — same pattern as `_INDEX_PATCH` above.
-# A reclaim that nulled the trial's worker_id 409s the batch; the
-# worker should give up and let the reclaim-sweep / runner reassign.
+# Worker fence: each insert is gated on the current trial ownership and
+# non-terminal state.  The route also locks that eligible trial row before
+# beginning a batch so a concurrent terminal state PATCH cannot split one
+# accepted batch across the terminal boundary.  The UNIQUE (trial_id, seq)
+# conflict handler remains the event idempotency authority.
 _INSERT_EVENT_SQL = sql_text("""
 INSERT INTO trial_events (
     trial_id, seq, kind, source, schema_version, payload, lifecycle_authority_id
 )
-VALUES (
+SELECT
     (:trial_id)::uuid,
     (:seq)::bigint,
     (:kind)::text,
@@ -62,10 +63,23 @@ VALUES (
     (:schema_version)::int,
     :payload,
     (:lifecycle_authority_id)::uuid
-)
+  FROM trials
+ WHERE id = (:trial_id)::uuid
+   AND worker_id = (:worker_id)::uuid
+   AND state IN ('claimed', 'running', 'materializing')
 ON CONFLICT (trial_id, seq) DO NOTHING
 RETURNING seq;
 """).bindparams(bindparam("payload", type_=JSONB))
+
+
+_EVENT_APPEND_FENCE = sql_text("""
+SELECT id
+  FROM trials
+ WHERE id = (:trial_id)::uuid
+   AND worker_id = (:worker_id)::uuid
+   AND state IN ('claimed', 'running', 'materializing')
+ FOR UPDATE;
+""")
 
 
 _MAX_BATCH = 500
@@ -77,7 +91,9 @@ UPDATE trials
    SET trajectory_index = :index_payload,
        result = CASE WHEN (:has_result)::boolean
                      THEN :result_payload ELSE result END
- WHERE id = (:trial_id)::uuid AND worker_id = (:worker_id)::uuid
+ WHERE id = (:trial_id)::uuid
+   AND worker_id = (:worker_id)::uuid
+   AND state IN ('claimed', 'running', 'materializing')
  RETURNING id;
 """).bindparams(
     bindparam("index_payload", type_=JSONB),
@@ -810,8 +826,9 @@ async def append_events(
     - Duplicates from worker retries return inserted=N reflecting only
       newly-landed rows; no error.
     - Worker fence: the trial's current `worker_id` must match the
-      `worker_id` in the body. Mismatch = 409 (worker lost claim);
-      writers should give up and let reclaim re-route.
+      `worker_id` in the body and its state must remain claimed, running,
+      or materializing. Mismatch or terminal state = 409; writers should
+      give up and let reclaim or terminal handling remain authoritative.
 
     Limits:
     - At most `_MAX_BATCH` events per request (500).
@@ -904,9 +921,12 @@ async def append_events(
             }
         )
 
-    # Fence check: refuse the whole batch if the trial's current
-    # worker_id doesn't match. Worker reclaim nulls worker_id, so a
-    # reclaim mid-batch surfaces here as a 409.
+    # Lock the eligible trial row for the whole batch.  State PATCH uses an
+    # UPDATE against this same row, so whichever operation wins the row lock
+    # establishes the ordering: an accepted batch commits before terminal
+    # state, while a committed terminal state makes this predicate miss.
+    # `_INSERT_EVENT_SQL` repeats the predicate on every write so the write
+    # itself remains fenced rather than relying only on this read.
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(
             session,
@@ -916,14 +936,20 @@ async def append_events(
             surface="trajectory",
             lock=True,
         )
-        owner_row = (
+        writable_row = (
             await session.execute(
-                select(TrialRow.worker_id).where(TrialRow.id == trial_id),
+                _EVENT_APPEND_FENCE,
+                {"trial_id": trial_id, "worker_id": worker_id},
             )
         ).one_or_none()
-        if owner_row is None:
-            raise HTTPException(status_code=404, detail="trial not found")
-        if owner_row[0] != worker_id:
+        if writable_row is None:
+            trial_exists = (
+                await session.execute(
+                    select(TrialRow.id).where(TrialRow.id == trial_id),
+                )
+            ).one_or_none()
+            if trial_exists is None:
+                raise HTTPException(status_code=404, detail="trial not found")
             raise HTTPException(
                 status_code=409,
                 detail="worker lost claim",
@@ -936,6 +962,7 @@ async def append_events(
 
         inserted = 0
         for row_params in rows:
+            row_params["worker_id"] = worker_id
             row_params["lifecycle_authority_id"] = lifecycle_authority_id
             result = await session.execute(_INSERT_EVENT_SQL, row_params)
             if result.first() is not None:

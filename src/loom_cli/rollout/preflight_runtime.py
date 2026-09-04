@@ -8,7 +8,10 @@ from types import MappingProxyType
 
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
-from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
+from loom_cli.rollout.preflight_authority import (
+    CandidatePreflightPlan,
+    ExecutionPrerequisiteCheckFactory,
+)
 from loom_cli.rollout.preflight_contract import CheckContext, RegisteredCheck, SafeValue
 from loom_cli.rollout.preflight_registered_checks import build_rehearsal_checks
 from loom_cli.rollout.preflight_registry import PreflightRegistry
@@ -88,12 +91,15 @@ class CandidatePreflightRuntime:
     bindings: Mapping[str, SafeValue]
     rehearsal_actions: RehearsalActionFactory
     rehearsal_identity: RehearsalIdentityFactory
+    execution_prerequisite_check_factory: ExecutionPrerequisiteCheckFactory
     refresh_static_checks: StaticCheckFactory | None = None
 
     def __post_init__(self) -> None:
         groups = {0: self.tier0, 1: self.tier1, 2: self.tier2}
-        if any(not checks for checks in groups.values()) or any(
-            check.spec.tier != tier for tier, checks in groups.items() for check in checks
+        if (
+            not callable(self.execution_prerequisite_check_factory)
+            or any(not checks for checks in groups.values())
+            or any(check.spec.tier != tier for tier, checks in groups.items() for check in checks)
         ):
             raise ValueError("preflight runtime static check groups are incomplete")
         all_checks = self.tier0 + self.tier1 + self.tier2
@@ -106,9 +112,15 @@ class CandidatePreflightRuntime:
         reserved = {"checkpoint.evidence.sha256", "rehearsal.plan.sha256"}
         if reserved & normalized.keys():
             raise ValueError("checkpoint-only bindings cannot be declared before backup")
-        required = {key for check in all_checks for key in check.spec.input_keys} | {
-            "staging.mutation-epoch"
-        }
+        prerequisite_check = self.execution_prerequisite_check_factory(None)
+        if (
+            prerequisite_check.spec.check_id != "execution.prerequisites"
+            or prerequisite_check.spec.tier != 3
+        ):
+            raise ValueError("execution prerequisite check factory is invalid")
+        required = {
+            key for check in (*all_checks, prerequisite_check) for key in check.spec.input_keys
+        } | {"staging.mutation-epoch"}
         missing = required - normalized.keys()
         if missing:
             raise ValueError(f"preflight runtime bindings are incomplete: {sorted(missing)}")
@@ -183,13 +195,16 @@ class CandidatePreflightRuntime:
         actions: Mapping[str, RehearsalAction],
     ) -> CandidatePreflightPlan:
         tier0, tier1, tier2 = self._static_checks()
-        tier3 = build_rehearsal_checks(
-            actions,
-            isolation_id=isolation_id,
-            candidate_sha=self.candidate.resolved_sha,
-            mutation_epoch=self._mutation_epoch,
-            checkpoint_evidence_digest=checkpoint_digest,
-            rehearsal_plan_digest=rehearsal_plan_digest,
+        tier3 = (
+            *build_rehearsal_checks(
+                actions,
+                isolation_id=isolation_id,
+                candidate_sha=self.candidate.resolved_sha,
+                mutation_epoch=self._mutation_epoch,
+                checkpoint_evidence_digest=checkpoint_digest,
+                rehearsal_plan_digest=rehearsal_plan_digest,
+            ),
+            self.execution_prerequisite_check_factory(None),
         )
         registry = PreflightRegistry.build(
             tier0 + tier1 + tier2 + tier3,
@@ -206,6 +221,7 @@ class CandidatePreflightRuntime:
             candidate=self.candidate,
             registry=registry,
             context=context,
+            execution_prerequisite_check_factory=(self.execution_prerequisite_check_factory),
         )
 
     def _static_checks(

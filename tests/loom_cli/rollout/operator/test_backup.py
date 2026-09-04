@@ -21,6 +21,7 @@ from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
+from uuid import UUID
 
 import pytest
 
@@ -33,6 +34,7 @@ from loom_cli.rollout.operator.backup import (
     SubprocessBackupCommandRunner,
     VerifiedBackup,
 )
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import (
     CallerIdentity,
@@ -50,6 +52,22 @@ POSTGRES_BYTES = b"pg\x00dump\xffbytes"
 MINIO_ACCESS_KEY = "minio-access-sensitive"
 MINIO_SECRET_KEY = "minio-secret-sensitive"
 TEST_MINIO_PORT = 39123
+
+
+def database_authority(*, writer_epoch: int = 0) -> DatabaseAuthorityEvidence:
+    return DatabaseAuthorityEvidence(
+        public_schema_revision="0067_global_capacity",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=writer_epoch,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
 
 
 def make_config(tmp_path: Path) -> OperatorConfig:
@@ -178,6 +196,32 @@ class RecordingRunner:
     ) -> bytes:
         rendered = self._record(argv, env)
         self.timeouts.append(timeout_seconds)
+        if rendered[-1] == "--output=json":
+            secret_name = rendered[rendered.index("secret") + 1]
+            namespace_flag = "--namespace" if "--namespace" in rendered else "-n"
+            namespace = rendered[rendered.index(namespace_flag) + 1]
+            if "--ignore-not-found=true" in rendered and secret_name in {
+                "loom-protected-worker-runtime",
+                "loom-capacity-agent",
+                "loom-capacity-execution-operator",
+                "loom-capacity-executor-gb10",
+                "loom-capacity-executor-oldlab",
+            }:
+                return b""
+            return json.dumps(
+                {
+                    "apiVersion": "v1",
+                    "data": {"token": "c2Vuc2l0aXZl"},
+                    "kind": "Secret",
+                    "metadata": {
+                        "name": secret_name,
+                        "namespace": namespace,
+                        "resourceVersion": "7",
+                        "uid": "11111111-1111-4111-8111-111111111111",
+                    },
+                    "type": "Opaque",
+                }
+            ).encode()
         if rendered[-2:] == ["-o", "json"]:
             return json.dumps(
                 {
@@ -317,9 +361,12 @@ def test_binary_dump_and_exact_secret_allowlist_never_expose_credentials(tmp_pat
     ]
     for path in secret_files:
         assert path.stat().st_mode & 0o777 == 0o600
-        assert f"name: {path.stem}" in path.read_text(encoding="utf-8")
+        assert json.loads(path.read_text(encoding="utf-8"))["metadata"] == {
+            "name": path.stem,
+            "namespace": "loom-staging",
+        }
 
-    secret_export_argvs = [argv for argv in runner.argvs if argv[-2:] == ["-o", "yaml"]]
+    secret_export_argvs = [argv for argv in runner.argvs if argv[-1] == "--output=json"]
     assert [argv[argv.index("secret") + 1] for argv in secret_export_argvs] == [
         "loom-secrets",
         "loom-admin-secret",
@@ -348,7 +395,7 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
             environment="staging",
             namespace="loom-staging",
             mutation_epoch=6,
-            schema_revision="0066",
+            schema_revision="0067_global_capacity",
             created_at=created_at,
             objects=[],
         )
@@ -360,23 +407,55 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
         minio=FailingMinioMirror(),
         now=lambda: FIXED_NOW,
         object_inventory_provider=inventory,
+        database_authority_provider=database_authority,
     ).create(make_request())
 
     manifest = json.loads(backup.manifest_path.read_text(encoding="utf-8"))
     bundle = backup.manifest_path.parent
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert set(manifest["components"]) == {
         "postgres",
         "object_inventory",
         "k8s_secrets",
+        "database_authority",
     }
     assert not (bundle / "minio").exists()
     inventory_document = json.loads((bundle / "object-inventory.json").read_text(encoding="utf-8"))
     assert inventory_document["mutation_epoch"] == 6
     assert len(inventory_document["inventory_root"]) == 64
     assert all("port-forward" not in argv for argv in runner.argvs)
-    assert not any(argv[-2:] == ["-o", "json"] for argv in runner.argvs)
-    assert runner.timeouts == [600.0, 30.0, 30.0, 30.0]
+    assert json.loads((bundle / "database-authority.json").read_bytes())["configuration_epoch"] == 9
+    assert runner.timeouts == [600.0, *([30.0] * 15)]
+
+
+def test_critical_checkpoint_rejects_database_authority_change_across_dump(
+    tmp_path: Path,
+) -> None:
+    observations = iter((database_authority(writer_epoch=4), database_authority(writer_epoch=5)))
+
+    def inventory(created_at: datetime) -> ImmutableObjectInventory:
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0067_global_capacity",
+            created_at=created_at,
+            objects=(),
+        )
+
+    with pytest.raises(BackupError) as caught:
+        BackupCreator(
+            make_config(tmp_path),
+            service_uid=os.getuid(),
+            runner=RecordingRunner(),
+            minio=FailingMinioMirror(),
+            now=lambda: FIXED_NOW,
+            object_inventory_provider=inventory,
+            database_authority_provider=lambda: next(observations),
+        ).create(make_request())
+
+    assert caught.value.code == "database_authority_changed"
+    assert caught.value.public_reason == "backup_postgres_failed"
 
 
 def test_critical_checkpoint_surfaces_inventory_provider_failure_without_detail(
@@ -395,6 +474,7 @@ def test_critical_checkpoint_surfaces_inventory_provider_failure_without_detail(
             minio=FailingMinioMirror(),
             now=lambda: FIXED_NOW,
             object_inventory_provider=inventory,
+            database_authority_provider=database_authority,
         ).create(make_request())
 
     assert exc_info.value.code == "object_inventory_failed"
@@ -410,7 +490,7 @@ def test_critical_checkpoint_surfaces_inventory_binding_failure(tmp_path: Path) 
             environment="staging",
             namespace="loom-other-staging",
             mutation_epoch=6,
-            schema_revision="0066",
+            schema_revision="0067_global_capacity",
             created_at=created_at,
             objects=[],
         )
@@ -423,10 +503,39 @@ def test_critical_checkpoint_surfaces_inventory_binding_failure(tmp_path: Path) 
             minio=FailingMinioMirror(),
             now=lambda: FIXED_NOW,
             object_inventory_provider=inventory,
+            database_authority_provider=database_authority,
         ).create(make_request())
 
     assert exc_info.value.code == "object_inventory_binding_failed"
     assert exc_info.value.public_reason == "backup_object_inventory_failed"
+
+
+def test_critical_checkpoint_rejects_inventory_database_revision_contradiction(
+    tmp_path: Path,
+) -> None:
+    def inventory(created_at: datetime) -> ImmutableObjectInventory:
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066_stale",
+            created_at=created_at,
+            objects=(),
+        )
+
+    with pytest.raises(BackupError) as caught:
+        BackupCreator(
+            make_config(tmp_path),
+            service_uid=os.getuid(),
+            runner=RecordingRunner(),
+            minio=FailingMinioMirror(),
+            now=lambda: FIXED_NOW,
+            object_inventory_provider=inventory,
+            database_authority_provider=database_authority,
+        ).create(make_request())
+
+    assert caught.value.code == "database_authority_binding_failed"
+    assert caught.value.public_reason == "backup_postgres_failed"
 
 
 def test_creator_surfaces_missing_service_account_as_precondition(
@@ -474,7 +583,7 @@ def test_critical_checkpoint_defers_latest_until_explicit_activation(tmp_path: P
             environment="staging",
             namespace="loom-staging",
             mutation_epoch=6,
-            schema_revision="0066",
+            schema_revision="0067_global_capacity",
             created_at=created_at,
             objects=[],
         )
@@ -486,6 +595,7 @@ def test_critical_checkpoint_defers_latest_until_explicit_activation(tmp_path: P
         minio=FailingMinioMirror(),
         now=lambda: FIXED_NOW,
         object_inventory_provider=inventory,
+        database_authority_provider=database_authority,
         publish_latest=False,
     )
     backup = creator.create(make_request())
@@ -506,7 +616,7 @@ def test_recovery_activation_revalidates_aged_payload_without_freshness_authorit
             environment="staging",
             namespace="loom-staging",
             mutation_epoch=6,
-            schema_revision="0066",
+            schema_revision="0067_global_capacity",
             created_at=created_at,
             objects=[],
         )
@@ -518,6 +628,7 @@ def test_recovery_activation_revalidates_aged_payload_without_freshness_authorit
         minio=FailingMinioMirror(),
         now=lambda: FIXED_NOW,
         object_inventory_provider=inventory,
+        database_authority_provider=database_authority,
         publish_latest=False,
     ).create(make_request())
     latest = config.rollout_root / "backups" / "latest"
@@ -1636,7 +1747,7 @@ class StageFailingRunner(RecordingRunner):
             self._record(argv, env)
             self.timeouts.append(timeout_seconds)
             raise RuntimeError("untrusted-stage-detail")
-        if self.stage.startswith("secret:") and rendered[-2:] == ["-o", "yaml"]:
+        if self.stage.startswith("secret:") and rendered[-1] == "--output=json":
             secret_name = rendered[rendered.index("secret") + 1]
             if secret_name == self.stage.removeprefix("secret:"):
                 self._record(argv, env)
@@ -4183,8 +4294,14 @@ def test_boto_mirror_removes_partial_object_on_stream_failure(
 @pytest.mark.parametrize(
     ("payload", "expected_code"),
     [
-        ("kind: ConfigMap\nmetadata:\n  name: loom-secrets\n", "secret_export_failed"),
-        ("kind: Secret\nmetadata:\n  name: wrong-name\n", "secret_export_failed"),
+        (
+            '{"apiVersion":"v1","kind":"ConfigMap","metadata":{}}',
+            "secret_export_failed",
+        ),
+        (
+            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"wrong-name"}}',
+            "secret_export_failed",
+        ),
     ],
 )
 def test_secret_export_rejects_wrong_kind_or_name_without_publication(
@@ -4201,7 +4318,7 @@ def test_secret_export_rejects_wrong_kind_or_name_without_publication(
             timeout_seconds: float | None = None,
         ) -> bytes:
             rendered = list(argv)
-            if rendered[-2:] == ["-o", "yaml"]:
+            if rendered[-1] == "--output=json":
                 self._record(argv, env)
                 self.timeouts.append(timeout_seconds)
                 return payload.encode("utf-8")

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -89,6 +88,27 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
     return await assert_schema_at_head(engine, db_url_env_var="LOOM_CP_DB_URL")
 
 
+async def _cancel_and_drain_tasks(
+    tasks: Sequence[asyncio.Task[None] | None],
+    *,
+    grace_seconds: float = 5.0,
+) -> None:
+    active_tasks = tuple(task for task in tasks if task is not None)
+    if not active_tasks:
+        return
+    for task in active_tasks:
+        task.cancel()
+    _done, pending = await asyncio.wait(active_tasks, timeout=grace_seconds)
+    for task in pending:
+        task.cancel()
+    results = await asyncio.gather(*active_tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(
+            result, asyncio.CancelledError
+        ):
+            raise result
+
+
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -108,9 +128,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         protected_worker_session_store: ProtectedWorkerSessionStore | None = None
         if settings.protected_worker_runtime_db_url_file is not None:
             protected_worker_runtime_engine = create_async_engine(
-                load_protected_worker_runtime_db_url(
-                    settings.protected_worker_runtime_db_url_file
-                ),
+                load_protected_worker_runtime_db_url(settings.protected_worker_runtime_db_url_file),
                 isolation_level="SERIALIZABLE",
                 pool_pre_ping=True,
                 pool_size=5,
@@ -123,6 +141,12 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                     expire_on_commit=False,
                 )
             )
+            try:
+                await protected_worker_session_store.assert_ready()
+            except BaseException:
+                await protected_worker_runtime_engine.dispose()
+                await engine.dispose()
+                raise
 
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
@@ -284,7 +308,9 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 name="loom-cp-service-execution-scheduler",
             )
         service_execution_materializer_task: asyncio.Task[None] | None = None
+        service_execution_materializer_stop_event: asyncio.Event | None = None
         if settings.service_execution_materializer_enabled:
+            service_execution_materializer_stop_event = asyncio.Event()
             service_execution_materializer_task = asyncio.create_task(
                 run_service_execution_materializer_loop(
                     materializer=ServiceExecutionMaterializer(
@@ -303,46 +329,32 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                     ),
                     interval_seconds=settings.service_execution_materializer_interval_sec,
                     concurrency=settings.service_execution_materializer_concurrency,
+                    stop_event=service_execution_materializer_stop_event,
                 ),
                 name="loom-cp-service-execution-materializer",
             )
         try:
             yield
         finally:
-            crash_detector_task.cancel()
-            metrics_refresher_task.cancel()
-            retry_exhausted_task.cancel()
-            worker_pool_autoscaler_task.cancel()
-            live_preview_reconciler_task.cancel()
-            if slurm_controller_task is not None:
-                slurm_controller_task.cancel()
-            if service_execution_scheduler_task is not None:
-                service_execution_scheduler_task.cancel()
             if service_execution_materializer_task is not None:
-                service_execution_materializer_task.cancel()
-            # Bound the await so a stuck task (e.g. mid-DB call when
-            # cancellation arrives, asyncpg connection takes a moment
-            # to release) doesn't block the entire lifespan shutdown —
-            # which then blocks `TestClient.__exit__`, which then
-            # blocks the test. Five seconds is generous for a task
-            # that should respond to cancel in microseconds.
-            for t in (
-                crash_detector_task,
-                metrics_refresher_task,
-                retry_exhausted_task,
-                worker_pool_autoscaler_task,
-                live_preview_reconciler_task,
-                slurm_controller_task,
-                service_execution_scheduler_task,
-                service_execution_materializer_task,
-            ):
-                if t is None:
-                    continue
-                with contextlib.suppress(
-                    asyncio.CancelledError,
-                    asyncio.TimeoutError,
-                ):
-                    await asyncio.wait_for(t, timeout=5.0)
+                assert service_execution_materializer_stop_event is not None
+                service_execution_materializer_stop_event.set()
+            # All tasks share one grace window. A driver may defer or consume
+            # the first cancellation while unwinding a database operation, so
+            # any survivors receive a concurrent follow-up cancellation. Every
+            # task is still drained before either database engine is disposed.
+            await _cancel_and_drain_tasks(
+                (
+                    crash_detector_task,
+                    metrics_refresher_task,
+                    retry_exhausted_task,
+                    worker_pool_autoscaler_task,
+                    live_preview_reconciler_task,
+                    slurm_controller_task,
+                    service_execution_scheduler_task,
+                    service_execution_materializer_task,
+                )
+            )
             await engine.dispose()
             if protected_worker_runtime_engine is not None:
                 await protected_worker_runtime_engine.dispose()

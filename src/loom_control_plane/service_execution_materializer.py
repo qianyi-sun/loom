@@ -77,6 +77,13 @@ from loom_control_plane.metrics import (
 
 logger = logging.getLogger(__name__)
 
+
+def _raise_if_cancellation_requested(exc: Exception) -> None:
+    current_task = asyncio.current_task()
+    if current_task is not None and current_task.cancelling():
+        raise asyncio.CancelledError from exc
+
+
 _TRACE_PATH = "trajectory/events.jsonl"
 _USAGE_PATH = "accounting/usage.json"
 _VERIFIER_PATH = "verifier/output.json"
@@ -1185,6 +1192,7 @@ class ServiceExecutionMaterializer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _raise_if_cancellation_requested(exc)
             logger.warning("service execution source cleanup retry: %s", exc)
             await self._retry_source_cleanup(claim, exc)
         return True
@@ -1264,6 +1272,7 @@ class ServiceExecutionMaterializer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # object-store and database transport failures retry
+            _raise_if_cancellation_requested(exc)
             logger.warning("service execution materialization retry: %s", exc)
             await self._retry(claim, exc)
         return True
@@ -1274,24 +1283,47 @@ async def run_service_execution_materializer_loop(
     materializer: ServiceExecutionMaterializer,
     interval_seconds: float,
     concurrency: int = 1,
+    stop_event: asyncio.Event | None = None,
 ) -> None:
+    stop = stop_event or asyncio.Event()
+
+    async def wait_for_next_cycle() -> None:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            pass
+
     async def worker(index: int) -> None:
-        while True:
+        while not stop.is_set():
             try:
                 processed = await materializer.run_once()
+                if stop.is_set():
+                    return
                 cleaned = await materializer.cleanup_source_once()
+                if stop.is_set():
+                    return
                 if index == 0:
                     await materializer.refresh_metrics()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                _raise_if_cancellation_requested(exc)
+                if stop.is_set():
+                    return
                 logger.exception("service execution materializer loop failed; retrying")
-                await asyncio.sleep(interval_seconds)
+                await wait_for_next_cycle()
                 continue
+            if stop.is_set():
+                return
             if not processed and not cleaned:
-                await asyncio.sleep(interval_seconds)
+                await wait_for_next_cycle()
 
-    await asyncio.gather(*(worker(index) for index in range(max(1, concurrency))))
+    async with asyncio.TaskGroup() as workers:
+        for index in range(max(1, concurrency)):
+            workers.create_task(
+                worker(index),
+                name=f"loom-cp-service-execution-materializer-{index}",
+            )
 
 
 __all__ = [
