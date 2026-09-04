@@ -13,7 +13,7 @@
 > `staging-smoke-gate`. The shared planner selects the applicable validation
 > work from changed paths, while labels can request additional validation.
 > Labels may add validation but cannot remove path-inferred validation. The
-> trusted base-branch controller enables GitHub squash auto-merge for every
+> developer or maintainer enables GitHub's native squash auto-merge for every
 > non-draft PR, independent of author or reviewer identity. GitHub waits for
 > every required gate on that current head SHA before merging.
 > Static documentation is a location-and-format allowlist; unknown runtime
@@ -135,9 +135,12 @@ secrets.
   their validation work from changed paths; labels request additional work but
   cannot turn off path-inferred work. A new non-document path without a known
   owner selects every heavy lane until its ownership is declared.
-- The trusted base-branch controller enables GitHub squash auto-merge for every
-  non-draft `dev` PR, regardless of author or reviewer. It remains queued until
-  every required gate is visible and successful on the current head SHA. The
+- For a completed non-draft `dev` PR, a trusted collaborator enables GitHub's
+  native squash auto-merge. No workflow or custom controller enables or performs
+  the merge. All four required gates must be visible and successful on the current head SHA,
+  and strict base evaluation requires the branch to be up to date with `dev`.
+  If another PR advances `dev`, update the branch and validate the new head;
+  auto-merge does not update a behind branch or reuse its old checks. The
   four strict, app-bound checks are the
   only merge authority: `dev` requires no human approval, no CODEOWNER
   approval, and no conversation resolution. Do not hand-merge an eligible
@@ -180,6 +183,28 @@ secrets.
 - Do not expect publish/deploy secrets to be available in PR workflows
 - External pull requests are accepted for issue-scoped work. If an issue
   is ambiguous, discuss the scope in the issue before implementing.
+
+Before publishing a completed change, fetch the latest `dev`, update your own
+branch, and exercise the changed behavior locally. Reproduce a bug before its
+fix and run the same regression afterward. Run focused tests and static checks
+on the final diff, then record the commands, environment, results, and any
+unexercised acceptance boundary in the PR's `Verification` section. Complete
+known amendments before pushing that head and enabling auto-merge. Keep Draft
+for genuinely incomplete work; it is not a waiting-room state for finished PRs.
+
+Include the consumers of a changed contract in this verification. A runner
+interface change also needs compatible test doubles and cancellation/cleanup
+tests. A migration-head advance needs the corresponding deployment policy and
+positive schema fixtures updated together, while retaining deliberate old-head
+upgrade tests and drift-rejection cases. Do not replace a pinned compatibility
+assertion with an unconditional "whatever the current head is" check.
+
+When CI fails, inspect the current head's failing source job and fix a
+deterministic error before requesting another attempt. Distinguish an actual
+failure from a cancelled superseded run or a filtered metadata event. Repeating
+the same failing head uses runner capacity without resolving the defect. These
+are developer verification practices, not a fifth required check or an
+additional approval gate.
 
 ## Release Flow
 
