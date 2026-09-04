@@ -442,14 +442,16 @@ class Terminus2ModelSwitchPlannedEvent(_EventBase):
 
 
 class Terminus2ModelMixPlannedEvent(_EventBase):
-    """Durable beta-mixture plan (episode grain). No K1/K2 cuts."""
+    """Durable mix plan (episode beta or turn-grain rising schedule)."""
 
     kind: Literal[EventKind.TERMINUS2_MODEL_MIX_PLANNED] = (
         EventKind.TERMINUS2_MODEL_MIX_PLANNED
     )
-    policy: Literal["beta_mixture"] = "beta_mixture"
-    beta: float = Field(ge=0.0, le=1.0)
-    grain: Literal["episode"] = "episode"
+    policy: Literal["beta_mixture", "student_to_teacher_turns"] = "beta_mixture"
+    beta: float | None = Field(default=None, ge=0.0, le=1.0)
+    grain: Literal["episode", "turn"] = "episode"
+    step_start: int | None = Field(default=None, ge=2)
+    step_end: int | None = Field(default=None, ge=3)
     seed_fingerprint: str
     student_model: ModelSpec
     teacher_model: ModelSpec

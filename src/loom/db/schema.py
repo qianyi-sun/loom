@@ -8772,7 +8772,7 @@ class TerminusAgentRunAttempt(Base):
 
 
 class EpisodeCheckpoint(Base):
-    """Versioned Terminus2 episode checkpoint for reclaim."""
+    """Multi-model progress marker for terminus reclaim (not Harbor resume)."""
 
     __tablename__ = "episode_checkpoints"
     __table_args__ = (

@@ -222,7 +222,7 @@ The Harbor-embedded runtime emits these events for operators and debuggers:
 | `terminus2_model_mix_planned` | Durable `beta_mixture` plan (`beta`, seed fingerprint) |
 | `terminus2_model_switch` | Applied student↔teacher cut |
 | `terminus2_llm_call_started` / `_completed` / `_failed` | Per-call correlation around the router |
-| `terminus2_episode_checkpoint` | Episode snapshot used on worker retry |
+| `terminus2_episode_checkpoint` | Multi-model **progress marker** for reclaim (not a Harbor resume save; distinct from `HarborCheckpointBridge`) |
 | `terminus2_recovery_failed` | Retry refused rather than merging two Harbor runs |
 
 Gateway join failures (missing `cp_client`, ambiguous token match, command
@@ -472,6 +472,12 @@ for a label on student-driven episodes. `beta = 1` is all teacher, including
 episode 1. Emits `terminus2_model_mix_planned` instead of the two K1/K2
 planned cuts. Applied `terminus2_model_switch` still fires when consecutive
 episodes change role.
+
+Third policy `student_to_teacher_turns` (`--multi-model-step-start` /
+`--multi-model-step-end`): each `LoomRoleRouter.call()` / `call_ordinal` is a
+schedule turn. Student before step start, rising β until step end, then force
+teacher with one-way latch. Plan stores the window as `k1`/`k2`. Also emits
+`terminus2_model_mix_planned` with `grain=turn`.
 
 Constraints:
 

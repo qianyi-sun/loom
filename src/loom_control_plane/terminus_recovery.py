@@ -1,13 +1,19 @@
 """Terminus-2 execution reclaim.
 
 Scheduler retry still claims the same trial. This module only records:
-one execution (same K1/K2), a new run_attempt, and the latest episode
-checkpoint.
+one execution (same mix plan), a new run_attempt, and the latest multi-model
+**progress marker** (table ``episode_checkpoints``).
+
+That row is not a Harbor resume checkpoint. ``HarborCheckpointBridge`` syncs
+Harbor ``trajectory.json`` into Loom events for all terminus-2 runs; the
+``episode_checkpoints`` table is multi-model-only and exists so reclaim can
+fail closed instead of merging a second episode-1 onto a partial
+student/teacher trajectory.
 
 Harbor cannot resume mid-session. The runtime therefore **fails closed**
-when a checkpoint exists (`resumed` or bad checksum) so a second
+when a progress marker exists (`resumed` or bad checksum) so a second
 episode-1 Harbor run is never appended onto the same trajectory.
-A first start with no checkpoint remains `fresh`.
+A first start with no marker remains `fresh`.
 """
 
 from __future__ import annotations

@@ -14,7 +14,9 @@ from pydantic import ValidationError
 
 from loom.agent.terminus2.model_switch import (
     assert_terminus2_switch_contract,
+    construct_teacher_llm,
     deterministic_episode_draw,
+    gateway_llm_kwargs_for_teacher,
     install_role_router,
     redact_agent_llm_kwargs,
     role_for_beta_episode,
@@ -189,6 +191,105 @@ def test_apply_plan_mode_resample_keeps_beta() -> None:
     assert "switch_episode" not in resampled["multi_model"]
 
 
+def test_turn_schedule_spec_requires_window() -> None:
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            policy="student_to_teacher_turns",
+            secondary_model=_SECONDARY,
+            step_start=2,
+        )
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            policy="student_to_teacher_turns",
+            secondary_model=_SECONDARY,
+            step_start=5,
+            step_end=3,
+        )
+
+
+def test_turn_schedule_spec_rejects_beta_and_k1() -> None:
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            policy="student_to_teacher_turns",
+            secondary_model=_SECONDARY,
+            step_start=2,
+            step_end=9,
+            beta=0.5,
+        )
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            policy="student_to_teacher_turns",
+            secondary_model=_SECONDARY,
+            step_start=2,
+            step_end=9,
+            switch_episode=3,
+        )
+
+
+def test_turn_beta_edges_and_monotonic() -> None:
+    from loom.agent.terminus2.model_switch import turn_beta
+
+    assert turn_beta(1, step_start=2, step_end=9) == 0.0
+    assert turn_beta(2, step_start=2, step_end=9) == 0.0
+    assert turn_beta(9, step_start=2, step_end=9) == 1.0
+    mid_a = turn_beta(4, step_start=2, step_end=9)
+    mid_b = turn_beta(6, step_start=2, step_end=9)
+    assert 0.0 < mid_a < mid_b < 1.0
+
+
+def test_role_for_turn_schedule_forces_and_latches() -> None:
+    from loom.agent.terminus2.model_switch import role_for_turn_schedule
+
+    trial = "22222222-2222-2222-2222-222222222222"
+    seed = "turn-seed"
+    assert role_for_turn_schedule(
+        1, step_start=3, step_end=6, seed=seed, trial_id=trial,
+    ) == "student"
+    # Force at end regardless of draw.
+    assert role_for_turn_schedule(
+        6, step_start=3, step_end=6, seed=seed, trial_id=trial,
+    ) == "teacher"
+    # After any teacher, later turns stay teacher (force at end also latches).
+    assert role_for_turn_schedule(
+        8, step_start=3, step_end=6, seed=seed, trial_id=trial,
+    ) == "teacher"
+
+
+@pytest.mark.asyncio
+async def test_role_router_turn_schedule_student_then_force() -> None:
+    student = _FakeLLM(name="openai/glm-5.1-student")
+    teacher = _FakeLLM(name="openai/qwen-teacher")
+    agent = _FakeAgent(_llm=student, _model_name="openai/glm-5.1-student")
+    router = install_role_router(
+        agent,
+        teacher_model_name="openai/qwen-teacher",
+        mix_mode="student_to_teacher_turns",
+        step_start=3,
+        step_end=4,
+        seed="s",
+        trial_id="trial-turn",
+        teacher_llm=teacher,
+    )
+    agent._n_episodes = 1
+    await router.call(prompt="t1")
+    await router.call(prompt="t2")
+    assert student.calls == [
+        "openai/glm-5.1-student",
+        "openai/glm-5.1-student",
+    ]
+    await router.call(prompt="t3")  # still before force at 4; beta at start=0
+    assert len(student.calls) == 3
+    await router.call(prompt="t4")  # force teacher
+    assert teacher.calls == ["openai/qwen-teacher"]
+    await router.call(prompt="t5")  # latch
+    assert teacher.calls == ["openai/qwen-teacher", "openai/qwen-teacher"]
+    assert router._call_ordinal == 5
+
+
 @dataclass
 class _FakeLLM:
     name: str
@@ -289,6 +390,157 @@ def test_redact_agent_llm_kwargs() -> None:
     redact_agent_llm_kwargs(agent)
     assert "api_key" not in agent._llm_kwargs
     assert agent._llm_kwargs["timeout"] == 1
+
+
+@dataclass
+class _StudentLiteLLM:
+    """Mirrors Harbor LiteLLM: live constructor kwargs keep api_key."""
+
+    name: str
+    _llm_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {"api_key": "loom_step_live", "timeout": 1},
+    )
+    _api_base: str | None = "http://gateway.test"
+    _session_id: str | None = "sess"
+    _max_thinking_tokens: int | None = None
+    _use_responses_api: bool = False
+
+
+@dataclass
+class _ConstructAgent:
+    _llm: Any
+    _model_name: str = "openai/student"
+    _n_episodes: int = 0
+    _temperature: float | None = None
+    _collect_rollout_details: bool = False
+    _reasoning_effort: str | None = None
+    _session_id: str | None = "agent-sess"
+    _llm_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {"api_key": "loom_step_dump", "timeout": 1},
+    )
+    captured_init: dict[str, Any] = field(default_factory=dict)
+
+    def _resolve_model_info(self, model_name: str, model_info: Any) -> None:
+        del model_name, model_info
+        return None
+
+    def _init_llm(self, **kwargs: Any) -> Any:
+        self.captured_init = dict(kwargs)
+        return _FakeLLM(name=str(kwargs.get("model_name") or "teacher"))
+
+
+@pytest.fixture
+def stub_harbor_llm_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests do not install Harbor; stub the backend enum import."""
+    import sys
+    import types
+
+    harbor = types.ModuleType("harbor")
+    harbor_llms = types.ModuleType("harbor.llms")
+    harbor_base = types.ModuleType("harbor.llms.base")
+
+    class LLMBackend:
+        LITELLM = "litellm"
+
+    harbor_base.LLMBackend = LLMBackend  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "harbor", harbor)
+    monkeypatch.setitem(sys.modules, "harbor.llms", harbor_llms)
+    monkeypatch.setitem(sys.modules, "harbor.llms.base", harbor_base)
+
+def test_gateway_llm_kwargs_uses_agent_dump_when_present() -> None:
+    agent = _ConstructAgent(_llm=_StudentLiteLLM("openai/student"))
+    kwargs = gateway_llm_kwargs_for_teacher(agent)
+    assert kwargs["api_key"] == "loom_step_dump"
+
+
+def test_gateway_llm_kwargs_recovers_from_student_after_redact() -> None:
+    """Regression: early redact of agent._llm_kwargs must not starve teacher."""
+    student = _StudentLiteLLM(
+        "openai/student",
+        _llm_kwargs={"api_key": "loom_step_live", "timeout": 1},
+    )
+    agent = _ConstructAgent(
+        _llm=student,
+        _llm_kwargs={"api_key": "loom_step_dump", "timeout": 1},
+    )
+    redact_agent_llm_kwargs(agent)
+    assert "api_key" not in agent._llm_kwargs
+    kwargs = gateway_llm_kwargs_for_teacher(agent)
+    assert kwargs["api_key"] == "loom_step_live"
+    assert kwargs["timeout"] == 1
+
+
+def test_gateway_llm_kwargs_fails_closed_without_any_api_key() -> None:
+    student = _StudentLiteLLM("openai/student", _llm_kwargs={"timeout": 1})
+    agent = _ConstructAgent(_llm=student, _llm_kwargs={"timeout": 1})
+    with pytest.raises(AgentError, match="missing gateway api_key"):
+        gateway_llm_kwargs_for_teacher(agent)
+
+
+def test_construct_teacher_llm_survives_premature_redact(
+    stub_harbor_llm_backend: None,
+) -> None:
+    student = _StudentLiteLLM(
+        "openai/student",
+        _llm_kwargs={"api_key": "loom_step_live", "timeout": 9},
+    )
+    agent = _ConstructAgent(
+        _llm=student,
+        _llm_kwargs={"api_key": "loom_step_dump", "timeout": 9},
+    )
+    redact_agent_llm_kwargs(agent)
+    teacher = construct_teacher_llm(agent, teacher_model_name="openai/teacher")
+    assert isinstance(teacher, _FakeLLM)
+    assert agent.captured_init["llm_kwargs"]["api_key"] == "loom_step_live"
+    assert agent.captured_init["api_base"] == "http://gateway.test"
+
+
+@pytest.mark.parametrize(
+    "mix_kwargs",
+    [
+        {
+            "mix_mode": "student_teacher_student",
+            "first_switch_episode": 3,
+            "return_switch_episode": 5,
+        },
+        {
+            "mix_mode": "beta_mixture",
+            "beta": 1.0,
+            "seed": "s",
+            "trial_id": "t1",
+        },
+        {
+            "mix_mode": "student_to_teacher_turns",
+            "step_start": 2,
+            "step_end": 5,
+            "seed": "s",
+            "trial_id": "t1",
+        },
+    ],
+)
+def test_install_role_router_passes_jwt_then_redacts_dump(
+    mix_kwargs: dict[str, Any],
+    stub_harbor_llm_backend: None,
+) -> None:
+    """Every mix policy constructs teacher with JWT, then scrubs dump kwargs."""
+    student = _StudentLiteLLM(
+        "openai/student",
+        _llm_kwargs={"api_key": "loom_step_live", "timeout": 1},
+    )
+    agent = _ConstructAgent(
+        _llm=student,
+        _llm_kwargs={"api_key": "loom_step_dump", "timeout": 1},
+    )
+    router = install_role_router(
+        agent,
+        teacher_model_name="openai/teacher",
+        **mix_kwargs,
+    )
+    assert agent.captured_init["llm_kwargs"]["api_key"] == "loom_step_dump"
+    assert "api_key" not in agent._llm_kwargs
+    assert agent._llm is router
+    # Live student LiteLLM still holds JWT (Harbor dump field is separate).
+    assert student._llm_kwargs["api_key"] == "loom_step_live"
 
 
 def test_scrub_harbor_trajectory_drops_step_api_key(tmp_path: Path) -> None:

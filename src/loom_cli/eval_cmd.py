@@ -637,6 +637,10 @@ def _batch_create(args: argparse.Namespace) -> int:
                 )
                 beta = getattr(args, "multi_model_beta", None)
                 mix_seed = getattr(args, "multi_model_seed", None)
+                step_start = getattr(args, "multi_model_step_start", None)
+                step_end = getattr(args, "multi_model_step_end", None)
+                turn_flags = step_start is not None or step_end is not None
+                policy_flag = getattr(args, "multi_model_policy", None)
                 if beta is not None and schedule_flags:
                     sys.stderr.write(
                         "error: --multi-model-beta cannot be combined with "
@@ -645,9 +649,23 @@ def _batch_create(args: argparse.Namespace) -> int:
                         "--multi-model-episode-ceiling.\n",
                     )
                     return 2
-                if mix_seed is not None and beta is None:
+                if beta is not None and turn_flags:
                     sys.stderr.write(
-                        "error: --multi-model-seed requires --multi-model-beta.\n",
+                        "error: --multi-model-beta cannot be combined with "
+                        "--multi-model-step-start or --multi-model-step-end.\n",
+                    )
+                    return 2
+                if turn_flags and schedule_flags:
+                    sys.stderr.write(
+                        "error: turn schedule flags cannot be combined with "
+                        "K1/K2 schedule flags.\n",
+                    )
+                    return 2
+                if mix_seed is not None and beta is None and not turn_flags:
+                    sys.stderr.write(
+                        "error: --multi-model-seed requires --multi-model-beta "
+                        "or turn schedule (--multi-model-step-start/"
+                        "--multi-model-step-end).\n",
                     )
                     return 2
                 if beta is not None and not 0.0 <= float(beta) <= 1.0:
@@ -655,6 +673,18 @@ def _batch_create(args: argparse.Namespace) -> int:
                         "error: --multi-model-beta must be in [0, 1].\n",
                     )
                     return 2
+                if (step_start is None) ^ (step_end is None):
+                    sys.stderr.write(
+                        "error: --multi-model-step-start and "
+                        "--multi-model-step-end must be set together.\n",
+                    )
+                    return 2
+                if step_start is not None and step_end is not None:
+                    if int(step_start) < 2 or int(step_end) <= int(step_start):
+                        sys.stderr.write(
+                            "error: require 2 <= step-start < step-end.\n",
+                        )
+                        return 2
                 multi_model_block: dict[str, Any] = {
                     "enabled": True,
                     "secondary_model": _build_agent_model(
@@ -663,7 +693,20 @@ def _batch_create(args: argparse.Namespace) -> int:
                         agent_provider_override=args.agent_provider,
                     ),
                 }
-                if beta is not None:
+                if policy_flag == "student_to_teacher_turns" or turn_flags:
+                    if step_start is None or step_end is None:
+                        sys.stderr.write(
+                            "error: student_to_teacher_turns requires "
+                            "--multi-model-step-start and "
+                            "--multi-model-step-end.\n",
+                        )
+                        return 2
+                    multi_model_block["policy"] = "student_to_teacher_turns"
+                    multi_model_block["step_start"] = int(step_start)
+                    multi_model_block["step_end"] = int(step_end)
+                    if mix_seed is not None:
+                        multi_model_block["mix_seed"] = str(mix_seed)
+                elif beta is not None:
                     multi_model_block["policy"] = "beta_mixture"
                     multi_model_block["beta"] = float(beta)
                     if mix_seed is not None:
@@ -1570,8 +1613,9 @@ def dispatch(argv: list[str]) -> int:
             "--agent terminus-2, --provider/--model (student), and "
             "--multi-model-secondary (teacher). Same BYO provider connection. "
             "Default policy is student until K1, teacher for teacher_episodes, "
-            "then student from K2. Pass --multi-model-beta instead for a "
-            "per-episode teacher coin (teacher if draw < beta)."
+            "then student from K2. Pass --multi-model-beta for a per-episode "
+            "teacher coin, or --multi-model-step-start/--multi-model-step-end "
+            "for turn-grain rising beta with latch."
         ),
     )
     p_bc.add_argument(
@@ -1581,6 +1625,20 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Teacher (usually larger) upstream model id. Student is --model. "
             "Required with --multi-model. Same provider connection."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-policy",
+        dest="multi_model_policy",
+        choices=(
+            "student_teacher_student",
+            "beta_mixture",
+            "student_to_teacher_turns",
+        ),
+        default=None,
+        help=(
+            "Optional explicit mix policy. Usually inferred from "
+            "--multi-model-beta or --multi-model-step-start/--step-end."
         ),
     )
     p_bc.add_argument(
@@ -1623,7 +1681,27 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Per-episode mix: P(teacher drives) = this value in [0, 1]. "
             "Teacher if hash(seed, trial, episode) < beta, else student. "
-            "Incompatible with K1/K2 flags. Not DAgger labels."
+            "Incompatible with K1/K2 and turn-schedule flags. Not DAgger labels."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-step-start",
+        dest="multi_model_step_start",
+        type=int,
+        default=None,
+        help=(
+            "Turn-grain schedule: first call_ordinal (>= 2) where rising beta "
+            "may select teacher. Requires --multi-model-step-end."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-step-end",
+        dest="multi_model_step_end",
+        type=int,
+        default=None,
+        help=(
+            "Turn-grain schedule: call_ordinal where teacher is forced "
+            "(must be > step-start). One-way latch after first teacher."
         ),
     )
     p_bc.add_argument(
@@ -1631,8 +1709,9 @@ def dispatch(argv: list[str]) -> int:
         dest="multi_model_seed",
         default=None,
         help=(
-            "Optional mix seed stored on the plan (beta_mixture only). "
-            "Omit to let the server generate one. Replays inherit this seed."
+            "Optional mix seed stored on the plan (beta_mixture or "
+            "student_to_teacher_turns). Omit to let the server generate one. "
+            "Replays inherit this seed."
         ),
     )
     p_bc.set_defaults(handler=_batch_create)

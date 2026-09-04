@@ -103,7 +103,10 @@ def apply_plan_mode(
     raw = out.get("multi_model")
     if not isinstance(raw, dict) or not raw.get("enabled"):
         return apply_multi_model_materialization(out)
-    if resolved == "resample" and raw.get("policy") != "beta_mixture":
+    if resolved == "resample" and raw.get("policy") not in {
+        "beta_mixture",
+        "student_to_teacher_turns",
+    }:
         mm = dict(raw)
         mm.pop("switch_episode", None)
         mm.pop("return_switch_episode", None)
