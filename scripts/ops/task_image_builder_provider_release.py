@@ -14,7 +14,7 @@ import stat
 import struct
 import subprocess
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
@@ -874,6 +874,62 @@ def build_release(
     )
 
 
+def build_certified_releases(
+    source_root: Path,
+    output_root: Path,
+    *,
+    guard_release_directories: Mapping[Architecture, Path],
+    runtime_roots: Mapping[Architecture, Path],
+    build_supervisor: Callable[[Path, Architecture], bytes] | None = None,
+) -> dict[Architecture, ProviderRelease]:
+    if set(guard_release_directories) != set(_ARCHITECTURES) or set(runtime_roots) != set(_ARCHITECTURES):
+        raise ProviderReleaseError("whole-release certification requires both architectures")
+    if output_root.exists():
+        output_root = _validate_root(output_root, "output root")
+    else:
+        output_root.mkdir(parents=True, mode=0o755)
+        output_root = _validate_root(output_root, "output root")
+    staging = Path(tempfile.mkdtemp(prefix=".provider-release-set.", dir=output_root))
+    staging.chmod(0o755)
+    try:
+        staged: dict[Architecture, ProviderRelease] = {}
+        for architecture in _ARCHITECTURES:
+            staged[architecture] = build_release(
+                source_root,
+                staging,
+                architecture,
+                guard_release_directory=guard_release_directories[architecture],
+                runtime_root=runtime_roots[architecture],
+                build_supervisor=build_supervisor,
+            )
+        for release in staged.values():
+            if (output_root / release.release_sha256).exists() or (
+                output_root / f"{release.release_sha256}.manifest.json"
+            ).exists():
+                raise ProviderReleaseError("release destination collision")
+        published: dict[Architecture, ProviderRelease] = {}
+        for architecture, release in staged.items():
+            directory = output_root / release.release_sha256
+            sidecar_path = output_root / f"{release.release_sha256}.manifest.json"
+            release.directory.chmod(0o755)
+            release.directory.rename(directory)
+            directory.chmod(0o555)
+            release.sidecar_path.rename(sidecar_path)
+            published[architecture] = ProviderRelease(
+                release_sha256=release.release_sha256,
+                directory=directory,
+                manifest_path=directory / _MANIFEST,
+                sidecar_path=sidecar_path,
+                manifest=release.manifest,
+            )
+        return published
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def verify_release_directory(
     path: Path,
     *,
@@ -980,18 +1036,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--architecture", choices=("x86_64", "aarch64"), required=True)
-    parser.add_argument("--guard-release-directory", type=Path, required=True)
-    parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument("--guard-release-directory-x86-64", type=Path, required=True)
+    parser.add_argument("--guard-release-directory-aarch64", type=Path, required=True)
+    parser.add_argument("--runtime-root-x86-64", type=Path, required=True)
+    parser.add_argument("--runtime-root-aarch64", type=Path, required=True)
     args = parser.parse_args(argv)
-    release = build_release(
+    releases = build_certified_releases(
         args.source_root.resolve(strict=True),
         args.output_root.resolve(),
-        cast(Architecture, args.architecture),
-        guard_release_directory=args.guard_release_directory.resolve(strict=True),
-        runtime_root=args.runtime_root.resolve(strict=True),
+        guard_release_directories={
+            "x86_64": args.guard_release_directory_x86_64.resolve(strict=True),
+            "aarch64": args.guard_release_directory_aarch64.resolve(strict=True),
+        },
+        runtime_roots={
+            "x86_64": args.runtime_root_x86_64.resolve(strict=True),
+            "aarch64": args.runtime_root_aarch64.resolve(strict=True),
+        },
     )
-    print(json.dumps({"release_sha256": release.release_sha256, "path": str(release.directory)}))
+    print(
+        json.dumps(
+            {
+                architecture: {
+                    "path": str(release.directory),
+                    "release_sha256": release.release_sha256,
+                }
+                for architecture, release in sorted(releases.items())
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 

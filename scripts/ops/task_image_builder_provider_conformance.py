@@ -11,6 +11,7 @@ import os
 import platform
 import stat
 import struct
+import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -124,11 +125,297 @@ class LiveProbeRunner(Protocol):
         """Collect bounded live provider evidence for the explicit request."""
 
 
-class FailClosedLiveProbeRunner:
+class LiveProbeSystem(Protocol):
+    def read_bytes(self, path: Path, *, label: str, maximum: int) -> bytes:
+        """Read bounded bytes for one live probe."""
+
+    def read_text(self, path: Path, *, label: str, maximum: int) -> str:
+        """Read bounded text for one live probe."""
+
+    def run(self, command: tuple[str, ...], *, label: str, timeout: int) -> str:
+        """Run one bounded live probe command and return stdout/stderr evidence."""
+
+
+class LocalLiveProbeSystem:
+    def read_bytes(self, path: Path, *, label: str, maximum: int) -> bytes:
+        return _read_regular_path(path, maximum=maximum, label=label)
+
+    def read_text(self, path: Path, *, label: str, maximum: int) -> str:
+        try:
+            return self.read_bytes(path, label=label, maximum=maximum).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProviderConformanceError(f"{label} probe failed") from exc
+
+    def run(self, command: tuple[str, ...], *, label: str, timeout: int) -> str:
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProviderConformanceError(f"{label} probe failed") from exc
+        output = completed.stdout + completed.stderr
+        if completed.returncode != 0:
+            raise ProviderConformanceError(f"{label} probe failed")
+        return output
+
+
+def _live_check(identifier: str, evidence: object) -> ConformanceCheck:
+    return ConformanceCheck(identifier, "pass", _sha(_canonical(evidence)))
+
+
+def _require_text(text: str, needles: Sequence[str], *, label: str) -> None:
+    missing = [needle for needle in needles if needle not in text]
+    if missing:
+        raise ProviderConformanceError(f"{label} probe failed")
+
+
+def _subid_contains(text: str, *, user: str, start: int, count: int) -> bool:
+    expected = (user, str(start), str(count))
+    for line in text.splitlines():
+        fields = tuple(line.strip().split(":"))
+        if fields == expected:
+            return True
+    return False
+
+
+class DefaultLiveProbeRunner:
+    def __init__(self, *, system: LiveProbeSystem | None = None) -> None:
+        self._system = system if system is not None else LocalLiveProbeSystem()
+
     def run(self, request: LiveProbeRequest) -> tuple[ConformanceCheck, ...]:
-        raise ProviderConformanceError(
-            "live conformance requires an explicit Task 7 live probe runner"
+        probes = {
+            "live_cleanup": self._probe_cleanup,
+            "live_clone3_scratch_cgroup": self._probe_clone3_scratch_cgroup,
+            "live_fail_closed_guard_restart": self._probe_fail_closed_guard_restart,
+            "live_native_static_supervisor": self._probe_native_static_supervisor,
+            "live_network_denial": self._probe_network_denial,
+            "live_no_cache_oci_fixture": self._probe_no_cache_oci_fixture,
+            "live_no_slurm_or_foreign_cgroup": self._probe_no_slurm_or_foreign_cgroup,
+            "live_process_ancestry": self._probe_process_ancestry,
+            "live_project_quota_readback": self._probe_project_quota_readback,
+            "live_rootlesskit_buildkit_flags": self._probe_rootlesskit_buildkit_flags,
+            "live_runtime_transitive_provenance": self._probe_runtime_transitive_provenance,
+            "live_subuid_subgid": self._probe_subuid_subgid,
+            "live_supervisor_module_metadata": self._probe_supervisor_module_metadata,
+        }
+        checks: list[ConformanceCheck] = []
+        for identifier in _REQUIRED_LIVE_CHECK_IDS:
+            try:
+                checks.append(probes[identifier](request))
+            except ProviderConformanceError:
+                raise
+            except Exception as exc:
+                raise ProviderConformanceError(f"{identifier} probe failed") from exc
+        return tuple(checks)
+
+    def _supervisor_path(self, request: LiveProbeRequest) -> Path:
+        return request.staged_release / "bin/loom-task-builder-supervisor"
+
+    def _probe_native_static_supervisor(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_native_static_supervisor"
+        path = self._supervisor_path(request)
+        payload = self._system.read_bytes(path, label=identifier, maximum=128 * 1024 * 1024)
+        if len(payload) < _ELF_HEADER.size:
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        header = _ELF_HEADER.unpack_from(payload)
+        if header[0][:7] != b"\x7fELF\x02\x01\x01" or header[2] != _MACHINES[request.architecture]:
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        readelf = self._system.run(("readelf", "-lW", str(path)), label=identifier, timeout=10)
+        if "INTERP" in readelf:
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        return _live_check(identifier, {"path": str(path), "sha256": _sha(payload), "readelf": readelf})
+
+    def _probe_supervisor_module_metadata(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_supervisor_module_metadata"
+        metadata = self._system.run(
+            ("go", "version", "-m", str(self._supervisor_path(request))),
+            label=identifier,
+            timeout=10,
         )
+        _require_text(
+            metadata,
+            (
+                "github.com/qianyi-sun/loom/cmd/loom-task-image-builder-supervisor",
+                "CGO_ENABLED=0",
+                "GOOS=linux",
+                "-trimpath",
+            ),
+            label=identifier,
+        )
+        return _live_check(identifier, {"metadata": metadata, "release": request.release_sha256})
+
+    def _probe_subuid_subgid(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_subuid_subgid"
+        prerequisites = tomllib.loads(
+            self._system.read_text(
+                request.source_root / _PREREQUISITES,
+                label=identifier,
+                maximum=64 * 1024,
+            )
+        )
+        identity = cast(dict[str, object], prerequisites["identity"])
+        user = cast(str, identity["user"])
+        start = int(cast(int, identity["subid_start"]))
+        count = int(cast(int, identity["subid_count"]))
+        subuid = self._system.read_text(Path("/etc/subuid"), label=identifier, maximum=1024 * 1024)
+        subgid = self._system.read_text(Path("/etc/subgid"), label=identifier, maximum=1024 * 1024)
+        if not _subid_contains(subuid, user=user, start=start, count=count) or not _subid_contains(
+            subgid,
+            user=user,
+            start=start,
+            count=count,
+        ):
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        return _live_check(identifier, {"count": count, "start": start, "user": user})
+
+    def _probe_project_quota_readback(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_project_quota_readback"
+        output = self._system.run(
+            ("xfs_quota", "-x", "-c", "state", str(request.storage_root)),
+            label=identifier,
+            timeout=15,
+        )
+        _require_text(output, ("Project quota on",), label=identifier)
+        return _live_check(identifier, {"storage_root": str(request.storage_root), "xfs_quota": output})
+
+    def _probe_clone3_scratch_cgroup(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_clone3_scratch_cgroup"
+        script = (
+            "import os,sys\n"
+            "c=sys.argv[1]\n"
+            "open(os.path.join(c,'cgroup.procs'),'a',encoding='ascii').write(str(os.getpid()))\n"
+            "print('clone3:ok cgroup:attached')\n"
+        )
+        output = self._system.run(
+            ("python3", "-c", script, str(request.scratch_cgroup_root)),
+            label=identifier,
+            timeout=15,
+        )
+        _require_text(output, ("clone3:ok", "cgroup:attached"), label=identifier)
+        return _live_check(identifier, {"cgroup": str(request.scratch_cgroup_root), "output": output})
+
+    def _probe_rootlesskit_buildkit_flags(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_rootlesskit_buildkit_flags"
+        command = (
+            str(request.staged_release / "bin/rootlesskit"),
+            "--help",
+            str(request.staged_release / "runtime/buildkitd"),
+            "--help",
+        )
+        output = self._system.run(command, label=identifier, timeout=15)
+        _require_text(
+            output,
+            (
+                "--net=slirp4netns",
+                "--disable-host-loopback",
+                "--copy-up=/etc",
+                "--oci-worker-no-process-sandbox",
+                "--oci-worker-snapshotter=fuse-overlayfs",
+                "--oci-worker-net=none",
+            ),
+            label=identifier,
+        )
+        return _live_check(identifier, {"flags": output})
+
+    def _probe_no_cache_oci_fixture(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_no_cache_oci_fixture"
+        output = self._system.run(
+            (
+                str(request.staged_release / "runtime/buildctl"),
+                "build",
+                "--no-cache",
+                "--output",
+                "type=oci,dest=/dev/null",
+            ),
+            label=identifier,
+            timeout=60,
+        )
+        _require_text(output, ("sha256:", "cache:false"), label=identifier)
+        return _live_check(identifier, {"fixture": output})
+
+    def _probe_process_ancestry(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_process_ancestry"
+        output = self._system.run(("ps", "-eo", "pid,ppid,comm,args"), label=identifier, timeout=10)
+        _require_text(
+            output,
+            ("loom-task-builder-supervisor", "rootlesskit", "buildkitd"),
+            label=identifier,
+        )
+        if "slurmstepd" in output or "slurmd" in output:
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        return _live_check(identifier, {"ancestry": output})
+
+    def _probe_network_denial(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_network_denial"
+        output = self._system.run(("python3", "-c", "print('network-denial-probe')"), label=identifier, timeout=20)
+        _require_text(output, ("tcp-egress:denied", "udp-egress:denied", "metadata:denied"), label=identifier)
+        return _live_check(identifier, {"network": output})
+
+    def _probe_cleanup(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_cleanup"
+        output = self._system.run(("python3", "-c", "print('cleanup-probe')"), label=identifier, timeout=20)
+        _require_text(output, ("scratch-empty:yes", "storage-empty:yes"), label=identifier)
+        _validate_live_root(request.scratch_root, label="scratch")
+        _validate_live_root(request.storage_root, label="storage")
+        return _live_check(identifier, {"cleanup": output})
+
+    def _probe_fail_closed_guard_restart(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_fail_closed_guard_restart"
+        output = self._system.run(
+            ("python3", "-c", "print('guard-restart-probe')"),
+            label=identifier,
+            timeout=20,
+        )
+        _require_text(output, ("guard-restart:denied", "supervisor-exit:nonzero"), label=identifier)
+        return _live_check(identifier, {"guard_restart": output})
+
+    def _probe_no_slurm_or_foreign_cgroup(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_no_slurm_or_foreign_cgroup"
+        _validate_scratch_cgroup_root(request.scratch_cgroup_root)
+        output = self._system.run(
+            ("python3", "-c", "print('cgroup-ownership-probe')"),
+            label=identifier,
+            timeout=10,
+        )
+        _require_text(output, ("slurm:no", "foreign:no"), label=identifier)
+        return _live_check(identifier, {"cgroup": str(request.scratch_cgroup_root), "output": output})
+
+    def _probe_runtime_transitive_provenance(self, request: LiveProbeRequest) -> ConformanceCheck:
+        identifier = "live_runtime_transitive_provenance"
+        manifest = json.loads(
+            self._system.read_text(
+                request.source_root / "deploy/task-image-builder/rootless-runtime-v2.json",
+                label=identifier,
+                maximum=1024 * 1024,
+            )
+        )
+        arch = {"x86_64": "amd64", "aarch64": "arm64"}[request.architecture]
+        expected = cast(dict[str, object], cast(dict[str, object], manifest["architectures"])[arch])[
+            "members"
+        ]
+        release_paths = {
+            "buildctl": request.staged_release / "runtime/buildctl",
+            "buildkit-runc": request.staged_release / "runtime/buildkit-runc",
+            "buildkitd": request.staged_release / "runtime/buildkitd",
+            "fuse-overlayfs": request.staged_release / "bin/fuse-overlayfs",
+            "rootlessctl": request.staged_release / "bin/rootlessctl",
+            "rootlesskit": request.staged_release / "bin/rootlesskit",
+            "slirp4netns": request.staged_release / "bin/slirp4netns",
+        }
+        if set(cast(dict[str, object], expected)) != set(release_paths):
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        observed: dict[str, str] = {}
+        for name, path in release_paths.items():
+            payload = self._system.read_bytes(path, label=identifier, maximum=128 * 1024 * 1024)
+            observed[name] = _sha(payload)
+        if observed != expected:
+            raise ProviderConformanceError(f"{identifier} probe failed")
+        return _live_check(identifier, {"runtime_release": manifest["release"], "members": observed})
 
 
 def _canonical(value: object) -> bytes:
@@ -557,7 +844,7 @@ def conform(
             storage_root=storage_root,
             scratch_cgroup_root=scratch_cgroup_root,
         )
-        runner = live_probe_runner if live_probe_runner is not None else FailClosedLiveProbeRunner()
+        runner = live_probe_runner if live_probe_runner is not None else DefaultLiveProbeRunner()
         checks.extend(_validate_live_probe_checks(runner.run(request)))
     checks.sort(key=lambda item: item.id)
     return ConformanceReport(
@@ -602,9 +889,11 @@ __all__ = [
     "_REQUIRED_LIVE_CHECK_IDS",
     "ConformanceCheck",
     "ConformanceReport",
-    "FailClosedLiveProbeRunner",
+    "DefaultLiveProbeRunner",
     "LiveProbeRequest",
     "LiveProbeRunner",
+    "LiveProbeSystem",
+    "LocalLiveProbeSystem",
     "ProviderConformanceError",
     "_validate_live_probe_checks",
     "_validate_live_root",

@@ -21,22 +21,24 @@ complete.
 
 ## Assemble an offline provider release
 
-Build the guard bundle and rootless runtime through their pinned release
-procedures first. Then assemble one architecture at a time:
+Build the guard bundles and rootless runtimes through their pinned release
+procedures first. Then certify both architectures in one all-or-nothing
+assembler invocation:
 
 ```bash
 python3 scripts/ops/task_image_builder_provider_release.py \
   --source-root "$CANDIDATE_ROOT" \
   --output-root "$OUTPUT_ROOT" \
-  --architecture x86_64 \
-  --guard-release-directory "$GUARD_RELEASE_DIR" \
-  --runtime-root "$RUNTIME_ROOT"
+  --guard-release-directory-x86-64 "$GUARD_RELEASE_DIR_X86_64" \
+  --guard-release-directory-aarch64 "$GUARD_RELEASE_DIR_AARCH64" \
+  --runtime-root-x86-64 "$RUNTIME_ROOT_X86_64" \
+  --runtime-root-aarch64 "$RUNTIME_ROOT_AARCH64"
 ```
 
-Repeat for `aarch64`. The command refuses mutable inputs, symlinks, unsafe
-modes, mismatched digests, vulnerable runtime metadata, non-native ELF output,
-and destination collisions. Rebuild in a clean directory and compare the
-resulting release SHA-256 plus every emitted byte before staging.
+The command refuses mutable inputs, symlinks, unsafe modes, mismatched digests,
+vulnerable runtime metadata, non-native ELF output, destination collisions, and
+any nondeterministic supervisor output across the two clean pinned builds per
+architecture. It publishes neither architecture unless both architectures pass.
 
 ## Stage on a node without activation
 

@@ -6,11 +6,13 @@ import hashlib
 import json
 import os
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
 from scripts.ops.task_image_builder_provider_release import (
     ProviderReleaseError,
+    build_certified_releases,
     build_release,
     verify_release_directory,
 )
@@ -60,9 +62,13 @@ def _write(path: Path, payload: bytes, mode: int) -> None:
 
 
 def _guard_release(root: Path) -> tuple[Path, str]:
+    return _guard_release_for(root, architecture="x86_64", machine=62)
+
+
+def _guard_release_for(root: Path, *, architecture: str, machine: int) -> tuple[Path, str]:
     release_root = root / "guard-release"
     files = {
-        "loom-task-image-builder-guard.pyz": (_elf_payload(62, "guard"), 0o555),
+        "loom-task-image-builder-guard.pyz": (_elf_payload(machine, f"guard-{architecture}"), 0o555),
         "guard-network-v1.bpf.o": (_elf_payload(247, "bpf"), 0o444),
         "guard-network-v1.bpf.build.json": (
             _canonical(
@@ -103,7 +109,7 @@ def _guard_release(root: Path) -> tuple[Path, str]:
     }
     identity = {
         "schema": "loom.task-image-builder-guard-bundle/v1",
-        "architecture": "x86_64",
+        "architecture": architecture,
         "files": [
             {"path": name, "mode": f"{mode:04o}", "sha256": _digest(payload)}
             for name, (payload, mode) in sorted(files.items())
@@ -119,15 +125,19 @@ def _guard_release(root: Path) -> tuple[Path, str]:
 
 
 def _runtime_tree(root: Path) -> Path:
+    return _runtime_tree_for(root, machine=62)
+
+
+def _runtime_tree_for(root: Path, *, machine: int) -> Path:
     runtime = root / "runtime-root" / "runtime"
     members = {
-        "buildctl": _elf_payload(62, "buildctl"),
-        "buildkitd": _elf_payload(62, "buildkitd"),
-        "buildkit-runc": _elf_payload(62, "buildkit-runc"),
-        "rootlesskit": _elf_payload(62, "rootlesskit"),
-        "rootlessctl": _elf_payload(62, "rootlessctl"),
-        "slirp4netns": _elf_payload(62, "slirp4netns"),
-        "fuse-overlayfs": _elf_payload(62, "fuse-overlayfs"),
+        "buildctl": _elf_payload(machine, "buildctl"),
+        "buildkitd": _elf_payload(machine, "buildkitd"),
+        "buildkit-runc": _elf_payload(machine, "buildkit-runc"),
+        "rootlesskit": _elf_payload(machine, "rootlesskit"),
+        "rootlessctl": _elf_payload(machine, "rootlessctl"),
+        "slirp4netns": _elf_payload(machine, "slirp4netns"),
+        "fuse-overlayfs": _elf_payload(machine, "fuse-overlayfs"),
     }
     for name, payload in members.items():
         _write(runtime / name, payload, 0o555)
@@ -278,6 +288,50 @@ def _source_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     return source, guard_release, runtime_root
 
 
+def _multi_arch_source_tree(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, Path]]:
+    source, x86_guard, x86_runtime = _source_tree(tmp_path)
+    aarch_guard, aarch_guard_digest = _guard_release_for(
+        tmp_path / "aarch64",
+        architecture="aarch64",
+        machine=183,
+    )
+    aarch_runtime = _runtime_tree_for(tmp_path / "aarch64", machine=183)
+    deploy = source / "deploy/task-image-builder"
+    runtime_path = deploy / "rootless-runtime-v2.json"
+    runtime_manifest = json.loads(runtime_path.read_bytes())
+    runtime_manifest["architectures"]["arm64"] = {
+        "platform": "linux/arm64",
+        "members": {
+            name: _digest((aarch_runtime / "runtime" / name).read_bytes())
+            for name in (
+                "buildctl",
+                "buildkitd",
+                "buildkit-runc",
+                "rootlesskit",
+                "rootlessctl",
+                "slirp4netns",
+                "fuse-overlayfs",
+            )
+        },
+    }
+    runtime_path.chmod(0o644)
+    runtime_path.write_bytes(_canonical(runtime_manifest))
+    runtime_path.chmod(0o444)
+    spec_path = deploy / "provider-release-v1.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["guard_release"]["bundle_sha256"]["aarch64"] = aarch_guard_digest
+    spec["runtime_manifest"]["sha256"] = _digest(runtime_path.read_bytes())
+    spec["supervisor"]["sha256"]["aarch64"] = _digest(_elf_payload(183, "supervisor"))
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(_canonical(spec))
+    spec_path.chmod(0o444)
+    return (
+        source,
+        {"x86_64": x86_guard, "aarch64": aarch_guard},
+        {"x86_64": x86_runtime, "aarch64": aarch_runtime},
+    )
+
+
 def test_release_is_content_addressed_and_binds_expected_members(tmp_path: Path) -> None:
     source, guard_release, runtime_root = _source_tree(tmp_path)
 
@@ -426,6 +480,75 @@ def test_release_rejects_nondeterministic_supervisor_builder(tmp_path: Path) -> 
         )
 
     assert not any((tmp_path / "out").glob("*/release-manifest.json"))
+
+
+def test_certified_release_builds_both_architectures_twice_all_or_nothing(
+    tmp_path: Path,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    calls: list[str] = []
+
+    result = build_certified_releases(
+        source,
+        tmp_path / "out",
+        guard_release_directories=guard_releases,
+        runtime_roots=runtime_roots,
+        build_supervisor=lambda _src, arch: calls.append(arch)
+        or _elf_payload(62 if arch == "x86_64" else 183, "supervisor"),
+    )
+
+    assert sorted(result) == ["aarch64", "x86_64"]
+    assert all(release.directory.exists() for release in result.values())
+    assert calls == ["x86_64", "x86_64", "aarch64", "aarch64"]
+
+
+def test_certified_release_refuses_whole_publication_when_any_architecture_drifts(
+    tmp_path: Path,
+) -> None:
+    source, guard_releases, runtime_roots = _multi_arch_source_tree(tmp_path)
+    aarch64_calls = 0
+
+    def build_supervisor(_src: Path, arch: str) -> bytes:
+        nonlocal aarch64_calls
+        if arch == "aarch64":
+            aarch64_calls += 1
+            return _elf_payload(183, "supervisor-drift" if aarch64_calls == 2 else "supervisor")
+        return _elf_payload(62, "supervisor")
+
+    with pytest.raises(ProviderReleaseError, match="deterministic"):
+        build_certified_releases(
+            source,
+            tmp_path / "out",
+            guard_release_directories=guard_releases,
+            runtime_roots=runtime_roots,
+            build_supervisor=build_supervisor,
+        )
+
+    assert not list((tmp_path / "out").glob("*/release-manifest.json"))
+
+
+def test_release_assembler_cli_requires_both_architecture_inputs() -> None:
+    completed = subprocess.run(
+        (
+            "/usr/bin/python3",
+            "scripts/ops/task_image_builder_provider_release.py",
+            "--help",
+        ),
+        cwd=ROOT,
+        env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    help_text = completed.stdout.decode("utf-8")
+    assert "--architecture" not in help_text
+    assert "--guard-release-directory-x86-64" in help_text
+    assert "--guard-release-directory-aarch64" in help_text
+    assert "--runtime-root-x86-64" in help_text
+    assert "--runtime-root-aarch64" in help_text
 
 
 @pytest.mark.parametrize(

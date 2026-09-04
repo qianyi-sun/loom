@@ -724,6 +724,105 @@ class _FakeLiveProbeRunner:
         )
 
 
+class _FakeLiveSystem:
+    def __init__(self, *, fail_label: str | None = None) -> None:
+        self.fail_label = fail_label
+        self.labels: list[str] = []
+
+    def _record(self, label: str) -> None:
+        self.labels.append(label)
+        if label == self.fail_label:
+            raise OSError(label)
+
+    def read_bytes(self, path: Path, *, label: str, maximum: int) -> bytes:
+        self._record(label)
+        return path.read_bytes()[:maximum]
+
+    def read_text(self, path: Path, *, label: str, maximum: int) -> str:
+        self._record(label)
+        if path == Path("/etc/subuid") or path == Path("/etc/subgid"):
+            return "loom-builder:3000000:65536\n"
+        return path.read_text(encoding="utf-8")[:maximum]
+
+    def run(self, command: tuple[str, ...], *, label: str, timeout: int) -> str:
+        del command, timeout
+        self._record(label)
+        return {
+            "live_native_static_supervisor": "Elf file type is EXEC\nProgram Headers: LOAD R E\n",
+            "live_supervisor_module_metadata": (
+                "path\tgithub.com/qianyi-sun/loom/cmd/loom-task-image-builder-supervisor\n"
+                "build\t-trimpath=true\n"
+                "build\tCGO_ENABLED=0\n"
+                "build\tGOOS=linux\n"
+            ),
+            "live_project_quota_readback": "Project quota on /tmp/loom-provider\n",
+            "live_clone3_scratch_cgroup": "clone3:ok cgroup:attached\n",
+            "live_rootlesskit_buildkit_flags": (
+                "--net=slirp4netns\n"
+                "--disable-host-loopback\n"
+                "--copy-up=/etc\n"
+                "--oci-worker-no-process-sandbox\n"
+                "--oci-worker-snapshotter=fuse-overlayfs\n"
+                "--oci-worker-net=none\n"
+            ),
+            "live_no_cache_oci_fixture": "exported digest sha256:" + "1" * 64 + "\ncache:false\n",
+            "live_process_ancestry": "systemd\nloom-task-builder-supervisor\nrootlesskit\nbuildkitd\n",
+            "live_network_denial": "tcp-egress:denied\nudp-egress:denied\nmetadata:denied\n",
+            "live_cleanup": "scratch-empty:yes\ncgroup-removed:yes\nstorage-empty:yes\n",
+            "live_fail_closed_guard_restart": "guard-restart:denied\nsupervisor-exit:nonzero\n",
+            "live_no_slurm_or_foreign_cgroup": "cgroup-owner:loom-provider\nslurm:no\nforeign:no\n",
+        }[label]
+
+
+def _live_runner_request(tmp_path: Path) -> object:
+    from scripts.ops.task_image_builder_provider_conformance import LiveProbeRequest
+
+    source, release = _source_tree(tmp_path)
+    scratch = tmp_path / "scratch"
+    storage = tmp_path / "storage"
+    cgroup = tmp_path / ".loom-task-image-builder-provider-conformance-test"
+    scratch.mkdir()
+    storage.mkdir()
+    cgroup.mkdir()
+    return LiveProbeRequest(
+        staged_release=release,
+        release_sha256=release.name,
+        architecture="x86_64",
+        source_root=source,
+        scratch_root=scratch,
+        storage_root=storage,
+        scratch_cgroup_root=cgroup,
+    )
+
+
+def test_default_live_probe_runner_performs_all_required_raw_probes(tmp_path: Path) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import DefaultLiveProbeRunner
+
+    system = _FakeLiveSystem()
+
+    checks = DefaultLiveProbeRunner(system=system).run(_live_runner_request(tmp_path))
+
+    assert tuple(check.id for check in checks) == _REQUIRED_LIVE_CHECK_IDS
+    assert set(_REQUIRED_LIVE_CHECK_IDS) <= set(system.labels)
+    assert "live_runtime_transitive_provenance" in system.labels
+
+
+@pytest.mark.parametrize("failed_probe", _REQUIRED_LIVE_CHECK_IDS)
+def test_default_live_probe_runner_rejects_each_failed_raw_probe(
+    tmp_path: Path,
+    failed_probe: str,
+) -> None:
+    from scripts.ops.task_image_builder_provider_conformance import (
+        DefaultLiveProbeRunner,
+        ProviderConformanceError,
+    )
+
+    with pytest.raises(ProviderConformanceError, match=failed_probe):
+        DefaultLiveProbeRunner(system=_FakeLiveSystem(fail_label=failed_probe)).run(
+            _live_runner_request(tmp_path)
+        )
+
+
 def _patch_live_conformance_verifiers(monkeypatch: pytest.MonkeyPatch) -> Path:
     from scripts.ops import task_image_builder_provider_conformance as conformance_module
 
@@ -826,6 +925,53 @@ def test_live_conformance_rejects_missing_task7_probe(
             scratch_cgroup_root=scratch_cgroup,
             live_probe_runner=runner,
         )
+
+
+def test_live_conformance_uses_the_default_production_probe_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.ops import task_image_builder_provider_conformance as conformance_module
+    from scripts.ops.task_image_builder_provider_conformance import ConformanceCheck, conform
+
+    staged_release = _patch_live_conformance_verifiers(monkeypatch)
+    scratch = tmp_path / "scratch"
+    storage = tmp_path / "storage"
+    scratch_cgroup = tmp_path / "scratch-cgroup"
+    scratch.mkdir()
+    storage.mkdir()
+    scratch_cgroup.mkdir()
+
+    class RecordingDefaultRunner:
+        called = False
+
+        def run(self, request: object) -> tuple[ConformanceCheck, ...]:
+            self.called = True
+            assert request.scratch_cgroup_root == scratch_cgroup
+            return tuple(
+                ConformanceCheck(item, "pass", _digest(item.encode("ascii")))
+                for item in _REQUIRED_LIVE_CHECK_IDS
+            )
+
+    runner = RecordingDefaultRunner()
+    monkeypatch.setattr(
+        conformance_module,
+        "DefaultLiveProbeRunner",
+        lambda: runner,
+    )
+
+    report = conform(
+        staged_release,
+        live=True,
+        root=Path("/"),
+        source_root=ROOT,
+        scratch_root=scratch,
+        storage_root=storage,
+        scratch_cgroup_root=scratch_cgroup,
+    )
+
+    assert runner.called is True
+    assert report.production_ready is False
 
 
 @pytest.mark.parametrize(
