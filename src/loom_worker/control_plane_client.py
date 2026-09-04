@@ -1429,6 +1429,7 @@ class HttpControlPlaneClient:
         last_call_ordinal: int,
         last_seq: int,
         tmux_session_id: str | None = None,
+        attempt_deadline_wall_clock: datetime | None = None,
     ) -> dict[str, Any]:
         client, owned = self._http()
         try:
@@ -1443,6 +1444,11 @@ class HttpControlPlaneClient:
                     "last_call_ordinal": last_call_ordinal,
                     "last_seq": last_seq,
                     "tmux_session_id": tmux_session_id,
+                    "attempt_deadline_wall_clock": (
+                        attempt_deadline_wall_clock.isoformat()
+                        if attempt_deadline_wall_clock is not None
+                        else None
+                    ),
                 },
             )
             r.raise_for_status()

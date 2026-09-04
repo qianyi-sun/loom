@@ -312,6 +312,8 @@ class SubprocessAgent:
         )
 
         # 3. Streaming exec inside the sandbox.
+        if self._attempt_deadline is not None:
+            self._attempt_deadline.require_remaining()
         driver_handle = await env.exec_streaming(
             argv,
             env_vars=env_vars,

@@ -70,14 +70,15 @@ class AttemptTrajectoryGuard:
         return self._writer._next_seq
 
     async def append(self, event: TrajectoryEvent) -> None:
-        self._require_active()
+        self.require_attempt_active()
         await self._writer.append(event)
 
     async def write_raw_dict(self, data: dict[str, object]) -> None:
-        self._require_active()
+        self.require_attempt_active()
         await self._writer.write_raw_dict(data)
 
-    def _require_active(self) -> None:
+    def require_attempt_active(self) -> None:
+        """Fail before any non-trajectory attempt-owned mutation starts."""
         if self._fence.closed:
             raise AttemptTrajectoryFencedError(
                 "agent trajectory write rejected after attempt terminal cause "

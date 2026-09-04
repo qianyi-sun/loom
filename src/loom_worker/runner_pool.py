@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from loom_worker.worker_health import WorkerUnhealthyError
@@ -18,10 +18,16 @@ class RunnerPool:
     (running + parked) work.
     """
 
-    def __init__(self, max_concurrent: int) -> None:
+    def __init__(
+        self,
+        max_concurrent: int,
+        *,
+        unhealthy_callback: Callable[[WorkerUnhealthyError], None] | None = None,
+    ) -> None:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._tasks: set[asyncio.Task[Any]] = set()
         self._fatal_error: WorkerUnhealthyError | None = None
+        self._unhealthy_callback = unhealthy_callback
 
     @property
     def in_flight(self) -> int:
@@ -42,6 +48,8 @@ class RunnerPool:
         error = task.exception()
         if isinstance(error, WorkerUnhealthyError) and self._fatal_error is None:
             self._fatal_error = error
+            if self._unhealthy_callback is not None:
+                self._unhealthy_callback(error)
 
     def raise_if_unhealthy(self) -> None:
         """Stop claim admission after a fatal attempt-supervision failure."""

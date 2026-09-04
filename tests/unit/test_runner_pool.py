@@ -1,9 +1,14 @@
 import asyncio
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
 from loom_worker.runner_pool import RunnerPool
-from loom_worker.worker_health import WorkerUnhealthyError
+from loom_worker.worker_health import WORKER_UNHEALTHY_EXIT_CODE, WorkerUnhealthyError
 
 
 async def test_pool_respects_max_concurrent() -> None:
@@ -67,3 +72,65 @@ async def test_fatal_worker_health_error_stops_future_claim_admission() -> None:
 
     with pytest.raises(WorkerUnhealthyError, match="attempt did not stop"):
         pool.raise_if_unhealthy()
+
+
+async def test_unhealthy_callback_runs_once() -> None:
+    observed: list[str] = []
+    pool = RunnerPool(
+        max_concurrent=2,
+        unhealthy_callback=lambda error: observed.append(str(error)),
+    )
+
+    async def fatal(message: str) -> None:
+        raise WorkerUnhealthyError(message)
+
+    await pool.spawn(fatal("first"))
+    await pool.spawn(fatal("second"))
+    await pool.wait_all()
+
+    assert observed == ["first"]
+
+
+def test_hard_exit_does_not_wait_for_cancellation_resistant_task() -> None:
+    source_root = os.fspath(Path(__file__).parents[2] / "src")
+    code = textwrap.dedent(
+        """
+        import asyncio
+        from loom_worker.runner_pool import RunnerPool
+        from loom_worker.worker_health import (
+            WorkerUnhealthyError,
+            hard_exit_unhealthy_worker,
+        )
+
+        async def ignore_cancellation():
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    continue
+
+        async def fatal():
+            asyncio.create_task(ignore_cancellation())
+            raise WorkerUnhealthyError("attempt did not stop")
+
+        async def main():
+            pool = RunnerPool(
+                max_concurrent=1,
+                unhealthy_callback=hard_exit_unhealthy_worker,
+            )
+            await pool.spawn(fatal())
+            await asyncio.sleep(60)
+
+        asyncio.run(main())
+        """
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = source_root
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == WORKER_UNHEALTHY_EXIT_CODE

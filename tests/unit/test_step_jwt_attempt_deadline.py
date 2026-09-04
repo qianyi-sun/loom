@@ -53,6 +53,34 @@ def test_mint_rejects_expiry_that_does_not_cover_deadline_grace() -> None:
         )
 
 
+def test_subsecond_deadline_requires_one_numericdate_encoding_second() -> None:
+    issued_at = datetime.now(UTC).replace(microsecond=999999)
+    deadline = issued_at + timedelta(seconds=10)
+
+    with pytest.raises(ValueError, match="deadline plus 300 seconds"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            trial_id=uuid4(),
+            step_id="main",
+            ttl_sec=310,
+            signing_key=_SIGNING_KEY,
+            issued_at=issued_at,
+            attempt_deadline_wall_clock=deadline,
+        )
+
+    token = mint_step_jwt(
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=311,
+        signing_key=_SIGNING_KEY,
+        issued_at=issued_at,
+        attempt_deadline_wall_clock=deadline,
+    )
+    context = verify_step_jwt(token, signing_key=_SIGNING_KEY)
+    assert context.expires_at >= deadline + timedelta(seconds=300)
+
+
 def test_verify_rejects_tampered_deadline_lifetime() -> None:
     issued_at = datetime.now(UTC).replace(microsecond=0)
     deadline = issued_at + timedelta(seconds=60)

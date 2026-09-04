@@ -121,7 +121,7 @@ from loom_worker.trial_cancellation_watchdog import (
 )
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
-from loom_worker.worker_health import WorkerUnhealthyError
+from loom_worker.worker_health import WorkerUnhealthyError, hard_exit_unhealthy_worker
 
 _DOCKER_HOST_GATEWAY_EXTRA_HOSTS: tuple[tuple[str, str], ...] = (
     ("host.docker.internal", "host-gateway"),
@@ -615,7 +615,10 @@ async def run_worker(
         hb.start()
 
         try:
-            pool = RunnerPool(max_concurrent=settings.max_concurrent)
+            pool = RunnerPool(
+                max_concurrent=settings.max_concurrent,
+                unhealthy_callback=hard_exit_unhealthy_worker,
+            )
             object_store = _build_worker_object_store(settings)
             await _ensure_runtime_buckets(
                 object_store,
@@ -912,6 +915,7 @@ async def _claim_available_trials(
     setup_health_policy = policy_from_settings(settings)
     read_health_snapshot = read_setup_health or read_node_health_snapshot
     while pool.in_flight < settings.max_concurrent:
+        pool.raise_if_unhealthy()
         health = setup_health_policy.evaluate(read_health_snapshot())
         if not health.ok:
             logger.warning(
@@ -935,6 +939,10 @@ async def _claim_available_trials(
             break
         if trial_payload is None:
             break
+        # A concurrently finishing attempt can poison this process while the
+        # claim request is in flight. Never start the raced claim here; the CP
+        # lease reclaimer will make it available to a fresh worker.
+        pool.raise_if_unhealthy()
         await _spawn_trial(
             pool=pool,
             settings=settings,
@@ -1001,6 +1009,7 @@ async def _claim_available_work(
     setup_health_policy = policy_from_settings(settings)
     read_health_snapshot = read_setup_health or read_node_health_snapshot
     while pool.in_flight < settings.max_concurrent:
+        pool.raise_if_unhealthy()
         health = setup_health_policy.evaluate(read_health_snapshot())
         if not health.ok:
             logger.warning(
@@ -1025,6 +1034,7 @@ async def _claim_available_work(
             break
         if envelope is None:
             break
+        pool.raise_if_unhealthy()
         # The HTTP boundary contains JSON UUID and timestamp strings.  Validate
         # through Pydantic's JSON path so strict in-process construction remains
         # closed without rejecting the canonical transport representation.

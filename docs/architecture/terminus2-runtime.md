@@ -89,7 +89,9 @@ The cross-process bridge is a signed UTC wall-clock claim:
 
 Wall-clock conversion never adds executable time. The extra 300 seconds covers
 bounded cleanup and clock skew only. It is part of credential validity, not the
-agent's execution budget.
+agent's execution budget. Worker TTL calculation adds one more encoding second
+because JWT `iat`/`exp` NumericDate values have whole-second precision while the
+attempt deadline retains microseconds; that second is not executable budget.
 
 Terminus-2 uses one step JWT for one attempt and does not rotate it mid-attempt.
 The token is minted only after the deadline exists, and the worker validates
@@ -141,7 +143,12 @@ start a retry, verifier, or artifact read against the still-changing
 workspace, and still lets platform-owned code write `step_end` and terminal
 trial evidence. After output projection and terminal-state reporting, that
 signal propagates through the runner pool, stops new claims, and requires the
-worker process to restart. The old task remains fenced throughout.
+worker process to restart. Production wiring exits with code 70 without asking
+`asyncio.run()` to await the cancellation-resistant task; the container or job
+supervisor then starts a fresh process. Claim loops check health before and
+after each claim request, so a claim racing the fatal signal is not started and
+returns through the normal lease-reclaim path. The old task remains fenced
+throughout.
 
 ### Gateway authentication and failure taxonomy
 
@@ -160,6 +167,20 @@ internal logs retain only the low-cardinality reason and never the token.
 Internal bearer reasons are restricted to `missing`, `malformed`,
 `invalid_signature`, `expired`, and `valid`. Classifiers consume the structured
 HTTP codes above rather than matching human-readable response strings.
+
+During rolling upgrade, pre-deadline tokens are accepted only inside the
+Gateway process compatibility window configured by
+`LOOM_GW_LEGACY_ATTEMPT_DEADLINE_COMPAT_SEC` (default 86,400 seconds), with
+separate `accepted` and `rejected` counters. Set this value to `0` after all
+Control Plane and worker images have rolled to make the deadline claim
+mandatory. The default window restarts with the Gateway process, so a completed
+rollout must pin `0`; repeated restarts are not a migration-completion signal.
+
+Terminus-2 finalization uses the same attempt mutation gate before trajectory
+sync, Control Plane episode checkpoint, sandbox artifact publication, and
+artifact-ref emission. Checkpoint requests also carry the signed wall deadline;
+the Control Plane locks the trial row, rejects terminal trials, and rolls back
+if the deadline is reached before commit.
 
 ### Terminal persistence order
 

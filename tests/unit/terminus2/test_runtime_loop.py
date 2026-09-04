@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from loom.agent.terminus2.runtime import (
     _install_tmux_session_alive_guard,
     _openai_gateway_base,
 )
+from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.fake import FakeDriver
 from loom.errors import AgentError
 from loom.models.types import ModelSpec
@@ -49,11 +51,29 @@ class _TokenCP:
         return []
 
 
+class _DeadlineCrossingTokenCP(_TokenCP):
+    def __init__(self, clock: list[float]) -> None:
+        super().__init__()
+        self.clock = clock
+
+    async def mint_attempt_step_token(self, **kwargs: object) -> object:
+        del kwargs
+        self.clock[0] = 1.0
+        return SimpleNamespace(token="deadline-token")
+
+
+class _AttemptTokenCP(_TokenCP):
+    async def mint_attempt_step_token(self, **kwargs: object) -> object:
+        del kwargs
+        return SimpleNamespace(token="deadline-token")
+
+
 def _patch_harbor(
     monkeypatch,
     *,
     tokens_seen: list[str],
     lifecycle: list[str] | None = None,
+    deadline_clock: list[float] | None = None,
 ) -> None:
     class _FakeTerminus2:
         def __init__(self, logs_dir, **kwargs: object) -> None:
@@ -79,6 +99,8 @@ def _patch_harbor(
                 json.dumps({"steps": []}),
                 encoding="utf-8",
             )
+            if deadline_clock is not None:
+                deadline_clock[0] = 1.0
 
     class _FakeContext:
         pass
@@ -160,6 +182,121 @@ async def test_concurrent_runtimes_do_not_mutate_process_env(
     assert os.environ.get("OPENAI_API_KEY") == prior_api_key
     assert os.environ.get("OPENAI_BASE_URL") == prior_base
     assert set(tokens_seen) == {"token-1", "token-2"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_start_harbor_when_token_mint_crosses_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    starts: list[str] = []
+
+    class _MustNotStart:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            starts.append("init")
+
+    monkeypatch.setattr(
+        "loom.agent.terminus2.runtime._import_terminus2",
+        lambda: (_MustNotStart, object),
+    )
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="gpt-4"),
+        team_id=str(uuid4()),
+        trial_id=uuid4(),
+        cp_client=_DeadlineCrossingTokenCP(clock),
+        gateway_url="http://127.0.0.1:19100",
+    )
+    runtime.begin_attempt(
+        AttemptDeadline.after(
+            1.0,
+            clock=lambda: clock[0],
+            wall_clock=lambda: 100.0,
+        )
+    )
+    driver = FakeDriver()
+    await driver.start()
+
+    async with TrajectoryWriter(
+        local_path=tmp_path / "mint-crossed.jsonl",
+        store=FakeObjectStore(),
+        bucket="trajectories",
+        key="t/events.jsonl",
+        min_part_bytes=0,
+    ) as trajectory:
+        with pytest.raises(AttemptDeadlineExceededError):
+            await runtime.run(
+                instruction="x",
+                env=driver,
+                trajectory=trajectory,
+                mcp=[],
+                skills_dir=None,
+                step_id="main",
+            )
+
+    assert starts == []
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_skips_final_artifact_publish_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    tokens_seen: list[str] = []
+    publishes = 0
+    _patch_harbor(
+        monkeypatch,
+        tokens_seen=tokens_seen,
+        deadline_clock=clock,
+    )
+
+    async def _unexpected_publish(*_args: object, **_kwargs: object) -> object:
+        nonlocal publishes
+        publishes += 1
+        raise AssertionError("deadline finalizer must not publish artifacts")
+
+    monkeypatch.setattr(
+        "loom.agent.terminus2.runtime._publish_harbor_artifacts_to_sandbox",
+        _unexpected_publish,
+    )
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="gpt-4"),
+        team_id=str(uuid4()),
+        trial_id=uuid4(),
+        cp_client=_AttemptTokenCP(),
+        gateway_url="http://127.0.0.1:19100",
+    )
+    runtime.begin_attempt(
+        AttemptDeadline.after(
+            1.0,
+            clock=lambda: clock[0],
+            wall_clock=lambda: 100.0,
+        )
+    )
+    driver = FakeDriver()
+    await driver.start()
+
+    async with TrajectoryWriter(
+        local_path=tmp_path / "finalizer-deadline.jsonl",
+        store=FakeObjectStore(),
+        bucket="trajectories",
+        key="t/events.jsonl",
+        min_part_bytes=0,
+    ) as trajectory:
+        await runtime.run(
+            instruction="x",
+            env=driver,
+            trajectory=trajectory,
+            mcp=[],
+            skills_dir=None,
+            step_id="main",
+        )
+
+    assert tokens_seen == ["deadline-token"]
+    assert publishes == 0
+    await driver.stop()
 
 
 @pytest.mark.asyncio
