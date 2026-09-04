@@ -44,22 +44,20 @@ from loom_task_image_builder_guard.authority import (
 )
 from loom_task_image_builder_guard.protocol import create_sealed_memfd
 from tests.integration.test_task_image_authority_api import (
-    NOW,
     _BEARER,
-    _FakeBundleBackend,
+    NOW,
     _clear_authority_rows,
+    _FakeBundleBackend,
     _principal_document,
     _seed_materialization,
     _seed_released_grant,
     _settings,
 )
-from tests.integration.test_task_image_projection_store import GRANT_ID
-from tests.integration.test_task_image_projection_store import SUPERVISOR_SHA256, _policy
+from tests.integration.test_task_image_projection_store import GRANT_ID, SUPERVISOR_SHA256, _policy
 from tests.unit.test_task_image_builder_guard_service import (
     PROOF,
     REQUEST,
     RESPONSE,
-    _config,
     _service,
 )
 
