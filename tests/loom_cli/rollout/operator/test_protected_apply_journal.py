@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -21,12 +22,22 @@ from loom_cli.rollout.operator.protected_apply_journal import (
 from loom_cli.rollout.operator.protected_apply_recovery import (
     find_advanced_epoch_attempt,
 )
+from loom_cli.rollout.operator.protected_capacity_manager_configuration_compensation import (
+    CapacityManagerConfigurationCompensationIntentRecord,
+    CapacityManagerConfigurationCompensationRecord,
+    CapacityManagerConfigurationCompensationStore,
+)
+from loom_cli.rollout.operator.protected_execution_preparation_journal import (
+    ExecutionPreparationOperationIntent,
+    ExecutionPreparationOperationJournal,
+    ExecutionPreparationOperationTerminal,
+)
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorApplyError,
     ExternalSupervisorCompensationError,
 )
 from loom_cli.rollout.operator.protected_gb10_transport import GB10FleetApplyError
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _execution_plan, _plan
 
 
 class _Backend:
@@ -64,6 +75,127 @@ def _journal(tmp_path: Path) -> ProtectedApplyJournal:
         request_id="req-alpha",
         attempt_number=1,
         service_uid=os.geteuid(),
+    )
+
+
+def _compensation_store(tmp_path: Path) -> CapacityManagerConfigurationCompensationStore:
+    return CapacityManagerConfigurationCompensationStore(
+        (
+            tmp_path / "state/protected-capacity/capacity-manager-configuration-compensations"
+        ).resolve(),
+        service_uid=os.geteuid(),
+    )
+
+
+def _compensation_intent(
+    plan,
+) -> CapacityManagerConfigurationCompensationIntentRecord:
+    assert plan.manager_configuration_epoch is not None
+    assert plan.manager_configuration_digest is not None
+    return CapacityManagerConfigurationCompensationIntentRecord.build(
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        plan_digest=plan.plan_digest,
+        activation_idempotency_key=UUID("00000000-0000-4000-8000-000000000301"),
+        activation_request_digest="1" * 64,
+        target_configuration_epoch=10,
+        target_configuration_digest="2" * 64,
+        target_configuration_evidence_digest="3" * 64,
+        predecessor_configuration_epoch=plan.manager_configuration_epoch,
+        predecessor_configuration_digest=plan.manager_configuration_digest,
+        predecessor_configuration_evidence_digest="4" * 64,
+        backup_lease_digest=plan.backup_lease_digest,
+        rollback_idempotency_key=UUID("00000000-0000-4000-8000-000000000302"),
+        rollback_request_digest="5" * 64,
+        rollback_evidence_sha256="6" * 64,
+    )
+
+
+def _compensation_record(plan) -> CapacityManagerConfigurationCompensationRecord:
+    intent = _compensation_intent(plan)
+    return CapacityManagerConfigurationCompensationRecord.build(
+        request_id=intent.request_id,
+        attempt_number=intent.attempt_number,
+        plan_digest=intent.plan_digest,
+        activation_idempotency_key=intent.activation_idempotency_key,
+        activation_request_digest=intent.activation_request_digest,
+        target_configuration_epoch=intent.target_configuration_epoch,
+        target_configuration_digest=intent.target_configuration_digest,
+        target_configuration_evidence_digest=intent.target_configuration_evidence_digest,
+        predecessor_configuration_epoch=intent.predecessor_configuration_epoch,
+        predecessor_configuration_digest=intent.predecessor_configuration_digest,
+        predecessor_configuration_evidence_digest=intent.predecessor_configuration_evidence_digest,
+        backup_lease_digest=intent.backup_lease_digest,
+        rollback_idempotency_key=intent.rollback_idempotency_key,
+        rollback_request_digest=intent.rollback_request_digest,
+        rollback_evidence_sha256=intent.rollback_evidence_sha256,
+        resulting_configuration_epoch=11,
+        resulting_configuration_digest="7" * 64,
+        resulting_configuration_evidence_digest="8" * 64,
+    )
+
+
+def _publish_recovery_plan_and_epoch_terminal(
+    tmp_path: Path,
+    *,
+    plan=None,  # type: ignore[no-untyped-def]
+):
+    journal = _journal(tmp_path)
+    plan = _plan(tmp_path) if plan is None else plan
+    FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+        service_uid=os.geteuid(),
+    ).publish(plan)
+    backend = _Backend()
+    journal.execute(plan, (backend.component("mutation-epoch-claim", 0),))
+    return plan
+
+
+def _record_execution_preparation_compensation(tmp_path: Path, plan) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "state").chmod(0o700)
+    journal = ExecutionPreparationOperationJournal(
+        (tmp_path / "state").resolve(),
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    preparation = ExecutionPreparationOperationIntent.build(
+        plan=plan,
+        artifact_sha256=plan.execution_prerequisite_artifact_sha256,
+        operation="manager-preparation",
+        request_sha256="1" * 64,
+        prepared_execution_epoch=None,
+        prepared_execution_manifest_sha256=None,
+    )
+    journal.record_intent(preparation)
+    journal.record_terminal(
+        ExecutionPreparationOperationTerminal.build(
+            intent=preparation,
+            evidence_sha256="2" * 64,
+            prepared_execution_epoch=1,
+            prepared_execution_manifest_sha256="3" * 64,
+            result_state="prepared",
+        )
+    )
+    abort = ExecutionPreparationOperationIntent.build(
+        plan=plan,
+        artifact_sha256=plan.execution_prerequisite_artifact_sha256,
+        operation="manager-abort",
+        request_sha256="4" * 64,
+        prepared_execution_epoch=1,
+        prepared_execution_manifest_sha256="3" * 64,
+    )
+    journal.record_intent(abort)
+    journal.record_terminal(
+        ExecutionPreparationOperationTerminal.build(
+            intent=abort,
+            evidence_sha256="5" * 64,
+            prepared_execution_epoch=1,
+            prepared_execution_manifest_sha256="3" * 64,
+            result_state="shadow",
+        )
     )
 
 
@@ -152,6 +284,278 @@ def test_protected_apply_recovery_requires_exact_plan_epoch_intent_and_terminal(
             request_id="req-alpha",
             through_attempt=1,
             candidate_sha="f" * 40,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+
+
+def test_protected_apply_recovery_rejects_changed_execution_prerequisite(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    original = _execution_plan(tmp_path, access_metadata_override="a" * 64)
+    changed = _execution_plan(tmp_path, access_metadata_override="b" * 64)
+    FinalGatePlanStore(
+        tmp_path / "state",
+        request_id=original.request_id,
+        attempt_number=original.attempt_number,
+        service_uid=os.geteuid(),
+    ).publish(original)
+    journal.execute(original, (_Backend().component("mutation-epoch-claim", 0),))
+
+    assert original.execution_prerequisite_artifact_sha256 != (
+        changed.execution_prerequisite_artifact_sha256
+    )
+    assert original.attestation_digest != changed.attestation_digest
+    with pytest.raises(ValueError, match="plan binding drifted"):
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id=original.request_id,
+            through_attempt=original.attempt_number,
+            candidate_sha=changed.candidate_sha,
+            attestation_digest=changed.attestation_digest,
+            starting_mutation_epoch=changed.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+
+
+def test_protected_apply_recovery_rejects_exact_compensated_attempt(tmp_path: Path) -> None:
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path)
+    store = _compensation_store(tmp_path)
+    intent = _compensation_intent(plan)
+    store.record_intent(intent)
+    store.record(_compensation_record(plan))
+
+    assert (
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+        is None
+    )
+
+
+def test_schema_seven_recovery_rejects_durably_compensated_execution_preparation(
+    tmp_path: Path,
+) -> None:
+    plan = _execution_plan(tmp_path)
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path, plan=plan)
+    _record_execution_preparation_compensation(tmp_path, plan)
+
+    assert (
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+        is None
+    )
+
+
+def test_schema_seven_final_gate_recovery_fails_closed_on_malformed_preparation_journal(
+    tmp_path: Path,
+) -> None:
+    """Break caught: final-gate recovery skips malformed execution authority."""
+
+    plan = _execution_plan(tmp_path)
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path, plan=plan)
+    state_root = (tmp_path / "state").resolve()
+    state_root.chmod(0o700)
+    journal = ExecutionPreparationOperationJournal(
+        state_root,
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    preparation = ExecutionPreparationOperationIntent.build(
+        plan=plan,
+        artifact_sha256=plan.execution_prerequisite_artifact_sha256,
+        operation="manager-preparation",
+        request_sha256="1" * 64,
+        prepared_execution_epoch=None,
+        prepared_execution_manifest_sha256=None,
+    )
+    journal.record_intent(preparation)
+    malformed = journal.root / "manager-preparation.intent.json"
+    malformed.write_bytes(b"{}\n")
+    malformed.chmod(0o600)
+
+    with pytest.raises(ValueError, match="intent fields are invalid"):
+        find_advanced_epoch_attempt(
+            state_root,
+            request_id=plan.request_id,
+            through_attempt=plan.attempt_number,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+
+
+def test_protected_apply_recovery_fails_closed_on_malformed_compensation_inventory(
+    tmp_path: Path,
+) -> None:
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path)
+    root = _compensation_store(tmp_path).root
+    root.mkdir(parents=True, mode=0o700)
+    malformed = root / ".capacity-manager-configuration-compensation-garbage.json"
+    malformed.write_bytes(b"{}\n")
+    malformed.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="filename is invalid"):
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+
+
+def test_protected_apply_recovery_fails_closed_on_incomplete_matching_compensation(
+    tmp_path: Path,
+) -> None:
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path)
+    store = _compensation_store(tmp_path)
+    store.record_intent(_compensation_intent(plan))
+
+    with pytest.raises(RuntimeError, match="record is incomplete"):
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+
+
+def test_protected_apply_recovery_fails_closed_on_matching_compensation_plan_drift(
+    tmp_path: Path,
+) -> None:
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path)
+    store = _compensation_store(tmp_path)
+    intent = CapacityManagerConfigurationCompensationIntentRecord.build(
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        plan_digest=plan.plan_digest,
+        activation_idempotency_key=UUID("00000000-0000-4000-8000-000000000399"),
+        activation_request_digest="1" * 64,
+        target_configuration_epoch=10,
+        target_configuration_digest="2" * 64,
+        target_configuration_evidence_digest="3" * 64,
+        predecessor_configuration_epoch=plan.manager_configuration_epoch,  # type: ignore[arg-type]
+        predecessor_configuration_digest=plan.manager_configuration_digest,  # type: ignore[arg-type]
+        predecessor_configuration_evidence_digest="4" * 64,
+        backup_lease_digest="9" * 64,
+        rollback_idempotency_key=UUID("00000000-0000-4000-8000-000000000302"),
+        rollback_request_digest="5" * 64,
+        rollback_evidence_sha256="6" * 64,
+    )
+    store.record_intent(intent)
+    store.record(
+        CapacityManagerConfigurationCompensationRecord.build(
+            request_id=intent.request_id,
+            attempt_number=intent.attempt_number,
+            plan_digest=intent.plan_digest,
+            activation_idempotency_key=intent.activation_idempotency_key,
+            activation_request_digest=intent.activation_request_digest,
+            target_configuration_epoch=intent.target_configuration_epoch,
+            target_configuration_digest=intent.target_configuration_digest,
+            target_configuration_evidence_digest=intent.target_configuration_evidence_digest,
+            predecessor_configuration_epoch=intent.predecessor_configuration_epoch,
+            predecessor_configuration_digest=intent.predecessor_configuration_digest,
+            predecessor_configuration_evidence_digest=intent.predecessor_configuration_evidence_digest,
+            backup_lease_digest=intent.backup_lease_digest,
+            rollback_idempotency_key=intent.rollback_idempotency_key,
+            rollback_request_digest=intent.rollback_request_digest,
+            rollback_evidence_sha256=intent.rollback_evidence_sha256,
+            resulting_configuration_epoch=11,
+            resulting_configuration_digest="7" * 64,
+            resulting_configuration_evidence_digest="8" * 64,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="plan binding drifted"):
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+
+
+def test_protected_apply_recovery_fails_closed_on_ambiguous_matching_compensations(
+    tmp_path: Path,
+) -> None:
+    plan = _publish_recovery_plan_and_epoch_terminal(tmp_path)
+    store = _compensation_store(tmp_path)
+    first = _compensation_intent(plan)
+    store.record_intent(first)
+    store.record(_compensation_record(plan))
+    second = CapacityManagerConfigurationCompensationIntentRecord.build(
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        plan_digest=plan.plan_digest,
+        activation_idempotency_key=UUID("00000000-0000-4000-8000-000000000399"),
+        activation_request_digest="1" * 64,
+        target_configuration_epoch=10,
+        target_configuration_digest="2" * 64,
+        target_configuration_evidence_digest="3" * 64,
+        predecessor_configuration_epoch=plan.manager_configuration_epoch,  # type: ignore[arg-type]
+        predecessor_configuration_digest=plan.manager_configuration_digest,  # type: ignore[arg-type]
+        predecessor_configuration_evidence_digest="4" * 64,
+        backup_lease_digest=plan.backup_lease_digest,
+        rollback_idempotency_key=UUID("00000000-0000-4000-8000-000000000302"),
+        rollback_request_digest="5" * 64,
+        rollback_evidence_sha256="6" * 64,
+    )
+    store.record_intent(second)
+    store.record(
+        CapacityManagerConfigurationCompensationRecord.build(
+            request_id=second.request_id,
+            attempt_number=second.attempt_number,
+            plan_digest=second.plan_digest,
+            activation_idempotency_key=second.activation_idempotency_key,
+            activation_request_digest=second.activation_request_digest,
+            target_configuration_epoch=second.target_configuration_epoch,
+            target_configuration_digest=second.target_configuration_digest,
+            target_configuration_evidence_digest=second.target_configuration_evidence_digest,
+            predecessor_configuration_epoch=second.predecessor_configuration_epoch,
+            predecessor_configuration_digest=second.predecessor_configuration_digest,
+            predecessor_configuration_evidence_digest=second.predecessor_configuration_evidence_digest,
+            backup_lease_digest=second.backup_lease_digest,
+            rollback_idempotency_key=second.rollback_idempotency_key,
+            rollback_request_digest=second.rollback_request_digest,
+            rollback_evidence_sha256=second.rollback_evidence_sha256,
+            resulting_configuration_epoch=11,
+            resulting_configuration_digest="7" * 64,
+            resulting_configuration_evidence_digest="8" * 64,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="match is ambiguous"):
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
             attestation_digest=plan.attestation_digest,
             starting_mutation_epoch=plan.starting_mutation_epoch,
             service_uid=os.geteuid(),

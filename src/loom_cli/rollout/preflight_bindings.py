@@ -117,6 +117,8 @@ def derive_attestation_bindings(
     """Build one complete binding from passed exact-check evidence and context."""
     if not executions or any(not execution.passed for execution in executions):
         raise ValueError("attestation bindings require complete passing preflight evidence")
+    if backup_lease is None or backup_lease.checkpoint_schema_version != 3:
+        raise ValueError("new attestation requires a schema-3 backup lease")
     by_id = {execution.check_id: execution for execution in executions}
     if len(by_id) != len(executions):
         raise ValueError("attestation binding evidence contains duplicate checks")
@@ -135,6 +137,7 @@ def derive_attestation_bindings(
         "gb10.host-readiness",
         "browser.runtime",
         "rehearsal.cleanup",
+        "execution.prerequisites",
     }
     if not required <= by_id.keys():
         raise ValueError("attestation binding evidence is incomplete")
@@ -340,34 +343,88 @@ def derive_attestation_bindings(
             target_unit_sha256=controller_units,
             target_unit_set_digest=controller_unit_set,
         )
-    if backup_lease is None:
-        backup_lease_id = _string(
-            evidence("backup.lease-eligibility", "source-request"),
-            "backup lease source request",
-        )
-        backup_lease_digest = _string(binding("backup.lease.sha256"), "backup lease digest")
-        backup_manifest_sha256 = _string(binding("backup.manifest.sha256"), "backup manifest")
-        backup_component_digest = _string(
-            binding("backup.component-set.sha256"), "backup component set"
-        )
-        db_snapshot_identity = _string(binding("db.snapshot-identity"), "DB snapshot")
-        schema_revision = _string(binding("schema.revision"), "schema revision")
-        object_inventory_root = _string(binding("object.inventory-root"), "object inventory")
-    else:
-        expected = (
-            (backup_lease.environment, binding("environment")),
-            (backup_lease.namespace, binding("namespace")),
-            (backup_lease.mutation_epoch, binding("staging.mutation-epoch")),
-        )
-        if any(actual != declared for actual, declared in expected):
-            raise ValueError("restore-verified backup lease drifts from preflight context")
-        backup_lease_id = backup_lease.lease_id
-        backup_lease_digest = backup_lease.evidence_digest
-        backup_manifest_sha256 = backup_lease.manifest_sha256
-        backup_component_digest = component_set_digest(backup_lease.component_sha256)
-        db_snapshot_identity = backup_lease.db_snapshot_identity
-        schema_revision = backup_lease.schema_revision
-        object_inventory_root = backup_lease.object_inventory_root
+    expected = (
+        (backup_lease.environment, binding("environment")),
+        (backup_lease.namespace, binding("namespace")),
+        (backup_lease.mutation_epoch, binding("staging.mutation-epoch")),
+    )
+    if any(actual != declared for actual, declared in expected):
+        raise ValueError("restore-verified backup lease drifts from preflight context")
+    backup_lease_id = backup_lease.lease_id
+    backup_lease_digest = backup_lease.evidence_digest
+    backup_manifest_sha256 = backup_lease.manifest_sha256
+    backup_component_digest = component_set_digest(backup_lease.component_sha256)
+    db_snapshot_identity = backup_lease.db_snapshot_identity
+    schema_revision = backup_lease.schema_revision
+    object_inventory_root = backup_lease.object_inventory_root
+    checkpoint_authority: dict[str, object] = {
+        "checkpoint_schema_version": backup_lease.checkpoint_schema_version,
+        "checkpoint_component_sha256": dict(backup_lease.component_sha256),
+        "database_authority_digest": backup_lease.database_authority_digest,
+        "public_schema_revision": backup_lease.public_schema_revision,
+        "capacity_guard_schema_revision": backup_lease.capacity_guard_schema_revision,
+        "manager_configuration_epoch": backup_lease.manager_configuration_epoch,
+        "manager_configuration_digest": backup_lease.manager_configuration_digest,
+        "manager_authority_incarnation": str(backup_lease.manager_authority_incarnation),
+        "manager_writer_epoch": backup_lease.manager_writer_epoch,
+        "manager_execution_state": backup_lease.manager_execution_state,
+        "manager_execution_epoch": backup_lease.manager_execution_epoch,
+        "manager_execution_manifest_sha256": backup_lease.manager_execution_manifest_sha256,
+        "manager_executable_new_capacity_ceiling": (
+            backup_lease.manager_executable_new_capacity_ceiling
+        ),
+        "manager_increase_freeze": backup_lease.manager_increase_freeze,
+        "restore_report_sha256": backup_lease.restore_report_sha256,
+    }
+    prerequisite_schema = _integer(
+        evidence("execution.prerequisites", "schema-version"),
+        "execution prerequisite schema",
+    )
+    if prerequisite_schema != 1:
+        raise ValueError("execution prerequisite schema is unsupported")
+    execution_prerequisites: dict[str, object] = {
+        "execution_prerequisite_schema_version": prerequisite_schema,
+        "execution_prerequisite_artifact_path": _string(
+            evidence("execution.prerequisites", "artifact-path"),
+            "execution prerequisite artifact path",
+        ),
+        "execution_prerequisite_artifact_sha256": _string(
+            evidence("execution.prerequisites", "artifact-sha256"),
+            "execution prerequisite artifact",
+        ),
+        "execution_core_artifact_bundle_sha256": _string(
+            evidence("execution.prerequisites", "core-artifact-bundle-sha256"),
+            "execution prerequisite core artifact bundle",
+        ),
+        "execution_policy_sha256": _string(
+            evidence("execution.prerequisites", "execution-policy-sha256"),
+            "execution policy",
+        ),
+        "executor_profile_seed_sha256": _string(
+            evidence("execution.prerequisites", "executor-profile-seed-sha256"),
+            "executor profile seed",
+        ),
+        "execution_manager_route_sha256": _string(
+            evidence("execution.prerequisites", "manager-route-sha256"),
+            "execution manager route",
+        ),
+        "execution_access_metadata_sha256": _string(
+            evidence("execution.prerequisites", "access-metadata-sha256"),
+            "execution access metadata",
+        ),
+        "execution_coexistence_witness_sha256": _string(
+            evidence("execution.prerequisites", "coexistence-witness-sha256"),
+            "execution coexistence witness",
+        ),
+        "execution_legacy_writer_sha256": _string(
+            evidence("execution.prerequisites", "legacy-writer-sha256"),
+            "execution legacy writer",
+        ),
+        "execution_rollback_evidence_sha256": _string(
+            evidence("execution.prerequisites", "rollback-evidence-sha256"),
+            "execution rollback evidence",
+        ),
+    }
 
     return AttestationBindings(
         candidate_sha=candidate_sha,
@@ -431,6 +488,8 @@ def derive_attestation_bindings(
         supervisor_controller_bindings=encode_external_supervisor_controller_bindings(
             controller_bindings
         ),
+        **checkpoint_authority,  # type: ignore[arg-type]
+        **execution_prerequisites,  # type: ignore[arg-type]
     )
 
 

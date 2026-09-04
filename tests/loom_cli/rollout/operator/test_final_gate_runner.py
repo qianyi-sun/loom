@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
+from uuid import UUID
 
 import pytest
 
@@ -16,8 +17,20 @@ from loom_cli.rollout.final_gate_readiness import (
     PROTECTED_MUTATION_CHECK_IDS,
     FinalGateResult,
 )
+from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.operator.final_gate_runner import FinalGateRunner
 from loom_cli.rollout.operator.final_gate_store import FinalGateExecutionStore
+from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ProtectedApplyComponent,
+    ProtectedApplyJournal,
+)
+from loom_cli.rollout.operator.protected_capacity_manager_configuration_compensation import (
+    CapacityManagerConfigurationCompensationIntentRecord,
+    CapacityManagerConfigurationCompensationRecord,
+    CapacityManagerConfigurationCompensationStore,
+)
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
     CheckExecution,
@@ -27,6 +40,12 @@ from loom_cli.rollout.preflight_contract import (
     StageCapability,
     _hash_json,
     _preflight_attestation_payload,
+)
+from tests.loom_cli.rollout.operator.test_final_gate_plan import (
+    _attestation as _stored_attestation,
+)
+from tests.loom_cli.rollout.operator.test_final_gate_plan import (
+    _plan as _stored_plan,
 )
 from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
     _baseline_executions,
@@ -197,6 +216,130 @@ def test_final_gate_runner_recovers_missing_outer_apply_from_component_journal(
     )
     assert observed[0]["through_attempt"] == 1
     assert calls[0] == ("final.protected-apply", CheckOperation.APPLY)
+
+
+def test_final_gate_runner_rejects_resume_after_compensated_protected_apply(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    attestation = _stored_attestation()
+    store = PreflightAttestationStore(state)
+    store.publish(attestation)
+    for attempt_number in (1, 2):
+        attempt = state / "requests" / "req-alpha" / "attempts" / str(attempt_number)
+        attempt.mkdir(parents=True, mode=0o700)
+        os.chmod(attempt, 0o700)
+    plan = _stored_plan(tmp_path)
+    FinalGatePlanStore(
+        state,
+        request_id="req-alpha",
+        attempt_number=1,
+        service_uid=os.geteuid(),
+    ).publish(plan)
+    journal = ProtectedApplyJournal(
+        state,
+        request_id="req-alpha",
+        attempt_number=1,
+        service_uid=os.geteuid(),
+    )
+    advanced = {"exact": False}
+
+    def classify(_plan):
+        return ComponentObservation(
+            state=ComponentState.EXACT if advanced["exact"] else ComponentState.READY,
+            evidence_digest="1" * 64,
+            observed_epoch=8 if advanced["exact"] else 7,
+        )
+
+    def apply(_plan):
+        advanced["exact"] = True
+
+    journal.execute(
+        plan,
+        (
+            ProtectedApplyComponent(
+                component_id="mutation-epoch-claim",
+                implementation_digest="2" * 64,
+                input_fingerprint="3" * 64,
+                classify=classify,
+                apply=apply,
+            ),
+        ),
+    )
+    compensation_store = CapacityManagerConfigurationCompensationStore(
+        (state / "protected-capacity" / "capacity-manager-configuration-compensations").resolve(),
+        service_uid=os.geteuid(),
+    )
+    assert plan.manager_configuration_epoch is not None
+    assert plan.manager_configuration_digest is not None
+    intent = CapacityManagerConfigurationCompensationIntentRecord.build(
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        plan_digest=plan.plan_digest,
+        activation_idempotency_key=UUID("00000000-0000-4000-8000-000000000301"),
+        activation_request_digest="1" * 64,
+        target_configuration_epoch=10,
+        target_configuration_digest="2" * 64,
+        target_configuration_evidence_digest="3" * 64,
+        predecessor_configuration_epoch=plan.manager_configuration_epoch,
+        predecessor_configuration_digest=plan.manager_configuration_digest,
+        predecessor_configuration_evidence_digest="4" * 64,
+        backup_lease_digest=plan.backup_lease_digest,
+        rollback_idempotency_key=UUID("00000000-0000-4000-8000-000000000302"),
+        rollback_request_digest="5" * 64,
+        rollback_evidence_sha256="6" * 64,
+    )
+    compensation_store.record_intent(intent)
+    compensation_store.record(
+        CapacityManagerConfigurationCompensationRecord.build(
+            request_id=intent.request_id,
+            attempt_number=intent.attempt_number,
+            plan_digest=intent.plan_digest,
+            activation_idempotency_key=intent.activation_idempotency_key,
+            activation_request_digest=intent.activation_request_digest,
+            target_configuration_epoch=intent.target_configuration_epoch,
+            target_configuration_digest=intent.target_configuration_digest,
+            target_configuration_evidence_digest=intent.target_configuration_evidence_digest,
+            predecessor_configuration_epoch=intent.predecessor_configuration_epoch,
+            predecessor_configuration_digest=intent.predecessor_configuration_digest,
+            predecessor_configuration_evidence_digest=intent.predecessor_configuration_evidence_digest,
+            backup_lease_digest=intent.backup_lease_digest,
+            rollback_idempotency_key=intent.rollback_idempotency_key,
+            rollback_request_digest=intent.rollback_request_digest,
+            rollback_evidence_sha256=intent.rollback_evidence_sha256,
+            resulting_configuration_epoch=11,
+            resulting_configuration_digest="7" * 64,
+            resulting_configuration_evidence_digest="8" * 64,
+        )
+    )
+    calls: list[tuple[str, CheckOperation]] = []
+    runner = FinalGateRunner(
+        attestation_store=store,
+        actions_factory=lambda _envelope, _attestation, _epoch, _admission: _actions(
+            calls,
+            attestation.attestation_digest,
+            observed_epoch=8,
+        ),
+        read_mutation_epoch=lambda: 8,
+        now=lambda: NOW,
+        state_root=state,
+        service_uid=os.geteuid(),
+    )
+    resumed = replace(
+        _envelope(attestation),
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    with pytest.raises(ValueError, match="mutation epoch drifted before apply"):
+        runner(
+            resumed,
+            replace(_admission(attestation), post_apply_resume=True),
+        )
+
+    assert calls == []
 
 
 def test_final_gate_runner_resumes_after_apply_without_repeating_mutation(

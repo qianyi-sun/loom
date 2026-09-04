@@ -186,7 +186,7 @@ class PersonalDevCapacityRuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class _CapacityCredentials:
+class CapacityDatabaseCredentials:
     reporter_incarnation: UUID
     reporter_token: str
     migrator_password: str
@@ -202,13 +202,45 @@ class CapacityDatabaseInstallation:
     runtime_database_url: str
 
 
+def protected_capacity_database_admission_digest(
+    *,
+    identity: DevInstanceIdentity,
+    configuration: ReporterConfigurationV1,
+    runtime_database_url: str,
+) -> str:
+    """Return the sealed database evidence shared with protected agents."""
+    owner, _migrator, agent, executor, observer, runtime = _role_names(identity)
+    evidence = {
+        "authority_incarnation": str(configuration.authority_incarnation),
+        "candidate_digest": configuration.candidate_digest,
+        "deployment_generation": configuration.deployment_generation,
+        "environment_id": configuration.environment_id,
+        "guard_schema_generation": capacity_guard_schema_head()[1],
+        "reporter_incarnation": str(configuration.reporter_incarnation),
+        "roles": {
+            "agent": agent,
+            "executor": executor,
+            "observer": observer,
+            "owner": owner,
+            "runtime": runtime,
+        },
+        "schema_version": 1,
+        "subject_id": str(configuration.subject_id),
+        "subject_incarnation": str(configuration.subject_incarnation),
+        "runtime_database_url_sha256": hashlib.sha256(
+            runtime_database_url.encode("utf-8")
+        ).hexdigest(),
+    }
+    return _sha256_json(evidence)
+
+
 class PersonalDevCapacityDatabase(Protocol):
     async def converge(
         self,
         *,
         identity: DevInstanceIdentity,
         claim: PersonalDevReconciliationClaim,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
         configuration: ReporterConfigurationV1,
     ) -> CapacityDatabaseInstallation: ...
 
@@ -231,7 +263,7 @@ class PsycopgPersonalDevCapacityDatabase:
     async def _converge_roles(
         self,
         identity: DevInstanceIdentity,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
     ) -> tuple[str, str, str, str, str, str, str, str]:
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)
         migrator_url = _retarget_database_url(
@@ -268,7 +300,7 @@ class PsycopgPersonalDevCapacityDatabase:
                 await connection.execute(
                     sql.SQL(
                         "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS"
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
                     ).format(sql.Identifier(owner))
                 )
                 await connection.execute(
@@ -510,8 +542,7 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                     await connection.execute(
                         sql.SQL(
-                            "GRANT UPDATE (state) "
-                            "ON TABLE public.task_image_materializations TO {}"
+                            "GRANT UPDATE (state) ON TABLE public.task_image_materializations TO {}"
                         ).format(sql.Identifier(owner))
                     )
                     await connection.execute(
@@ -647,8 +678,7 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                     await connection.execute(
                         sql.SQL(
-                            "GRANT UPDATE (in_flight_count) "
-                            "ON TABLE public.team_quotas TO {}"
+                            "GRANT UPDATE (in_flight_count) ON TABLE public.team_quotas TO {}"
                         ).format(sql.Identifier(owner))
                     )
                     await connection.execute(
@@ -969,12 +999,11 @@ class PsycopgPersonalDevCapacityDatabase:
         finally:
             await engine.dispose()
 
-    async def converge(
+    async def converge_protected(
         self,
         *,
         identity: DevInstanceIdentity,
-        claim: PersonalDevReconciliationClaim,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
         configuration: ReporterConfigurationV1,
     ) -> CapacityDatabaseInstallation:
         (
@@ -1062,36 +1091,36 @@ class PsycopgPersonalDevCapacityDatabase:
             ) from None
         finally:
             await self._seal_migrator(identity, owner=owner, migrator=migrator)
-        evidence = {
-            "authority_incarnation": str(fence.authority_incarnation),
-            "candidate_digest": fence.candidate_digest,
-            "deployment_generation": fence.deployment_generation,
-            "environment_id": fence.environment_id,
-            "guard_schema_generation": capacity_guard_schema_head()[1],
-            "reporter_incarnation": str(fence.reporter_incarnation),
-            "roles": {
-                "agent": agent,
-                "executor": executor,
-                "observer": observer,
-                "owner": owner,
-                "runtime": runtime,
-            },
-            "schema_version": 1,
-            "subject_id": str(fence.subject_id),
-            "subject_incarnation": str(fence.subject_incarnation),
-        }
         runtime_url = capacity_runtime_database_url(
             self._admin_url,
             identity,
             credentials.runtime_password,
         )
-        evidence["runtime_database_url_sha256"] = hashlib.sha256(
-            runtime_url.encode("utf-8")
-        ).hexdigest()
         return CapacityDatabaseInstallation(
-            protected_admission_sha256=_sha256_json(evidence),
+            protected_admission_sha256=protected_capacity_database_admission_digest(
+                identity=identity,
+                configuration=configuration,
+                runtime_database_url=runtime_url,
+            ),
             agent_database_url=agent_url,
             runtime_database_url=runtime_url,
+        )
+
+    async def converge(
+        self,
+        *,
+        identity: DevInstanceIdentity,
+        claim: PersonalDevReconciliationClaim,
+        credentials: CapacityDatabaseCredentials,
+        configuration: ReporterConfigurationV1,
+    ) -> CapacityDatabaseInstallation:
+        """Retain the personal-dev protocol while sharing claim-independent setup."""
+
+        del claim
+        return await self.converge_protected(
+            identity=identity,
+            credentials=credentials,
+            configuration=configuration,
         )
 
 
@@ -1099,8 +1128,8 @@ def _new_credentials(
     *,
     reporter_incarnation: UUID | None = None,
     runtime_password: str | None = None,
-) -> _CapacityCredentials:
-    return _CapacityCredentials(
+) -> CapacityDatabaseCredentials:
+    return CapacityDatabaseCredentials(
         reporter_incarnation=reporter_incarnation or uuid4(),
         reporter_token=secrets.token_urlsafe(48),
         migrator_password=secrets.token_urlsafe(48),
@@ -1168,7 +1197,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         self,
         claim: PersonalDevReconciliationClaim,
         identity: DevInstanceIdentity,
-    ) -> _CapacityCredentials:
+    ) -> CapacityDatabaseCredentials:
         runtime_secret = await self._kubectl.read_secret_optional(
             identity.namespace,
             PROTECTED_WORKER_RUNTIME_SECRET_NAME,
@@ -1210,7 +1239,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             raise PersonalDevCapacityInstallationError(
                 "protected capacity credential belongs to another subject incarnation"
             )
-        base = _CapacityCredentials(
+        base = CapacityDatabaseCredentials(
             reporter_incarnation=reporter_incarnation,
             reporter_token=_opaque_credential(
                 _decode_secret_text(existing, "reporter-token"),
@@ -1248,7 +1277,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             )
         if operation_id == claim.operation.id or claim.operation.kind == "capacity":
             return base
-        return _CapacityCredentials(
+        return CapacityDatabaseCredentials(
             reporter_incarnation=uuid4(),
             reporter_token=secrets.token_urlsafe(48),
             migrator_password=base.migrator_password,
@@ -1261,7 +1290,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         self,
         claim: PersonalDevReconciliationClaim,
         identity: DevInstanceIdentity,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
     ) -> dict[str, object]:
         labels = {
             "app.kubernetes.io/managed-by": "loom-personal-dev-lifecycle",
@@ -1294,7 +1323,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         self,
         claim: PersonalDevReconciliationClaim,
         identity: DevInstanceIdentity,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
     ) -> None:
         """Durably bind retry credentials before any protected database mutation."""
 
@@ -1397,7 +1426,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
     def _configuration(
         self,
         claim: PersonalDevReconciliationClaim,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
     ) -> ReporterConfigurationV1:
         operation = claim.operation
         publication_sha256 = claim.candidate.publication_sha256
@@ -1433,7 +1462,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         *,
         claim: PersonalDevReconciliationClaim,
         identity: DevInstanceIdentity,
-        credentials: _CapacityCredentials,
+        credentials: CapacityDatabaseCredentials,
         configuration: ReporterConfigurationV1,
         database: CapacityDatabaseInstallation,
         tls: dict[str, bytes],
@@ -1958,6 +1987,7 @@ def parse_pool_capabilities(raw: str) -> tuple[AgentPoolCapabilityV1, ...]:
 
 
 __all__ = [
+    "CapacityDatabaseCredentials",
     "CapacityDatabaseInstallation",
     "KubectlPersonalDevCapacityInstaller",
     "PersonalDevCapacityDatabase",
@@ -1965,4 +1995,5 @@ __all__ = [
     "PersonalDevCapacityRuntimeConfig",
     "PsycopgPersonalDevCapacityDatabase",
     "parse_pool_capabilities",
+    "protected_capacity_database_admission_digest",
 ]

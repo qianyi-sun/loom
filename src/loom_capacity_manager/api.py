@@ -38,6 +38,7 @@ from loom_capacity_manager.contracts import (
     MAX_FIXED_CLAIMS_PER_REPORT,
     MAX_POOLS,
     ConfigurationActivationV1,
+    ConfigurationRollbackV1,
     DemandSnapshotV1,
     DynamicDevelopmentSubjectProjectionV1,
     FleetManifestV1,
@@ -533,6 +534,7 @@ def create_app(
     fleet_body = contract_body(FleetManifestV1)
     subject_body = contract_body(SubjectConfigurationV1)
     activation_body = contract_body(ConfigurationActivationV1)
+    rollback_body = contract_body(ConfigurationRollbackV1)
     development_projection_body = contract_body(DynamicDevelopmentSubjectProjectionV1)
     demand_body = contract_body(DemandSnapshotV1)
     pool_body = contract_body(PoolObservationV1)
@@ -557,12 +559,8 @@ def create_app(
     execution_retirement_body = contract_body(ExecutionRetirementV2)
     executable_acceptance_body = contract_body(ExecutableReservationAcceptanceV2)
     executable_bootstrap_proposal_body = contract_body(ExecutableBootstrapProposalV2)
-    executable_bootstrap_acknowledgement_body = contract_body(
-        ExecutableBootstrapAcknowledgementV2
-    )
-    executable_admission_acknowledgement_body = contract_body(
-        ExecutableAdmissionAcknowledgementV2
-    )
+    executable_bootstrap_acknowledgement_body = contract_body(ExecutableBootstrapAcknowledgementV2)
+    executable_admission_acknowledgement_body = contract_body(ExecutableAdmissionAcknowledgementV2)
     executable_admission_closure_acknowledgement_body = contract_body(
         ExecutableAdmissionPlanClosureAcknowledgementV2
     )
@@ -698,6 +696,26 @@ def create_app(
         try:
             async with session_factory() as session:
                 result = await store.activate_configuration(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/configuration-rollbacks")
+    async def rollback_configuration(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:configure:rollback")),
+        value: ConfigurationRollbackV1 = Depends(rollback_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.rollback_configuration(
                     session,
                     value,
                     actor=actor.principal_id,
@@ -1520,9 +1538,7 @@ def create_app(
     @app.get(
         "/v2/subjects/{subject_id}/admission-work",
         response_model=(
-            ExecutableAdmissionPlanProposalV2
-            | ExecutableAdmissionPlanClosureV2
-            | None
+            ExecutableAdmissionPlanProposalV2 | ExecutableAdmissionPlanClosureV2 | None
         ),
     )
     async def next_subject_admission_work(
@@ -1546,17 +1562,13 @@ def create_app(
                     reporter_incarnation=actor.demand_reporter_incarnation,
                 )
             payload = (
-                b"null"
-                if result is None
-                else canonical_executable_admission_work_bytes(result)
+                b"null" if result is None else canonical_executable_admission_work_bytes(result)
             )
             return Response(content=payload, media_type="application/json")
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
-    @app.put(
-        "/v2/subjects/{subject_id}/admission-acknowledgements/{proposal_id}"
-    )
+    @app.put("/v2/subjects/{subject_id}/admission-acknowledgements/{proposal_id}")
     async def acknowledge_executable_admission_plan(
         subject_id: UUID,
         proposal_id: UUID,
@@ -1588,9 +1600,7 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
-    @app.put(
-        "/v2/subjects/{subject_id}/admission-closures/{closure_id}/acknowledgements"
-    )
+    @app.put("/v2/subjects/{subject_id}/admission-closures/{closure_id}/acknowledgements")
     async def acknowledge_executable_admission_plan_closure(
         subject_id: UUID,
         closure_id: UUID,
@@ -1803,6 +1813,19 @@ def create_app(
             request.app.state.ready = False
             metrics.ready.set(0)
             raise HTTPException(status_code=503, detail="capacity writer is not ready") from exc
+
+    @app.get("/v1/configuration")
+    async def active_configuration(
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        allocation_input = await _allocation_input(request)
+        return {
+            "schema_version": 1,
+            "configuration": allocation_input.configuration,
+            "fleet": allocation_input.fleet,
+            "subjects": tuple(item.configuration for item in allocation_input.subjects),
+        }
 
     @app.get("/v1/status")
     async def aggregate_status(

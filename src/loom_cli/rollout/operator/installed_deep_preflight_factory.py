@@ -61,7 +61,17 @@ from .checkpoint_lease import CriticalCheckpointEvidence
 from .config import OperatorConfig
 from .deep_preflight_authority import RuntimePurpose
 from .installed_backup_authority import build_installed_backup_authority
-from .installed_deep_preflight import InstalledDeepPreflightComposition
+from .installed_deep_preflight import (
+    InstalledDeepPreflightComposition,
+)
+from .installed_execution_authority import (
+    InstalledExecutionAuthorityReader,
+    InstalledExecutionAuthoritySource,
+    KubernetesExecutionWitnessExportsSource,
+)
+from .installed_execution_prerequisite import (
+    InstalledExecutionPrerequisitePublisherFactory,
+)
 from .installed_preflight_commands import (
     GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS,
     CommandResult,
@@ -71,6 +81,15 @@ from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
 from .policy import sanitized_child_environment
 from .preflight import probe_gb10_shared_mount_readonly
+from .protected_apply_executor import SubprocessProtectedApplyCommandRunner
+from .protected_capacity_manager_client import open_protected_capacity_manager_client
+from .protected_controller_prerequisite_transport import (
+    build_fixed_gb10_controller_prerequisite_transport,
+    build_fixed_oldlab_controller_prerequisite_transport,
+)
+from .protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisiteStore,
+)
 from .protected_external_supervisor_transport import (
     PROTECTED_USER_UNIT_ANCHOR,
     PROTECTED_USER_UNIT_DIR,
@@ -83,6 +102,12 @@ from .protected_external_supervisor_transport import (
 from .protected_gb10_external_supervisor_transport import (
     GB10_CONTROLLER_EXECUTION_HOST,
     build_fixed_gb10_external_supervisor_transport,
+)
+from .protected_staging_capacity_database_component import (
+    staging_database_protected_admission_digest_for_candidate,
+)
+from .protected_staging_capacity_runtime import (
+    KubernetesProtectedStagingCapacityRuntime,
 )
 from .readonly_capacity_client import (
     CapacitySource,
@@ -112,6 +137,9 @@ def _hash_json(value: object) -> str:
 _GB10_CONTROLLER_DEADLINE_RESERVE_SECONDS = 600
 _EXTERNAL_SUPERVISOR_AUTHORITY_MANIFEST = Path(
     "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+)
+_EXECUTION_AUTHORITY_PUBLICATION = Path(
+    "/var/lib/loom-staging-rollout/protected-capacity/execution-authority/issue-906.json"
 )
 
 # Keep this independent from the primary release-image plan.  Some primary
@@ -657,6 +685,84 @@ def build_installed_deep_preflight_composition(
     )
     artifact_store = PreflightArtifactStore(config.state_root, service_uid=service_uid)
     attestation_store = PreflightAttestationStore(config.state_root)
+    protected_runner = SubprocessProtectedApplyCommandRunner(
+        kubeconfig=config.kubeconfig_path,
+    )
+    protected_capacity_runtime = KubernetesProtectedStagingCapacityRuntime(
+        runner=protected_runner,
+        state_root=config.state_root,
+        candidate_root=config.runner_repo,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        container_registry=str(cluster.container_registry),
+    )
+
+    def manager_configuration_source() -> Mapping[str, object]:
+        with open_protected_capacity_manager_client(
+            runner=protected_runner,
+            credentials_root=protected_capacity_runtime.credentials_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+        ) as client:
+            return client.get_configuration()
+
+    def protected_admission_source(
+        candidate: CandidateBinding,
+        artifact_bundle_digest: str,
+        mutation_epoch: int,
+        seed: Mapping[str, object],
+    ) -> str:
+        return staging_database_protected_admission_digest_for_candidate(
+            candidate_sha=candidate.resolved_sha,
+            artifact_bundle_digest=artifact_bundle_digest,
+            mutation_epoch=mutation_epoch,
+            seed=seed,
+        )
+
+    def execution_authority_source_factory(
+        candidate: CandidateBinding,
+        executor_image: str,
+    ) -> InstalledExecutionAuthoritySource:
+        candidate_tree = candidate.resolved_tree
+        if candidate_tree is None:
+            raise ValueError("installed execution candidate tree is unavailable")
+        gb10_controller = build_fixed_gb10_external_supervisor_transport(
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate_tree,
+            run=commands.gb10_supervisor_controller,
+        )
+        return InstalledExecutionAuthoritySource(
+            publication_reader=InstalledExecutionAuthorityReader(
+                path=_EXECUTION_AUTHORITY_PUBLICATION,
+                expected_uid=service_uid,
+                expected_gid=service_gid,
+            ),
+            controller_transports={
+                "gb10": build_fixed_gb10_controller_prerequisite_transport(
+                    controller=gb10_controller,
+                ),
+                "oldlab": build_fixed_oldlab_controller_prerequisite_transport(
+                    run=commands.oldlab_controller,
+                    image=executor_image,
+                ),
+            },
+            credential_bundle_reader=(protected_capacity_runtime.read_execution_credential_bundle),
+            witness_exports_source=KubernetesExecutionWitnessExportsSource(protected_runner),
+            now=now,
+        )
+
+    execution_prerequisite_publisher_factory = InstalledExecutionPrerequisitePublisherFactory(
+        store=ProtectedExecutionPrerequisiteStore(
+            config.state_root,
+            service_uid=service_uid,
+        ),
+        container_registry=str(cluster.container_registry),
+        manager_configuration_source=manager_configuration_source,
+        configuration_seed_source=protected_capacity_runtime.read_credential_seed,
+        staging_protected_admission_source=protected_admission_source,
+        authority_source_factory=execution_authority_source_factory,
+        now=now,
+    )
 
     def backup_authority(mutation_epoch: int) -> BackupAdmissionAuthority:
         try:
@@ -857,6 +963,7 @@ def build_installed_deep_preflight_composition(
         route=route,
         baseline_probe_route=readonly.baseline_probe_route,
         rehearsal_factory=rehearsal_factory,
+        execution_prerequisite_publisher_factory=execution_prerequisite_publisher_factory,
         final_gate_run=commands.final_gate_helper,
         # The worker composition survives the protected apply.  The ordinary
         # source is deliberately single-flight for one concurrent preflight

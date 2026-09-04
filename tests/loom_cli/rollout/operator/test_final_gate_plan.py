@@ -6,6 +6,7 @@ import stat
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -22,6 +23,7 @@ from loom_cli.rollout.external_supervisor_readiness import (
     protected_external_supervisor_script_paths_for_units,
 )
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.final_gate_plan import (
     FinalGatePlan,
     FinalGatePlanError,
@@ -29,6 +31,12 @@ from loom_cli.rollout.operator.final_gate_plan import (
 )
 from loom_cli.rollout.operator.model import DriverEnvelope, driver_envelope_sha256
 from loom_cli.rollout.operator.protected_apply_baseline import ProtectedApplyBaseline
+from loom_cli.rollout.operator.protected_execution_prerequisite_store import (
+    ProtectedExecutionPrerequisiteStore,
+)
+from loom_cli.rollout.operator.protected_execution_prerequisites import (
+    ProtectedExecutionPrerequisiteArtifact,
+)
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
@@ -49,29 +57,68 @@ from loom_cli.rollout.preflight_contract import (
     external_supervisor_unit_set_digest_or_empty,
 )
 from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
+from tests.loom_cli.rollout.operator.protected_execution_prerequisite_fixtures import (
+    execution_prerequisite_artifact as _artifact,
+)
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
 
 
 def _lease() -> BackupLease:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0066",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
     return BackupLease(
         lease_id="lease-1234567890abcdef",
         source_request_id="req-source01",
         manifest_sha256="a" * 64,
-        component_sha256={"postgres": "d" * 64},
+        component_sha256={
+            "database_authority": authority.digest,
+            "k8s_secrets": "e" * 64,
+            "object_inventory": "c" * 64,
+            "postgres": "d" * 64,
+        },
         environment="staging",
         namespace="loom-staging",
         mutation_epoch=7,
-        db_snapshot_identity="snapshot-1",
+        db_snapshot_identity="pgdump-sha256:" + "d" * 64,
         schema_revision="0066",
         object_inventory_root="c" * 64,
         created_at=NOW - timedelta(minutes=10),
         expires_at=NOW + timedelta(hours=1),
         restore_verified_at=NOW - timedelta(minutes=5),
+        checkpoint_schema_version=3,
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=authority.authority_incarnation,
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        manager_increase_freeze=authority.increase_freeze,
+        restore_report_sha256="f" * 64,
     )
 
 
-def _attestation() -> PreflightAttestation:
+def _attestation(
+    execution_prerequisite: ProtectedExecutionPrerequisiteArtifact | None = None,
+    *,
+    execution_prerequisite_path: Path | None = None,
+) -> PreflightAttestation:
     check = RegisteredCheck(
         spec=CheckSpec(
             check_id="candidate.identity",
@@ -103,6 +150,34 @@ def _attestation() -> PreflightAttestation:
     systemd = _systemd_evidence()
     predecessor = _predecessor_evidence()
     controller_bindings = _controller_bindings(systemd, predecessor)
+    execution_bindings: dict[str, object] = {}
+    if execution_prerequisite is not None:
+        if execution_prerequisite_path is None:
+            execution_prerequisite_path = (
+                Path("/test/execution-prerequisites")
+                / f"{execution_prerequisite.artifact_sha256}.json"
+            )
+        execution_bindings = {
+            "execution_prerequisite_schema_version": 1,
+            "execution_prerequisite_artifact_path": str(execution_prerequisite_path),
+            "execution_prerequisite_artifact_sha256": (execution_prerequisite.artifact_sha256),
+            "execution_core_artifact_bundle_sha256": (
+                execution_prerequisite.core_artifact_bundle_sha256
+            ),
+            "execution_policy_sha256": execution_prerequisite.execution_policy_sha256,
+            "executor_profile_seed_sha256": (execution_prerequisite.executor_profile_seed_sha256),
+            "execution_manager_route_sha256": (execution_prerequisite.manager_route_sha256),
+            "execution_access_metadata_sha256": (
+                execution_prerequisite.credential_metadata_manifest_sha256
+            ),
+            "execution_coexistence_witness_sha256": (
+                execution_prerequisite.witness_manifest_sha256
+            ),
+            "execution_legacy_writer_sha256": (
+                execution_prerequisite.legacy_writer_manifest_sha256
+            ),
+            "execution_rollback_evidence_sha256": (execution_prerequisite.rollback_evidence_sha256),
+        }
     bindings = AttestationBindings(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -120,7 +195,7 @@ def _attestation() -> PreflightAttestation:
         backup_lease_digest=lease.evidence_digest,
         backup_manifest_sha256="a" * 64,
         backup_component_set_digest=component_set_digest(lease.component_sha256),
-        db_snapshot_identity="snapshot-1",
+        db_snapshot_identity=lease.db_snapshot_identity,
         schema_revision="0066",
         object_inventory_root="c" * 64,
         migration_plan_digest="4" * 64,
@@ -173,6 +248,22 @@ def _attestation() -> PreflightAttestation:
             target_unit_set_digest=str(systemd["supervisor-unit-set-digest"]),
         ),
         supervisor_controller_bindings=controller_bindings,
+        checkpoint_schema_version=lease.checkpoint_schema_version,
+        checkpoint_component_sha256=lease.component_sha256,
+        database_authority_digest=lease.database_authority_digest,
+        public_schema_revision=lease.public_schema_revision,
+        capacity_guard_schema_revision=lease.capacity_guard_schema_revision,
+        manager_configuration_epoch=lease.manager_configuration_epoch,
+        manager_configuration_digest=lease.manager_configuration_digest,
+        manager_authority_incarnation=str(lease.manager_authority_incarnation),
+        manager_writer_epoch=lease.manager_writer_epoch,
+        manager_execution_state=lease.manager_execution_state,
+        manager_execution_epoch=lease.manager_execution_epoch,
+        manager_execution_manifest_sha256=lease.manager_execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=lease.manager_executable_new_capacity_ceiling,
+        manager_increase_freeze=lease.manager_increase_freeze,
+        restore_report_sha256=lease.restore_report_sha256,
+        **execution_bindings,  # type: ignore[arg-type]
     )
     return PreflightAttestation.issue(
         bindings=bindings,
@@ -436,11 +527,60 @@ def _plan(tmp_path: Path) -> FinalGatePlan:
     )
 
 
+def _execution_plan(
+    tmp_path: Path,
+    *,
+    access_metadata_override: str | None = None,
+) -> FinalGatePlan:
+    artifacts = _artifacts(tmp_path)
+    lease = _lease()
+    prerequisite = replace(
+        _artifact(
+            core_bundle_sha256=artifacts.bundle_digest,
+            backup_lease_sha256=lease.evidence_digest,
+        ),
+        source_configuration_epoch=lease.manager_configuration_epoch,
+        source_configuration_sha256=lease.manager_configuration_digest,
+    )
+    if access_metadata_override is not None:
+        prerequisite = replace(
+            prerequisite,
+            credential_metadata_sha256={
+                **prerequisite.credential_metadata_sha256,
+                "manager-read": access_metadata_override,
+            },
+        )
+    prerequisite_store = ProtectedExecutionPrerequisiteStore(
+        tmp_path / "execution-authority",
+        service_uid=tmp_path.stat().st_uid,
+    )
+    publication = prerequisite_store.publish(prerequisite)
+    attestation = _attestation(
+        prerequisite,
+        execution_prerequisite_path=publication.path,
+    )
+    return FinalGatePlan.build(
+        _envelope(attestation),
+        attestation,
+        artifacts,
+        lease,
+        _baseline(),
+        _systemd_evidence(),
+        _predecessor_evidence(),
+        execution_prerequisite_publication=publication,
+        execution_prerequisite_store=prerequisite_store,
+    )
+
+
 def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
 
     assert FinalGatePlan.from_dict(plan.to_dict()) == plan
-    assert plan.schema_version == 5
+    assert plan.schema_version == 6
+    assert plan.checkpoint_schema_version == 3
+    assert plan.checkpoint_component_sha256 == _lease().component_sha256
+    assert plan.database_authority_digest == _lease().database_authority_digest
+    assert plan.manager_configuration_digest == _lease().manager_configuration_digest
     assert plan.candidate_tree == "b" * 40
     assert plan.request_envelope_sha256 == driver_envelope_sha256(_envelope(_attestation()))
     assert plan.artifact_bundle_digest == "e" * 64
@@ -454,6 +594,198 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     assert plan.service_token_source == _envelope(_attestation()).service_token_source
     assert plan.protected_baseline_digest == _baseline().baseline_digest
     assert plan.protected_baseline_resource_digests == _baseline().resource_digests
+
+
+def test_final_gate_plan_binds_exact_execution_prerequisite_publication(
+    tmp_path: Path,
+) -> None:
+    artifacts = _artifacts(tmp_path)
+    lease = _lease()
+    prerequisite = replace(
+        _artifact(
+            core_bundle_sha256=artifacts.bundle_digest,
+            backup_lease_sha256=lease.evidence_digest,
+        ),
+        source_configuration_epoch=lease.manager_configuration_epoch,
+        source_configuration_sha256=lease.manager_configuration_digest,
+    )
+    prerequisite_store = ProtectedExecutionPrerequisiteStore(
+        tmp_path / "execution-authority",
+        service_uid=tmp_path.stat().st_uid,
+    )
+    publication = prerequisite_store.publish(prerequisite)
+    attestation = _attestation(
+        prerequisite,
+        execution_prerequisite_path=publication.path,
+    )
+
+    plan = FinalGatePlan.build(
+        _envelope(attestation),
+        attestation,
+        artifacts,
+        lease,
+        _baseline(),
+        _systemd_evidence(),
+        _predecessor_evidence(),
+        execution_prerequisite_publication=publication,
+        execution_prerequisite_store=prerequisite_store,
+    )
+
+    assert plan.schema_version == 7
+    assert plan.execution_prerequisite_artifact_path == str(publication.path)
+    assert plan.execution_prerequisite_artifact_sha256 == prerequisite.artifact_sha256
+    assert plan.execution_policy_sha256 == prerequisite.execution_policy_sha256
+    assert plan.executor_profile_seed_sha256 == prerequisite.executor_profile_seed_sha256
+    assert FinalGatePlan.from_dict(plan.to_dict()) == plan
+
+
+def test_final_gate_plan_requires_bound_execution_prerequisite_publication(
+    tmp_path: Path,
+) -> None:
+    artifacts = _artifacts(tmp_path)
+    lease = _lease()
+    prerequisite = replace(
+        _artifact(
+            core_bundle_sha256=artifacts.bundle_digest,
+            backup_lease_sha256=lease.evidence_digest,
+        ),
+        source_configuration_epoch=lease.manager_configuration_epoch,
+        source_configuration_sha256=lease.manager_configuration_digest,
+    )
+    attestation = _attestation(prerequisite)
+
+    with pytest.raises(ValueError, match="authority is incomplete"):
+        FinalGatePlan.build(
+            _envelope(attestation),
+            attestation,
+            artifacts,
+            lease,
+            _baseline(),
+            _systemd_evidence(),
+            _predecessor_evidence(),
+        )
+
+
+def test_final_gate_plan_reader_rejects_prerequisite_path_digest_drift(
+    tmp_path: Path,
+) -> None:
+    payload = _execution_plan(tmp_path).to_dict()
+    payload["execution_prerequisite_artifact_path"] = "/safe/different.json"
+    payload["plan_digest"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "plan_digest"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="prerequisite binding is invalid"):
+        FinalGatePlan.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "attestation",
+        "publication-path",
+        "core-bundle",
+        "candidate-tree",
+        "backup-lease",
+        "manager-configuration",
+    ],
+)
+def test_final_gate_plan_rejects_execution_prerequisite_authority_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    artifacts = _artifacts(tmp_path)
+    lease = _lease()
+    prerequisite = replace(
+        _artifact(
+            core_bundle_sha256=("0" * 64 if drift == "core-bundle" else artifacts.bundle_digest),
+            backup_lease_sha256=("1" * 64 if drift == "backup-lease" else lease.evidence_digest),
+        ),
+        candidate_tree="2" * 40 if drift == "candidate-tree" else artifacts.candidate_tree,
+        source_configuration_epoch=lease.manager_configuration_epoch,
+        source_configuration_sha256=(
+            "3" * 64 if drift == "manager-configuration" else lease.manager_configuration_digest
+        ),
+    )
+    attested_prerequisite = prerequisite
+    if drift == "attestation":
+        attested_prerequisite = replace(
+            prerequisite,
+            credential_metadata_sha256={
+                **prerequisite.credential_metadata_sha256,
+                "manager-read": "4" * 64,
+            },
+        )
+    prerequisite_store = ProtectedExecutionPrerequisiteStore(
+        tmp_path / "execution-authority",
+        service_uid=tmp_path.stat().st_uid,
+    )
+    publication = prerequisite_store.publish(prerequisite)
+    attestation = _attestation(
+        attested_prerequisite,
+        execution_prerequisite_path=(
+            (
+                tmp_path / "different-execution-authority" / "execution-prerequisites"
+                if drift == "publication-path"
+                else prerequisite_store.root
+            )
+            / f"{attested_prerequisite.artifact_sha256}.json"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="authority drifted"):
+        FinalGatePlan.build(
+            _envelope(attestation),
+            attestation,
+            artifacts,
+            lease,
+            _baseline(),
+            _systemd_evidence(),
+            _predecessor_evidence(),
+            execution_prerequisite_publication=publication,
+            execution_prerequisite_store=prerequisite_store,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capacity_guard_schema_revision", "guard_0027"),
+        ("manager_execution_manifest_sha256", "f" * 64),
+        ("execution_policy_sha256", "f" * 64),
+    ],
+)
+def test_historical_final_gate_constructor_rejects_schema_three_only_fields(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    historical = replace(
+        _plan(tmp_path),
+        schema_version=5,
+        checkpoint_schema_version=None,
+        checkpoint_component_sha256=None,
+        database_authority_digest=None,
+        public_schema_revision=None,
+        capacity_guard_schema_revision=None,
+        manager_configuration_epoch=None,
+        manager_configuration_digest=None,
+        manager_authority_incarnation=None,
+        manager_writer_epoch=None,
+        manager_execution_state=None,
+        manager_execution_epoch=None,
+        manager_execution_manifest_sha256=None,
+        manager_executable_new_capacity_ceiling=None,
+        manager_increase_freeze=None,
+        restore_report_sha256=None,
+    )
+
+    with pytest.raises(ValueError, match="historical final gate plan"):
+        replace(historical, **{field: value})
 
 
 def test_final_gate_plan_reobserves_runtime_without_freezing_live_digest(
@@ -482,6 +814,24 @@ def test_final_gate_plan_v4_remains_readable_with_historical_transition_digest(
     payload = plan.to_dict()
     payload.pop("plan_digest")
     payload["schema_version"] = 4
+    for field in (
+        "checkpoint_schema_version",
+        "checkpoint_component_sha256",
+        "database_authority_digest",
+        "public_schema_revision",
+        "capacity_guard_schema_revision",
+        "manager_configuration_epoch",
+        "manager_configuration_digest",
+        "manager_authority_incarnation",
+        "manager_writer_epoch",
+        "manager_execution_state",
+        "manager_execution_epoch",
+        "manager_execution_manifest_sha256",
+        "manager_executable_new_capacity_ceiling",
+        "manager_increase_freeze",
+        "restore_report_sha256",
+    ):
+        payload.pop(field)
     target_units = {
         name: digest for name, digest in plan.systemd_unit_digests.items() if name not in UNIT_PATHS
     }
@@ -783,7 +1133,7 @@ def test_final_gate_plan_store_is_private_and_nonreplaceable(tmp_path: Path) -> 
     assert path.stat().st_nlink == 1
 
     with pytest.raises(FinalGatePlanError, match="cannot be replaced"):
-        store.publish(replace(plan, db_snapshot_identity="snapshot-2"))
+        store.publish(replace(plan, starting_mutation_epoch=8))
 
     raw = json.loads(path.read_text())
     raw["route"] = "https://example.invalid/dev"

@@ -21,7 +21,11 @@ from loom_cli.rollout.gb10_readiness import (
 from loom_cli.rollout.image_readiness import (
     DockerRunner as ImageDockerRunner,
 )
-from loom_cli.rollout.image_readiness import ImageBuildSession, image_plan_digest
+from loom_cli.rollout.image_readiness import (
+    ImageArtifactSet,
+    ImageBuildSession,
+    image_plan_digest,
+)
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
 from loom_cli.rollout.lifecycle_protocol import (
     LifecycleSelfTestEvidence,
@@ -53,6 +57,7 @@ from loom_cli.rollout.preflight_artifact_store import (
 )
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+    EvidenceValue,
     RegisteredCheck,
     SafeValue,
 )
@@ -66,6 +71,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_execution_prerequisite_check,
     build_external_supervisor_predecessor_check,
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
@@ -112,6 +118,11 @@ GB10_PREFLIGHT_FLEET_CONCURRENCY = 4
 # independent work; keep this resource class serialized while other GB10
 # readiness checks retain their bounded fleet pool.
 GB10_CANDIDATE_SOURCE_CONCURRENCY = 1
+
+ExecutionPrerequisitePublisher = Callable[
+    [BackupLease, ImageArtifactSet],
+    Mapping[str, EvidenceValue],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +267,7 @@ class PreflightRuntimeSources:
     baseline_probe_route: str
     rehearsal_actions: RehearsalActionFactory
     rehearsal_identity: RehearsalIdentityFactory
+    execution_prerequisite_publisher: ExecutionPrerequisitePublisher
     now: Callable[[], datetime]
     importer: ModuleImporter = importlib.import_module
     lifecycle_self_test: Callable[[], LifecycleSelfTestEvidence] = run_lifecycle_self_test
@@ -282,6 +294,7 @@ class PreflightRuntimeSources:
             or not self.route.startswith("https://")
             or not self.baseline_probe_route.startswith("https://")
             or not self.manifest_image_names
+            or not callable(self.execution_prerequisite_publisher)
             or len(self.database_schema_revision) != 4
             or not self.database_schema_revision.isascii()
             or not self.database_schema_revision.isdecimal()
@@ -405,6 +418,21 @@ class PreflightRuntimeSources:
             )
             return tier0, tier1, tier2
 
+        def execution_prerequisite_check(lease: BackupLease | None) -> RegisteredCheck:
+            def publish(found: BackupLease) -> Mapping[str, EvidenceValue]:
+                return self.execution_prerequisite_publisher(
+                    found,
+                    image_session.verify(),
+                )
+
+            return build_execution_prerequisite_check(
+                publish,
+                lease=lease,
+                candidate_sha=self.candidate.resolved_sha,
+                candidate_tree=self.candidate.resolved_tree or "",
+                mutation_epoch=mutation_epoch,
+            )
+
         tier0, tier1, tier2 = groups()
         return CandidatePreflightRuntime(
             candidate=self.candidate,
@@ -414,6 +442,7 @@ class PreflightRuntimeSources:
             bindings=self._bindings(mutation_epoch=mutation_epoch),
             rehearsal_actions=self.rehearsal_actions,
             rehearsal_identity=self.rehearsal_identity,
+            execution_prerequisite_check_factory=execution_prerequisite_check,
             refresh_static_checks=groups,
         )
 
@@ -682,5 +711,6 @@ __all__ = [
     "GB10_CANDIDATE_SOURCE_CONCURRENCY",
     "GB10_PREFLIGHT_FLEET_CONCURRENCY",
     "BackupAdmissionAuthority",
+    "ExecutionPrerequisitePublisher",
     "PreflightRuntimeSources",
 ]

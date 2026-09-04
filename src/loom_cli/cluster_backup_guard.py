@@ -29,9 +29,16 @@ ROLLOUT_CHECKPOINT_COMPONENTS: tuple[str, ...] = (
     "object_inventory",
     "k8s_secrets",
 )
+CRITICAL_ROLLOUT_CHECKPOINT_COMPONENTS: tuple[str, ...] = (
+    "postgres",
+    "object_inventory",
+    "k8s_secrets",
+    "database_authority",
+)
 _BACKUP_COMPONENTS_BY_SCHEMA: dict[int, tuple[str, ...]] = {
     1: REQUIRED_BACKUP_COMPONENTS,
     2: ROLLOUT_CHECKPOINT_COMPONENTS,
+    3: CRITICAL_ROLLOUT_CHECKPOINT_COMPONENTS,
 }
 PROTECTED_ENVIRONMENTS: frozenset[str] = frozenset(
     {
@@ -1210,6 +1217,8 @@ def write_backup_manifest(
         raise ValueError(
             "missing required backup component(s): " + ", ".join(missing),
         )
+    if schema_version == 3 and set(components) != set(required_components):
+        raise ValueError("backup components must exactly match schema")
     budget = _TraversalBudget(limits or BackupTraversalLimits())
     created_at = (now or datetime.now(UTC)).astimezone(UTC)
     inspections = _inspect_component_set(components, budget=budget)
@@ -1316,7 +1325,7 @@ def validate_backup_manifest(
     problems: list[str] = []
     schema_version = manifest.get("schema_version")
     if type(schema_version) is not int or schema_version not in _BACKUP_COMPONENTS_BY_SCHEMA:
-        problems.append("backup manifest schema_version must be 1 or 2")
+        problems.append("backup manifest schema_version must be 1, 2, or 3")
         required_components: tuple[str, ...] = ()
     else:
         required_components = _BACKUP_COMPONENTS_BY_SCHEMA[schema_version]
@@ -1356,6 +1365,8 @@ def validate_backup_manifest(
     if not isinstance(components, dict):
         problems.append("backup manifest components must be an object")
         return problems
+    if schema_version == 3 and set(components) != set(required_components):
+        problems.append("backup manifest component set does not exactly match schema")
     inspections: dict[str, _InspectedComponent] = {}
     for name in required_components:
         component = components.get(name)

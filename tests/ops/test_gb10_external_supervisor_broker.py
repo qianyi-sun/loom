@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -11,18 +12,37 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.loom_cli.rollout.operator.test_protected_capacity_execution_preparation_component import (
+    _component as _prepared_component,
+)
+from tests.loom_cli.rollout.operator.test_protected_capacity_execution_preparation_component import (
+    _controller_evidence as _prepared_evidence,
+)
+from tests.loom_cli.rollout.operator.test_protected_controller_discovery import (
+    _evidence as _controller_discovery_evidence,
+)
+from tests.loom_cli.rollout.operator.test_protected_controller_prerequisite_component import (
+    _component as _controller_prerequisite_component,
+)
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transition import (
     _artifact,
 )
 
+from loom_cli.rollout.operator.protected_controller_discovery import ControllerDiscoveryRequest
 from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
     CAPACITY_ACCEPTANCE_FAILURE_CODES,
     _encode_helper_request,
+    _encode_pool_credential_request,
+)
+from loom_cli.rollout.operator.protected_pool_credential_transport import (
+    PoolExecutionCredentialEvidence,
+    PoolExecutionCredentialPayload,
 )
 
 NORMAL_GB10_WORKER_HOSTS = (
@@ -53,6 +73,23 @@ SPEC.loader.exec_module(broker)
 _TEST_REQUEST_NONCE = "0123456789abcdef01234567"
 _TEST_UNIT_NAME = f"loom-gb10-capacity-{_TEST_REQUEST_NONCE}.service"
 _TEST_JOB_NAME = f"loom-accept-abcdef0-1-{_TEST_REQUEST_NONCE}"
+
+
+def _pool_credential_payload() -> PoolExecutionCredentialPayload:
+    return PoolExecutionCredentialPayload(
+        pool_id="gb10",
+        files={
+            "bearer-token": b"gb10-bearer-token",
+            "client-certificate.pem": b"gb10-client-certificate",
+            "client-private-key.pem": b"gb10-client-private-key",
+            "manager-ca.pem": b"gb10-manager-ca",
+            "ownership-private-key": b"gb10-ownership-private-key",
+        },
+        credential_metadata_sha256={
+            "pool-executor-gb10": "a" * 64,
+            "pool-ownership-gb10": "b" * 64,
+        },
+    )
 
 
 def _public_key(seed: int = 7, comment: str = "test") -> bytes:
@@ -210,6 +247,117 @@ def test_broker_parses_only_canonical_typed_protocol_identity(tmp_path: Path) ->
                 broker.parse_request_identity(
                     (json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n").encode()
                 )
+
+    (tmp_path / "controller-prerequisite").mkdir()
+    component, _transport, plan, prerequisite_artifact, _evidence = (
+        _controller_prerequisite_component(
+            tmp_path / "controller-prerequisite",
+            pool_id="gb10",
+            evidence_present=False,
+        )
+    )
+    prerequisite = component._request(plan, prerequisite_artifact)
+    prerequisite_request = _encode_helper_request(
+        operation="observe_controller_prerequisite",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        controller_prerequisite=prerequisite,
+    )
+    assert broker.parse_request_identity(prerequisite_request.encode()) == (
+        artifact.candidate_sha,
+        artifact.candidate_tree,
+    )
+    configured_registry = json.loads(prerequisite_request)
+    configured_registry["controller_prerequisite"]["image"] = (
+        "192.168.50.13:5000/loom-capacity-executor@sha256:" + "d" * 64
+    )
+    configured_registry_request = (
+        json.dumps(configured_registry, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    assert broker.parse_request_identity(configured_registry_request) == (
+        artifact.candidate_sha,
+        artifact.candidate_tree,
+    )
+
+    pool_payload = _pool_credential_payload()
+    pool_request = _encode_pool_credential_request(
+        operation="observe_pool_credential",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        pool_credential=pool_payload,
+    )
+    assert broker.parse_request_identity(pool_request.encode()) == (
+        artifact.candidate_sha,
+        artifact.candidate_tree,
+    )
+    foreign = json.loads(pool_request)
+    foreign["pool_credential"]["pool_id"] = "oldlab"
+    with pytest.raises(broker.BrokerError, match="pool credential"):
+        broker.parse_request_identity(
+            (json.dumps(foreign, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+
+
+def test_controller_pool_credential_runs_only_candidate_installer_as_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    payload = _pool_credential_payload()
+    request = _encode_pool_credential_request(
+        operation="publish_pool_credential",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        pool_credential=payload,
+    ).encode()
+    candidate = Path("/opt/loom-staging-runner/candidates") / artifact.candidate_sha
+    evidence = PoolExecutionCredentialEvidence(
+        pool_id="gb10",
+        file_sha256={
+            name: hashlib.sha256(content).hexdigest() for name, content in payload.files.items()
+        },
+        credential_metadata_sha256=payload.credential_metadata_sha256,
+        uid=991,
+        gid=991,
+        directory_mode=0o700,
+        file_mode=0o600,
+    )
+    calls: list[dict[str, object]] = []
+
+    def run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(
+            returncode=0,
+            stdout=evidence.to_bytes().decode("ascii"),
+            stderr="",
+        )
+
+    monkeypatch.setattr(broker, "_run", run)
+
+    assert broker.run_controller_pool_credential(candidate, request) == evidence.to_bytes()
+    assert calls == [
+        {
+            "argv": (
+                str(candidate / "venv/bin/python"),
+                "-I",
+                "-B",
+                str(candidate / "repo/scripts/ops/install_capacity_executor.py"),
+                "--operation",
+                "publish-credential",
+            ),
+            "cwd": candidate / "repo",
+            "environment": {
+                "HOME": "/root",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            "timeout": 180,
+            "check": False,
+            "input_payload": payload.to_bytes().decode("ascii"),
+        }
+    ]
 
 
 def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
@@ -1766,6 +1914,494 @@ def test_broker_main_dispatches_non_capacity_through_candidate_runtime(
     assert checked_paths == [broker.UV_BINARY, broker.SYSTEM_PYTHON]
     assert ensured == [(broker.CANDIDATES_ROOT, artifact.candidate_sha, artifact.candidate_tree)]
     assert executed == [(candidate, request)]
+
+
+def test_broker_main_dispatches_controller_prerequisite_as_root_without_generic_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prerequisite_root = tmp_path / "controller-prerequisite"
+    prerequisite_root.mkdir()
+    component, _transport, plan, prerequisite_artifact, evidence = (
+        _controller_prerequisite_component(
+            prerequisite_root,
+            pool_id="gb10",
+            evidence_present=False,
+        )
+    )
+    prerequisite = component._request(plan, prerequisite_artifact)
+    request = _encode_helper_request(
+        operation="observe_controller_prerequisite",
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        controller_prerequisite=prerequisite,
+    ).encode()
+    candidate = Path("/opt/loom-staging-runner/candidates") / plan.candidate_sha
+    output = SimpleNamespace(buffer=io.BytesIO())
+    calls: list[tuple[Path, bytes]] = []
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "ensure_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        broker,
+        "run_controller_prerequisite",
+        lambda candidate_path, payload: (
+            calls.append((candidate_path, payload)),
+            evidence.to_bytes(),
+        )[1],
+    )
+    monkeypatch.setattr(
+        broker,
+        "_exec_helper",
+        lambda *_args: pytest.fail("controller prerequisite reached unprivileged helper"),
+    )
+
+    assert broker.main([]) == 0
+    assert calls == [(candidate, request)]
+    assert output.buffer.getvalue() == evidence.to_bytes()
+
+
+@pytest.mark.parametrize(
+    ("outer_operation", "installer_operation", "timer", "tick"),
+    (
+        ("observe_prepared_controller", "observe-prepared", False, False),
+        ("converge_prepared_files", "converge-prepared-files", False, False),
+        ("enable_prepared_timer", "enable-prepared-timer", True, False),
+        ("run_prepared_tick", "run-prepared-tick", True, True),
+        ("disable_prepared_timer", "disable-prepared-timer", False, False),
+    ),
+)
+def test_broker_validates_and_runs_prepared_controller_through_candidate_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outer_operation: str,
+    installer_operation: str,
+    timer: bool,
+    tick: bool,
+) -> None:
+    prepared_root = tmp_path / "prepared-controller"
+    prepared_root.mkdir()
+    component, _manager, transports, plan, _artifact, _guard_calls = _prepared_component(
+        prepared_root
+    )
+    component.apply(plan)
+    prepared = transports["gb10"].requests[-1][1]
+    request = _encode_helper_request(
+        operation=outer_operation,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        prepared_controller=prepared,
+    ).encode("ascii")
+    assert broker.parse_request_identity(request) == (
+        plan.candidate_sha,
+        plan.candidate_tree,
+    )
+    candidate = broker.CANDIDATES_ROOT / plan.candidate_sha
+    evidence = _prepared_evidence(prepared, timer=timer, tick=tick).to_bytes()
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        calls.append((tuple(argv), kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=evidence.decode("ascii"),
+            stderr="",
+        )
+
+    monkeypatch.setattr(broker, "_run", run)
+
+    assert broker.run_controller_prepared(candidate, request) == evidence
+    assert calls == [
+        (
+            (
+                str(candidate / "venv/bin/python"),
+                "-I",
+                "-B",
+                str(candidate / "repo/scripts/ops/install_capacity_executor.py"),
+                "--operation",
+                installer_operation,
+            ),
+            {
+                "check": False,
+                "cwd": candidate / "repo",
+                "environment": {
+                    "HOME": "/root",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                "input_payload": prepared.to_bytes().decode("ascii"),
+                "timeout": 180,
+            },
+        )
+    ]
+
+
+def test_broker_rejects_malformed_prepared_authority_before_candidate_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_root = tmp_path / "prepared-controller-invalid"
+    prepared_root.mkdir()
+    component, _manager, transports, plan, _artifact, _guard_calls = _prepared_component(
+        prepared_root
+    )
+    component.apply(plan)
+    prepared = transports["gb10"].requests[-1][1]
+    valid = json.loads(
+        _encode_helper_request(
+            operation="observe_prepared_controller",
+            candidate_sha=plan.candidate_sha,
+            candidate_tree=plan.candidate_tree,
+            prepared_controller=prepared,
+        )
+    )
+
+    def copy_request() -> dict[str, object]:
+        return json.loads(json.dumps(valid))
+
+    wrong_execution = copy_request()
+    wrong_execution["prepared_controller"]["execution"]["execution_state"] = "active"
+    wrong_pool = copy_request()
+    wrong_pool["prepared_controller"]["pool_id"] = "oldlab"
+    extra_field = copy_request()
+    extra_field["prepared_controller"]["unexpected"] = True
+    invalid_base64 = copy_request()
+    invalid_base64["prepared_controller"]["files"]["/etc/loom-capacity-executor/service.env"] = (
+        "%%%%"
+    )
+    oversized = copy_request()
+    oversized["prepared_controller"]["files"]["/etc/loom-capacity-executor/service.env"] = (
+        base64.b64encode(b"x" * (3 * 1024 * 1024)).decode("ascii")
+    )
+    outer_extra = copy_request()
+    outer_extra["unexpected"] = True
+    calls: list[object] = []
+    monkeypatch.setattr(broker, "_run", lambda *_args, **_kwargs: calls.append(object()))
+    candidate = broker.CANDIDATES_ROOT / plan.candidate_sha
+
+    for invalid in (
+        wrong_execution,
+        wrong_pool,
+        extra_field,
+        invalid_base64,
+        oversized,
+        outer_extra,
+    ):
+        with pytest.raises(broker.BrokerError):
+            broker.run_controller_prepared(candidate, broker._canonical_json(invalid))
+
+    assert calls == []
+
+
+def test_broker_main_dispatches_prepared_controller_as_root_without_generic_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_root = tmp_path / "prepared-controller-dispatch"
+    prepared_root.mkdir()
+    component, _manager, transports, plan, _artifact, _guard_calls = _prepared_component(
+        prepared_root
+    )
+    component.apply(plan)
+    prepared = transports["gb10"].requests[-1][1]
+    request = _encode_helper_request(
+        operation="enable_prepared_timer",
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        prepared_controller=prepared,
+    ).encode("ascii")
+    candidate = broker.CANDIDATES_ROOT / plan.candidate_sha
+    evidence = _prepared_evidence(prepared, timer=True, tick=False).to_bytes()
+    output = SimpleNamespace(buffer=io.BytesIO())
+    calls: list[tuple[Path, bytes]] = []
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "ensure_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        broker,
+        "run_controller_prepared",
+        lambda candidate_path, payload: (
+            calls.append((candidate_path, payload)),
+            evidence,
+        )[1],
+    )
+    monkeypatch.setattr(
+        broker,
+        "_exec_helper",
+        lambda *_args: pytest.fail("prepared controller reached unprivileged helper"),
+    )
+
+    assert broker.main([]) == 0
+    assert calls == [(candidate, request)]
+    assert output.buffer.getvalue() == evidence
+
+
+def test_broker_rejects_prepared_controller_response_for_another_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_root = tmp_path / "prepared-controller-response"
+    prepared_root.mkdir()
+    component, _manager, transports, plan, _artifact, _guard_calls = _prepared_component(
+        prepared_root
+    )
+    component.apply(plan)
+    prepared = transports["gb10"].requests[-1][1]
+    request = _encode_helper_request(
+        operation="run_prepared_tick",
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        prepared_controller=prepared,
+    ).encode("ascii")
+    candidate = broker.CANDIDATES_ROOT / plan.candidate_sha
+    foreign = replace(
+        _prepared_evidence(prepared, timer=True, tick=True),
+        request_sha256="9" * 64,
+    )
+    monkeypatch.setattr(
+        broker,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=foreign.to_bytes().decode("ascii"),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="response is invalid"):
+        broker.run_controller_prepared(candidate, request)
+
+
+def test_broker_rejects_noncanonical_unbounded_or_semantically_wrong_prepared_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_root = tmp_path / "prepared-controller-response-bounds"
+    prepared_root.mkdir()
+    component, _manager, transports, plan, _artifact, _guard_calls = _prepared_component(
+        prepared_root
+    )
+    component.apply(plan)
+    prepared = transports["gb10"].requests[-1][1]
+    request = _encode_helper_request(
+        operation="run_prepared_tick",
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        prepared_controller=prepared,
+    ).encode("ascii")
+    candidate = broker.CANDIDATES_ROOT / plan.candidate_sha
+    unticked = _prepared_evidence(prepared, timer=True, tick=False).to_bytes().decode("ascii")
+    valid = _prepared_evidence(prepared, timer=True, tick=True).to_bytes().decode("ascii")
+    responses = [
+        valid.replace("{", "{ ", 1),
+        "x" * (broker._MAX_COMMAND_OUTPUT + 1),
+        "null\n",
+        unticked,
+    ]
+
+    def run(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(returncode=0, stdout=responses.pop(0), stderr="")
+
+    monkeypatch.setattr(broker, "_run", run)
+
+    for _index in range(4):
+        with pytest.raises(broker.BrokerError):
+            broker.run_controller_prepared(candidate, request)
+
+
+def test_broker_validates_and_runs_controller_discovery_only_through_candidate_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch discovery reaching a generic helper or an unbound executable path."""
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    discovery = ControllerDiscoveryRequest(
+        schema_version=1,
+        pool_id="gb10",
+        transport_authority_sha256="8" * 64,
+    )
+    request = _encode_helper_request(
+        operation="discover_controller",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        controller_discovery=discovery,
+    ).encode("ascii")
+    assert broker.parse_request_identity(request) == (
+        artifact.candidate_sha,
+        artifact.candidate_tree,
+    )
+    candidate = broker.CANDIDATES_ROOT / artifact.candidate_sha
+    evidence = replace(
+        _controller_discovery_evidence(pool_id="gb10"),
+        transport_authority_sha256=discovery.transport_authority_sha256,
+    ).to_bytes()
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        calls.append((tuple(argv), kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=evidence.decode("ascii"),
+            stderr="",
+        )
+
+    monkeypatch.setattr(broker, "_run", run)
+
+    assert broker.run_controller_prerequisite(candidate, request) == evidence
+    assert calls[0][0] == (
+        str(candidate / "venv/bin/python"),
+        "-I",
+        "-B",
+        str(candidate / "repo/scripts/ops/install_capacity_executor.py"),
+        "--operation",
+        "discover-controller",
+    )
+    assert calls[0][1]["cwd"] == candidate / "repo"
+    assert calls[0][1]["timeout"] == 180
+    assert calls[0][1]["input_payload"] == discovery.to_bytes().decode("ascii")
+
+
+def test_broker_rejects_malformed_or_unbounded_controller_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch malformed nested authority or an unbounded installer response."""
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    discovery = ControllerDiscoveryRequest(
+        schema_version=1,
+        pool_id="gb10",
+        transport_authority_sha256="8" * 64,
+    )
+    rendered = _encode_helper_request(
+        operation="discover_controller",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        controller_discovery=discovery,
+    ).encode("ascii")
+    wrong_pool = json.loads(rendered)
+    wrong_pool["controller_discovery"]["pool_id"] = "oldlab"
+    wrong_pool_bytes = broker._canonical_json(wrong_pool)
+    duplicate = rendered.replace(
+        b'"pool_id":"gb10",',
+        b'"pool_id":"gb10","pool_id":"gb10",',
+    )
+    for payload in (wrong_pool_bytes, duplicate, rendered + b" "):
+        with pytest.raises(broker.BrokerError):
+            broker.parse_request_identity(payload)
+
+    candidate = broker.CANDIDATES_ROOT / artifact.candidate_sha
+    monkeypatch.setattr(
+        broker,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="x" * (broker._MAX_COMMAND_OUTPUT + 1),
+            stderr="",
+        ),
+    )
+    with pytest.raises(broker.BrokerError, match="failed safely"):
+        broker.run_controller_prerequisite(candidate, rendered)
+
+
+def test_broker_main_dispatches_controller_discovery_as_root_without_generic_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch discovery falling through to the privilege-dropped supervisor helper."""
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    discovery = ControllerDiscoveryRequest(
+        schema_version=1,
+        pool_id="gb10",
+        transport_authority_sha256="8" * 64,
+    )
+    request = _encode_helper_request(
+        operation="discover_controller",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        controller_discovery=discovery,
+    ).encode("ascii")
+    candidate = broker.CANDIDATES_ROOT / artifact.candidate_sha
+    output = SimpleNamespace(buffer=io.BytesIO())
+    calls: list[tuple[Path, bytes]] = []
+    evidence = replace(
+        _controller_discovery_evidence(pool_id="gb10"),
+        transport_authority_sha256=discovery.transport_authority_sha256,
+    ).to_bytes()
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "ensure_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        broker,
+        "run_controller_prerequisite",
+        lambda candidate_path, payload: (
+            calls.append((candidate_path, payload)),
+            evidence,
+        )[1],
+    )
+    monkeypatch.setattr(
+        broker,
+        "_exec_helper",
+        lambda *_args: pytest.fail("controller discovery reached unprivileged helper"),
+    )
+
+    assert broker.main([]) == 0
+    assert calls == [(candidate, request)]
+    assert output.buffer.getvalue() == evidence
+
+
+def test_broker_main_dispatches_pool_credential_as_root_without_generic_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    payload = _pool_credential_payload()
+    request = _encode_pool_credential_request(
+        operation="observe_pool_credential",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        pool_credential=payload,
+    ).encode()
+    candidate = Path("/opt/loom-staging-runner/candidates") / artifact.candidate_sha
+    output = SimpleNamespace(buffer=io.BytesIO())
+    calls: list[tuple[Path, bytes]] = []
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "ensure_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        broker,
+        "run_controller_pool_credential",
+        lambda candidate_path, wire: (
+            calls.append((candidate_path, wire)),
+            b"null\n",
+        )[1],
+    )
+    monkeypatch.setattr(
+        broker,
+        "_exec_helper",
+        lambda *_args: pytest.fail("pool credential reached unprivileged helper"),
+    )
+
+    assert broker.main([]) == 0
+    assert calls == [(candidate, request)]
+    assert output.buffer.getvalue() == b"null\n"
 
 
 def test_forced_key_render_is_idempotent_and_preserves_unrelated_authority() -> None:

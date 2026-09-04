@@ -22,6 +22,7 @@ CapacityScope = Literal[
     "capacity:configure:fleet",
     "capacity:configure:subject",
     "capacity:configure:activate",
+    "capacity:configure:rollback",
     "capacity:project:development",
     "capacity:reconcile",
     "capacity:read",
@@ -35,6 +36,15 @@ CapacityScope = Literal[
     "capacity:execution:drain",
     "capacity:execution:retire",
 ]
+_EXECUTION_TRANSITION_SCOPES = frozenset(
+    {
+        "capacity:execution:prepare",
+        "capacity:execution:abort",
+        "capacity:execution:activate",
+        "capacity:execution:drain",
+        "capacity:execution:retire",
+    }
+)
 
 
 def bearer_token_sha256(header: str | None) -> str:
@@ -101,17 +111,11 @@ class _PrincipalDocument(_StrictModel):
                 self.executor_pool_generation,
             )
         )
-        has_execution_transition = bool(
-            {
-                "capacity:execution:prepare",
-                "capacity:execution:abort",
-                "capacity:execution:activate",
-                "capacity:execution:drain",
-                "capacity:execution:retire",
-            }.intersection(self.scopes)
-        )
+        has_execution_transition = bool(_EXECUTION_TRANSITION_SCOPES.intersection(self.scopes))
         if has_execution_transition and (has_subject or self.pool_id is not None):
             raise ValueError("execution transition principal must be unbound")
+        if has_execution_transition and len(self.scopes) != 1:
+            raise ValueError("execution transition principal must be single-purpose")
         if has_subject and not all(value is not None for value in subject_values):
             raise ValueError("incomplete subject binding")
         if has_pool_reporter and self.pool_id is None:

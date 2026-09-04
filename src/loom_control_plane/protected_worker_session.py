@@ -269,6 +269,16 @@ class ProtectedWorkerSessionStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
+    async def assert_ready(self) -> None:
+        """Require the guard-owned registration before the API can serve traffic."""
+
+        try:
+            await self.current_registration()
+        except ProtectedTrialSubmissionError as exc:
+            raise ProtectedWorkerRuntimeConfigurationError(
+                "protected worker runtime database is unavailable"
+            ) from exc
+
     async def current_registration(self) -> AgentRegistrationV1:
         """Load the exact guard-owned registration used to seal new demand."""
 

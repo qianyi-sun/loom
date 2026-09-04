@@ -1121,6 +1121,9 @@ def _default_dependencies(
     from .final_gate_runner import FinalGateRunner
     from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
     from .installed_detached_preflight import build_installed_detached_preflight_runner
+    from .protected_execution_prerequisite_store import (
+        ProtectedExecutionPrerequisiteStore,
+    )
 
     control_config = config if installed_config is None else installed_config
     store = RequestStore(config.state_root)
@@ -1214,6 +1217,10 @@ def _default_dependencies(
         read_mutation_epoch=composition.read_mutation_epoch,
         now=clock,
         post_apply_plan_factory=post_apply_plan,
+        execution_prerequisite_store=ProtectedExecutionPrerequisiteStore(
+            config.state_root,
+            service_uid=service_uid,
+        ),
     )
     final_gates = FinalGateRunner(
         attestation_store=composition.attestation_store,

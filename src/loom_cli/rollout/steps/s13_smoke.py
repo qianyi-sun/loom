@@ -52,6 +52,7 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
+DEFAULT_CURRENT_GB10_MODEL_SMOKE_TASK_ID = "loom-smoke/gb10-direct-completion-hello-world"
 DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10"
 DEFAULT_SMOKE_AGENT = "oracle"
 
@@ -139,8 +140,7 @@ def _smoke_task_id(ctx: RolloutContext, *, submit_mode: str = "user-token") -> s
         return DEFAULT_CURRENT_GB10_SMOKE_TASK_ID
     if ctx.scope == "full-cluster":
         raise RuntimeError(
-            "full-cluster rollout requires --smoke-task-id for an audited "
-            "current profile",
+            "full-cluster rollout requires --smoke-task-id for an audited current profile",
         )
     raise RuntimeError(f"unsupported rollout scope: {ctx.scope!r}")
 
