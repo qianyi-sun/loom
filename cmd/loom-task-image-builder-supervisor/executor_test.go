@@ -358,6 +358,84 @@ func TestExecutorBuildRejectsAbsentBaseResolutionCapture(t *testing.T) {
 	}
 }
 
+// Break caught: capture flags or same-attempt bindings are omitted, or accepted evidence aliases OCIOutput.
+func TestExecutorBuildReturnsMatchingBaseResolutionEvidenceAndCleansCapture(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	component := BuildComponent{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components:   []BuildComponent{component},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4242), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	var captureDir string
+	executorRunBuildctl = func(_ context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+		if !containsAdjacentArgs(argv, "--opt", "loom.capture-base-resolution=v1") {
+			t.Fatalf("buildctl argv missing capture opt-in: %#v", argv)
+		}
+		refPath := valueAfterArg(t, argv, "--ref-file")
+		metadataPath := valueAfterArg(t, argv, "--metadata-file")
+		if refPath == "" || metadataPath == "" || filepath.Dir(refPath) != filepath.Dir(metadataPath) {
+			t.Fatalf("buildctl capture paths invalid: ref=%q metadata=%q", refPath, metadataPath)
+		}
+		captureDir = filepath.Dir(refPath)
+		if info, err := os.Stat(captureDir); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("capture directory mode invalid: info=%v err=%v", info, err)
+		}
+		if err := os.WriteFile(refPath, []byte("solve_1-abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+		return OCIOutput{
+			Path:           path,
+			TopLevelDigest: baseResolutionTestRoot,
+			FileSHA256:     strings.Repeat("b", 64),
+			Architecture:   "amd64",
+			OS:             "linux",
+		}, nil
+	}
+
+	result, err := executor.Build(context.Background(), component)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	resultValue := reflect.ValueOf(result)
+	outputField := resultValue.FieldByName("Output")
+	evidenceField := resultValue.FieldByName("BaseResolution")
+	if !outputField.IsValid() || !evidenceField.IsValid() {
+		t.Fatalf("Build() result does not separate OCI output and evidence: %T", result)
+	}
+	output, ok := outputField.Interface().(OCIOutput)
+	if !ok || output.TopLevelDigest != baseResolutionTestRoot {
+		t.Fatalf("Build() output = %#v", outputField.Interface())
+	}
+	evidence, ok := evidenceField.Interface().(BaseResolutionEvidence)
+	if !ok || evidence.JSON() == "" {
+		t.Fatalf("Build() evidence = %#v", evidenceField.Interface())
+	}
+	if _, err := os.Stat(captureDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("capture directory survived successful Build(): %v", err)
+	}
+}
+
 func TestExecutorCloseTerminatesDaemonAndRejectsSurvivors(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
@@ -1892,6 +1970,15 @@ func valueAfterArg(t *testing.T, argv []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+func containsAdjacentArgs(argv []string, first string, second string) bool {
+	for index := 0; index+1 < len(argv); index++ {
+		if argv[index] == first && argv[index+1] == second {
+			return true
+		}
+	}
+	return false
 }
 
 func commandExitStatus(t *testing.T, status int) error {
