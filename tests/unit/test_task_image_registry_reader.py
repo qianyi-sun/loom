@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from loom_task_image_authority import registry_reader
 from loom_task_image_authority.config import (
     TaskImageAuthorityConfigurationError,
     TaskImageAuthoritySettings,
@@ -693,6 +694,94 @@ async def test_queued_read_has_total_deadline_and_mints_only_after_admission(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_admission_releases_concurrently_acquired_permit(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+) -> None:
+    class _CancellingSemaphore:
+        def __init__(self) -> None:
+            self.parent: asyncio.Task[bytes] | None = None
+            self.acquired = 0
+            self.released = 0
+
+        async def acquire(self) -> bool:
+            self.acquired += 1
+            assert self.parent is not None
+            self.parent.cancel()
+            return True
+
+        def release(self) -> None:
+            self.released += 1
+
+    payload = b"permit-owner"
+    descriptor = _descriptor(OCI_LAYER, payload)
+    semaphore = _CancellingSemaphore()
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    )
+    reader._semaphore = semaphore  # type: ignore[assignment]
+    semaphore.parent = asyncio.create_task(_read_all(reader, "blob", descriptor))
+
+    with pytest.raises(asyncio.CancelledError):
+        await semaphore.parent
+
+    assert semaphore.acquired == 1
+    assert semaphore.released == 1
+    await reader.aclose()
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_rejects_an_already_completed_await() -> None:
+    completed: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    completed.set_result("too late")
+    started = False
+
+    async def operation() -> str:
+        nonlocal started
+        started = True
+        return "also too late"
+
+    with pytest.raises(registry_reader._TotalTimeoutError):
+        await registry_reader._bounded_await(
+            completed,
+            deadline=asyncio.get_running_loop().time() - 1.0,
+        )
+    with pytest.raises(registry_reader._TotalTimeoutError):
+        await registry_reader._bounded_await(
+            operation(),
+            deadline=asyncio.get_running_loop().time() - 1.0,
+        )
+    assert started is False
+
+
+@pytest.mark.asyncio
+async def test_suspended_stream_cannot_yield_buffered_body_after_total_deadline(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+) -> None:
+    payload = b"buffered-after-deadline"
+    descriptor = _descriptor(OCI_LAYER, payload)
+    _route(tls_registry, "blob", descriptor, payload)
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+        limits=RegistryReaderLimits(total_timeout_seconds=0.03),
+    )
+    stream = reader.read("blob", descriptor)
+    assert await anext(stream) == payload[: len(payload) // 2]
+    await asyncio.sleep(0.04)
+
+    with pytest.raises(RegistryReadError, match="total timeout"):
+        await anext(stream)
+
+    await stream.aclose()
+    await reader.aclose()
+
+
+@pytest.mark.asyncio
 async def test_aclose_aborts_active_socket_and_queued_read_before_mint(
     tls_registry: _TLSRegistry,
     token_key: rsa.RSAPrivateKey,
@@ -733,6 +822,99 @@ async def test_aclose_aborts_active_socket_and_queued_read_before_mint(
     with pytest.raises(RuntimeError, match="closed"):
         await anext(held_stream)
     await held_stream.aclose()
+
+
+class _FakeTransport:
+    def __init__(self) -> None:
+        self.aborted = False
+
+    def abort(self) -> None:
+        self.aborted = True
+
+
+class _FakeWriter:
+    def __init__(self) -> None:
+        self.closed = False
+        self.transport = _FakeTransport()
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+    def write(self, payload: bytes) -> None:
+        raise AssertionError(f"closed reader wrote {len(payload)} bytes")
+
+    async def drain(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_aclose_cancels_stalled_connect_and_releases_admission(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+
+    async def stalled_connect(*args: object, **kwargs: object) -> tuple[object, object]:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled connect continued")
+
+    monkeypatch.setattr(registry_reader.asyncio, "open_connection", stalled_connect)
+    descriptor = _descriptor(OCI_LAYER, b"stalled-connect")
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    )
+    read = asyncio.create_task(_read_all(reader, "blob", descriptor))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await asyncio.wait_for(reader.aclose(), timeout=0.2)
+
+    assert read.done()
+    with pytest.raises(RuntimeError, match="closed"):
+        await read
+    assert reader._semaphore._value == 4
+
+
+@pytest.mark.asyncio
+async def test_aclose_owns_socket_returned_by_concurrently_cancelled_connect(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    writer = _FakeWriter()
+
+    async def completing_connect(*args: object, **kwargs: object) -> tuple[object, object]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return asyncio.StreamReader(), writer
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(registry_reader.asyncio, "open_connection", completing_connect)
+    descriptor = _descriptor(OCI_LAYER, b"concurrent-connect")
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    )
+    read = asyncio.create_task(_read_all(reader, "blob", descriptor))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await asyncio.wait_for(reader.aclose(), timeout=0.2)
+
+    assert writer.closed is True
+    assert read.done()
+    with pytest.raises(RuntimeError, match="closed"):
+        await read
+    assert reader._semaphore._value == 4
 
 
 @pytest.mark.asyncio

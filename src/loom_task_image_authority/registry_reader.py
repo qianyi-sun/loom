@@ -15,7 +15,7 @@ from collections.abc import AsyncGenerator, Awaitable, Iterable
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import TracebackType
+from types import CoroutineType, TracebackType
 from typing import Literal, Self, TypeVar
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -46,13 +46,28 @@ class _TransportTimeoutError(TimeoutError):
     pass
 
 
+def _ensure_deadline(deadline: float) -> None:
+    if asyncio.get_running_loop().time() >= deadline:
+        raise _TotalTimeoutError
+
+
 async def _bounded_await(
     awaitable: Awaitable[_T],
     *,
     deadline: float,
     operation_timeout: float | None = None,
 ) -> _T:
+    try:
+        _ensure_deadline(deadline)
+    except _TotalTimeoutError:
+        if isinstance(awaitable, CoroutineType):
+            awaitable.close()
+        raise
     remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0.0:
+        if isinstance(awaitable, CoroutineType):
+            awaitable.close()
+        raise _TotalTimeoutError
     total_is_tighter = operation_timeout is None or remaining <= operation_timeout
     timeout = remaining if operation_timeout is None else min(remaining, operation_timeout)
     try:
@@ -162,6 +177,10 @@ class HTTPSRegistryReader:
         self._ssl_context = context
         self._semaphore = asyncio.Semaphore(limits.maximum_concurrent_reads)
         self._admissions: set[asyncio.Task[bool]] = set()
+        self._connects: set[
+            asyncio.Task[tuple[asyncio.StreamReader, asyncio.StreamWriter]]
+        ] = set()
+        self._connecting_operations: set[asyncio.Event] = set()
         self._writers: set[asyncio.StreamWriter] = set()
         self._closed = False
 
@@ -183,17 +202,34 @@ class HTTPSRegistryReader:
             return
         self._closed = True
         admissions = tuple(self._admissions)
+        connects = tuple(self._connects)
+        connecting_operations = tuple(self._connecting_operations)
         for admission in admissions:
             admission.cancel()
-        if admissions:
-            await asyncio.gather(*admissions, return_exceptions=True)
-        writers = tuple(self._writers)
+        for connect in connects:
+            connect.cancel()
+        owned = admissions + connects
+        if owned:
+            await asyncio.gather(*owned, return_exceptions=True)
+        writers = set(self._writers)
+        for connect in connects:
+            if (
+                connect.done()
+                and not connect.cancelled()
+                and connect.exception() is None
+            ):
+                _stream, writer = connect.result()
+                writers.add(writer)
         for writer in writers:
             writer.close()
         if writers:
             await asyncio.gather(
                 *(self._finish_close(writer) for writer in writers),
                 return_exceptions=True,
+            )
+        if connecting_operations:
+            await asyncio.gather(
+                *(operation.wait() for operation in connecting_operations)
             )
 
     async def _finish_close(self, writer: asyncio.StreamWriter) -> None:
@@ -210,25 +246,42 @@ class HTTPSRegistryReader:
             raise RuntimeError("registry reader is closed")
         admission = asyncio.create_task(self._semaphore.acquire())
         self._admissions.add(admission)
+        transferred = False
         try:
             try:
-                await _bounded_await(admission, deadline=deadline)
+                acquired = await _bounded_await(
+                    asyncio.shield(admission),
+                    deadline=deadline,
+                )
             except asyncio.CancelledError:
                 current = asyncio.current_task()
                 if self._closed and current is not None and not current.cancelling():
                     raise RuntimeError("registry reader is closed") from None
                 raise
+            if not acquired:
+                raise RuntimeError("registry admission failed")
+            if self._closed:
+                raise RuntimeError("registry reader is closed")
+            transferred = True
         finally:
             self._admissions.discard(admission)
-        if self._closed:
-            self._semaphore.release()
-            raise RuntimeError("registry reader is closed")
+            if not transferred:
+                if not admission.done():
+                    admission.cancel()
+                    await asyncio.gather(admission, return_exceptions=True)
+                if (
+                    admission.done()
+                    and not admission.cancelled()
+                    and admission.exception() is None
+                    and admission.result()
+                ):
+                    self._semaphore.release()
 
     async def _connect(
         self,
         deadline: float,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await _bounded_await(
+        connect = asyncio.create_task(
             asyncio.open_connection(
                 self._hostname,
                 self._port,
@@ -236,10 +289,40 @@ class HTTPSRegistryReader:
                 server_hostname=self._hostname,
                 ssl_handshake_timeout=self._limits.connect_timeout_seconds,
                 ssl_shutdown_timeout=self._limits.connect_timeout_seconds,
-            ),
-            deadline=deadline,
-            operation_timeout=self._limits.connect_timeout_seconds,
+            )
         )
+        self._connects.add(connect)
+        transferred = False
+        try:
+            try:
+                result = await _bounded_await(
+                    asyncio.shield(connect),
+                    deadline=deadline,
+                    operation_timeout=self._limits.connect_timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if self._closed and current is not None and not current.cancelling():
+                    raise RuntimeError("registry reader is closed") from None
+                raise
+            if self._closed:
+                raise RuntimeError("registry reader is closed")
+            transferred = True
+            return result
+        finally:
+            self._connects.discard(connect)
+            if not transferred:
+                if not connect.done():
+                    connect.cancel()
+                    await asyncio.gather(connect, return_exceptions=True)
+                if (
+                    connect.done()
+                    and not connect.cancelled()
+                    and connect.exception() is None
+                ):
+                    _stream, orphaned_writer = connect.result()
+                    orphaned_writer.close()
+                    await self._finish_close(orphaned_writer)
 
     def _request_bytes(
         self,
@@ -323,6 +406,7 @@ class HTTPSRegistryReader:
         response_seen = False
         pre_response_input_bytes = 0
         try:
+            _ensure_deadline(deadline)
             await self._admit(deadline)
             acquired = True
             now = datetime.now(UTC).replace(microsecond=0)
@@ -337,7 +421,13 @@ class HTTPSRegistryReader:
                 max_incomplete_event_size=self._limits.maximum_response_header_bytes,
             )
             request_bytes = self._request_bytes(protocol, path, descriptor, issued.token)
-            stream, writer = await self._connect(deadline)
+            connecting_operation = asyncio.Event()
+            self._connecting_operations.add(connecting_operation)
+            try:
+                stream, writer = await self._connect(deadline)
+            finally:
+                self._connecting_operations.discard(connecting_operation)
+                connecting_operation.set()
             self._writers.add(writer)
             if self._closed:
                 raise RuntimeError("registry reader is closed")
@@ -357,6 +447,7 @@ class HTTPSRegistryReader:
                 self._limits.maximum_response_header_bytes + 1,
             )
             while True:
+                _ensure_deadline(deadline)
                 if self._closed:
                     raise RuntimeError("registry reader is closed")
                 event = protocol.next_event()
@@ -418,6 +509,7 @@ class HTTPSRegistryReader:
                             retryable=False,
                         )
                     if chunk:
+                        _ensure_deadline(deadline)
                         if self._closed:
                             raise RuntimeError("registry reader is closed")
                         yield chunk
@@ -441,6 +533,7 @@ class HTTPSRegistryReader:
                             "registry response size mismatch",
                             retryable=False,
                         )
+                    _ensure_deadline(deadline)
                     return
                 if isinstance(event, h11.ConnectionClosed):
                     raise RegistryReadError("registry response ended early", retryable=True)
