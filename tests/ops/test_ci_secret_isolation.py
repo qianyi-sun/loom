@@ -64,9 +64,15 @@ def _run_validation_step(
     )
 
 
-def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache() -> None:
+@pytest.mark.parametrize(
+    ("job_name", "matrix_output"),
+    [("build", "ordinary_builds"), ("scanner-cache-build", "scanner_cache_builds")],
+)
+def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
+    job_name: str, matrix_output: str
+) -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    build = workflow["jobs"]["build"]
+    build = workflow["jobs"][job_name]
 
     assert workflow["permissions"] == {"contents": "read"}
     assert build["permissions"] == {"contents": "read"}
@@ -75,7 +81,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
         "needs.plan.outputs.trusted_publish != 'true' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
-        "needs.plan.outputs.images != '[]'"
+        f"needs.plan.outputs.{matrix_output} != '[]'"
     )
     assert _checkout_steps(build)
     assert all(
@@ -129,7 +135,14 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
         "needs.plan.outputs.trusted_publish == 'true')) && "
     )
     assert _normalized_expression(publish["if"]) == (
-        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "!cancelled() && "
+        "needs.plan.result == 'success' && "
+        "needs.trivy-binary.result == 'success' && "
+        "(needs.personal-dev-scanner-cache-assets.result == 'success' || "
+        "(needs.personal-dev-scanner-cache-assets.result == 'skipped' && "
+        '!contains(needs.plan.outputs.images, \'"image":"personal-dev-scanner-cache"\'))) && '
+        + trusted_event
+        + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
@@ -140,7 +153,9 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
         for step in _checkout_steps(publish)
     )
     assert _normalized_expression(manifest["if"]) == (
-        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "!cancelled() && needs.plan.result == 'success' && "
+        + trusted_event
+        + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]' && "
@@ -175,10 +190,11 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
 
-def test_images_manual_dispatch_is_build_only() -> None:
+@pytest.mark.parametrize("job_name", ["build", "scanner-cache-build"])
+def test_images_manual_dispatch_is_build_only(job_name: str) -> None:
     workflow = _workflow(".github/workflows/images.yml")
     on_config = _workflow_on(workflow)
-    build = workflow["jobs"]["build"]
+    build = workflow["jobs"][job_name]
     publish = workflow["jobs"]["publish"]
 
     assert "workflow_dispatch" in on_config
@@ -272,6 +288,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "trivy-binary",
         "personal-dev-scanner-cache-assets",
         "build",
+        "scanner-cache-build",
         "publish",
         "publish-manifest",
         "personal-dev-trusted-release",
@@ -281,6 +298,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "plan",
         "trivy-binary",
         "build",
+        "scanner-cache-build",
         "images-gate",
     ):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
@@ -507,11 +525,12 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     assert error_marker in result.stderr
 
 
+@pytest.mark.parametrize("job_name", ["build", "scanner-cache-build"])
 def test_image_input_validation_never_evaluates_command_substitution(
-    tmp_path: Path,
+    tmp_path: Path, job_name: str
 ) -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    step = _named_step(workflow["jobs"]["build"], "Validate image build inputs")
+    step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
     sentinel = tmp_path / "shell-injection-ran"
     result = _run_validation_step(
         step,

@@ -23,18 +23,24 @@ def test_scanner_cache_image_is_minimal_nonroot_and_immutable() -> None:
         "9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
     )
     assert "RUN " not in "\n".join(lines)
-    assert not any(command in "\n".join(lines).lower() for command in ("curl", "wget", "apt", "pip"))
-    assert lines.count(
-        "COPY src/loom/personal_dev_scanner_cache.py ./loom/personal_dev_scanner_cache.py"
-    ) == 1
-    assert lines.count(
-        "COPY src/loom/personal_dev_scanner_cache_init.py "
-        "./loom/personal_dev_scanner_cache_init.py"
-    ) == 1
+    assert not any(
+        command in "\n".join(lines).lower() for command in ("curl", "wget", "apt", "pip")
+    )
+    assert (
+        lines.count(
+            "COPY src/loom/personal_dev_scanner_cache.py ./loom/personal_dev_scanner_cache.py"
+        )
+        == 1
+    )
+    assert (
+        lines.count(
+            "COPY src/loom/personal_dev_scanner_cache_init.py "
+            "./loom/personal_dev_scanner_cache_init.py"
+        )
+        == 1
+    )
     assert {
-        line
-        for line in lines
-        if line.startswith("COPY --from=personal-dev-scanner-cache ")
+        line for line in lines if line.startswith("COPY --from=personal-dev-scanner-cache ")
     } == {
         "COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 "
         "db/metadata.json /opt/loom-personal-dev-scanner-cache/assets/db/metadata.json",
@@ -49,9 +55,7 @@ def test_scanner_cache_image_is_minimal_nonroot_and_immutable() -> None:
     assert "WORKDIR /opt/loom-personal-dev-scanner-cache/assets/java-db" in lines
     assert "USER 65531:65532" in lines
     assert "ENV PYTHONPATH=/opt/loom-personal-dev-scanner-cache" in lines
-    assert lines[-1] == (
-        'ENTRYPOINT ["python", "-m", "loom.personal_dev_scanner_cache_init"]'
-    )
+    assert lines[-1] == ('ENTRYPOINT ["python", "-m", "loom.personal_dev_scanner_cache_init"]')
 
 
 def test_service_image_uses_the_same_pinned_trivy_version_as_scanner_policy() -> None:
@@ -87,7 +91,7 @@ def test_scanner_cache_image_has_one_exact_component_owner() -> None:
 def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_builds() -> None:
     jobs = _workflow()["jobs"]
     assets = jobs["personal-dev-scanner-cache-assets"]
-    build = jobs["build"]
+    build = jobs["scanner-cache-build"]
     publish = jobs["publish"]
 
     assert assets["needs"] == ["plan", "trivy-binary"]
@@ -109,7 +113,6 @@ def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_b
         "retention-days": 1,
     }
     assert set(build["needs"]) == {
-        "image-route",
         "personal-dev-scanner-cache-assets",
         "plan",
         "trivy-binary",
@@ -119,7 +122,8 @@ def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_b
         "plan",
         "trivy-binary",
     }
-    assert "matrix.image == 'personal-dev-scanner-cache'" in build["runs-on"]
+    assert "ubuntu-24.04-arm" in build["runs-on"]
+    assert "ubuntu-24.04" in build["runs-on"]
     for job in (build, publish):
         download = next(
             step
@@ -144,7 +148,5 @@ def test_workflow_prepares_one_release_bound_asset_and_routes_it_only_to_cache_b
     for script in (candidate_script, publish_script):
         assert 'if [[ "$IMAGE_NAME" == "personal-dev-scanner-cache" ]]; then' in script
         assert "--build-context" in script
-        assert (
-            '"personal-dev-scanner-cache=/tmp/loom-personal-dev-scanner-cache"' in script
-        )
+        assert '"personal-dev-scanner-cache=/tmp/loom-personal-dev-scanner-cache"' in script
         assert "verify_scanner_cache_assets" in script
