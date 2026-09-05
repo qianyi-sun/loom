@@ -213,13 +213,13 @@ def _without_reconciliation_labels(call: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _not_found(kind: str, name: str) -> CommandResult:
+def _not_found(kind: str, name: str, *, stdout: str = "") -> CommandResult:
     message = (
         f"Error response from daemon: network {name} not found\n"
         if kind == "network"
         else f"Error response from daemon: No such container: {name}\n"
     )
-    return CommandResult(1, "", message)
+    return CommandResult(1, stdout, message)
 
 
 @dataclass
@@ -234,6 +234,7 @@ class RecordingDockerRunner:
     managed_networks_after: str = ""
     invalid_create_name: str | None = None
     drifted_inspect_name: str | None = None
+    missing_inspect_stdout: str = ""
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -303,7 +304,11 @@ class RecordingDockerRunner:
             return CommandResult(1, stderr="primary failed")
         if is_reconciliation and call[-1] not in self.present:
             kind = "network" if call[3] == "network" else "container"
-            return _not_found(kind, call[-1])
+            return _not_found(
+                kind,
+                call[-1],
+                stdout=self.missing_inspect_stdout,
+            )
         if (
             not is_cleanup
             and not is_preexisting_check
@@ -317,7 +322,15 @@ class RecordingDockerRunner:
         if is_preexisting_check:
             present = self.present.get(call[-1])
             kind = "network" if call[3] == "network" else "container"
-            return _not_found(kind, call[-1]) if present is None else CommandResult(0, present[1])
+            return (
+                _not_found(
+                    kind,
+                    call[-1],
+                    stdout=self.missing_inspect_stdout,
+                )
+                if present is None
+                else CommandResult(0, present[1])
+            )
         if call[3:5] == ("ps", "-aq"):
             return CommandResult(0, self.managed_containers_after)
         if call[3:6] == ("network", "ls", "-q"):
@@ -416,6 +429,29 @@ def test_runs_fixed_two_sandbox_conformance_without_a_shell() -> None:
     assert all(
         env == {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"} for env in runner.environments
     )
+
+
+def test_accepts_empty_json_list_stdout_for_an_exact_missing_inspect() -> None:
+    """Catches rejecting the Docker CLI's exact absent-object response."""
+    runner = RecordingDockerRunner(missing_inspect_stdout="[]\n")
+
+    receipt = run_conformance(_inputs(), runner)
+
+    assert receipt["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ("[]", "[]\nextra", "{}\n", "[{}]\n", "null\n"),
+)
+def test_rejects_any_other_stdout_for_a_missing_inspect(stdout: str) -> None:
+    """Catches broadening absence beyond Docker's two exact response forms."""
+    runner = RecordingDockerRunner(missing_inspect_stdout=stdout)
+
+    with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+        run_conformance(_inputs(), runner)
+
+    assert raised.value.stage == "preconditions"
 
 
 def test_every_docker_call_uses_the_fixed_absolute_executable() -> None:
