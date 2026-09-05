@@ -60,8 +60,10 @@ platform evidence, and component identity. It must not update
 Registry `HEAD`, successful blob upload, manifest upload, or a recorded
 candidate remains insufficient for task-image execution. Phase 2D2 is the next
 increment allowed to validate registry bytes and sign publication readiness;
-protected shadow acceptance and Phase 4 activation are still required after
-that.
+protected shadow acceptance is still required after that. Phase 4 activation
+must then pass the `ArchitectureCapacityFence` with the signed executor witness
+for each architecture before any architecture-by-architecture cutover. Do not
+activate x86_64 or arm64 publication from Phase 2D1 candidate evidence alone.
 
 ## Future registry/JWKS ceremony
 
