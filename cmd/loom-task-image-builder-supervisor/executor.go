@@ -242,6 +242,17 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOu
 		return OCIOutput{}, err
 	}
 	outputPath := filepath.Join(outputDir, component.Name+".tar")
+	captureDir, err := os.MkdirTemp(e.jobRoot, ".build-capture-")
+	if err != nil {
+		return OCIOutput{}, err
+	}
+	defer func() {
+		if cleanupErr := os.RemoveAll(captureDir); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cleanup build capture: %w", cleanupErr))
+		}
+	}()
+	refPath := filepath.Join(captureDir, "solve-ref")
+	metadataPath := filepath.Join(captureDir, "metadata.json")
 	cleanupOutput := true
 	defer func() {
 		if cleanupOutput {
@@ -260,6 +271,9 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOu
 		"--local", "dockerfile=" + filepath.Join(e.jobRoot, filepath.Dir(component.Dockerfile)),
 		"--opt", "filename=" + filepath.Base(component.Dockerfile),
 		"--opt", "platform=" + platform,
+		"--opt", "loom.capture-base-resolution=v1",
+		"--ref-file", refPath,
+		"--metadata-file", metadataPath,
 		"--output", "type=oci,dest=" + outputPath,
 	}
 	env := []string{"LANG=C.UTF-8", "TZ=UTC", "BUILDKIT_HOST=" + e.buildkitAddress}
@@ -269,6 +283,9 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOu
 	output, err := executorValidateOCIOutput(outputPath, platform)
 	if err != nil {
 		return OCIOutput{}, err
+	}
+	if _, err := os.ReadFile(refPath); err != nil {
+		return OCIOutput{}, errBaseResolutionInvalid
 	}
 	cleanupOutput = false
 	return output, nil
