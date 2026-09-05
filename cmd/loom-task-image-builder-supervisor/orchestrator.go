@@ -34,7 +34,7 @@ type TaskImageGuard interface {
 
 type BuildExecutor interface {
 	Start(context.Context) error
-	Build(context.Context, BuildComponent) (OCIOutput, error)
+	Build(context.Context, BuildComponent) (BuildResult, error)
 	Close(context.Context) error
 }
 
@@ -385,7 +385,7 @@ func (s *orchestratorState) closeActiveExecutor(executor BuildExecutor) error {
 
 type buildResult struct {
 	component BuildComponent
-	output    OCIOutput
+	result    BuildResult
 	err       error
 }
 
@@ -403,8 +403,8 @@ func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
 		buildCtx, cancelBuild := context.WithCancelCause(s.ctx)
 		result := make(chan buildResult, 1)
 		go func(component BuildComponent) {
-			output, err := s.executor.Build(buildCtx, component)
-			result <- buildResult{component: component, output: output, err: err}
+			built, err := s.executor.Build(buildCtx, component)
+			result <- buildResult{component: component, result: built, err: err}
 		}(component)
 		for {
 			select {
@@ -455,7 +455,7 @@ func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
 					s.record(BuildOutcomeLeaseLost, "authority_fenced", got.component.Name)
 					return safeError("authority_fenced")
 				}
-				s.built = append(s.built, BuiltComponent{Name: got.component.Name, Output: got.output})
+				s.built = append(s.built, BuiltComponent{Name: got.component.Name, Output: got.result.Output, BaseResolution: got.result.BaseResolution})
 				goto nextComponent
 			}
 		}

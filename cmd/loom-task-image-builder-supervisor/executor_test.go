@@ -274,6 +274,12 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		ranExecutable = executable
 		ranArgv = append([]string(nil), argv...)
 		ranCgroupFD = cgroupFD
+		if err := os.WriteFile(valueAfterArg(t, argv, "--ref-file"), []byte("solve_1-abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(valueAfterArg(t, argv, "--metadata-file"), baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		return nil
 	}
 	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
@@ -283,15 +289,15 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		if platform != "linux/amd64" {
 			t.Fatalf("platform = %q, want linux/amd64", platform)
 		}
-		return OCIOutput{Path: path, TopLevelDigest: "sha256:" + strings.Repeat("a", 64), FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
+		return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
 	}
 
-	output, err := executor.Build(context.Background(), component)
+	result, err := executor.Build(context.Background(), component)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if output.TopLevelDigest != "sha256:"+strings.Repeat("a", 64) {
-		t.Fatalf("TopLevelDigest = %q", output.TopLevelDigest)
+	if result.Output.TopLevelDigest != baseResolutionTestRoot {
+		t.Fatalf("TopLevelDigest = %q", result.Output.TopLevelDigest)
 	}
 	if ranExecutable.Path != fixture.config.Runtime.Buildctl.Path {
 		t.Fatalf("ran executable = %q, want buildctl", ranExecutable.Path)
@@ -308,6 +314,9 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		"--local", "dockerfile=" + filepath.Join(fixture.jobRoot, filepath.Dir(component.Dockerfile)),
 		"--opt", "filename=" + filepath.Base(component.Dockerfile),
 		"--opt", "platform=linux/amd64",
+		"--opt", "loom.capture-base-resolution=v1",
+		"--ref-file", valueAfterArg(t, ranArgv, "--ref-file"),
+		"--metadata-file", valueAfterArg(t, ranArgv, "--metadata-file"),
 		"--output", "type=oci,dest=" + filepath.Join(fixture.jobRoot, "oci", component.Name+".tar"),
 	}
 	if !reflect.DeepEqual(ranArgv, required) {
@@ -417,19 +426,11 @@ func TestExecutorBuildReturnsMatchingBaseResolutionEvidenceAndCleansCapture(t *t
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	resultValue := reflect.ValueOf(result)
-	outputField := resultValue.FieldByName("Output")
-	evidenceField := resultValue.FieldByName("BaseResolution")
-	if !outputField.IsValid() || !evidenceField.IsValid() {
-		t.Fatalf("Build() result does not separate OCI output and evidence: %T", result)
+	if result.Output.TopLevelDigest != baseResolutionTestRoot {
+		t.Fatalf("Build() output = %#v", result.Output)
 	}
-	output, ok := outputField.Interface().(OCIOutput)
-	if !ok || output.TopLevelDigest != baseResolutionTestRoot {
-		t.Fatalf("Build() output = %#v", outputField.Interface())
-	}
-	evidence, ok := evidenceField.Interface().(BaseResolutionEvidence)
-	if !ok || evidence.JSON() == "" {
-		t.Fatalf("Build() evidence = %#v", evidenceField.Interface())
+	if result.BaseResolution.JSON() == "" {
+		t.Fatalf("Build() evidence = %#v", result.BaseResolution)
 	}
 	if _, err := os.Stat(captureDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("capture directory survived successful Build(): %v", err)
@@ -1207,10 +1208,10 @@ func TestNativeBuildFixtureExecutesRootlessBuildKitInExactCgroup(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("Build() error = %v", result.err)
 	}
-	if result.output.TopLevelDigest == "" || result.output.FileSHA256 == "" || result.output.Architecture != runtime.GOARCH {
+	if result.output.Output.TopLevelDigest == "" || result.output.Output.FileSHA256 == "" || result.output.Output.Architecture != runtime.GOARCH || result.output.BaseResolution.JSON() == "" {
 		t.Fatalf("unexpected OCI output: %#v", result.output)
 	}
-	assertOCIOutputContainsNativeRunProof(t, result.output.Path)
+	assertOCIOutputContainsNativeRunProof(t, result.output.Output.Path)
 	assertNoForbiddenHostSocketFDs(t, cgroupPath)
 
 	if err := executor.Close(ctx); err != nil {
@@ -1224,7 +1225,7 @@ func TestNativeBuildFixtureExecutesRootlessBuildKitInExactCgroup(t *testing.T) {
 }
 
 type nativeBuildResult struct {
-	output OCIOutput
+	output BuildResult
 	err    error
 }
 

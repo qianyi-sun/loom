@@ -1284,18 +1284,19 @@ func (e *fakeOrchestratorExecutor) Start(ctx context.Context) error {
 	return nil
 }
 
-func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildComponent) (OCIOutput, error) {
+func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildComponent) (BuildResult, error) {
 	e.h.events = append(e.h.events, "build:"+component.Name)
 	if e.blockBuild != nil {
-		return e.blockBuild(ctx, component.Name)
+		output, err := e.blockBuild(ctx, component.Name)
+		return BuildResult{Output: output}, err
 	}
 	if err := e.buildErr[component.Name]; err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
 	if e.afterBuild != nil {
 		e.afterBuild(component.Name)
 	}
-	return e.outputs[component.Name], nil
+	return BuildResult{Output: e.outputs[component.Name]}, nil
 }
 
 func (e *fakeOrchestratorExecutor) Close(ctx context.Context) error {

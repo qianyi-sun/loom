@@ -40,6 +40,13 @@ type BuildComponent struct {
 	Dockerfile string
 }
 
+// BuildResult keeps archive contents separate from same-solve evidence while
+// remaining comparable for immutable orchestration snapshots.
+type BuildResult struct {
+	Output         OCIOutput
+	BaseResolution BaseResolutionEvidence
+}
+
 type Executor struct {
 	config Config
 	// capabilities contains borrowed guard-transferred descriptors. Executor uses
@@ -227,32 +234,21 @@ func (e *Executor) Start(ctx context.Context) (err error) {
 	return nil
 }
 
-func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOutput, err error) {
+func (e *Executor) Build(ctx context.Context, component BuildComponent) (result BuildResult, err error) {
 	if e == nil || !e.started {
-		return OCIOutput{}, errors.New("executor not started")
+		return BuildResult{}, errors.New("executor not started")
 	}
 	if err := validateBuildComponent(component); err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
 	if !e.planContainsComponent(component.Name) {
-		return OCIOutput{}, errors.New("build component not in plan")
+		return BuildResult{}, errors.New("build component not in plan")
 	}
 	outputDir := filepath.Join(e.jobRoot, "oci")
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
 	outputPath := filepath.Join(outputDir, component.Name+".tar")
-	captureDir, err := os.MkdirTemp(e.jobRoot, ".build-capture-")
-	if err != nil {
-		return OCIOutput{}, err
-	}
-	defer func() {
-		if cleanupErr := os.RemoveAll(captureDir); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup build capture: %w", cleanupErr))
-		}
-	}()
-	refPath := filepath.Join(captureDir, "solve-ref")
-	metadataPath := filepath.Join(captureDir, "metadata.json")
 	cleanupOutput := true
 	defer func() {
 		if cleanupOutput {
@@ -261,6 +257,19 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOu
 			}
 		}
 	}()
+	captureName, captureDir, captureFD, err := createBuildCaptureDirectory(e.capabilities.JobDirectoryFD, e.jobRoot)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	defer func() {
+		if cleanupErr := cleanupBuildCapture(e.capabilities.JobDirectoryFD, captureFD, captureName, captureDir); cleanupErr != nil {
+			result = BuildResult{}
+			cleanupOutput = true
+			err = errors.Join(err, fmt.Errorf("cleanup build capture: %w", cleanupErr))
+		}
+	}()
+	refPath := filepath.Join(captureDir, "solve-ref")
+	metadataPath := filepath.Join(captureDir, "metadata.json")
 	platform := "linux/" + e.plan.Architecture
 	argv := []string{
 		"--addr", e.buildkitAddress,
@@ -278,17 +287,99 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOu
 	}
 	env := []string{"LANG=C.UTF-8", "TZ=UTC", "BUILDKIT_HOST=" + e.buildkitAddress}
 	if err := executorRunBuildctl(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD); err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
 	output, err := executorValidateOCIOutput(outputPath, platform)
 	if err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
-	if _, err := os.ReadFile(refPath); err != nil {
-		return OCIOutput{}, errBaseResolutionInvalid
+	ref, err := readBoundedBuildCapture(captureFD, "solve-ref", 128)
+	if err != nil || len(ref) == 0 {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
+	metadata, err := readBoundedBuildCapture(captureFD, "metadata.json", maxBuildMetadataBytes)
+	if err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
+	evidence, err := parseBaseResolutionMetadata(metadata, string(ref), platform, output.TopLevelDigest)
+	if err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
 	}
 	cleanupOutput = false
-	return output, nil
+	return BuildResult{Output: output, BaseResolution: evidence}, nil
+}
+
+func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, string, int, error) {
+	id, err := newUUID()
+	if err != nil {
+		return "", "", -1, err
+	}
+	name := ".build-capture-" + id
+	if err := syscall.Mkdirat(jobFD, name, 0o700); err != nil {
+		return "", "", -1, err
+	}
+	path := filepath.Join(jobRoot, name)
+	fd, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		_ = os.Remove(path)
+		return "", "", -1, err
+	}
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(fd, &statValue); err != nil ||
+		statValue.Mode&syscall.S_IFMT != syscall.S_IFDIR ||
+		os.FileMode(statValue.Mode).Perm() != 0o700 ||
+		statValue.Uid != uint32(os.Geteuid()) {
+		syscall.Close(fd)
+		_ = os.Remove(path)
+		if err != nil {
+			return "", "", -1, err
+		}
+		return "", "", -1, errors.New("build capture directory invalid")
+	}
+	return name, path, fd, nil
+}
+
+func readBoundedBuildCapture(dirFD int, name string, maxBytes int) ([]byte, error) {
+	if dirFD < 0 || (name != "solve-ref" && name != "metadata.json") || maxBytes <= 0 {
+		return nil, errBaseResolutionInvalid
+	}
+	fd, err := syscall.Openat(dirFD, name, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errBaseResolutionInvalid
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		syscall.Close(fd)
+		return nil, errBaseResolutionInvalid
+	}
+	defer file.Close()
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(fd, &statValue); err != nil ||
+		statValue.Mode&syscall.S_IFMT != syscall.S_IFREG ||
+		statValue.Size < 0 || statValue.Size > int64(maxBytes) {
+		return nil, errBaseResolutionInvalid
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
+	if err != nil || len(payload) > maxBytes {
+		return nil, errBaseResolutionInvalid
+	}
+	return payload, nil
+}
+
+func cleanupBuildCapture(jobFD int, captureFD int, name string, path string) error {
+	var errs []error
+	for _, leaf := range []string{"solve-ref", "metadata.json"} {
+		if err := syscall.Unlinkat(captureFD, leaf); err != nil && !errors.Is(err, syscall.ENOENT) {
+			errs = append(errs, err)
+		}
+	}
+	if err := syscall.Close(captureFD); err != nil {
+		errs = append(errs, err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (e *Executor) Close(ctx context.Context) error {

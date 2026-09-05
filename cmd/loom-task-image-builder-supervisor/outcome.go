@@ -22,8 +22,9 @@ const (
 var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 type BuiltComponent struct {
-	Name   string
-	Output OCIOutput
+	Name           string
+	Output         OCIOutput
+	BaseResolution BaseResolutionEvidence
 }
 
 type BuiltComponentSet struct {
