@@ -6,10 +6,10 @@
   "supervisor_relative_path": "bin/loom-task-builder-supervisor",
   "guard_release": {
     "path": "deploy/task-image-builder/guard-release-v1.json",
-    "sha256": "a38d1759e8acc86f98e5d3b9868c12b4934e1db892ba3128797a4ffedbe42102",
+    "sha256": "2cb99babb23b269d294d31ef3ff68831655c42381fbcc79a2a966404850d142d",
     "bundle_sha256": {
-      "x86_64": "67b2173c91bf56327b27c146d514001460e747c9bdb6e0eff8b6f6d783d8cc4f",
-      "aarch64": "c4a53d02c79f44d3a3a1eb274c181f1cc8a3aef180ba6fc6bbeb2575c4741bd6"
+      "x86_64": "adcfa7cf8634cb7d27128e24137b3ec9170b48d5d434406244f317ba4cff0f92",
+      "aarch64": "a0b990de58efddedbbfe91322f507c2c48b1e4da9566d8e06fb54b8ee7e6e753"
     }
   },
   "host_release": {
