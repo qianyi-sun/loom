@@ -303,10 +303,11 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             privileges = await connection.execute(
                 "SELECT has_database_privilege(%s, 'loom', 'CONNECT'), "
                 "has_database_privilege(%s, 'loom', 'CREATE'), "
+                "has_database_privilege(%s, 'loom', 'TEMPORARY'), "
                 "has_database_privilege(%s, 'loom', 'CREATE')",
-                (migrator, migrator, owner),
+                (migrator, migrator, migrator, owner),
             )
-            assert await privileges.fetchone() == (False, False, False)
+            assert await privileges.fetchone() == (False, False, False, False)
             sessions = await connection.execute(
                 "SELECT count(*) FROM pg_stat_activity WHERE usename = %s",
                 (migrator,),
@@ -321,8 +322,25 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             assert details["active_migrator_sessions"] == 0
             assert details["database_privileges"] == {
                 "migrator_acl_count": 0,
+                "migrator_connect": False,
+                "migrator_create": False,
+                "migrator_temporary": False,
                 "owner_create": False,
             }
+            await connection.execute("GRANT CONNECT ON DATABASE loom TO PUBLIC")
+            public_details_result = await connection.execute(
+                capacity_database_component_module._DETAIL_SQL
+            )
+            public_details_row = await public_details_result.fetchone()
+            assert public_details_row is not None
+            assert public_details_row[0]["database_privileges"] == {
+                "migrator_acl_count": 0,
+                "migrator_connect": True,
+                "migrator_create": False,
+                "migrator_temporary": False,
+                "owner_create": False,
+            }
+            await connection.execute("REVOKE CONNECT ON DATABASE loom FROM PUBLIC")
             assert details["roles"][migrator]["credential_validity"] == "infinite"
             for role in (agent, observer, runtime):
                 assert details["roles"][role]["credential_validity"] == "infinite"

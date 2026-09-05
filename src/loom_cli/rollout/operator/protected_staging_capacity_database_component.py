@@ -50,6 +50,7 @@ _QUERY_TIMEOUT_SECONDS = 30.0
 _MUTATION_TIMEOUT_SECONDS = 60.0
 _WAIT_TIMEOUT_SECONDS = 660.0
 _WAIT_SLICE_SECONDS = 5
+_CLEANUP_PATCH_ATTEMPTS = 3
 _PEER_PSQL_COMMAND = (
     "kubectl",
     "--namespace",
@@ -175,6 +176,15 @@ _DETAIL_SQL = single_line_sql(
             JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
             WHERE grantee.rolname = 'loom_cap_staging_migrator'
           ),
+          'migrator_connect', pg_catalog.has_database_privilege(
+            'loom_cap_staging_migrator', 'loom', 'CONNECT'
+          ),
+          'migrator_create', pg_catalog.has_database_privilege(
+            'loom_cap_staging_migrator', 'loom', 'CREATE'
+          ),
+          'migrator_temporary', pg_catalog.has_database_privilege(
+            'loom_cap_staging_migrator', 'loom', 'TEMPORARY'
+          ),
           'owner_create', pg_catalog.has_database_privilege(
             'loom_cap_staging_owner', 'loom', 'CREATE'
           )
@@ -288,6 +298,87 @@ def _manifest_resources(manifest: bytes) -> dict[str, dict[str, object]]:
     if set(resources) != {"Secret", "Job"}:
         raise ValueError("protected staging capacity database manifest is invalid")
     return resources
+
+
+def _pop_exact(mapping: dict[str, object], key: str, value: object) -> None:
+    if mapping.get(key) == value:
+        mapping.pop(key)
+
+
+def _resource_projection(document: Mapping[str, object]) -> dict[str, object]:
+    """Remove only API/controller fields whose exact defaults are independently known."""
+
+    value = copy.deepcopy(dict(document))
+    value.pop("status", None)
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        return value
+    uid = metadata.get("uid")
+    name = metadata.get("name")
+    for field in (
+        "creationTimestamp",
+        "generation",
+        "managedFields",
+        "resourceVersion",
+        "uid",
+    ):
+        metadata.pop(field, None)
+    labels = metadata.get("labels")
+    if isinstance(labels, dict):
+        labels.pop(_CLEANUP_LABEL, None)
+    if value.get("kind") != "Job":
+        return value
+
+    spec = value.get("spec")
+    if not isinstance(spec, dict):
+        return value
+    for spec_field, spec_default in (
+        ("completionMode", "NonIndexed"),
+        ("manualSelector", False),
+        ("podReplacementPolicy", "TerminatingOrFailed"),
+        ("suspend", False),
+    ):
+        _pop_exact(spec, spec_field, spec_default)
+    if isinstance(uid, str):
+        _pop_exact(
+            spec,
+            "selector",
+            {"matchLabels": {"batch.kubernetes.io/controller-uid": uid}},
+        )
+    template = spec.get("template")
+    if not isinstance(template, dict):
+        return value
+    template_metadata = template.get("metadata")
+    template_labels = (
+        template_metadata.get("labels") if isinstance(template_metadata, dict) else None
+    )
+    if isinstance(template_labels, dict) and isinstance(uid, str) and isinstance(name, str):
+        for label_field, label_default in (
+            ("batch.kubernetes.io/controller-uid", uid),
+            ("batch.kubernetes.io/job-name", name),
+            ("controller-uid", uid),
+            ("job-name", name),
+        ):
+            _pop_exact(template_labels, label_field, label_default)
+    pod_spec = template.get("spec")
+    if not isinstance(pod_spec, dict):
+        return value
+    for pod_field, pod_default in (
+        ("dnsPolicy", "ClusterFirst"),
+        ("schedulerName", "default-scheduler"),
+        ("terminationGracePeriodSeconds", 30),
+    ):
+        _pop_exact(pod_spec, pod_field, pod_default)
+    for container_field in ("containers", "initContainers"):
+        containers = pod_spec.get(container_field)
+        if not isinstance(containers, list):
+            continue
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            _pop_exact(container, "terminationMessagePath", "/dev/termination-log")
+            _pop_exact(container, "terminationMessagePolicy", "File")
+    return value
 
 
 def _job_failed(status: Mapping[str, object]) -> bool:
@@ -430,15 +521,56 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             raise RuntimeError("protected staging capacity database did not converge")
 
     def _compensate_bootstrap(self, plan: FinalGatePlan, manifest: bytes) -> None:
-        self._disable_transient_credentials(preserve_runtime_credentials=False)
-        self._terminate_transient_sessions(preserve_runtime_credentials=False)
-        self._delete_bootstrap_resources(plan, manifest, kinds=("Job",))
+        credentials_disabled = self._attempt_compensation_phase(
+            lambda: self._disable_transient_credentials(preserve_runtime_credentials=False)
+        )
+        self._attempt_compensation_phase(
+            lambda: self._terminate_transient_sessions(preserve_runtime_credentials=False)
+        )
+        self._attempt_compensation_phase(
+            lambda: self._delete_bootstrap_resources(plan, manifest, kinds=("Job",))
+        )
+
+        credentials_disabled = (
+            self._attempt_compensation_phase(
+                lambda: self._disable_transient_credentials(preserve_runtime_credentials=False)
+            )
+            or credentials_disabled
+        )
+        sessions_terminated = self._attempt_compensation_phase(
+            lambda: self._terminate_transient_sessions(preserve_runtime_credentials=False)
+        )
+        job_stopped = self._attempt_compensation_phase(
+            lambda: self._delete_bootstrap_resources(plan, manifest, kinds=("Job",))
+        )
+        unresolved = [
+            phase
+            for phase, confirmed in (
+                ("credentials", credentials_disabled),
+                ("sessions", sessions_terminated),
+                ("job", job_stopped),
+            )
+            if not confirmed
+        ]
+        if unresolved:
+            raise RuntimeError(
+                "protected staging capacity database compensation could not confirm safe "
+                f"shutdown: {','.join(unresolved)}"
+            ) from None
         self._remove_transient_authority()
         self._verify_transient_authority_sealed(
             preserve_runtime_credentials=False,
             durable_runtime_credentials=True,
         )
         self._delete_bootstrap_resources(plan, manifest, kinds=("Secret",))
+
+    @staticmethod
+    def _attempt_compensation_phase(operation: Callable[[], None]) -> bool:
+        try:
+            operation()
+        except Exception:
+            return False
+        return True
 
     def _snapshot(
         self,
@@ -508,7 +640,13 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             "active_migrator_sessions": 0,
             "agent_role": "loom_cap_staging_agent",
             "authority": expected_fence.model_dump(mode="json"),
-            "database_privileges": {"migrator_acl_count": 0, "owner_create": False},
+            "database_privileges": {
+                "migrator_acl_count": 0,
+                "migrator_connect": False,
+                "migrator_create": False,
+                "migrator_temporary": False,
+                "owner_create": False,
+            },
             "registration": expected_registration.model_dump(mode="json"),
             "roles": _expected_roles(
                 runtime_credential_validity=(
@@ -587,7 +725,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         self,
         manifest: bytes,
     ) -> tuple[dict[str, dict[str, object]], str, bool]:
-        _manifest_resources(manifest)
+        expected = _manifest_resources(manifest)
         inventory = self.runner.capture_stdout(
             (
                 "kubectl",
@@ -683,6 +821,11 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         )
         if not observed:
             return observed, evidence_digest, True
+        if any(
+            _resource_projection(item) != _resource_projection(expected[kind])
+            for kind, item in observed.items()
+        ):
+            return observed, evidence_digest, False
         comparison_manifest = _manifest_with_observed_cleanup_labels(manifest, observed)
         status = self.runner.run_status(
             (
@@ -714,38 +857,20 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             raise ValueError("protected staging capacity database cleanup target is invalid")
         observed = self._observed_bootstrap_resources(manifest)
         cleanup_token = secrets.token_urlsafe(32)
+        labelled: set[str] = set()
         for kind in kinds:
             item = observed.get(kind)
             if item is None:
                 continue
-            metadata = item["metadata"]
-            assert isinstance(metadata, dict)
-            patch = [
-                {"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
-                {
-                    "op": "test",
-                    "path": "/metadata/resourceVersion",
-                    "value": metadata["resourceVersion"],
-                },
-                {"op": "add", "path": _CLEANUP_LABEL_PATH, "value": cleanup_token},
-            ]
-            self.runner.run_checked(
-                (
-                    "kubectl",
-                    "--namespace",
-                    _NAMESPACE,
-                    "patch",
-                    f"{kind.lower()}/{_NAME}",
-                    "--type=json",
-                    "--patch-file=-",
-                    f"--request-timeout={_REQUEST_TIMEOUT}",
-                ),
-                env=self.runner.environment,
-                input_payload=json.dumps(patch, sort_keys=True).encode("utf-8"),
-                timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
-            )
+            if self._label_bootstrap_resource_for_cleanup(
+                kind=kind,
+                item=item,
+                cleanup_token=cleanup_token,
+                manifest=manifest,
+            ):
+                labelled.add(kind)
         for kind in kinds:
-            if kind not in observed:
+            if kind not in labelled:
                 continue
             argv = [
                 "kubectl",
@@ -770,6 +895,60 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             raise RuntimeError(
                 "protected staging capacity database bootstrap cleanup was not exact"
             )
+
+    def _label_bootstrap_resource_for_cleanup(
+        self,
+        *,
+        kind: str,
+        item: dict[str, object],
+        cleanup_token: str,
+        manifest: bytes,
+    ) -> bool:
+        metadata = item["metadata"]
+        assert isinstance(metadata, dict)
+        original_uid = metadata["uid"]
+        for _attempt in range(_CLEANUP_PATCH_ATTEMPTS):
+            patch = [
+                {"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
+                {
+                    "op": "test",
+                    "path": "/metadata/resourceVersion",
+                    "value": metadata["resourceVersion"],
+                },
+                {"op": "add", "path": _CLEANUP_LABEL_PATH, "value": cleanup_token},
+            ]
+            try:
+                self.runner.run_checked(
+                    (
+                        "kubectl",
+                        "--namespace",
+                        _NAMESPACE,
+                        "patch",
+                        f"{kind.lower()}/{_NAME}",
+                        "--type=json",
+                        "--patch-file=-",
+                        f"--request-timeout={_REQUEST_TIMEOUT}",
+                    ),
+                    env=self.runner.environment,
+                    input_payload=json.dumps(patch, sort_keys=True).encode("utf-8"),
+                    timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+                )
+                return True
+            except Exception:
+                refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+                if refreshed is None:
+                    return False
+                refreshed_metadata = refreshed["metadata"]
+                assert isinstance(refreshed_metadata, dict)
+                if refreshed_metadata["uid"] != original_uid:
+                    raise RuntimeError(
+                        "protected staging capacity database bootstrap identity changed "
+                        "during cleanup"
+                    ) from None
+                metadata = refreshed_metadata
+        raise RuntimeError(
+            "protected staging capacity database bootstrap cleanup patch did not stabilize"
+        ) from None
 
     def _observed_bootstrap_resources(
         self,
@@ -1146,6 +1325,7 @@ DECLARE
     granted_name text;
     member_name text;
 BEGIN
+    REVOKE ALL PRIVILEGES ON DATABASE loom FROM PUBLIC;
     IF EXISTS (
         SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_migrator'
     ) THEN
@@ -1286,6 +1466,15 @@ BEGIN
             JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
             WHERE database.datname = 'loom'
               AND grantee.rolname = 'loom_cap_staging_migrator'
+        )
+        OR pg_catalog.has_database_privilege(
+            'loom_cap_staging_migrator', 'loom', 'CONNECT'
+        )
+        OR pg_catalog.has_database_privilege(
+            'loom_cap_staging_migrator', 'loom', 'CREATE'
+        )
+        OR pg_catalog.has_database_privilege(
+            'loom_cap_staging_migrator', 'loom', 'TEMPORARY'
         )
         OR pg_catalog.has_database_privilege(
             'loom_cap_staging_owner', 'loom', 'CREATE'
