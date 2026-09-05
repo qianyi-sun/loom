@@ -628,7 +628,7 @@ def _is_exact_not_found(
         if kind == "network"
         else f"Error response from daemon: No such container: {name}\n"
     )
-    return result.returncode == 1 and result.stdout == "" and result.stderr == expected
+    return result.returncode == 1 and result.stdout in {"", "[]\n"} and result.stderr == expected
 
 
 def _inspect_owned_create(
