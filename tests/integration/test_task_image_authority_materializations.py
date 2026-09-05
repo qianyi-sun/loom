@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,6 +23,7 @@ from loom.db.schema import (
     TaskImagePublicationEvidence,
 )
 from loom.task_image_materialization import task_image_materialization_key
+from loom_control_plane import task_image_materializations as legacy_materializations
 from loom_task_image_authority.contracts import TaskImageSessionRenewalV1
 from loom_task_image_authority.materializations import (
     TaskImageSessionMaterializationAuthorizationError,
@@ -203,6 +205,68 @@ async def _attempt(
             )
         )
     ).one()
+
+
+@pytest.mark.parametrize("counter_matches_attempt", [False, True])
+async def test_legacy_completion_cannot_publish_a_session_bound_rootless_attempt(
+    authority_materialization_session: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    counter_matches_attempt: bool,
+) -> None:
+    monkeypatch.setattr(
+        legacy_materializations,
+        "datetime",
+        SimpleNamespace(now=lambda _: NOW + timedelta(seconds=12)),
+    )
+    async with authority_materialization_session() as session:
+        authorization, *_ = await _active_authorization(session)
+        await _queued_materialization(session)
+        claimed = await claim_session_materialization(
+            session,
+            authorization=authorization,
+            claim_id=CLAIM_ID,
+            now=NOW + timedelta(seconds=10),
+            lease_seconds=300,
+        )
+        assert claimed is not None
+        row, _plan = claimed
+        attempt = await _attempt(session)
+        await start_session_materialization(
+            session,
+            authorization=authorization,
+            materialization_id=row.id,
+            attempt_id=attempt.id,
+            lease_epoch=row.lease_epoch,
+            operation_id=START_ID,
+            now=NOW + timedelta(seconds=11),
+        )
+        # Failure-budget counters are not an authorization fence. Prove the
+        # denial even if that counter happens to match the rootless attempt.
+        if counter_matches_attempt:
+            row.attempt_count = attempt.attempt_number
+            await session.flush()
+        owner, lease = row.claimed_by, row.lease_expires_at
+        assert owner is not None
+        with pytest.raises(
+            legacy_materializations.TaskImageCompletionError,
+            match="rootless attempts require verified publication",
+        ):
+            await legacy_materializations.complete_task_image_materialization(
+                session,
+                materialization_id=row.id,
+                builder_id=owner,
+                lease_epoch=row.lease_epoch,
+                registry_images={"task": "registry.example/task@sha256:" + "a" * 64},
+            )
+        assert row.state == "running"
+        assert row.ready_at is None
+        assert row.registry_images == {}
+        assert row.claimed_by == owner
+        assert row.lease_expires_at == lease
+        assert (
+            await session.scalar(select(func.count()).select_from(TaskImagePublicationEvidence))
+            == 0
+        )
 
 
 async def test_claim_is_session_derived_and_exactly_replayable(

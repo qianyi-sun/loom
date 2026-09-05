@@ -94,6 +94,12 @@ fresh fetch; test migration upgrade, downgrade and constraints.
 Create `publication_store.py` and `publication_worker.py`, with PostgreSQL
 integration tests; extend schema/migration from Task 3 with job/receipt bindings.
 
+Partial implementation evidence: legacy completion now rejects grant-bound
+rootless attempts using the current persisted lease/attempt identity, not a
+builder-name prefix or failure-budget counter. 52 materialization/session/route
+integration tests passed, including ordinary Phase 1 completion. Durable jobs,
+the verifier worker and signed atomic readiness are still pending.
+
 - [ ] Test snapshot creation/replay, unique complete candidate sets and leased
   worker generation claims under real concurrent transactions.
 - [ ] Implement snapshot/read/commit using existing session/lease lock helpers.

@@ -395,6 +395,20 @@ async def complete_task_image_materialization(
         allowed_states=("running",),
         now=now,
     )
+    # The current immutable attempt, not a caller-controlled builder-name
+    # prefix or a failure-budget counter, determines publication authority.
+    # Keep materialization -> attempt ordering; this path never waits for the
+    # earlier publication epoch/key/grant locks used by verified completion.
+    current_attempt = await session.scalar(
+        select(TaskImageMaterializationAttempt)
+        .where(
+            TaskImageMaterializationAttempt.materialization_id == row.id,
+            TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+        )
+        .with_for_update()
+    )
+    if current_attempt is not None and current_attempt.grant_id is not None:
+        raise TaskImageCompletionError("rootless attempts require verified publication")
     try:
         registry_images = validate_task_image_registry_images(
             registry_images,
