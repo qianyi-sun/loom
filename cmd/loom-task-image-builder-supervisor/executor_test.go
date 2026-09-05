@@ -441,7 +441,7 @@ func TestExecutorBuildReturnsMatchingBaseResolutionEvidenceAndCleansCapture(t *t
 func TestExecutorBuildRejectsInvalidCaptureFilesAndRemovesOCIOutput(t *testing.T) {
 	for _, name := range []string{
 		"missing ref", "missing metadata", "wrong ref binding", "wrong platform binding", "wrong output binding",
-		"malformed metadata", "oversized ref", "oversized metadata", "symlink ref", "symlink metadata", "fifo ref", "fifo metadata",
+		"malformed metadata", "oversized ref", "oversized metadata", "non-private directory", "symlink ref", "symlink metadata", "fifo ref", "fifo metadata",
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture, executor, component := newStartedCaptureExecutor(t)
@@ -497,6 +497,11 @@ func TestExecutorBuildRejectsInvalidCaptureFilesAndRemovesOCIOutput(t *testing.T
 				}
 				if metadata != nil && name != "symlink metadata" && name != "fifo metadata" {
 					if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if name == "non-private directory" {
+					if err := os.Chmod(filepath.Dir(refPath), 0o755); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -599,7 +604,7 @@ func TestExecutorBuildCleanupFailureReturnsZeroAndRemovesOCIOutput(t *testing.T)
 		if err := os.WriteFile(metadataPath, baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(captureDir, "unexpected"), []byte("force nonempty cleanup"), 0o600); err != nil {
+		if err := os.Chmod(fixture.jobRoot, 0o500); err != nil {
 			t.Fatal(err)
 		}
 		return nil
@@ -612,6 +617,9 @@ func TestExecutorBuildCleanupFailureReturnsZeroAndRemovesOCIOutput(t *testing.T)
 	}
 
 	result, err := executor.Build(context.Background(), component)
+	if chmodErr := os.Chmod(fixture.jobRoot, 0o755); chmodErr != nil {
+		t.Fatalf("restore job directory mode: %v", chmodErr)
+	}
 	if err == nil || result != (BuildResult{}) || !strings.Contains(err.Error(), "cleanup build capture") {
 		t.Fatalf("cleanup failure returned result=%#v error=%v", result, err)
 	}

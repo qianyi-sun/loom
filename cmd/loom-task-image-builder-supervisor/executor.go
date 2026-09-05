@@ -293,6 +293,9 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 	if err != nil {
 		return BuildResult{}, err
 	}
+	if err := validateBuildCaptureDirectory(captureFD); err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
 	ref, err := readBoundedBuildCapture(captureFD, "solve-ref", 128)
 	if err != nil || len(ref) == 0 {
 		return BuildResult{}, errBaseResolutionInvalid
@@ -321,22 +324,29 @@ func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, int, error)
 	path := filepath.Join(jobRoot, name)
 	fd, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		_ = os.Remove(path)
-		return "", -1, err
+		return "", -1, errors.Join(err, os.Remove(path))
+	}
+	if err := validateBuildCaptureDirectory(fd); err != nil {
+		return "", -1, errors.Join(err, cleanupBuildCapture(fd, path))
+	}
+	return path, fd, nil
+}
+
+func validateBuildCaptureDirectory(fd int) error {
+	if fd < 0 {
+		return errors.New("build capture directory invalid")
 	}
 	var statValue syscall.Stat_t
 	if err := syscall.Fstat(fd, &statValue); err != nil ||
 		statValue.Mode&syscall.S_IFMT != syscall.S_IFDIR ||
 		os.FileMode(statValue.Mode).Perm() != 0o700 ||
 		statValue.Uid != uint32(os.Geteuid()) {
-		syscall.Close(fd)
-		_ = os.Remove(path)
 		if err != nil {
-			return "", -1, err
+			return err
 		}
-		return "", -1, errors.New("build capture directory invalid")
+		return errors.New("build capture directory invalid")
 	}
-	return path, fd, nil
+	return nil
 }
 
 func readBoundedBuildCapture(dirFD int, name string, maxBytes int) ([]byte, error) {
@@ -376,7 +386,7 @@ func cleanupBuildCapture(captureFD int, path string) error {
 	if err := syscall.Close(captureFD); err != nil {
 		errs = append(errs, err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.RemoveAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
