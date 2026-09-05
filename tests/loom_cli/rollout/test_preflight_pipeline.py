@@ -113,6 +113,7 @@ def _registry(
     *,
     failed_check: str | None = None,
     calls: list[str] | None = None,
+    freshness_ttls: dict[str, int] | None = None,
 ) -> PreflightRegistry:
     manifest = load_coverage_manifest()
     checks: list[RegisteredCheck] = []
@@ -147,7 +148,7 @@ def _registry(
                     input_keys=(f"input.{entry.check_id}",),
                     evidence_schema=(EvidenceField("result", "string"),),
                     timeout_seconds=10,
-                    freshness_ttl_seconds=300,
+                    freshness_ttl_seconds=(freshness_ttls or {}).get(entry.check_id, 300),
                     remediation="restore the exact declared test preflight invariant",
                     secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
                     final_only_justification=entry.final_only_justification,
@@ -218,6 +219,52 @@ def test_pipeline_completes_only_deferred_execution_prerequisite(
         for execution in rehearsal.executions
         if execution.check_id != "execution.prerequisites"
     }
+
+
+def test_pipeline_refreshes_expired_authority_before_deferred_execution(
+    tmp_path: Path,
+) -> None:
+    """Catch rejecting an expired prior check instead of refreshing it."""
+    calls: list[str] = []
+    freshness_ttls = {"docker.runtime": 60}
+    registry = _registry(
+        failed_check="execution.prerequisites",
+        calls=calls,
+        freshness_ttls=freshness_ttls,
+    )
+    now = [datetime(2026, 7, 19, 10, tzinfo=UTC)]
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: now[0],
+    )
+    context = _context(registry)
+    rehearsal = pipeline.rehearse(context=context)
+    prior = {execution.check_id: execution for execution in rehearsal.executions}
+
+    now[0] += timedelta(seconds=61)
+    calls.clear()
+    late_registry = _registry(calls=calls, freshness_ttls=freshness_ttls)
+    late_check = next(
+        check for check in late_registry.checks if check.spec.check_id == "execution.prerequisites"
+    )
+    completed = pipeline.complete_deferred_execution(
+        context=context,
+        rehearsal=rehearsal,
+        check=late_check,
+    )
+
+    current = {execution.check_id: execution for execution in completed.executions}
+    assert completed.passed
+    assert set(calls) == {"docker.runtime", "execution.prerequisites"}
+    assert len(calls) == 2
+    assert current["docker.runtime"].started_at == now[0]
+    assert current["docker.runtime"].expires_at > prior["docker.runtime"].expires_at
+    assert all(
+        current[check_id] == execution
+        for check_id, execution in prior.items()
+        if check_id not in {"docker.runtime", "execution.prerequisites"}
+    )
 
 
 def test_pipeline_reports_every_independent_blocker(tmp_path: Path) -> None:
