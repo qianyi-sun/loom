@@ -321,6 +321,43 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 	}
 }
 
+// Break caught: a successful OCI export is accepted without same-build base-resolution capture.
+func TestExecutorBuildRejectsAbsentBaseResolutionCapture(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	component := BuildComponent{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components:   []BuildComponent{component},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4242), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+		return OCIOutput{
+			Path:           path,
+			TopLevelDigest: baseResolutionTestRoot,
+			FileSHA256:     strings.Repeat("b", 64),
+			Architecture:   "amd64",
+			OS:             "linux",
+		}, nil
+	}
+
+	if _, err := executor.Build(context.Background(), component); err == nil {
+		t.Fatal("Build() accepted absent ref and metadata capture")
+	}
+}
+
 func TestExecutorCloseTerminatesDaemonAndRejectsSurvivors(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
