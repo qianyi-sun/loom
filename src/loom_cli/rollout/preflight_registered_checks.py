@@ -1031,7 +1031,11 @@ def build_external_supervisor_predecessor_check(
             # The GB10 adapter propagates this absolute bound across elapsed
             # predecessor work and both possible controller observations.
             timeout_seconds=EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS,
-            freshness_ttl_seconds=120,
+            # This live predecessor is consumed again only after the complete
+            # isolated rehearsal cleanup. Keep it fresh for the same bounded
+            # window as the rehearsal checks; final drift still re-probes the
+            # protected authority before apply.
+            freshness_ttl_seconds=3600,
             remediation=(
                 "restore the checked-in reviewed predecessor or active canonical supervisor "
                 "authority, "
