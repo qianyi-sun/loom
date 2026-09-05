@@ -3151,6 +3151,307 @@ class TaskImageMaterializationOperationEvent(Base):
     recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
+class TaskImageRegistryCredentialGeneration(Base):
+    """Append-only exact-repository registry credential generation."""
+
+    __tablename__ = "task_image_registry_credentials"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+                "grant_id",
+            ],
+            [
+                "task_image_materialization_attempts.id",
+                "task_image_materialization_attempts.materialization_id",
+                "task_image_materialization_attempts.attempt_number",
+                "task_image_materialization_attempts.lease_epoch",
+                "task_image_materialization_attempts.builder_id",
+                "task_image_materialization_attempts.grant_id",
+            ],
+            name="task_image_registry_credentials_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_registry_credentials_session_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "attestation_generation"],
+            [
+                "task_image_build_containment_attestations.grant_id",
+                "task_image_build_containment_attestations.generation",
+            ],
+            name="task_image_registry_credentials_attestation_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["predecessor_credential_id"],
+            ["task_image_registry_credentials.credential_id"],
+            name="task_image_registry_credentials_predecessor_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["lease_heartbeat_operation_id"],
+            ["task_image_materialization_operation_events.operation_id"],
+            name="task_image_registry_credentials_heartbeat_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "request_id",
+            name="task_image_registry_credentials_request_uidx",
+        ),
+        UniqueConstraint(
+            "materialization_attempt_id",
+            "component",
+            "generation",
+            name="task_image_registry_credentials_component_generation_uidx",
+        ),
+        UniqueConstraint(
+            "credential_id",
+            "materialization_attempt_id",
+            "component",
+            "repository",
+            name="task_image_registry_credentials_candidate_binding_uidx",
+        ),
+        CheckConstraint(
+            "credential_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND request_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND materialization_attempt_id <> "
+            "'00000000-0000-0000-0000-000000000000'::uuid "
+            "AND materialization_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND attempt_number > 0 AND lease_epoch > 0 "
+            "AND session_generation > 0 AND attestation_generation > 0 "
+            "AND generation BETWEEN 1 AND 512 "
+            "AND component ~ '^(task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$'",
+            name="task_image_registry_credentials_binding_check",
+        ),
+        CheckConstraint(
+            "(generation = 1 AND predecessor_credential_id IS NULL "
+            "AND lease_heartbeat_operation_id IS NULL) OR "
+            "(generation > 1 AND predecessor_credential_id IS NOT NULL "
+            "AND predecessor_credential_id <> credential_id "
+            "AND lease_heartbeat_operation_id IS NOT NULL)",
+            name="task_image_registry_credentials_chain_check",
+        ),
+        CheckConstraint(
+            "attestation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND attestation_sha256 <> repeat('0', 64) "
+            "AND request_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND request_sha256 <> repeat('0', 64) "
+            "AND jsonb_typeof(response_public_json) = 'object' "
+            "AND response_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND response_sha256 <> repeat('0', 64) "
+            "AND octet_length(token_hash) = 32 "
+            "AND registry_key_id ~ '^[A-Za-z0-9_-]{43}$'",
+            name="task_image_registry_credentials_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(repository) BETWEEN 1 AND 255 "
+            "AND repository ~ "
+            "'^loom-task-image-attempts/(x86_64|arm64)/"
+            "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            "[89ab][0-9a-f]{3}-[0-9a-f]{12}/"
+            "(task|sidecar-sha256-[0-9a-f]{64})$' "
+            "AND octet_length(registry_origin) BETWEEN 9 AND 2048 "
+            "AND registry_origin ~ '^https://[^/@?#]+(:[1-9][0-9]{0,4})?$' "
+            "AND registry_service ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$' "
+            "AND registry_issuer ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$'",
+            name="task_image_registry_credentials_registry_check",
+        ),
+        CheckConstraint(
+            "secret_response_ref ~ "
+            "'^loom://task-image-registry-credential/"
+            "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+            "[89ab][0-9a-f]{3}-[0-9a-f]{12}$'",
+            name="task_image_registry_credentials_secret_check",
+        ),
+        CheckConstraint(
+            "issued_at < expires_at "
+            "AND expires_at <= issued_at + INTERVAL '45 seconds' "
+            "AND issued_at <= recorded_at",
+            name="task_image_registry_credentials_time_check",
+        ),
+        Index(
+            "task_image_registry_credentials_expiry_idx",
+            "expires_at",
+            "credential_id",
+        ),
+        Index(
+            "task_image_registry_credentials_renewal_idx",
+            "materialization_attempt_id",
+            "component",
+            text("generation DESC"),
+        ),
+    )
+
+    credential_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attestation_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attestation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    component: Mapped[str] = mapped_column(String(136), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    predecessor_credential_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    lease_heartbeat_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    repository: Mapped[str] = mapped_column(Text, nullable=False)
+    registry_origin: Mapped[str] = mapped_column(Text, nullable=False)
+    registry_service: Mapped[str] = mapped_column(String(128), nullable=False)
+    registry_issuer: Mapped[str] = mapped_column(String(128), nullable=False)
+    registry_key_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    response_public_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    response_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    secret_response_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class TaskImagePublicationCandidate(Base):
+    """Inert immutable upload evidence awaiting independent verification."""
+
+    __tablename__ = "task_image_publication_candidates"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+                "grant_id",
+            ],
+            [
+                "task_image_materialization_attempts.id",
+                "task_image_materialization_attempts.materialization_id",
+                "task_image_materialization_attempts.attempt_number",
+                "task_image_materialization_attempts.lease_epoch",
+                "task_image_materialization_attempts.builder_id",
+                "task_image_materialization_attempts.grant_id",
+            ],
+            name="task_image_publication_candidates_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_publication_candidates_session_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["credential_id", "materialization_attempt_id", "component", "repository"],
+            [
+                "task_image_registry_credentials.credential_id",
+                "task_image_registry_credentials.materialization_attempt_id",
+                "task_image_registry_credentials.component",
+                "task_image_registry_credentials.repository",
+            ],
+            name="task_image_publication_candidates_credential_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            name="task_image_publication_candidates_operation_uidx",
+        ),
+        UniqueConstraint(
+            "materialization_attempt_id",
+            "component",
+            name="task_image_publication_candidates_attempt_component_uidx",
+        ),
+        CheckConstraint(
+            "candidate_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND operation_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND credential_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND materialization_attempt_id <> "
+            "'00000000-0000-0000-0000-000000000000'::uuid "
+            "AND materialization_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND attempt_number > 0 AND lease_epoch > 0 "
+            "AND session_generation > 0 "
+            "AND component ~ '^(task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$' "
+            "AND repository ~ "
+            "'^loom-task-image-attempts/(x86_64|arm64)/"
+            "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            "[89ab][0-9a-f]{3}-[0-9a-f]{12}/"
+            "(task|sidecar-sha256-[0-9a-f]{64})$' "
+            "AND platform IN ('linux/amd64', 'linux/arm64')",
+            name="task_image_publication_candidates_binding_check",
+        ),
+        CheckConstraint(
+            "manifest_digest ~ '^sha256:[0-9a-f]{64}$' "
+            "AND manifest_digest <> 'sha256:' || repeat('0', 64) "
+            "AND manifest_size > 0 "
+            "AND oci_file_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oci_file_sha256 <> repeat('0', 64) "
+            "AND oci_file_size > 0",
+            name="task_image_publication_candidates_digest_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(response_json) = 'object' "
+            "AND response_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND response_sha256 <> repeat('0', 64)",
+            name="task_image_publication_candidates_response_check",
+        ),
+        Index(
+            "task_image_publication_candidates_observed_idx",
+            "recorded_at",
+            "candidate_id",
+        ),
+    )
+
+    candidate_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    credential_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    component: Mapped[str] = mapped_column(String(136), nullable=False)
+    repository: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    manifest_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    oci_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    oci_file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    response_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class TaskImagePublicationEvidence(Base):
     """Append-only publication evidence for one exact materialization attempt."""
 

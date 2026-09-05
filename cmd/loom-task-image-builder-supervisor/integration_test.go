@@ -103,6 +103,7 @@ func TestSupervisorCrossLanguageLocalSocketFlow(t *testing.T) {
 	}
 
 	server.wantOperations([]string{"project", "exchange", "claim", "bundle", "start", "release", "claim", "claim", "finish"})
+	server.wantNoOperations([]string{"registry-credential", "publication-candidate", "fail"})
 	if !reflect.DeepEqual(events, []string{"download", "handoff"}) {
 		t.Fatalf("events = %#v, want download/handoff", events)
 	}
@@ -343,6 +344,18 @@ func (s *supervisorFlowServer) wantOperations(want []string) {
 	defer s.mu.Unlock()
 	if !reflect.DeepEqual(s.ops, want) {
 		s.t.Fatalf("guard operations = %#v, want %#v", s.ops, want)
+	}
+}
+
+func (s *supervisorFlowServer) wantNoOperations(forbidden []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, operation := range s.ops {
+		for _, denied := range forbidden {
+			if operation == denied {
+				s.t.Fatalf("guard operation %q occurred in inert publication flow: %#v", denied, s.ops)
+			}
+		}
 	}
 }
 

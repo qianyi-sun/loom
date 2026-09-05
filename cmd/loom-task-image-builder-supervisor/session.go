@@ -57,9 +57,32 @@ func (m *SessionManager) WithCurrent(fn func(*SecretBuffer) error) error {
 	return fn(m.current.Secret)
 }
 
+func (m *SessionManager) WithCurrentEnvelope(fn func(*SessionEnvelope, *SecretBuffer) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == nil || m.current.Secret == nil || m.current.Secret.closed {
+		return errors.New("current session unavailable")
+	}
+	return fn(m.current, m.current.Secret)
+}
+
 func (m *SessionManager) Renew(ctx context.Context) (*SessionEnvelope, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.renewLocked(ctx)
+}
+
+func (m *SessionManager) RenewWithCurrent(ctx context.Context, fn func(*SessionEnvelope, *SecretBuffer) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next, err := m.renewLocked(ctx)
+	if err != nil {
+		return err
+	}
+	return fn(next, next.Secret)
+}
+
+func (m *SessionManager) renewLocked(ctx context.Context) (*SessionEnvelope, error) {
 	if m.current == nil || m.current.Secret == nil || m.current.Secret.closed {
 		return nil, errors.New("current session unavailable")
 	}
@@ -323,6 +346,10 @@ func parseSessionEnvelopeFields(payload []byte) (sessionEnvelopeFields, error) {
 }
 
 func scanJSONObjectFields(payload []byte) (map[string][]byte, error) {
+	// Validate syntax without decoding values or copying secret bytes.
+	if !json.Valid(payload) {
+		return nil, errors.New("JSON payload invalid")
+	}
 	position := skipJSONWhitespace(payload, 0)
 	if position >= len(payload) || payload[position] != '{' {
 		return nil, errors.New("session payload invalid")

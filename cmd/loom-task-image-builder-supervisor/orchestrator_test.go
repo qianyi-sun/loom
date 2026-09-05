@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -392,24 +393,297 @@ func TestOrchestratorSignalCancellationTerminatesActiveExecutorAndFinishes(t *te
 	h.wantOutcome(t, BuildOutcomeCancelled, "cancelled")
 }
 
-// Break caught: disabled publication is mislabeled deterministic and consumes deterministic Fail budget.
-func TestOrchestratorDisabledPublicationIsTransientAndReleases(t *testing.T) {
+// Break caught: publication failures revoke containment or leave BuildKit open
+// while releasing retryable infrastructure work.
+func TestOrchestratorPublicationRetryableFailuresCloseExecutorThenReleaseWithoutFail(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{name: "disabled phase", err: ErrPublicationPhaseUnavailable, reason: "publication_phase_unavailable"},
+		{name: "verification unavailable", err: ErrPublicationVerificationUnavailable, reason: "publication_verification_unavailable"},
+		{name: "registry failure", err: errors.New("registry PRIVATE-TOKEN upload failed"), reason: "publication_failed"},
+		{name: "candidate failure", err: errors.New("candidate PRIVATE-TOKEN ambiguous"), reason: "publication_failed"},
+		{name: "credential failure", err: errors.New("credential PRIVATE-TOKEN unavailable"), reason: "publication_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOrchestratorHarness(t)
+			h.handoff.err = tc.err
+
+			err := h.orchestrator().Run(context.Background())
+			if err == nil {
+				t.Fatal("Run() succeeded, want publication retryable failure")
+			}
+			if strings.Contains(err.Error(), "PRIVATE-TOKEN") {
+				t.Fatalf("Run() leaked raw publication error: %v", err)
+			}
+
+			h.wantEvents(t, []string{
+				"project", "exchange", "claim", "bundle", "download", "start", "executor_start",
+				"build:task", "build:sidecar:cache", "handoff", "executor_close", "release", "caps_close", "finish",
+			})
+			if h.guard.failureKinds != nil {
+				t.Fatalf("Fail called for retryable publication failure: %#v", h.guard.failureKinds)
+			}
+			if !reflect.DeepEqual(h.guard.releaseDeterministicFailureCounts, []int{0}) {
+				t.Fatalf("release deterministic failure counts = %#v, want unchanged zero count", h.guard.releaseDeterministicFailureCounts)
+			}
+			h.wantOutcome(t, BuildOutcomeTransientFailure, tc.reason)
+		})
+	}
+}
+
+// Break caught: the orchestrator calls a credentialed handoff without binding it
+// to the guarded session/claim authority frozen by the successful build.
+func TestOrchestratorInjectsGuardedPublicationCredentialSourceIntoCredentialedHandoff(t *testing.T) {
 	h := newOrchestratorHarness(t)
-	h.handoff.err = ErrPublicationPhaseUnavailable
+	capture := &captureCredentialedPublicationHandoff{
+		expectation: PublicationRegistryExpectation{
+			RegistryOrigin:  "https://registry.example",
+			RegistryService: "registry.example",
+			RegistryIssuer:  "loom-task-image",
+			RegistryKeyID:   strings.Repeat("A", 43),
+		},
+		events: &h.events,
+		err:    ErrPublicationVerificationUnavailable,
+	}
+	h.overrideHandoff = capture
 
 	err := h.orchestrator().Run(context.Background())
 	if err == nil {
-		t.Fatal("Run() succeeded, want disabled publication error")
+		t.Fatal("Run() succeeded, want verification-unavailable retry")
 	}
-
+	if capture.source == nil {
+		t.Fatal("credentialed handoff did not receive a PublicationCredentialSource")
+	}
+	if capture.source.guard != h.guard {
+		t.Fatalf("credential source guard = %#v, want orchestrator guard", capture.source.guard)
+	}
+	wantBinding := PublicationAttemptBinding{
+		GrantID:           testGrantID,
+		MaterializationID: testMaterializationID,
+		AttemptID:         testAttemptID,
+		LeaseEpoch:        1,
+		BuilderID:         "rootless:22222222222242228222222222222222",
+		CPUArch:           "arm64",
+		Platform:          "linux/arm64",
+		RegistryOrigin:    "https://registry.example",
+		RegistryService:   "registry.example",
+		RegistryIssuer:    "loom-task-image",
+		RegistryKeyID:     strings.Repeat("A", 43),
+	}
+	if capture.source.binding != wantBinding {
+		t.Fatalf("credential source binding = %#v, want %#v", capture.source.binding, wantBinding)
+	}
+	if len(capture.set.Components) != 2 || capture.set.Components[0].Name != "task" || capture.set.Components[1].Name != "sidecar:cache" {
+		t.Fatalf("credentialed handoff received non-canonical built set: %#v", capture.set.Components)
+	}
 	h.wantEvents(t, []string{
 		"project", "exchange", "claim", "bundle", "download", "start", "executor_start",
-		"build:task", "build:sidecar:cache", "handoff", "release", "executor_close", "caps_close", "finish",
+		"build:task", "build:sidecar:cache", "credentialed_handoff", "executor_close", "release", "caps_close", "finish",
 	})
-	if h.guard.failureKinds != nil {
-		t.Fatalf("Fail called for disabled publication: %#v", h.guard.failureKinds)
+	h.wantOutcome(t, BuildOutcomeTransientFailure, "publication_verification_unavailable")
+}
+
+// Break caught: the registry handoff resorts attacker-controlled output,
+// records candidates before manifest acknowledgement, returns success in D1, or
+// leaks credential buffers after renewal.
+func TestRegistryPublicationHandoffRecordsCandidatesInCanonicalOrderAndReturnsVerificationUnavailable(t *testing.T) {
+	set := handoffBuiltSet()
+	var events []string
+	guard := newHandoffCredentialGuard(t, &events)
+	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard), guard, validPublicationAttemptBinding())
+	handoff := newTestRegistryPublicationHandoff(&handoffUploader{
+		events:          &events,
+		renewComponents: map[string]bool{"task": true},
+	})
+
+	err := handoff.AcceptWithCredentials(context.Background(), set, source)
+	if !errors.Is(err, ErrPublicationVerificationUnavailable) {
+		t.Fatalf("AcceptWithCredentials() error = %v, want ErrPublicationVerificationUnavailable", err)
 	}
-	h.wantOutcome(t, BuildOutcomeTransientFailure, "publication_phase_unavailable")
+
+	wantEvents := []string{
+		"credential:task:1",
+		"renew",
+		"heartbeat",
+		"credential:task:2",
+		"manifest-ack:task",
+		"candidate:task",
+		"credential:sidecar:db:1",
+		"manifest-ack:sidecar:db",
+		"candidate:sidecar:db",
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", events, wantEvents)
+	}
+	if len(guard.candidateRequests) != 2 {
+		t.Fatalf("candidate requests = %d, want 2", len(guard.candidateRequests))
+	}
+	if got := []string{guard.candidateRequests[0].Component, guard.candidateRequests[1].Component}; !reflect.DeepEqual(got, []string{"task", "sidecar:db"}) {
+		t.Fatalf("candidate components = %#v, want canonical task then sidecar", got)
+	}
+	guard.wantAllSecretsClosed(t)
+}
+
+// Break caught: the upload adapter records a candidate for manifest evidence
+// that does not match the frozen built component/repository.
+func TestRegistryPublicationHandoffRejectsManifestMismatchBeforeCandidateRecord(t *testing.T) {
+	set := handoffBuiltSet()
+	var events []string
+	guard := newHandoffCredentialGuard(t, &events)
+	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard), guard, validPublicationAttemptBinding())
+	handoff := newTestRegistryPublicationHandoff(&handoffUploader{
+		events: &events,
+		mutateManifest: func(manifest *UploadedManifest) {
+			manifest.Repository = "loom-task-image-attempts/arm64/44444444-4444-4444-8444-444444444444/attacker"
+		},
+	})
+
+	err := handoff.AcceptWithCredentials(context.Background(), set, source)
+	if err == nil {
+		t.Fatal("AcceptWithCredentials() succeeded, want manifest mismatch rejection")
+	}
+	if len(guard.candidateRequests) != 0 {
+		t.Fatalf("candidate requests = %#v, want none after manifest mismatch", guard.candidateRequests)
+	}
+	if !reflect.DeepEqual(events, []string{"credential:task:1", "manifest-ack:task"}) {
+		t.Fatalf("events = %#v, want credential then manifest acknowledgement only", events)
+	}
+	guard.wantAllSecretsClosed(t)
+}
+
+// Break caught: the real registry handoff is assembled from ambient production
+// configuration instead of a validated policy directly supplied by tests.
+func TestRegistryPublicationHandoffConstructorBindsValidatedPolicyExpectation(t *testing.T) {
+	server, ca := uploadTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	policy, err := NewRegistryUploadPolicy(server.URL, "test-registry", ca, "example.com")
+	if err != nil {
+		t.Fatalf("NewRegistryUploadPolicy() error = %v", err)
+	}
+
+	handoff, err := NewRegistryPublicationHandoff(policy, "loom-task-image", strings.Repeat("A", 43))
+	if err != nil {
+		t.Fatalf("NewRegistryPublicationHandoff() error = %v", err)
+	}
+	if got := handoff.PublicationRegistryExpectation(); got != (PublicationRegistryExpectation{
+		RegistryOrigin:  server.URL,
+		RegistryService: "test-registry",
+		RegistryIssuer:  "loom-task-image",
+		RegistryKeyID:   strings.Repeat("A", 43),
+	}) {
+		t.Fatalf("PublicationRegistryExpectation() = %#v", got)
+	}
+	if _, err := NewRegistryPublicationHandoff(policy, "issuer with spaces", strings.Repeat("A", 43)); err == nil {
+		t.Fatal("NewRegistryPublicationHandoff() accepted invalid issuer")
+	}
+}
+
+// Break caught: a later upload failure erases the first component's inert
+// candidate side effect or records a candidate for the failed component.
+func TestRegistryPublicationHandoffSecondComponentFailureKeepsOnlyFirstCandidateAndClosesSecrets(t *testing.T) {
+	set := handoffBuiltSet()
+	var events []string
+	guard := newHandoffCredentialGuard(t, &events)
+	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard), guard, validPublicationAttemptBinding())
+	handoff := newTestRegistryPublicationHandoff(&handoffUploader{
+		events:              &events,
+		failBeforeManifest:  "sidecar:db",
+		failWithPrivateText: "registry PRIVATE-TOKEN connection reset",
+	})
+
+	err := handoff.AcceptWithCredentials(context.Background(), set, source)
+	if err == nil {
+		t.Fatal("AcceptWithCredentials() succeeded, want second component failure")
+	}
+	if errors.Is(err, ErrPublicationVerificationUnavailable) {
+		t.Fatalf("AcceptWithCredentials() returned verification sentinel after failed component: %v", err)
+	}
+
+	wantEvents := []string{
+		"credential:task:1",
+		"manifest-ack:task",
+		"candidate:task",
+		"credential:sidecar:db:1",
+		"upload-failed:sidecar:db",
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", events, wantEvents)
+	}
+	if len(guard.candidateRequests) != 1 || guard.candidateRequests[0].Component != "task" {
+		t.Fatalf("candidate side effects = %#v, want only first component", guard.candidateRequests)
+	}
+	guard.wantAllSecretsClosed(t)
+}
+
+// Break caught: context cancellation during publication continues to the next
+// component or converts a canceled partial handoff into verification success.
+func TestRegistryPublicationHandoffContextCancellationStopsBeforeNextComponent(t *testing.T) {
+	set := handoffBuiltSet()
+	var events []string
+	guard := newHandoffCredentialGuard(t, &events)
+	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard), guard, validPublicationAttemptBinding())
+	ctx, cancel := context.WithCancel(context.Background())
+	handoff := newTestRegistryPublicationHandoff(&handoffUploader{
+		events:              &events,
+		cancelAfterManifest: cancel,
+	})
+
+	err := handoff.AcceptWithCredentials(ctx, set, source)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AcceptWithCredentials() error = %v, want context.Canceled", err)
+	}
+
+	wantEvents := []string{
+		"credential:task:1",
+		"manifest-ack:task",
+		"candidate:task",
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", events, wantEvents)
+	}
+	if len(guard.candidateRequests) != 1 || guard.candidateRequests[0].Component != "task" {
+		t.Fatalf("candidate side effects = %#v, want only first component", guard.candidateRequests)
+	}
+	guard.wantAllSecretsClosed(t)
+}
+
+// Break caught: ambiguous candidate transport failure retries with a fresh
+// semantic operation instead of replaying the exact same candidate request.
+func TestPublicationCredentialSourceRecordReplaysAmbiguousCandidateWithSameOperation(t *testing.T) {
+	set := handoffBuiltSet()
+	var events []string
+	guard := newHandoffCredentialGuard(t, &events)
+	guard.failFirstCandidate = errors.New("candidate PRIVATE-TOKEN response lost")
+	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard), guard, validPublicationAttemptBinding())
+	credential, err := source.Next(context.Background(), set, "task", nil)
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	defer source.Close(credential)
+
+	ack, err := source.Record(context.Background(), set, credential, set.Components[0])
+	if err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+	if ack == nil {
+		t.Fatal("Record() returned nil acknowledgement")
+	}
+	if len(guard.candidateRequests) != 2 {
+		t.Fatalf("candidate requests = %d, want original plus exact replay", len(guard.candidateRequests))
+	}
+	if guard.candidateRequests[0] != guard.candidateRequests[1] {
+		t.Fatalf("candidate replay request drifted:\nfirst=%#v\nsecond=%#v", guard.candidateRequests[0], guard.candidateRequests[1])
+	}
+	if guard.candidateRequests[0].OperationID == "" || guard.candidateRequests[0].OperationID != ack.OperationID {
+		t.Fatalf("replay operation id = %q, ack operation id = %q", guard.candidateRequests[0].OperationID, ack.OperationID)
+	}
+	if got := strings.Join(events, ","); got != "credential:task:1,candidate:task,candidate:task" {
+		t.Fatalf("events = %s, want one credential and exact candidate replay", got)
+	}
 }
 
 // Break caught: cleanup ambiguity is discarded and caller exits zero.
@@ -529,6 +803,27 @@ func TestParseBuildClaimAllowsLeasePastSessionWhenPlanAuthorizationIsSessionBoun
 	}
 }
 
+// Break caught: publication credential renewal derives builder_id from a renewed
+// session instead of preserving the original frozen claim builder binding.
+func TestParseBuildClaimPreservesFrozenBuilderIDInBuildPlan(t *testing.T) {
+	mutation := defaultClaimMutation()
+	claim, err := parseBuildClaim(&SecretBuffer{data: []byte(testClaimJSON(mutation))}, claimBinding{
+		GrantID:           testGrantID,
+		ClaimID:           mutation.ClaimID,
+		SessionID:         testSessionID,
+		SessionGeneration: 1,
+		ConfigCPUArch:     "arm64",
+		Now:               testNow,
+		SessionExpiresAt:  testNow.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("parseBuildClaim() error = %v", err)
+	}
+	if claim.Plan.BuilderID != mutation.BuilderID {
+		t.Fatalf("Plan.BuilderID = %q, want frozen claim builder_id %q", claim.Plan.BuilderID, mutation.BuilderID)
+	}
+}
+
 // Break caught: BuildOutcome carries raw logs, URLs, tokens, Dockerfile text, or environment.
 func TestBuildOutcomeWireRedactsForbiddenMaterialAndBoundsStatus(t *testing.T) {
 	outcome := BuildOutcome{
@@ -615,16 +910,21 @@ func newOrchestratorHarness(t *testing.T) *orchestratorHarness {
 }
 
 type orchestratorHarness struct {
-	events     []string
-	clock      *manualClock
-	guard      *fakeOrchestratorGuard
-	executor   *fakeOrchestratorExecutor
-	handoff    *fakePublicationHandoff
-	downloader BundleDownloader
-	outcomes   []BuildOutcome
+	events          []string
+	clock           *manualClock
+	guard           *fakeOrchestratorGuard
+	executor        *fakeOrchestratorExecutor
+	handoff         *fakePublicationHandoff
+	overrideHandoff PublicationHandoff
+	downloader      BundleDownloader
+	outcomes        []BuildOutcome
 }
 
 func (h *orchestratorHarness) orchestrator() *Orchestrator {
+	handoff := h.overrideHandoff
+	if handoff == nil {
+		handoff = h.handoff
+	}
 	return &Orchestrator{
 		GrantID:      testGrantID,
 		Config:       Config{CPUArch: "arm64"},
@@ -632,7 +932,7 @@ func (h *orchestratorHarness) orchestrator() *Orchestrator {
 		Clock:        h.clock,
 		NewExecutor:  func(Config, *AllocationCapabilities, BuildPlan) (BuildExecutor, error) { return h.executor, nil },
 		Download:     h.downloader,
-		Handoff:      h.handoff,
+		Handoff:      handoff,
 		IdleGrace:    time.Millisecond,
 		CleanupGrace: time.Second,
 		RecordOutcome: func(outcome BuildOutcome) {
@@ -722,21 +1022,22 @@ func (t *manualTimer) C() <-chan time.Time { return t.ch }
 func (t *manualTimer) Stop() bool { return true }
 
 type fakeOrchestratorGuard struct {
-	h                 *orchestratorHarness
-	claimAvailable    bool
-	claimAvailability []bool
-	claimMutation     claimMutation
-	renewErr          error
-	renewCalls        int
-	heartbeatErr      error
-	releaseErr        error
-	failErr           error
-	finishErr         error
-	sessionExpires    time.Time
-	leaseExpires      time.Time
-	proofSHA256       string
-	failureKinds      []string
-	finishIDs         []string
+	h                                 *orchestratorHarness
+	claimAvailable                    bool
+	claimAvailability                 []bool
+	claimMutation                     claimMutation
+	renewErr                          error
+	renewCalls                        int
+	heartbeatErr                      error
+	releaseErr                        error
+	failErr                           error
+	finishErr                         error
+	sessionExpires                    time.Time
+	leaseExpires                      time.Time
+	proofSHA256                       string
+	failureKinds                      []string
+	finishIDs                         []string
+	releaseDeterministicFailureCounts []int
 
 	rejectCanceledFailContext bool
 }
@@ -797,6 +1098,14 @@ func (g *fakeOrchestratorGuard) Bundle(ctx context.Context, grantID string, oper
 	return &SecretBuffer{data: []byte(`{"schema":"loom.task-image-bundle-capability/v1","redacted":true}`)}, nil
 }
 
+func (g *fakeOrchestratorGuard) RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error) {
+	return nil, errors.New("registry credential not configured")
+}
+
+func (g *fakeOrchestratorGuard) PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	return nil, errors.New("publication candidate not configured")
+}
+
 func (g *fakeOrchestratorGuard) Start(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {
 	g.h.events = append(g.h.events, "start")
 	return testLease("start", operationID, g.leaseExpires), nil
@@ -815,7 +1124,9 @@ func (g *fakeOrchestratorGuard) Release(ctx context.Context, grantID string, ope
 	if g.releaseErr != nil {
 		return nil, g.releaseErr
 	}
-	return testLease("release", operationID, time.Time{}), nil
+	lease := testLease("release", operationID, time.Time{})
+	g.releaseDeterministicFailureCounts = append(g.releaseDeterministicFailureCounts, lease.DeterministicFailureCount)
+	return lease, nil
 }
 
 func (g *fakeOrchestratorGuard) Fail(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, failureKind string, current *SecretBuffer) (*LeaseResponse, error) {
@@ -1029,4 +1340,252 @@ type fakeBundleDownloader func(context.Context, *SecretBuffer, int) (*Downloaded
 
 func (fn fakeBundleDownloader) DownloadBundle(ctx context.Context, secret *SecretBuffer, fd int) (*DownloadedBundle, error) {
 	return fn(ctx, secret, fd)
+}
+
+type captureCredentialedPublicationHandoff struct {
+	expectation PublicationRegistryExpectation
+	events      *[]string
+	err         error
+	set         BuiltComponentSet
+	source      *PublicationCredentialSource
+}
+
+func (h *captureCredentialedPublicationHandoff) Accept(context.Context, BuiltComponentSet) error {
+	return errors.New("plain handoff called without publication credential source")
+}
+
+func (h *captureCredentialedPublicationHandoff) PublicationRegistryExpectation() PublicationRegistryExpectation {
+	return h.expectation
+}
+
+func (h *captureCredentialedPublicationHandoff) AcceptWithCredentials(ctx context.Context, set BuiltComponentSet, source *PublicationCredentialSource) error {
+	h.set = set
+	h.source = source
+	*h.events = append(*h.events, "credentialed_handoff")
+	return h.err
+}
+
+type handoffUploader struct {
+	events              *[]string
+	renewComponents     map[string]bool
+	failBeforeManifest  string
+	failWithPrivateText string
+	cancelAfterManifest func()
+	mutateManifest      func(*UploadedManifest)
+}
+
+func newTestRegistryPublicationHandoff(u registryPublicationUploader) *RegistryPublicationHandoff {
+	return &RegistryPublicationHandoff{
+		uploader: u,
+		expectation: PublicationRegistryExpectation{
+			RegistryOrigin:  "https://registry.example",
+			RegistryService: "registry.example",
+			RegistryIssuer:  "loom-task-image",
+			RegistryKeyID:   strings.Repeat("A", 43),
+		},
+	}
+}
+
+func (u *handoffUploader) Upload(ctx context.Context, output OCIOutput, source RegistryUploadCredentialSource) (UploadedManifest, error) {
+	if err := ctx.Err(); err != nil {
+		return UploadedManifest{}, err
+	}
+	credential, err := source.Next(ctx, nil)
+	if err != nil {
+		return UploadedManifest{}, err
+	}
+	defer func() {
+		if credential != nil {
+			source.Close(credential)
+		}
+	}()
+	if u.renewComponents[credential.Component] {
+		next, err := source.Next(ctx, credential)
+		if err != nil {
+			return UploadedManifest{}, err
+		}
+		credential = next
+	}
+	if credential.Component == u.failBeforeManifest {
+		*u.events = append(*u.events, "upload-failed:"+credential.Component)
+		message := u.failWithPrivateText
+		if message == "" {
+			message = "registry upload failed"
+		}
+		return UploadedManifest{}, errors.New(message)
+	}
+	manifest := UploadedManifest{
+		Repository: credential.Repository,
+		Digest:     output.TopLevelDigest,
+		MediaType:  output.ManifestMediaType,
+		Size:       output.ManifestSize,
+	}
+	*u.events = append(*u.events, "manifest-ack:"+credential.Component)
+	if u.mutateManifest != nil {
+		u.mutateManifest(&manifest)
+	}
+	if err := source.UploadSucceeded(ctx, manifest, credential); err != nil {
+		return UploadedManifest{}, err
+	}
+	if u.cancelAfterManifest != nil {
+		u.cancelAfterManifest()
+	}
+	return manifest, nil
+}
+
+func handoffBuiltSet() BuiltComponentSet {
+	return BuiltComponentSet{
+		GrantID:           testGrantID,
+		MaterializationID: testMaterializationID,
+		AttemptID:         testAttemptID,
+		LeaseEpoch:        1,
+		Components: []BuiltComponent{
+			{
+				Name: "task",
+				Output: OCIOutput{
+					Path:              "/tmp/not-used/task.tar",
+					TopLevelDigest:    "sha256:" + strings.Repeat("a", 64),
+					ManifestSize:      321,
+					ManifestMediaType: ociManifestMediaType,
+					FileSHA256:        strings.Repeat("b", 64),
+					SizeBytes:         5678,
+					OS:                "linux",
+					Architecture:      "arm64",
+				},
+			},
+			{
+				Name: "sidecar:db",
+				Output: OCIOutput{
+					Path:              "/tmp/not-used/db.tar",
+					TopLevelDigest:    "sha256:" + strings.Repeat("c", 64),
+					ManifestSize:      654,
+					ManifestMediaType: ociManifestMediaType,
+					FileSHA256:        strings.Repeat("d", 64),
+					SizeBytes:         8765,
+					OS:                "linux",
+					Architecture:      "arm64",
+				},
+			},
+		},
+	}
+}
+
+type handoffCredentialGuard struct {
+	t                  *testing.T
+	events             *[]string
+	sessionGeneration  int
+	credentialCounters map[string]int
+	secrets            []*SecretBuffer
+	lastHeartbeat      string
+	failFirstCandidate error
+	candidateRequests  []PublicationCandidateRequest
+}
+
+func newHandoffCredentialGuard(t *testing.T, events *[]string) *handoffCredentialGuard {
+	t.Helper()
+	return &handoffCredentialGuard{
+		t:                  t,
+		events:             events,
+		sessionGeneration:  1,
+		credentialCounters: map[string]int{},
+	}
+}
+
+func (g *handoffCredentialGuard) Renew(context.Context, string, string, *SecretBuffer) (*SessionEnvelope, error) {
+	*g.events = append(*g.events, "renew")
+	g.sessionGeneration++
+	return testSession(g.sessionGeneration, time.Now().Add(time.Minute)), nil
+}
+
+func (g *handoffCredentialGuard) Heartbeat(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {
+	*g.events = append(*g.events, "heartbeat")
+	g.lastHeartbeat = operationID
+	return testLease("heartbeat", operationID, time.Now().Add(time.Minute)), nil
+}
+
+func (g *handoffCredentialGuard) RegistryCredential(ctx context.Context, request RegistryCredentialRequest, current *SecretBuffer) (*SecretBuffer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	g.credentialCounters[request.Component]++
+	generation := g.credentialCounters[request.Component]
+	*g.events = append(*g.events, fmt.Sprintf("credential:%s:%d", request.Component, generation))
+	repo, err := publicationRepository("arm64", testAttemptID, request.Component)
+	if err != nil {
+		g.t.Fatalf("publicationRepository() error = %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	mutation := registryCredentialMutation{
+		CredentialID:          uuidWithTail(0x7000 + len(g.secrets) + 1),
+		RequestID:             request.OperationID,
+		Component:             request.Component,
+		Repository:            repo,
+		Generation:            generation,
+		SessionGeneration:     g.sessionGeneration,
+		AttestationGeneration: g.sessionGeneration,
+		IssuedAt:              now.Format(time.RFC3339),
+		ExpiresAt:             now.Add(45 * time.Second).Format(time.RFC3339),
+	}
+	if generation > 1 {
+		mutation.PredecessorCredentialIDJSON = fmt.Sprintf("%q", request.PredecessorCredentialID)
+		mutation.PredecessorGenerationJSON = fmt.Sprintf("%d", request.PredecessorGeneration)
+		mutation.HeartbeatOperationIDJSON = fmt.Sprintf("%q", g.lastHeartbeat)
+	}
+	secret := &SecretBuffer{data: []byte(validRegistryCredentialJSON(mutation))}
+	g.secrets = append(g.secrets, secret)
+	return secret, nil
+}
+
+func (g *handoffCredentialGuard) PublicationCandidate(ctx context.Context, request PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	g.candidateRequests = append(g.candidateRequests, request)
+	*g.events = append(*g.events, "candidate:"+request.Component)
+	if g.failFirstCandidate != nil && len(g.candidateRequests) == 1 {
+		return nil, g.failFirstCandidate
+	}
+	return &PublicationCandidateAcknowledgement{
+		CandidateID:             uuidWithTail(0x9000 + len(g.candidateRequests)),
+		OperationID:             request.OperationID,
+		CredentialID:            request.CredentialID,
+		CredentialGeneration:    request.CredentialGeneration,
+		GrantID:                 request.GrantID,
+		SessionID:               request.SessionID,
+		SessionGeneration:       request.SessionGeneration,
+		MaterializationID:       request.MaterializationID,
+		AttemptID:               request.AttemptID,
+		AttemptNumber:           request.AttemptNumber,
+		LeaseEpoch:              request.LeaseEpoch,
+		BuilderID:               request.BuilderID,
+		Component:               request.Component,
+		ManifestDigest:          request.ManifestDigest,
+		ManifestSize:            request.ManifestSize,
+		OCIFileSHA256:           request.OCIFileSHA256,
+		OCIFileSize:             request.OCIFileSize,
+		Platform:                request.Platform,
+		RecordedAt:              testNow,
+		AuthorityResponseSHA256: strings.Repeat("c", 64),
+	}, nil
+}
+
+func (g *handoffCredentialGuard) wantAllSecretsClosed(t *testing.T) {
+	t.Helper()
+	if len(g.secrets) == 0 {
+		t.Fatal("no credential secrets were issued")
+	}
+	for i, secret := range g.secrets {
+		if secret == nil || !secret.closed {
+			t.Fatalf("credential secret %d closed = %v, want true", i, secret != nil && secret.closed)
+		}
+		for offset, value := range secret.data {
+			if value != 0 {
+				t.Fatalf("credential secret %d byte %d = %d, want zeroized", i, offset, value)
+			}
+		}
+	}
+}
+
+func uuidWithTail(tail int) string {
+	return fmt.Sprintf("77777777-7777-4777-8777-%012x", tail)
 }

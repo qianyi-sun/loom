@@ -27,6 +27,7 @@ from loom_task_image_builder_guard.authority import (
     LeaseAcknowledgement,
     ProjectionChallenge,
     ProjectionReceipt,
+    PublicationCandidateAcknowledgement,
     SealedAuthorityPayload,
 )
 from loom_task_image_builder_guard.bpf import (
@@ -252,6 +253,20 @@ class Authority(Protocol):
         materialization_id: UUID,
         request: dict[str, object],
     ) -> SealedAuthorityPayload: ...
+
+    def registry_credential(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> SealedAuthorityPayload: ...
+
+    def publication_candidate(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgement: ...
 
     def release(
         self,
@@ -2305,6 +2320,8 @@ class GuardService:
                 "bundle",
                 "release",
                 "fail",
+                "registry-credential",
+                "publication-candidate",
             }:
                 if descriptor is None:
                     raise GuardError("local_session_descriptor_required")
@@ -3220,6 +3237,7 @@ class GuardService:
         authority_request = self._session_request(session)
         secret: SealedAuthorityPayload | None = None
         acknowledgement: LeaseAcknowledgement | None = None
+        candidate: PublicationCandidateAcknowledgement | None = None
         if request.operation == "claim":
             authority_request["claim_id"] = str(operation_id)
             secret = self.authority.claim(grant_id, authority_request)
@@ -3232,12 +3250,88 @@ class GuardService:
                 raise GuardError("local_request_invalid")
             authority_request.update(
                 {
-                    "operation_id": str(operation_id),
                     "materialization_id": str(request.materialization_id),
                     "attempt_id": str(request.attempt_id),
                     "lease_epoch": request.lease_epoch,
                 }
             )
+            if request.operation == "registry-credential":
+                if request.component is None:
+                    raise GuardError("local_request_invalid")
+                authority_request.update(
+                    {
+                        "request_id": str(operation_id),
+                        "component": request.component,
+                        "predecessor_credential_id": (
+                            None
+                            if request.predecessor_credential_id is None
+                            else str(request.predecessor_credential_id)
+                        ),
+                        "predecessor_generation": request.predecessor_generation,
+                    }
+                )
+                secret = self.authority.registry_credential(
+                    grant_id,
+                    request.materialization_id,
+                    authority_request,
+                )
+            elif request.operation == "publication-candidate":
+                if (
+                    request.credential_id is None
+                    or request.credential_generation is None
+                    or request.component is None
+                    or request.manifest_digest is None
+                    or request.manifest_size is None
+                    or request.oci_file_sha256 is None
+                    or request.oci_file_size is None
+                    or request.platform is None
+                    or request.platform
+                    != (
+                        "linux/amd64"
+                        if session.cpu_arch == "x86_64"
+                        else "linux/arm64"
+                    )
+                ):
+                    raise GuardError("local_request_invalid")
+                authority_request.update(
+                    {
+                        "operation_id": str(operation_id),
+                        "credential_id": str(request.credential_id),
+                        "credential_generation": request.credential_generation,
+                        "component": request.component,
+                        "manifest_digest": request.manifest_digest,
+                        "manifest_size": request.manifest_size,
+                        "oci_file_sha256": request.oci_file_sha256,
+                        "oci_file_size": request.oci_file_size,
+                        "platform": request.platform,
+                    }
+                )
+                candidate = self.authority.publication_candidate(
+                    grant_id,
+                    request.materialization_id,
+                    authority_request,
+                )
+                if (
+                    candidate.operation_id != operation_id
+                    or candidate.credential_id != request.credential_id
+                    or candidate.credential_generation
+                    != request.credential_generation
+                    or candidate.grant_id != grant_id
+                    or candidate.session_id != session.session_id
+                    or candidate.session_generation != session.generation
+                    or candidate.materialization_id != request.materialization_id
+                    or candidate.attempt_id != request.attempt_id
+                    or candidate.lease_epoch != request.lease_epoch
+                    or candidate.component != request.component
+                    or candidate.manifest_digest != request.manifest_digest
+                    or candidate.manifest_size != request.manifest_size
+                    or candidate.oci_file_sha256 != request.oci_file_sha256
+                    or candidate.oci_file_size != request.oci_file_size
+                    or candidate.platform != request.platform
+                ):
+                    raise GuardError("authority_candidate_invalid")
+            else:
+                authority_request["operation_id"] = str(operation_id)
             if request.operation == "fail":
                 authority_request["failure_kind"] = request.failure_kind
             if request.operation == "bundle":
@@ -3246,7 +3340,10 @@ class GuardService:
                     request.materialization_id,
                     authority_request,
                 )
-            else:
+            elif request.operation not in {
+                "registry-credential",
+                "publication-candidate",
+            }:
                 method = cast(
                     Callable[
                         [UUID, UUID, dict[str, object]],
@@ -3269,14 +3366,40 @@ class GuardService:
         }
         if secret is not None:
             response["operation_id"] = str(operation_id)
-            if request.operation == "bundle":
+            if request.operation in {"bundle", "registry-credential"}:
                 response["materialization_id"] = str(request.materialization_id)
                 response["attempt_id"] = str(request.attempt_id)
                 response["lease_epoch"] = request.lease_epoch
+            if request.operation == "registry-credential":
+                response["component"] = request.component
             response["payload_sha256"] = secret.sha256
         elif request.operation == "claim":
             response["operation_id"] = str(operation_id)
             response["available"] = False
+        elif candidate is not None:
+            response.update(
+                {
+                    "candidate_id": str(candidate.candidate_id),
+                    "operation_id": str(candidate.operation_id),
+                    "credential_id": str(candidate.credential_id),
+                    "credential_generation": candidate.credential_generation,
+                    "session_id": str(candidate.session_id),
+                    "session_generation": candidate.session_generation,
+                    "materialization_id": str(candidate.materialization_id),
+                    "attempt_id": str(candidate.attempt_id),
+                    "attempt_number": candidate.attempt_number,
+                    "lease_epoch": candidate.lease_epoch,
+                    "builder_id": candidate.builder_id,
+                    "component": candidate.component,
+                    "manifest_digest": candidate.manifest_digest,
+                    "manifest_size": candidate.manifest_size,
+                    "oci_file_sha256": candidate.oci_file_sha256,
+                    "oci_file_size": candidate.oci_file_size,
+                    "platform": candidate.platform,
+                    "recorded_at": _timestamp(candidate.recorded_at),
+                    "authority_response_sha256": candidate.response_sha256,
+                }
+            )
         elif acknowledgement is not None:
             response.update(
                 {

@@ -6,11 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOCIValidateAcceptsMinimalLayoutAndReturnsImmutableDigestAndTarSHA(t *testing.T) {
@@ -241,4 +246,284 @@ func mustJSON(t *testing.T, value any) []byte {
 func sha256Hex(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func TestOCIFixRetainsManifestSize(t *testing.T) {
+	var size int64
+	p, _ := writeOCILayoutTar(t, "amd64", func(f *ociLayoutFixture) { size = f.index.Manifests[0].Size })
+	output, err := ValidateOCIOutput(p, "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := reflect.ValueOf(output).FieldByName("ManifestSize")
+	if !field.IsValid() {
+		t.Fatal("validated manifest size missing from OCIOutput")
+	}
+	if field.Int() != size || size <= 0 || size == output.SizeBytes {
+		t.Fatalf("manifest size=%d expected=%d archive=%d", field.Int(), size, output.SizeBytes)
+	}
+}
+
+func TestOCIBounds(t *testing.T) {
+	layer := []byte("layer payload")
+	d := ociDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:" + sha256Hex(layer), Size: int64(len(layer))}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ociLayoutFixture)
+	}{
+		{"oversized index", func(f *ociLayoutFixture) {
+			f.index.Annotations = map[string]string{"padding": strings.Repeat("x", 4<<20)}
+		}},
+		{"oversized manifest", func(f *ociLayoutFixture) {
+			f.manifest.Annotations = map[string]string{"padding": strings.Repeat("x", 4<<20)}
+		}},
+		{"257 descriptors", func(f *ociLayoutFixture) {
+			for i := 0; i < 257; i++ {
+				b := []byte{byte(i), byte(i >> 8)}
+				f.extraEntries = append(f.extraEntries, tarEntry{name: "blobs/sha256/" + sha256Hex(b), body: b})
+			}
+		}},
+		{"129 layers", func(f *ociLayoutFixture) {
+			for i := 0; i < 129; i++ {
+				f.manifest.Layers = append(f.manifest.Layers, d)
+			}
+			f.extraEntries = append(f.extraEntries, tarEntry{name: "blobs/sha256/" + sha256Hex(layer), body: layer})
+		}},
+		{"negative size", func(f *ociLayoutFixture) { f.manifest.Config.Size = -1 }},
+		{"huge size", func(f *ociLayoutFixture) { f.manifest.Config.Size = 1<<63 - 1 }},
+		{"duplicate blob", func(f *ociLayoutFixture) {
+			f.extraEntries = append(f.extraEntries, tarEntry{name: "blobs/sha256/" + sha256Hex(layer), body: layer}, tarEntry{name: "blobs/sha256/" + sha256Hex(layer), body: layer})
+		}},
+		{"missing payload", func(f *ociLayoutFixture) { f.manifest.Layers = []ociDescriptor{d} }},
+		{"digest mutation", func(f *ociLayoutFixture) {
+			f.manifest.Layers = []ociDescriptor{d}
+			f.extraEntries = append(f.extraEntries, tarEntry{name: "blobs/sha256/" + sha256Hex(layer), body: []byte("Layer payload")})
+		}},
+		{"descriptor media type", func(f *ociLayoutFixture) { f.index.Manifests[0].MediaType = "text/plain" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := writeOCILayoutTar(t, "amd64", tc.mutate)
+			if _, err := ValidateOCIOutput(p, "linux/amd64"); err == nil {
+				t.Fatal("accepted invalid OCI layout")
+			}
+		})
+	}
+}
+
+func TestOCIBoundedTarAndOverflow(t *testing.T) {
+	t.Run("total tar quota", func(t *testing.T) {
+		p, _ := writeOCILayoutTar(t, "amd64", nil)
+		if err := os.Truncate(p, 107374182400+1); err != nil {
+			t.Fatal(err)
+		}
+		// A sparse oversized archive must be rejected before reading its holes.
+		done := make(chan error, 1)
+		go func() { _, err := ValidateOCIOutput(p, "linux/amd64"); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("accepted oversized tar")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("oversized tar was not rejected before scanning")
+		}
+	})
+	for _, size := range []string{"9223372036854775808", "-1"} {
+		t.Run("JSON size "+size, func(t *testing.T) {
+			p, _ := writeOCILayoutTar(t, "amd64", nil)
+			rewriteOCITar(t, p, func(name string, b []byte) []byte {
+				if name == "index.json" {
+					var v map[string]any
+					if err := json.Unmarshal(b, &v); err != nil {
+						t.Fatal(err)
+					}
+					v["manifests"].([]any)[0].(map[string]any)["size"] = json.RawMessage(size)
+					return mustJSON(t, v)
+				}
+				return b
+			})
+			if _, err := ValidateOCIOutput(p, "linux/amd64"); err == nil {
+				t.Fatal("accepted invalid size")
+			}
+		})
+	}
+}
+
+func TestOCIExactManifestMetadata(t *testing.T) {
+	p, want := writeOCILayoutTar(t, "amd64", nil)
+	out, err := ValidateOCIOutput(p, "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := reflect.ValueOf(out).FieldByName("ManifestMediaType")
+	if !field.IsValid() || field.String() != "application/vnd.oci.image.manifest.v1+json" {
+		t.Fatal("exact validated manifest media type missing")
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			t.Fatal("manifest missing")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Name == "blobs/sha256/"+want.manifestDigest {
+			if out.ManifestSize != h.Size {
+				t.Fatal("manifest size changed")
+			}
+			break
+		}
+	}
+}
+
+func rewriteOCITar(t *testing.T, p string, mutate func(string, []byte) []byte) {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(bytes.NewReader(b))
+	var dst bytes.Buffer
+	tw := tar.NewWriter(&dst)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b = mutate(h.Name, b)
+		h.Size = int64(len(b))
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, dst.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOCIAtLimitsAndStreaming(t *testing.T) {
+	t.Run("exact JSON budget", func(t *testing.T) {
+		p, _ := writeOCILayoutTar(t, "amd64", func(f *ociLayoutFixture) {
+			f.manifest.Annotations = map[string]string{"padding": ""}
+			f.manifest.Annotations["padding"] = strings.Repeat("x", (4<<20)-len(mustJSON(t, f.manifest)))
+		})
+		rewriteOCITar(t, p, func(name string, b []byte) []byte {
+			if name == "index.json" {
+				b = append(b, bytes.Repeat([]byte(" "), (4<<20)-len(b))...)
+			}
+			return b
+		})
+		out, err := ValidateOCIOutput(p, "linux/amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.ManifestSize != 4<<20 {
+			t.Fatal("boundary fixture incorrect")
+		}
+	})
+	t.Run("128 layers and 256 blobs", func(t *testing.T) {
+		p, _ := writeOCILayoutTar(t, "amd64", func(f *ociLayoutFixture) {
+			for i := 0; i < 254; i++ {
+				b := []byte{byte(i), byte(i >> 8)}
+				f.extraEntries = append(f.extraEntries, tarEntry{name: "blobs/sha256/" + sha256Hex(b), body: b})
+				if i < 128 {
+					f.manifest.Layers = append(f.manifest.Layers, ociDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:" + sha256Hex(b), Size: 2})
+				}
+			}
+		})
+		if _, err := ValidateOCIOutput(p, "linux/amd64"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("stream layer hashing", func(t *testing.T) {
+		b := bytes.Repeat([]byte("L"), 17<<20)
+		p, _ := writeOCILayoutTar(t, "amd64", func(f *ociLayoutFixture) {
+			f.manifest.Layers = []ociDescriptor{{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:" + sha256Hex(b), Size: int64(len(b))}}
+			f.extraEntries = append(f.extraEntries, tarEntry{name: "blobs/sha256/" + sha256Hex(b), body: b})
+		})
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		if _, err := ValidateOCIOutput(p, "linux/amd64"); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&after)
+		if after.TotalAlloc-before.TotalAlloc > 8<<20 {
+			t.Fatal("scanner allocated layer-sized memory")
+		}
+	})
+	for _, size := range []int64{-1, 107374182401} {
+		t.Run(fmt.Sprintf("tar entry size %d", size), func(t *testing.T) {
+			var b bytes.Buffer
+			tw := tar.NewWriter(&b)
+			if err := tw.WriteHeader(&tar.Header{Name: "index.json", Mode: 0600, Size: 0}); err != nil {
+				t.Fatal(err)
+			}
+			header := append([]byte(nil), b.Bytes()[:512]...)
+			if size < 0 {
+				for i := 124; i < 136; i++ {
+					header[i] = 255
+				}
+			} else {
+				copy(header[124:136], fmt.Sprintf("%011o\x00", size))
+			}
+			for i := 148; i < 156; i++ {
+				header[i] = ' '
+			}
+			sum := 0
+			for _, v := range header {
+				sum += int(v)
+			}
+			copy(header[148:156], fmt.Sprintf("%06o\x00 ", sum))
+			p := filepath.Join(t.TempDir(), "bad.tar")
+			if err := os.WriteFile(p, header, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateOCIOutput(p, "linux/amd64"); err == nil {
+				t.Fatal("accepted invalid tar entry size")
+			}
+		})
+	}
+}
+
+// In-memory fixture helper retained for executor conformance tests. The scanner
+// and uploader use descriptorEntry and streaming readers instead.
+func descriptorPayload(entries map[string][]byte, descriptor ociDescriptor) ([]byte, error) {
+	digest, err := parseSHA256Descriptor(descriptor.Digest)
+	if err != nil {
+		return nil, err
+	}
+	if descriptor.Size < 0 {
+		return nil, errors.New("OCI descriptor size invalid")
+	}
+	payload, ok := entries["blobs/sha256/"+digest]
+	if !ok {
+		return nil, errors.New("OCI descriptor blob missing")
+	}
+	if int64(len(payload)) != descriptor.Size {
+		return nil, errors.New("OCI descriptor size mismatch")
+	}
+	sum := sha256.Sum256(payload)
+	if hex.EncodeToString(sum[:]) != digest {
+		return nil, errors.New("OCI descriptor digest mismatch")
+	}
+	return payload, nil
 }

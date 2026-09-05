@@ -20,6 +20,7 @@ import (
 
 type BuildPlan struct {
 	Architecture              string
+	BuilderID                 string
 	Frontend                  string
 	NetworkMode               string
 	BuildTimeout              time.Duration

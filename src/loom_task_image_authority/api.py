@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -60,6 +61,9 @@ from loom_task_image_authority.contracts import (
     TaskImageMaterializationOperationRequestV1,
     TaskImageProjectionRequestV1,
     TaskImageProjectionRevocationV1,
+    TaskImagePublicationCandidateRequestV1,
+    TaskImageRegistryCredentialRequestV1,
+    TaskImageRegistryCredentialV1,
     TaskImageSessionRenewalV1,
     new_bootstrap_token,
     new_session_token,
@@ -67,6 +71,7 @@ from loom_task_image_authority.contracts import (
 from loom_task_image_authority.http_contracts import (
     TaskImageMaterializationClaimResponseV1,
     TaskImageMaterializationOperationResponseV1,
+    TaskImagePublicationCandidateResponseV1,
 )
 from loom_task_image_authority.materializations import (
     DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS,
@@ -79,6 +84,14 @@ from loom_task_image_authority.materializations import (
     release_containment_failed_session_materialization,
     release_session_materialization,
     start_session_materialization,
+)
+from loom_task_image_authority.registry_credentials import (
+    issue_session_registry_credential,
+    record_session_publication_candidate,
+)
+from loom_task_image_authority.registry_token import (
+    DistributionRegistryTokenIssuer,
+    load_distribution_registry_token_issuer,
 )
 from loom_task_image_authority.store import (
     TaskImageBuildSessionAuthorization,
@@ -316,6 +329,8 @@ class AuthorityMetricsMiddleware:
                 "release": "materialization_release",
                 "fail": "materialization_fail",
                 "bundle": "materialization_bundle",
+                "registry-credential": "registry_credential",
+                "publication-candidate": "publication_candidate",
             }.get(parts[5])
         return None
 
@@ -368,6 +383,9 @@ def create_app(
     session_token_factory: Callable[[], str] | None = None,
     session_id_factory: Callable[[], UUID] | None = None,
     bundle_capability_provider: TaskImageBundleCapabilityProvider | None = None,
+    registry_token_issuer: DistributionRegistryTokenIssuer | None = None,
+    credential_id_factory: Callable[[], UUID] | None = None,
+    candidate_id_factory: Callable[[], UUID] | None = None,
 ) -> FastAPI:
     """Create the independent projection service; it owns no Slurm client."""
 
@@ -378,6 +396,11 @@ def create_app(
     resolved_session_token = session_token_factory or new_session_token
     resolved_session_id = session_id_factory or uuid4
     resolved_bundle_capability_provider = bundle_capability_provider
+    resolved_registry_token_issuer = registry_token_issuer
+    if resolved_registry_token_issuer is None and settings.registry_origin is not None:
+        resolved_registry_token_issuer = load_distribution_registry_token_issuer(settings)
+    resolved_credential_id = credential_id_factory or uuid4
+    resolved_candidate_id = candidate_id_factory or uuid4
     metrics = TaskImageAuthorityMetrics()
 
     @asynccontextmanager
@@ -479,7 +502,18 @@ def create_app(
     ) -> Callable[[Request], Awaitable[_ContractT]]:
         async def dependency(request: Request) -> _ContractT:
             try:
-                return model.model_validate_json(await request.body())
+                payload = await request.body()
+
+                def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+                    result: dict[str, object] = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("duplicate JSON object key")
+                        result[key] = value
+                    return result
+
+                json.loads(payload, object_pairs_hook=unique_object)
+                return model.model_validate_json(payload)
             except (ValidationError, ValueError):
                 raise HTTPException(
                     status_code=422,
@@ -499,6 +533,8 @@ def create_app(
     claim_body = contract_body(TaskImageMaterializationClaimRequestV1)
     operation_body = contract_body(TaskImageMaterializationOperationRequestV1)
     failure_body = contract_body(TaskImageMaterializationFailureRequestV1)
+    registry_credential_body = contract_body(TaskImageRegistryCredentialRequestV1)
+    publication_candidate_body = contract_body(TaskImagePublicationCandidateRequestV1)
 
     async def transition(
         operation: Callable[
@@ -700,7 +736,10 @@ def create_app(
         session: AsyncSession,
         *,
         guard: TaskImageGuardPrincipalV1,
-        body: TaskImageMaterializationClaimRequestV1 | TaskImageMaterializationOperationRequestV1,
+        body: TaskImageMaterializationClaimRequestV1
+        | TaskImageMaterializationOperationRequestV1
+        | TaskImageRegistryCredentialRequestV1
+        | TaskImagePublicationCandidateRequestV1,
         now: datetime,
     ) -> TaskImageBuildSessionAuthorization:
         return await authorize_task_image_guard_session(
@@ -881,7 +920,9 @@ def create_app(
         *,
         grant_id: UUID,
         materialization_id: UUID,
-        body: TaskImageMaterializationOperationRequestV1,
+        body: TaskImageMaterializationOperationRequestV1
+        | TaskImageRegistryCredentialRequestV1
+        | TaskImagePublicationCandidateRequestV1,
     ) -> None:
         if grant_id != body.grant_id or materialization_id != body.materialization_id:
             raise HTTPException(status_code=409, detail="task-image authority conflict")
@@ -1011,6 +1052,88 @@ def create_app(
             result,
             maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
         )
+
+    @app.put(
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential"
+    )
+    async def registry_credential(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageRegistryCredentialRequestV1 = Depends(registry_credential_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        if resolved_registry_token_issuer is None:
+            raise HTTPException(
+                status_code=503,
+                detail="task-image authority unavailable",
+            )
+        request_now = resolved_now()
+
+        async def credential_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImageRegistryCredentialV1:
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=request_now,
+            )
+            return await issue_session_registry_credential(
+                session,
+                authorization=authorization,
+                request=body,
+                now=request_now,
+                issuer=resolved_registry_token_issuer,
+                secret_store=secret_store,
+                credential_id_factory=resolved_credential_id,
+            )
+
+        return bounded_response(await transition(credential_transition))
+
+    @app.put(
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-candidate"
+    )
+    async def publication_candidate(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImagePublicationCandidateRequestV1 = Depends(
+            publication_candidate_body
+        ),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        request_now = resolved_now()
+
+        async def candidate_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImagePublicationCandidateResponseV1:
+            del secret_store
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=request_now,
+            )
+            return await record_session_publication_candidate(
+                session,
+                authorization=authorization,
+                request=body,
+                now=request_now,
+                candidate_id_factory=resolved_candidate_id,
+            )
+
+        return bounded_response(await transition(candidate_transition))
 
     @app.put("/v1/projections/{grant_id}/revocation", status_code=204)
     async def revocation(

@@ -23,6 +23,8 @@ type TaskImageGuard interface {
 	Renew(context.Context, string, string, *SecretBuffer) (*SessionEnvelope, error)
 	Claim(context.Context, string, string, *SecretBuffer) (*SecretBuffer, bool, error)
 	Bundle(context.Context, string, string, string, string, int, *SecretBuffer) (*SecretBuffer, error)
+	RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error)
+	PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error)
 	Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Release(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
@@ -323,13 +325,8 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 		LeaseEpoch:        claim.LeaseEpoch,
 		Components:        append([]BuiltComponent(nil), s.built...),
 	}
-	if err := s.o.Handoff.Accept(s.ctx, set); err != nil {
-		if errors.Is(err, ErrPublicationPhaseUnavailable) {
-			s.record(BuildOutcomeTransientFailure, "publication_phase_unavailable", "")
-			return errors.Join(ErrPublicationPhaseUnavailable, s.releaseLease())
-		}
-		s.record(BuildOutcomeTransientFailure, "publication_failed", "")
-		return errors.Join(safeError("publication_failed"), s.failLease("containment"))
+	if err := s.acceptPublication(set); err != nil {
+		return s.handlePublicationError(err)
 	}
 	if err := s.releaseLease(); err != nil {
 		s.record(BuildOutcomeLeaseLost, "release_failed", "")
@@ -337,6 +334,32 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 	}
 	s.recordBuilt()
 	return nil
+}
+
+func (s *orchestratorState) acceptPublication(set BuiltComponentSet) error {
+	if credentialed, ok := s.o.Handoff.(CredentialedPublicationHandoff); ok {
+		binding, err := publicationAttemptBinding(set, s.claimData.Plan, credentialed.PublicationRegistryExpectation())
+		if err != nil {
+			return err
+		}
+		source := NewPublicationCredentialSource(s.sessionManager, s.o.Guard, binding)
+		return credentialed.AcceptWithCredentials(s.ctx, set, source)
+	}
+	return s.o.Handoff.Accept(s.ctx, set)
+}
+
+func (s *orchestratorState) handlePublicationError(err error) error {
+	reason := "publication_failed"
+	var reported error = safeError(reason)
+	if errors.Is(err, ErrPublicationPhaseUnavailable) {
+		reason = "publication_phase_unavailable"
+		reported = ErrPublicationPhaseUnavailable
+	} else if errors.Is(err, ErrPublicationVerificationUnavailable) {
+		reason = "publication_verification_unavailable"
+		reported = ErrPublicationVerificationUnavailable
+	}
+	s.record(BuildOutcomeTransientFailure, reason, "")
+	return errors.Join(reported, s.closeActiveExecutor(s.executor), s.releaseLease())
 }
 
 func (s *orchestratorState) closeExecutor(executor BuildExecutor) error {
@@ -844,6 +867,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 	}
 	return BuildPlan{
 		Architecture: architecture,
+		BuilderID:    w.BuilderID,
 		Frontend:     "dockerfile.v0",
 		NetworkMode:  "sandbox",
 		BuildTimeout: time.Duration(w.BuildTimeoutSeconds * float64(time.Second)),
@@ -864,6 +888,42 @@ func authorityArchForGo(goArch string) (string, string, error) {
 	default:
 		return "", "", errors.New("unsupported native architecture")
 	}
+}
+
+func publicationAttemptBinding(set BuiltComponentSet, plan BuildPlan, expectation PublicationRegistryExpectation) (PublicationAttemptBinding, error) {
+	if !isCanonicalNonZeroUUID(set.GrantID) ||
+		!isCanonicalNonZeroUUID(set.MaterializationID) ||
+		!isCanonicalNonZeroUUID(set.AttemptID) ||
+		set.LeaseEpoch <= 0 ||
+		!builderIDPattern.MatchString(plan.BuilderID) ||
+		!registryOriginValid(expectation.RegistryOrigin) ||
+		!registryIdentityPattern.MatchString(expectation.RegistryService) ||
+		!registryIdentityPattern.MatchString(expectation.RegistryIssuer) ||
+		!registryKeyIDPattern.MatchString(expectation.RegistryKeyID) {
+		return PublicationAttemptBinding{}, errors.New("publication attempt binding invalid")
+	}
+	var cpuArch, platform string
+	switch plan.Architecture {
+	case "amd64":
+		cpuArch, platform = "x86_64", "linux/amd64"
+	case "arm64":
+		cpuArch, platform = "arm64", "linux/arm64"
+	default:
+		return PublicationAttemptBinding{}, errors.New("publication attempt architecture invalid")
+	}
+	return PublicationAttemptBinding{
+		GrantID:           set.GrantID,
+		MaterializationID: set.MaterializationID,
+		AttemptID:         set.AttemptID,
+		LeaseEpoch:        set.LeaseEpoch,
+		BuilderID:         plan.BuilderID,
+		CPUArch:           cpuArch,
+		Platform:          platform,
+		RegistryOrigin:    expectation.RegistryOrigin,
+		RegistryService:   expectation.RegistryService,
+		RegistryIssuer:    expectation.RegistryIssuer,
+		RegistryKeyID:     expectation.RegistryKeyID,
+	}, nil
 }
 
 type realBundleDownloader struct{}
