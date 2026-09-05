@@ -241,6 +241,38 @@ def _optional_private_directory_metadata(
     return _private_directory_metadata(path, service_uid=service_uid)
 
 
+def _directory_entry_identities(path: Path, *, service_uid: int) -> dict[str, tuple[int, ...]]:
+    """Snapshot names and no-follow entry identities, not just directory times."""
+    before = _private_directory_metadata(path, service_uid=service_uid)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            if _metadata_identity(before) != _metadata_identity(os.fstat(fd)):
+                raise PreflightArtifactReferenceInventoryError(
+                    "preflight artifact maintenance directory changed during inventory"
+                )
+            entries = {
+                name: _metadata_identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                for name in sorted(os.listdir(fd))
+            }
+            if (
+                set(entries) != set(os.listdir(fd))
+                or _metadata_identity(before) != _metadata_identity(os.fstat(fd))
+                or _metadata_identity(before)
+                != _metadata_identity(_private_directory_metadata(path, service_uid=service_uid))
+            ):
+                raise PreflightArtifactReferenceInventoryError(
+                    "preflight artifact maintenance directory changed during inventory"
+                )
+            return entries
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise PreflightArtifactReferenceInventoryError(
+            "preflight artifact maintenance directory entries are unreadable"
+        ) from exc
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -372,13 +404,8 @@ class InstalledMaintenanceReferenceInventory:
         before = _optional_private_directory_metadata(root, service_uid=self.service_uid)
         if before is None:
             return
-        try:
-            names = sorted(os.listdir(root))
-        except OSError as exc:
-            raise PreflightArtifactReferenceInventoryError(
-                "preflight artifact manifest ownership journal is unreadable"
-            ) from exc
-        for name in names:
+        root_entries = _directory_entry_identities(root, service_uid=self.service_uid)
+        for name in root_entries:
             if _MANIFEST_REQUEST_RE.fullmatch(name) is None:
                 raise PreflightArtifactReferenceInventoryError(
                     "preflight artifact manifest ownership journal contains unknown entries"
@@ -388,12 +415,10 @@ class InstalledMaintenanceReferenceInventory:
                 request_root,
                 service_uid=self.service_uid,
             )
-            try:
-                entries = set(os.listdir(request_root))
-            except OSError as exc:
-                raise PreflightArtifactReferenceInventoryError(
-                    "preflight artifact manifest ownership journal is unreadable"
-                ) from exc
+            request_entries = _directory_entry_identities(
+                request_root, service_uid=self.service_uid
+            )
+            entries = set(request_entries)
             if not entries <= {"inventory.json", "events.jsonl"} or "inventory.json" not in entries:
                 raise PreflightArtifactReferenceInventoryError(
                     "preflight artifact manifest ownership journal contains unknown entries"
@@ -417,7 +442,11 @@ class InstalledMaintenanceReferenceInventory:
                 request_root,
                 service_uid=self.service_uid,
             )
-            if _metadata_identity(request_before) != _metadata_identity(request_after):
+            if _metadata_identity(request_before) != _metadata_identity(
+                request_after
+            ) or request_entries != _directory_entry_identities(
+                request_root, service_uid=self.service_uid
+            ):
                 raise PreflightArtifactReferenceInventoryError(
                     "preflight artifact manifest ownership journal changed during inventory"
                 )
@@ -431,7 +460,9 @@ class InstalledMaintenanceReferenceInventory:
             if not terminal:
                 reasons.setdefault(bundle_digest, set()).add("manifest-ownership-claim")
         after = _private_directory_metadata(root, service_uid=self.service_uid)
-        if _metadata_identity(before) != _metadata_identity(after):
+        if _metadata_identity(before) != _metadata_identity(
+            after
+        ) or root_entries != _directory_entry_identities(root, service_uid=self.service_uid):
             raise PreflightArtifactReferenceInventoryError(
                 "preflight artifact manifest ownership journal changed during inventory"
             )
@@ -730,14 +761,9 @@ class InstalledMaintenanceReferenceInventory:
         before = _optional_private_directory_metadata(root, service_uid=self.service_uid)
         if before is None:
             return
-        try:
-            names = sorted(os.listdir(root))
-        except OSError as exc:
-            raise PreflightArtifactReferenceInventoryError(
-                "preflight artifact lifecycle capacity journal is unreadable"
-            ) from exc
+        root_entries = _directory_entry_identities(root, service_uid=self.service_uid)
         grouped: dict[str, set[str]] = {}
-        for name in names:
+        for name in root_entries:
             match = _CAPACITY_ENTRY_RE.fullmatch(name)
             if match is None:
                 raise PreflightArtifactReferenceInventoryError(
@@ -765,7 +791,9 @@ class InstalledMaintenanceReferenceInventory:
                     "lifecycle-capacity-claim"
                 )
         after = _private_directory_metadata(root, service_uid=self.service_uid)
-        if _metadata_identity(before) != _metadata_identity(after):
+        if _metadata_identity(before) != _metadata_identity(
+            after
+        ) or root_entries != _directory_entry_identities(root, service_uid=self.service_uid):
             raise PreflightArtifactReferenceInventoryError(
                 "preflight artifact lifecycle capacity journal changed during inventory"
             )
