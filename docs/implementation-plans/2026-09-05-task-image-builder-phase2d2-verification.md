@@ -33,17 +33,24 @@ Interface: frozen `OCIDescriptor(media_type, digest, size)`;
 `verify_oci_graph(reader, root, platform, limits) -> VerifiedOCIGraph`.
 The result binds root, runnable manifest, config, ordered layers and platform.
 
-- [ ] Write tests with an in-memory asynchronous chunk reader and independently
+- [x] Write tests with an in-memory asynchronous chunk reader and independently
   hashed fixtures. Verify both architectures, OCI and Docker media types, direct
   and single-image index roots, and correct descriptor request kinds.
-- [ ] Run the new test module and confirm failure from the missing verifier.
-- [ ] Implement bounded streaming, strict JSON/descriptor validation, exact
+- [x] Run the new test module and confirm failure from the missing verifier.
+- [x] Implement bounded streaming, strict JSON/descriptor validation, exact
   platform/rootfs checks, conflict detection and mandatory iterator close.
-- [ ] Mutate digests, sizes, platform, duplicate keys, URLs, foreign media,
+- [x] Mutate digests, sizes, platform, duplicate keys, URLs, foreign media,
   nested indexes, layer count, total bytes and chunk limits; prove rejection.
   Test cancellation and transport failures preserve closure and classification.
-- [ ] Run the new module, Ruff, strict mypy and authority package boundary tests;
+- [x] Run the new module, Ruff, strict mypy and authority package boundary tests;
   review and commit the verified module.
+
+Task 1 evidence: 59 graph tests and 14 package/deployment tests passed;
+Ruff and strict mypy passed. Independent review findings were fixed and
+re-reviewed: unsupported OS requirements reject for direct and indexed graphs,
+and the isolated descriptor-conflict regression fails with its production
+check disabled in memory. JSON traversal uses depth-sized iterator storage.
+The module is not composed into production and does not confer readiness.
 
 ## Task 2: Repository-bound HTTPS reader
 
