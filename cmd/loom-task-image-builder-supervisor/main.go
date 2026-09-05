@@ -24,7 +24,9 @@ var (
 	guardClientFactory      = func(cfg Config) TaskImageGuard {
 		return NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second)
 	}
-	applyProcessEnvironment      = replaceProcessEnvironment
+	applyProcessEnvironment = replaceProcessEnvironment
+	// Phase 2D1 production composition stays registry-inert; tests inject the
+	// opt-in registry handoff directly without adding config discovery here.
 	productionPublicationHandoff = DisabledPublicationHandoff{}
 	productionSupervisorNewExec  = func(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (BuildExecutor, error) {
 		return NewExecutor(cfg, caps, plan)

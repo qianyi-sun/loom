@@ -32,6 +32,9 @@ _MAX_FIELDS = 32
 _MAX_CONTENT_LENGTH_DIGITS = 20
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+_BUILDER_ID = re.compile(r"^rootless:[0-9a-f]{32}$")
+_COMPONENT = re.compile(r"^(?:task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$")
+_MANIFEST_DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
 _TOKEN = {
     "bootstrap": re.compile(r"^loom_tibp_[A-Za-z0-9_-]{64,128}$"),
     "session": re.compile(r"^loom_tibs_[A-Za-z0-9_-]{64,128}$"),
@@ -130,6 +133,28 @@ def _digest(value: object, *, code: str) -> str:
 
 def _integer(value: object, *, code: str) -> int:
     if type(value) is not int or not 1 <= value <= (1 << 63) - 1:
+        raise GuardError(code)
+    return value
+
+
+def _credential_generation(value: object, *, code: str) -> int:
+    generation = _integer(value, code=code)
+    if generation > 512:
+        raise GuardError(code)
+    return generation
+
+
+def _component(value: object, *, code: str) -> str:
+    if not isinstance(value, str) or _COMPONENT.fullmatch(value) is None:
+        raise GuardError(code)
+    return value
+
+
+def _manifest_digest(value: object, *, code: str) -> str:
+    if not isinstance(value, str):
+        raise GuardError(code)
+    matched = _MANIFEST_DIGEST.fullmatch(value)
+    if matched is None or matched.group(1) == "0" * 64:
         raise GuardError(code)
     return value
 
@@ -265,6 +290,32 @@ class LeaseAcknowledgement:
     state: str
     deterministic_failure_count: int
     lease_expires_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationCandidateAcknowledgement:
+    """Strict nonsecret binding returned for one inert publication candidate."""
+
+    candidate_id: UUID
+    operation_id: UUID
+    credential_id: UUID
+    credential_generation: int
+    grant_id: UUID
+    session_id: UUID
+    session_generation: int
+    materialization_id: UUID
+    attempt_id: UUID
+    attempt_number: int
+    lease_epoch: int
+    builder_id: str
+    component: str
+    manifest_digest: str
+    manifest_size: int
+    oci_file_sha256: str
+    oci_file_size: int
+    platform: Literal["linux/amd64", "linux/arm64"]
+    recorded_at: datetime
+    response_sha256: str
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -968,6 +1019,236 @@ class AuthorityClient:
         )
         return self._seal_response("guard-bundle", raw)
 
+    def registry_credential(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> SealedAuthorityPayload:
+        """Request one fixed-scope credential and seal its body without parsing it."""
+
+        grant = self._grant(grant_id)
+        if not isinstance(materialization_id, UUID) or materialization_id.int == 0:
+            raise GuardError("authority_registry_credential_invalid")
+        code = "authority_registry_credential_invalid"
+        value = _exact(
+            request,
+            frozenset(
+                {
+                    "schema_version",
+                    "request_id",
+                    "grant_id",
+                    "session_id",
+                    "session_generation",
+                    "session_token",
+                    "materialization_id",
+                    "attempt_id",
+                    "lease_epoch",
+                    "component",
+                    "predecessor_credential_id",
+                    "predecessor_generation",
+                }
+            ),
+            code=code,
+        )
+        predecessor_id = value["predecessor_credential_id"]
+        predecessor_generation = value["predecessor_generation"]
+        if (
+            value["schema_version"] != 1
+            or _uuid(value["request_id"], code=code).int == 0
+            or _uuid(value["grant_id"], code=code) != grant
+            or _uuid(value["session_id"], code=code).int == 0
+            or _integer(value["session_generation"], code=code) <= 0
+            or not _token(value["session_token"], kind="session", code=code)
+            or _uuid(value["materialization_id"], code=code)
+            != materialization_id
+            or _uuid(value["attempt_id"], code=code).int == 0
+            or _integer(value["lease_epoch"], code=code) <= 0
+            or not _component(value["component"], code=code)
+            or (predecessor_id is None) != (predecessor_generation is None)
+        ):
+            raise GuardError(code)
+        if predecessor_id is not None:
+            _uuid(predecessor_id, code=code)
+            _credential_generation(predecessor_generation, code=code)
+        raw = self._request(
+            f"/v1/projections/{grant}/materializations/{materialization_id}/"
+            "registry-credential",
+            request,
+            expected_status=200,
+            maximum_bytes=_MAX_REQUEST_BYTES,
+        )
+        descriptor = create_sealed_memfd(
+            "guard-registry-credential",
+            raw,
+            maximum=_MAX_REQUEST_BYTES,
+        )
+        return SealedAuthorityPayload(descriptor, hashlib.sha256(raw).hexdigest())
+
+    def publication_candidate(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgement:
+        """Record one inert candidate and return only its strict nonsecret binding."""
+
+        grant = self._grant(grant_id)
+        if not isinstance(materialization_id, UUID) or materialization_id.int == 0:
+            raise GuardError("authority_candidate_invalid")
+        code = "authority_candidate_invalid"
+        request_value = _exact(
+            request,
+            frozenset(
+                {
+                    "schema_version",
+                    "operation_id",
+                    "grant_id",
+                    "session_id",
+                    "session_generation",
+                    "session_token",
+                    "materialization_id",
+                    "attempt_id",
+                    "lease_epoch",
+                    "credential_id",
+                    "credential_generation",
+                    "component",
+                    "manifest_digest",
+                    "manifest_size",
+                    "oci_file_sha256",
+                    "oci_file_size",
+                    "platform",
+                }
+            ),
+            code=code,
+        )
+        request_operation_id = _uuid(request_value["operation_id"], code=code)
+        request_session_id = _uuid(request_value["session_id"], code=code)
+        request_session_generation = _integer(
+            request_value["session_generation"],
+            code=code,
+        )
+        request_attempt_id = _uuid(request_value["attempt_id"], code=code)
+        request_lease_epoch = _integer(request_value["lease_epoch"], code=code)
+        request_credential_id = _uuid(request_value["credential_id"], code=code)
+        request_credential_generation = _credential_generation(
+            request_value["credential_generation"],
+            code=code,
+        )
+        request_component = _component(request_value["component"], code=code)
+        request_manifest_digest = _manifest_digest(
+            request_value["manifest_digest"],
+            code=code,
+        )
+        request_manifest_size = _integer(request_value["manifest_size"], code=code)
+        request_oci_file_sha256 = _digest(request_value["oci_file_sha256"], code=code)
+        request_oci_file_size = _integer(request_value["oci_file_size"], code=code)
+        request_platform = request_value["platform"]
+        if (
+            request_value["schema_version"] != 1
+            or _uuid(request_value["grant_id"], code=code) != grant
+            or not _token(request_value["session_token"], kind="session", code=code)
+            or _uuid(request_value["materialization_id"], code=code)
+            != materialization_id
+            or request_platform not in {"linux/amd64", "linux/arm64"}
+        ):
+            raise GuardError(code)
+
+        raw = self._request(
+            f"/v1/projections/{grant}/materializations/{materialization_id}/"
+            "publication-candidate",
+            request,
+            expected_status=200,
+            maximum_bytes=_MAX_REQUEST_BYTES,
+        )
+        response = _exact(
+            _document(raw),
+            frozenset(
+                {
+                    "schema_version",
+                    "candidate_id",
+                    "operation_id",
+                    "credential_id",
+                    "credential_generation",
+                    "grant_id",
+                    "session_id",
+                    "session_generation",
+                    "materialization_id",
+                    "attempt_id",
+                    "attempt_number",
+                    "lease_epoch",
+                    "builder_id",
+                    "component",
+                    "repository",
+                    "manifest_digest",
+                    "manifest_size",
+                    "oci_file_sha256",
+                    "oci_file_size",
+                    "platform",
+                    "recorded_at",
+                }
+            ),
+            code=code,
+        )
+        candidate_id = _uuid(response["candidate_id"], code=code)
+        attempt_number = _integer(response["attempt_number"], code=code)
+        builder_id = response["builder_id"]
+        repository = response["repository"]
+        recorded_at = _time(response["recorded_at"], code=code)
+        if (
+            response["schema_version"]
+            != "loom.task-image-publication-candidate.v1"
+            or _uuid(response["operation_id"], code=code) != request_operation_id
+            or _uuid(response["credential_id"], code=code) != request_credential_id
+            or _credential_generation(response["credential_generation"], code=code)
+            != request_credential_generation
+            or _uuid(response["grant_id"], code=code) != grant
+            or _uuid(response["session_id"], code=code) != request_session_id
+            or _integer(response["session_generation"], code=code)
+            != request_session_generation
+            or _uuid(response["materialization_id"], code=code)
+            != materialization_id
+            or _uuid(response["attempt_id"], code=code) != request_attempt_id
+            or _integer(response["lease_epoch"], code=code) != request_lease_epoch
+            or not isinstance(builder_id, str)
+            or _BUILDER_ID.fullmatch(builder_id) is None
+            or _component(response["component"], code=code) != request_component
+            or not isinstance(repository, str)
+            or not 1 <= len(repository) <= 255
+            or _manifest_digest(response["manifest_digest"], code=code)
+            != request_manifest_digest
+            or _integer(response["manifest_size"], code=code)
+            != request_manifest_size
+            or _digest(response["oci_file_sha256"], code=code)
+            != request_oci_file_sha256
+            or _integer(response["oci_file_size"], code=code)
+            != request_oci_file_size
+            or response["platform"] != request_platform
+        ):
+            raise GuardError(code)
+        return PublicationCandidateAcknowledgement(
+            candidate_id=candidate_id,
+            operation_id=request_operation_id,
+            credential_id=request_credential_id,
+            credential_generation=request_credential_generation,
+            grant_id=grant,
+            session_id=request_session_id,
+            session_generation=request_session_generation,
+            materialization_id=materialization_id,
+            attempt_id=request_attempt_id,
+            attempt_number=attempt_number,
+            lease_epoch=request_lease_epoch,
+            builder_id=builder_id,
+            component=request_component,
+            manifest_digest=request_manifest_digest,
+            manifest_size=request_manifest_size,
+            oci_file_sha256=request_oci_file_sha256,
+            oci_file_size=request_oci_file_size,
+            platform=cast(Literal["linux/amd64", "linux/arm64"], request_platform),
+            recorded_at=recorded_at,
+            response_sha256=hashlib.sha256(raw).hexdigest(),
+        )
+
     def attest(
         self,
         grant_id: UUID,
@@ -1027,5 +1308,6 @@ __all__ = [
     "LeaseAcknowledgement",
     "ProjectionChallenge",
     "ProjectionReceipt",
+    "PublicationCandidateAcknowledgement",
     "SealedAuthorityPayload",
 ]

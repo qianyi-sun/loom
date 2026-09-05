@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -122,6 +123,28 @@ func TestRunConstructsEnvironmentFromProjectedQuotaDirectory(t *testing.T) {
 	}
 }
 
+func TestProductionOrchestratorKeepsDisabledPublicationHandoffInert(t *testing.T) {
+	cfg := Config{
+		CPUArch: runtime.GOARCH,
+		Guard: GuardConfig{
+			SocketPath:        "/run/loom-task-image-builder-guard/guard.sock",
+			MaxPacketBytes:    4096,
+			AckTimeoutSeconds: 5,
+		},
+	}
+
+	supervisor := productionOrchestrator("11111111-1111-4111-8111-111111111111", cfg)
+	if _, ok := supervisor.Handoff.(DisabledPublicationHandoff); !ok {
+		t.Fatalf("production handoff = %T, want DisabledPublicationHandoff", supervisor.Handoff)
+	}
+	if _, ok := supervisor.Handoff.(CredentialedPublicationHandoff); ok {
+		t.Fatalf("disabled production handoff unexpectedly requests publication credentials")
+	}
+	if err := supervisor.Handoff.Accept(context.Background(), BuiltComponentSet{}); !errors.Is(err, ErrPublicationPhaseUnavailable) {
+		t.Fatalf("disabled handoff error = %v, want ErrPublicationPhaseUnavailable", err)
+	}
+}
+
 type supervisorProjectClientFunc func(context.Context, string) (*AllocationCapabilities, error)
 
 func (fn supervisorProjectClientFunc) Project(ctx context.Context, grantID string) (*AllocationCapabilities, error) {
@@ -141,6 +164,14 @@ func (fn supervisorProjectClientFunc) Claim(context.Context, string, string, *Se
 }
 
 func (fn supervisorProjectClientFunc) Bundle(context.Context, string, string, string, string, int, *SecretBuffer) (*SecretBuffer, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
 	return nil, nil
 }
 

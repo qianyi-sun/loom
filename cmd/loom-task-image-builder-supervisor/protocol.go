@@ -84,6 +84,61 @@ type LeaseResponse struct {
 	LeaseExpiresAt            *time.Time
 }
 
+type RegistryCredentialRequest struct {
+	GrantID                 string
+	OperationID             string
+	MaterializationID       string
+	AttemptID               string
+	LeaseEpoch              int
+	Component               string
+	PredecessorCredentialID string
+	PredecessorGeneration   int
+}
+
+type PublicationCandidateRequest struct {
+	GrantID                 string
+	OperationID             string
+	CredentialID            string
+	CredentialGeneration    int
+	SessionID               string
+	SessionGeneration       int
+	MaterializationID       string
+	AttemptID               string
+	AttemptNumber           int
+	LeaseEpoch              int
+	BuilderID               string
+	Component               string
+	ManifestDigest          string
+	ManifestSize            int64
+	OCIFileSHA256           string
+	OCIFileSize             int64
+	Platform                string
+	AuthorityResponseSHA256 string
+}
+
+type PublicationCandidateAcknowledgement struct {
+	CandidateID             string
+	OperationID             string
+	CredentialID            string
+	CredentialGeneration    int
+	GrantID                 string
+	SessionID               string
+	SessionGeneration       int
+	MaterializationID       string
+	AttemptID               string
+	AttemptNumber           int
+	LeaseEpoch              int
+	BuilderID               string
+	Component               string
+	ManifestDigest          string
+	ManifestSize            int64
+	OCIFileSHA256           string
+	OCIFileSize             int64
+	Platform                string
+	RecordedAt              time.Time
+	AuthorityResponseSHA256 string
+}
+
 func NewGuardClient(socketPath string, maxPacketBytes int, ackTimeout time.Duration) *GuardClient {
 	return &GuardClient{
 		socketPath:     socketPath,
@@ -173,11 +228,10 @@ func (c *GuardClient) Project(ctx context.Context, grantID string) (*AllocationC
 		BuildEgressInode:   uint64(buildStat.Ino),
 	}
 	rights[1], rights[2] = -1, -1
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		caps.Close()
 		return nil, err
 	}
-	packet.fd = -1
 	return caps, nil
 }
 
@@ -287,6 +341,163 @@ func (c *GuardClient) Bundle(ctx context.Context, grantID string, operationID st
 	return secret, err
 }
 
+func (c *GuardClient) RegistryCredential(ctx context.Context, request RegistryCredentialRequest, current *SecretBuffer) (*SecretBuffer, error) {
+	if (request.PredecessorCredentialID == "") != (request.PredecessorGeneration == 0) {
+		return nil, errors.New("registry credential predecessor invalid")
+	}
+	var predecessorID any
+	var predecessorGeneration any
+	if request.PredecessorCredentialID != "" || request.PredecessorGeneration != 0 {
+		predecessorID = request.PredecessorCredentialID
+		predecessorGeneration = request.PredecessorGeneration
+	}
+	secret, _, err := c.secretOperation(ctx, map[string]any{
+		"schema":                    localSchema,
+		"operation":                 "registry-credential",
+		"grant_id":                  request.GrantID,
+		"operation_id":              request.OperationID,
+		"materialization_id":        request.MaterializationID,
+		"attempt_id":                request.AttemptID,
+		"lease_epoch":               request.LeaseEpoch,
+		"component":                 request.Component,
+		"predecessor_credential_id": predecessorID,
+		"predecessor_generation":    predecessorGeneration,
+	}, current)
+	return secret, err
+}
+
+func (c *GuardClient) PublicationCandidate(ctx context.Context, request PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	localRequest := map[string]any{
+		"schema":                localSchema,
+		"operation":             "publication-candidate",
+		"grant_id":              request.GrantID,
+		"operation_id":          request.OperationID,
+		"materialization_id":    request.MaterializationID,
+		"attempt_id":            request.AttemptID,
+		"lease_epoch":           request.LeaseEpoch,
+		"credential_id":         request.CredentialID,
+		"credential_generation": request.CredentialGeneration,
+		"component":             request.Component,
+		"manifest_digest":       request.ManifestDigest,
+		"manifest_size":         request.ManifestSize,
+		"oci_file_sha256":       request.OCIFileSHA256,
+		"oci_file_size":         request.OCIFileSize,
+		"platform":              request.Platform,
+	}
+	fd, err := current.cloneSealedMemfd("session-publication-candidate", maxSecretBytes)
+	if err != nil {
+		return nil, err
+	}
+	packet, rights, err := c.roundTrip(ctx, localRequest, []int{fd})
+	syscall.Close(fd)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRights(rights)
+	defer packet.Close()
+	if len(rights) != 0 {
+		return nil, errors.New("publication candidate response should not carry rights")
+	}
+	var response struct {
+		Schema                  string `json:"schema"`
+		Operation               string `json:"operation"`
+		ResponseID              string `json:"response_id"`
+		GrantID                 string `json:"grant_id"`
+		CandidateID             string `json:"candidate_id"`
+		OperationID             string `json:"operation_id"`
+		CredentialID            string `json:"credential_id"`
+		CredentialGeneration    int    `json:"credential_generation"`
+		SessionID               string `json:"session_id"`
+		SessionGeneration       int    `json:"session_generation"`
+		MaterializationID       string `json:"materialization_id"`
+		AttemptID               string `json:"attempt_id"`
+		AttemptNumber           int    `json:"attempt_number"`
+		LeaseEpoch              int    `json:"lease_epoch"`
+		BuilderID               string `json:"builder_id"`
+		Component               string `json:"component"`
+		ManifestDigest          string `json:"manifest_digest"`
+		ManifestSize            int64  `json:"manifest_size"`
+		OCIFileSHA256           string `json:"oci_file_sha256"`
+		OCIFileSize             int64  `json:"oci_file_size"`
+		Platform                string `json:"platform"`
+		RecordedAt              string `json:"recorded_at"`
+		AuthorityResponseSHA256 string `json:"authority_response_sha256"`
+	}
+	if err := decodeStrictJSON(packet.payload, &response); err != nil {
+		return nil, err
+	}
+	recordedAt, err := time.Parse(time.RFC3339, response.RecordedAt)
+	if err != nil {
+		return nil, err
+	}
+	if response.Schema != localSchema ||
+		response.Operation != "publication-candidate" ||
+		response.GrantID != request.GrantID ||
+		response.OperationID != request.OperationID ||
+		response.CredentialID != request.CredentialID ||
+		response.CredentialGeneration != request.CredentialGeneration ||
+		response.SessionID != request.SessionID ||
+		response.SessionGeneration != request.SessionGeneration ||
+		response.MaterializationID != request.MaterializationID ||
+		response.AttemptID != request.AttemptID ||
+		response.AttemptNumber != request.AttemptNumber ||
+		response.LeaseEpoch != request.LeaseEpoch ||
+		response.BuilderID != request.BuilderID ||
+		response.Component != request.Component ||
+		response.ManifestDigest != request.ManifestDigest ||
+		response.ManifestSize != request.ManifestSize ||
+		response.OCIFileSHA256 != request.OCIFileSHA256 ||
+		response.OCIFileSize != request.OCIFileSize ||
+		response.Platform != request.Platform ||
+		(request.AuthorityResponseSHA256 != "" && response.AuthorityResponseSHA256 != request.AuthorityResponseSHA256) ||
+		!isCanonicalNonZeroUUID(response.ResponseID) ||
+		!isCanonicalNonZeroUUID(response.CandidateID) ||
+		!isCanonicalNonZeroUUID(response.OperationID) ||
+		!isCanonicalNonZeroUUID(response.CredentialID) ||
+		!isCanonicalNonZeroUUID(response.SessionID) ||
+		!isCanonicalNonZeroUUID(response.MaterializationID) ||
+		!isCanonicalNonZeroUUID(response.AttemptID) ||
+		response.CredentialGeneration <= 0 ||
+		response.SessionGeneration <= 0 ||
+		response.AttemptNumber <= 0 ||
+		response.LeaseEpoch <= 0 ||
+		!builderIDPattern.MatchString(response.BuilderID) ||
+		!componentPattern.MatchString(response.Component) ||
+		response.ManifestSize <= 0 ||
+		response.OCIFileSize <= 0 ||
+		parsePublicationManifestDigest(response.ManifestDigest) != nil ||
+		!isDigest(response.OCIFileSHA256) ||
+		(response.Platform != "linux/amd64" && response.Platform != "linux/arm64") ||
+		!isDigest(response.AuthorityResponseSHA256) {
+		return nil, errors.New("publication candidate response invalid")
+	}
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
+		return nil, err
+	}
+	return &PublicationCandidateAcknowledgement{
+		CandidateID:             response.CandidateID,
+		OperationID:             response.OperationID,
+		CredentialID:            response.CredentialID,
+		CredentialGeneration:    response.CredentialGeneration,
+		GrantID:                 response.GrantID,
+		SessionID:               response.SessionID,
+		SessionGeneration:       response.SessionGeneration,
+		MaterializationID:       response.MaterializationID,
+		AttemptID:               response.AttemptID,
+		AttemptNumber:           response.AttemptNumber,
+		LeaseEpoch:              response.LeaseEpoch,
+		BuilderID:               response.BuilderID,
+		Component:               response.Component,
+		ManifestDigest:          response.ManifestDigest,
+		ManifestSize:            response.ManifestSize,
+		OCIFileSHA256:           response.OCIFileSHA256,
+		OCIFileSize:             response.OCIFileSize,
+		Platform:                response.Platform,
+		RecordedAt:              recordedAt,
+		AuthorityResponseSHA256: response.AuthorityResponseSHA256,
+	}, nil
+}
+
 func (c *GuardClient) Start(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {
 	return c.leaseOperation(ctx, "start", grantID, operationID, materializationID, attemptID, leaseEpoch, "", current)
 }
@@ -330,10 +541,9 @@ func (c *GuardClient) Finish(ctx context.Context, grantID string, operationID st
 	if response.Schema != localSchema || response.Operation != "finishing" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return errors.New("finish response invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		return err
 	}
-	packet.fd = -1
 	return nil
 }
 
@@ -375,11 +585,10 @@ func (c *GuardClient) decodeSessionResponse(packet *responsePacket, rights []int
 		session.Secret.Close()
 		return nil, errors.New("session response binding invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		session.Secret.Close()
 		return nil, err
 	}
-	packet.fd = -1
 	return session, nil
 }
 
@@ -455,11 +664,18 @@ func (c *GuardClient) connect(ctx context.Context) (int, time.Time, error) {
 	}
 }
 
+// ackPacket centralizes the shared packet ownership handoff.
+func (c *GuardClient) ackPacket(packet *responsePacket, responseID string) error {
+	fd := packet.fd
+	packet.fd = -1
+	return c.sendAck(fd, responseID, packet.deadline)
+}
+
 func (c *GuardClient) sendAck(fd int, responseID string, deadline time.Time) error {
+	defer syscall.Close(fd)
 	if !isCanonicalNonZeroUUID(responseID) {
 		return errors.New("ack response id invalid")
 	}
-	defer syscall.Close(fd)
 	return sendLocalPacket(fd, deadline, map[string]any{
 		"schema":      localSchema,
 		"operation":   "ack",
@@ -500,10 +716,9 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		if response.Schema != localSchema || response.Operation != "claim" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) || response.Available == nil || *response.Available {
 			return nil, false, errors.New("secret response invalid")
 		}
-		if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+		if err := c.ackPacket(packet, response.ResponseID); err != nil {
 			return nil, false, err
 		}
-		packet.fd = -1
 		return nil, false, nil
 	}
 	if len(rights) != 1 {
@@ -549,6 +764,28 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		}
 		payloadSHA256 = response.PayloadSHA256
 		responseID = response.ResponseID
+	case "registry-credential":
+		component, _ := request["component"].(string)
+		var response struct {
+			Schema            string `json:"schema"`
+			Operation         string `json:"operation"`
+			ResponseID        string `json:"response_id"`
+			GrantID           string `json:"grant_id"`
+			OperationID       string `json:"operation_id"`
+			MaterializationID string `json:"materialization_id"`
+			AttemptID         string `json:"attempt_id"`
+			LeaseEpoch        int    `json:"lease_epoch"`
+			Component         string `json:"component"`
+			PayloadSHA256     string `json:"payload_sha256"`
+		}
+		if err := decodeStrictJSON(packet.payload, &response); err != nil {
+			return nil, false, err
+		}
+		if response.Schema != localSchema || response.Operation != "registry-credential" || response.GrantID != grantID || response.OperationID != operationID || response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch || response.Component != component || !isCanonicalNonZeroUUID(response.ResponseID) || !isDigest(response.PayloadSHA256) {
+			return nil, false, errors.New("secret response invalid")
+		}
+		payloadSHA256 = response.PayloadSHA256
+		responseID = response.ResponseID
 	default:
 		return nil, false, errors.New("secret operation invalid")
 	}
@@ -561,11 +798,10 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		buffer.Close()
 		return nil, false, errors.New("secret payload digest mismatch")
 	}
-	if err := c.sendAck(packet.fd, responseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, responseID); err != nil {
 		buffer.Close()
 		return nil, false, err
 	}
-	packet.fd = -1
 	return buffer, true, nil
 }
 
@@ -603,10 +839,9 @@ func (c *GuardClient) leaseOperation(ctx context.Context, operation string, gran
 	if response.Operation != operation || response.GrantID != grantID || response.OperationID != operationID || response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return nil, errors.New("lease response invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		return nil, err
 	}
-	packet.fd = -1
 	return &response, nil
 }
 

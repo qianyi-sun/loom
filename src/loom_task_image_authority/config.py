@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import os
+import re
 import ssl
 import stat
 from collections.abc import Mapping
@@ -24,6 +26,11 @@ from loom.task_image_build_plan import (
 
 _MAX_KEYRING_BYTES = 1024 * 1024
 _MAX_KEY_VERSION = (1 << 31) - 1
+_DNS_HOST_PATTERN = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+)
+_REGISTRY_IDENTITY_PATTERN = r"^[a-z0-9][a-z0-9_.:-]{0,127}$"
 
 
 class TaskImageAuthorityConfigurationError(ValueError):
@@ -68,6 +75,20 @@ class TaskImageAuthoritySettings(BaseSettings):
         le=MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
     )
     bundle_url_expiry_seconds: int = Field(default=900, ge=1, le=900)
+    registry_origin: str | None = Field(default=None, max_length=2048)
+    registry_service: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=_REGISTRY_IDENTITY_PATTERN,
+    )
+    registry_issuer: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=_REGISTRY_IDENTITY_PATTERN,
+    )
+    registry_signing_key_file: Path | None = None
 
     @model_validator(mode="after")
     def _bundle_configuration_is_complete_and_safe(
@@ -95,6 +116,81 @@ class TaskImageAuthoritySettings(BaseSettings):
         ):
             raise ValueError("bundle expected bucket is invalid")
         return self
+
+    @model_validator(mode="after")
+    def _registry_configuration_is_complete_and_safe(
+        self,
+    ) -> TaskImageAuthoritySettings:
+        values = (
+            self.registry_origin,
+            self.registry_service,
+            self.registry_issuer,
+            self.registry_signing_key_file,
+        )
+        if any(value is not None for value in values) and not all(
+            value is not None for value in values
+        ):
+            raise ValueError("registry credential configuration must be all present or absent")
+        if self.registry_origin is not None:
+            _validate_https_origin(self.registry_origin, label="registry origin")
+        return self
+
+
+def _validate_https_origin(value: str, *, label: str) -> str:
+    if (
+        type(value) is not str
+        or not value.isascii()
+        or any(character.isspace() or ord(character) < 0x20 for character in value)
+        or "\\" in value
+    ):
+        raise ValueError(f"{label} must be a canonical origin-only HTTPS URL")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError(f"{label} must be a canonical origin-only HTTPS URL") from None
+    try:
+        address = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError:
+        if (
+            parsed.hostname is None
+            or len(parsed.hostname) > 253
+            or _DNS_HOST_PATTERN.fullmatch(parsed.hostname) is None
+        ):
+            raise ValueError(
+                f"{label} must be a canonical origin-only HTTPS URL"
+            ) from None
+        canonical_host = parsed.hostname
+    else:
+        canonical_host = (
+            f"[{address.compressed}]" if address.version == 6 else address.compressed
+        )
+    canonical_netloc = (
+        f"{canonical_host}:{port}"
+        if canonical_host is not None and port is not None
+        else canonical_host
+    )
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.hostname is None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc != canonical_netloc
+        or port == 0
+        or parsed.geturl() != value
+    ):
+        raise ValueError(f"{label} must be a canonical origin-only HTTPS URL")
+    return value
+
+
+def _validate_registry_identity(value: str, *, label: str) -> str:
+    if type(value) is not str or re.fullmatch(_REGISTRY_IDENTITY_PATTERN, value) is None:
+        raise ValueError(f"{label} is invalid")
+    return value
 
 
 def read_owner_only_bytes(path: Path, *, max_bytes: int = 16 * 1024) -> bytes:

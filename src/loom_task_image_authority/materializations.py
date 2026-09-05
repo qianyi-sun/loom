@@ -164,7 +164,7 @@ def _stored_claim_plan(
     return plan
 
 
-async def _lock_current_session_authority(
+async def lock_current_task_image_build_session_authority(
     session: AsyncSession,
     *,
     authorization: TaskImageBuildSessionAuthorization,
@@ -308,7 +308,7 @@ async def claim_session_materialization(
     now = _utc(now)
     claim_id = _nonzero_id(claim_id, label="claim_id")
     deadline = _lease_deadline(now=now, lease_seconds=lease_seconds)
-    await _lock_current_session_authority(
+    await lock_current_task_image_build_session_authority(
         session,
         authorization=authorization,
         now=now,
@@ -462,7 +462,7 @@ async def _operation_replay(
     return row
 
 
-async def _locked_operation_lease(
+async def lock_session_materialization_lease(
     session: AsyncSession,
     *,
     authorization: TaskImageBuildSessionAuthorization,
@@ -603,7 +603,7 @@ async def _prepare_operation(
     _nonzero_id(attempt_id, label="attempt_id")
     if lease_epoch <= 0:
         raise ValueError("lease_epoch must be positive")
-    await _lock_current_session_authority(
+    await lock_current_task_image_build_session_authority(
         session,
         authorization=authorization,
         now=now,
@@ -619,7 +619,7 @@ async def _prepare_operation(
     )
     if replay is not None:
         return now, replay, None
-    row, attempt = await _locked_operation_lease(
+    row, attempt = await lock_session_materialization_lease(
         session,
         authorization=authorization,
         materialization_id=materialization_id,
@@ -733,12 +733,12 @@ async def get_session_materialization_build_plan(
     _nonzero_id(attempt_id, label="attempt_id")
     if lease_epoch <= 0:
         raise ValueError("lease_epoch must be positive")
-    await _lock_current_session_authority(
+    await lock_current_task_image_build_session_authority(
         session,
         authorization=authorization,
         now=now,
     )
-    row, _attempt = await _locked_operation_lease(
+    row, _attempt = await lock_session_materialization_lease(
         session,
         authorization=authorization,
         materialization_id=materialization_id,
@@ -770,7 +770,7 @@ async def issue_session_materialization_bundle(
     _nonzero_id(attempt_id, label="attempt_id")
     if lease_epoch <= 0:
         raise ValueError("lease_epoch must be positive")
-    await _lock_current_session_authority(
+    await lock_current_task_image_build_session_authority(
         session,
         authorization=authorization,
         now=now,
@@ -792,7 +792,7 @@ async def issue_session_materialization_bundle(
         raise TaskImageSessionMaterializationConflictError(
             "task-image operation identity was already used"
         )
-    row, attempt = await _locked_operation_lease(
+    row, attempt = await lock_session_materialization_lease(
         session,
         authorization=authorization,
         materialization_id=materialization_id,

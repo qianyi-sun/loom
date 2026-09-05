@@ -425,6 +425,8 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         assert "sentinel" not in result.stdout
         assert "X-Amz-Signature" not in result.stdout
         assert {"authority_api_challenge", "authority_api_attach", "authority_api_exchange", "authority_api_renew", "authority_api_claim", "authority_api_bundle", "authority_api_start", "authority_api_release"}.issubset(set(authority_events))
+        assert "authority_api_registry_credential" not in authority_events
+        assert "authority_api_publication_candidate" not in authority_events
         assert "storage_cleanup" not in guard_events
 
         engine = create_async_engine(postgres_url)
@@ -458,6 +460,15 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         assert projection.state == "exchanged"
         assert materialization is not None
         assert attempts
-        assert {event.operation_type for event in events} >= {"bundle", "start", "release"}
+        operation_types = {event.operation_type for event in events}
+        assert operation_types >= {"bundle", "start", "release"}
+        assert "registry-credential" not in operation_types
+        assert "publication-candidate" not in operation_types
+        assert "fail" not in operation_types
+        assert materialization.registry_images == {}
+        assert materialization.registry_image_history == []
+        assert materialization.ready_at is None
+        assert materialization.finished_at is None
+        assert all(attempt.claim_deterministic_failure_count == 0 for attempt in attempts)
     finally:
         await _clear_authority_rows(postgres_url)

@@ -39,6 +39,8 @@ ATTESTATION = UUID("77777777-7777-7777-7777-777777777777")
 MATERIALIZATION = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 ATTEMPT = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 OPERATION = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+CREDENTIAL = UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+CANDIDATE = UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
 DIGEST_C = "3" * 64
@@ -606,6 +608,218 @@ def test_claim_immediately_seals_an_opaque_success_body_without_deserializing_it
         finally:
             claimed.close()
         assert [item[0] for item in server.requests] == [route]
+
+
+def test_registry_credential_stays_opaque_and_candidate_acknowledgement_is_strict(
+    tmp_path: Path,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config,
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+            now_factory=lambda: NOW + timedelta(seconds=6),
+        )
+        current = {
+            "schema_version": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+        }
+        credential_request = current | {
+            "request_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "component": "task",
+            "predecessor_credential_id": None,
+            "predecessor_generation": None,
+        }
+        candidate_request = current | {
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "component": "task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+        }
+        repository = f"loom-task-image-attempts/arm64/{ATTEMPT}/task"
+        credential_payload = b"\x00opaque-registry-credential\xffprivate-token"
+        candidate_payload = json.dumps(
+            {
+                "schema_version": "loom.task-image-publication-candidate.v1",
+                "candidate_id": str(CANDIDATE),
+                "operation_id": str(OPERATION),
+                "credential_id": str(CREDENTIAL),
+                "credential_generation": 1,
+                "grant_id": str(GRANT),
+                "session_id": str(SESSION),
+                "session_generation": 1,
+                "materialization_id": str(MATERIALIZATION),
+                "attempt_id": str(ATTEMPT),
+                "attempt_number": 2,
+                "lease_epoch": 3,
+                "builder_id": "rootless:" + "a" * 32,
+                "component": "task",
+                "repository": repository,
+                "manifest_digest": "sha256:" + DIGEST_A,
+                "manifest_size": 512,
+                "oci_file_sha256": DIGEST_B,
+                "oci_file_size": 4096,
+                "platform": "linux/arm64",
+                "recorded_at": _timestamp(NOW + timedelta(seconds=6)),
+            },
+            separators=(",", ":"),
+        ).encode("ascii")
+        base = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}"
+        server.responses = {
+            f"{base}/registry-credential": (
+                200,
+                credential_payload,
+                {"Content-Type": "application/json"},
+            ),
+            f"{base}/publication-candidate": (
+                200,
+                candidate_payload,
+                {"Content-Type": "application/json"},
+            ),
+        }
+
+        credential = client.registry_credential(
+            GRANT,
+            MATERIALIZATION,
+            credential_request,
+        )
+        acknowledgement = client.publication_candidate(
+            GRANT,
+            MATERIALIZATION,
+            candidate_request,
+        )
+        try:
+            assert read_sealed_memfd(credential.descriptor, maximum=65536) == (
+                credential_payload
+            )
+            assert credential.sha256 == hashlib.sha256(credential_payload).hexdigest()
+            assert "private-token" not in repr(credential)
+        finally:
+            credential.close()
+
+        assert acknowledgement.candidate_id == CANDIDATE
+        assert acknowledgement.operation_id == OPERATION
+        assert acknowledgement.credential_id == CREDENTIAL
+        assert acknowledgement.credential_generation == 1
+        assert acknowledgement.grant_id == GRANT
+        assert acknowledgement.session_id == SESSION
+        assert acknowledgement.session_generation == 1
+        assert acknowledgement.materialization_id == MATERIALIZATION
+        assert acknowledgement.attempt_id == ATTEMPT
+        assert acknowledgement.attempt_number == 2
+        assert acknowledgement.lease_epoch == 3
+        assert acknowledgement.builder_id == "rootless:" + "a" * 32
+        assert acknowledgement.component == "task"
+        assert acknowledgement.manifest_digest == "sha256:" + DIGEST_A
+        assert acknowledgement.manifest_size == 512
+        assert acknowledgement.oci_file_sha256 == DIGEST_B
+        assert acknowledgement.oci_file_size == 4096
+        assert acknowledgement.platform == "linux/arm64"
+        assert acknowledgement.recorded_at == NOW + timedelta(seconds=6)
+        assert acknowledgement.response_sha256 == hashlib.sha256(
+            candidate_payload
+        ).hexdigest()
+        assert [item[0] for item in server.requests] == [
+            f"{base}/registry-credential",
+            f"{base}/publication-candidate",
+        ]
+        assert server.methods == ["PUT", "PUT"]
+        assert json.loads(server.requests[0][2]) == credential_request
+        assert json.loads(server.requests[1][2]) == candidate_request
+        for _path, _headers, request_payload, _tls in server.requests:
+            assert b"repository" not in request_payload
+            assert b"registry_origin" not in request_payload
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("wrong-operation", "wrong-credential", "extra-field"),
+)
+def test_publication_candidate_rejects_changed_authority_binding(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config,
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+            now_factory=lambda: NOW + timedelta(seconds=6),
+        )
+        request = {
+            "schema_version": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "component": "task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+        }
+        response: dict[str, object] = {
+            "schema_version": "loom.task-image-publication-candidate.v1",
+            "candidate_id": str(CANDIDATE),
+            "operation_id": str(OPERATION),
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "attempt_number": 2,
+            "lease_epoch": 3,
+            "builder_id": "rootless:" + "a" * 32,
+            "component": "task",
+            "repository": f"loom-task-image-attempts/arm64/{ATTEMPT}/task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+            "recorded_at": _timestamp(NOW + timedelta(seconds=6)),
+        }
+        if mutation == "wrong-operation":
+            response["operation_id"] = str(REQUEST)
+        elif mutation == "wrong-credential":
+            response["credential_id"] = str(REQUEST)
+        else:
+            response["bearer_token"] = "must-not-be-accepted"
+        route = (
+            f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/"
+            "publication-candidate"
+        )
+        server.responses[route] = _json_response(response)
+
+        with pytest.raises(GuardError) as caught:
+            client.publication_candidate(GRANT, MATERIALIZATION, request)
+
+        assert caught.value.code == "authority_candidate_invalid"
+        assert SESSION_TOKEN not in str(caught.value)
+        assert "must-not-be-accepted" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

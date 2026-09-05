@@ -29,6 +29,7 @@ from loom_task_image_builder_guard.authority import (
     LeaseAcknowledgement,
     ProjectionChallenge,
     ProjectionReceipt,
+    PublicationCandidateAcknowledgement,
     SealedAuthorityPayload,
 )
 from loom_task_image_builder_guard.bpf import (
@@ -89,6 +90,8 @@ SESSION_TWO = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 MATERIALIZATION = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 ATTEMPT = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 LEASE_OPERATION = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+CREDENTIAL = UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+CANDIDATE = UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
 DIGEST_C = "3" * 64
@@ -631,6 +634,7 @@ class _Authority:
         self.peer = peer
         self.events = events
         self.requests: list[tuple[str, dict[str, object]]] = []
+        self.registry_descriptor: int | None = None
 
     @staticmethod
     def request_sha256(value: object) -> str:
@@ -876,6 +880,59 @@ class _Authority:
         payload = _json({"opaque": "sentinel-secret-bundle"})
         descriptor = create_sealed_memfd("bundle", payload, maximum=65536)
         return SealedAuthorityPayload(descriptor, hashlib.sha256(payload).hexdigest())
+
+    def registry_credential(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> SealedAuthorityPayload:
+        assert grant_id == GRANT
+        assert materialization_id == MATERIALIZATION
+        self.events.append("authority_registry_credential")
+        self.requests.append(("registry-credential", json.loads(_json(request))))
+        payload = _json(
+            {
+                "bearer_token": "sentinel-private-registry-token",
+                "credential_id": str(CREDENTIAL),
+            }
+        )
+        descriptor = create_sealed_memfd("registry-credential", payload, maximum=65536)
+        self.registry_descriptor = descriptor
+        return SealedAuthorityPayload(descriptor, hashlib.sha256(payload).hexdigest())
+
+    def publication_candidate(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgement:
+        assert grant_id == GRANT
+        assert materialization_id == MATERIALIZATION
+        self.events.append("authority_publication_candidate")
+        self.requests.append(("publication-candidate", json.loads(_json(request))))
+        return PublicationCandidateAcknowledgement(
+            candidate_id=CANDIDATE,
+            operation_id=UUID(str(request["operation_id"])),
+            credential_id=UUID(str(request["credential_id"])),
+            credential_generation=int(request["credential_generation"]),
+            grant_id=grant_id,
+            session_id=UUID(str(request["session_id"])),
+            session_generation=int(request["session_generation"]),
+            materialization_id=materialization_id,
+            attempt_id=UUID(str(request["attempt_id"])),
+            attempt_number=2,
+            lease_epoch=int(request["lease_epoch"]),
+            builder_id="rootless:" + "a" * 32,
+            component=str(request["component"]),
+            manifest_digest=str(request["manifest_digest"]),
+            manifest_size=int(request["manifest_size"]),
+            oci_file_sha256=str(request["oci_file_sha256"]),
+            oci_file_size=int(request["oci_file_size"]),
+            platform=str(request["platform"]),
+            recorded_at=NOW + timedelta(seconds=6),
+            response_sha256=DIGEST_D,
+        )
 
     def revoke(self, grant_id: UUID, request: dict[str, object]) -> None:
         del grant_id, request
@@ -2630,6 +2687,323 @@ def test_lease_operations_require_current_session_and_keep_secret_outputs_sealed
     assert authority_request["session_id"] == str(SESSION)
     assert authority_request["session_generation"] == 1
     assert authority_request["session_token"] == SESSION_TOKEN
+    service.close()
+    ledger.close()
+
+
+def test_registry_publication_operations_proxy_opaque_capability_without_ledger_writes(
+    tmp_path: Path,
+) -> None:
+    service, ledger, _peer, _slurm, _events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    service._uuid = iter(
+        (
+            UUID("abababab-abab-4bab-8bab-abababababab"),
+            UUID("acacacac-acac-4cac-8cac-acacacacacac"),
+        )
+    ).__next__
+    entry = ledger.get(GRANT)
+    assert entry is not None
+    ledger_before = entry.raw
+    requests = (
+        {
+            "schema": LOCAL_SCHEMA,
+            "operation": "registry-credential",
+            "grant_id": str(GRANT),
+            "operation_id": str(LEASE_OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 1,
+            "component": "task",
+            "predecessor_credential_id": None,
+            "predecessor_generation": None,
+        },
+        {
+            "schema": LOCAL_SCHEMA,
+            "operation": "publication-candidate",
+            "grant_id": str(GRANT),
+            "operation_id": str(LEASE_OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 1,
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "component": "task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+        },
+    )
+
+    for request in requests:
+        current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+        server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        thread = _run_connection(service, server)
+        try:
+            send_packet(client, _json(request), descriptor=current_fd)
+            os.close(current_fd)
+            response_payload, descriptor = receive_request(client, maximum=4096)
+            response = json.loads(response_payload)
+            if request["operation"] == "registry-credential":
+                assert descriptor is not None
+                try:
+                    secret = read_sealed_memfd(descriptor, maximum=65536)
+                finally:
+                    os.close(descriptor)
+                assert b"sentinel-private-registry-token" in secret
+                assert b"sentinel-private-registry-token" not in response_payload
+                assert response == {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "registry-credential",
+                    "response_id": "abababab-abab-4bab-8bab-abababababab",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(LEASE_OPERATION),
+                    "materialization_id": str(MATERIALIZATION),
+                    "attempt_id": str(ATTEMPT),
+                    "lease_epoch": 1,
+                    "component": "task",
+                    "payload_sha256": hashlib.sha256(secret).hexdigest(),
+                }
+            else:
+                assert descriptor is None
+                assert response == {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "publication-candidate",
+                    "response_id": "acacacac-acac-4cac-8cac-acacacacacac",
+                    "candidate_id": str(CANDIDATE),
+                    "operation_id": str(LEASE_OPERATION),
+                    "credential_id": str(CREDENTIAL),
+                    "credential_generation": 1,
+                    "grant_id": str(GRANT),
+                    "session_id": str(SESSION),
+                    "session_generation": 1,
+                    "materialization_id": str(MATERIALIZATION),
+                    "attempt_id": str(ATTEMPT),
+                    "attempt_number": 2,
+                    "lease_epoch": 1,
+                    "builder_id": "rootless:" + "a" * 32,
+                    "component": "task",
+                    "manifest_digest": "sha256:" + DIGEST_A,
+                    "manifest_size": 512,
+                    "oci_file_sha256": DIGEST_B,
+                    "oci_file_size": 4096,
+                    "platform": "linux/arm64",
+                    "recorded_at": "2026-09-02T16:00:06Z",
+                    "authority_response_sha256": DIGEST_D,
+                }
+            send_packet(
+                client,
+                _json(
+                    {
+                        "schema": LOCAL_SCHEMA,
+                        "operation": "ack",
+                        "response_id": response["response_id"],
+                    }
+                ),
+            )
+            thread.join(timeout=3)
+            assert not thread.is_alive()
+        finally:
+            client.close()
+
+    authority_requests = service.authority.requests[-2:]  # type: ignore[attr-defined]
+    assert [operation for operation, _request in authority_requests] == [
+        "registry-credential",
+        "publication-candidate",
+    ]
+    credential_authority_request = authority_requests[0][1]
+    assert credential_authority_request == {
+        "schema_version": 1,
+        "request_id": str(LEASE_OPERATION),
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token": SESSION_TOKEN,
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 1,
+        "component": "task",
+        "predecessor_credential_id": None,
+        "predecessor_generation": None,
+    }
+    candidate_authority_request = authority_requests[1][1]
+    assert candidate_authority_request == {
+        "schema_version": 1,
+        "operation_id": str(LEASE_OPERATION),
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token": SESSION_TOKEN,
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 1,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 1,
+        "component": "task",
+        "manifest_digest": "sha256:" + DIGEST_A,
+        "manifest_size": 512,
+        "oci_file_sha256": DIGEST_B,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+    }
+    assert all("repository" not in request for _, request in authority_requests)
+    assert all("registry_origin" not in request for _, request in authority_requests)
+    assert ledger.get(GRANT).raw == ledger_before  # type: ignore[union-attr]
+    registry_descriptor = service.authority.registry_descriptor  # type: ignore[attr-defined]
+    assert registry_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(registry_descriptor)
+    service.close()
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("condition", "expected_code"),
+    [
+        ("absent", "local_session_descriptor_required"),
+        ("multiple", "local_descriptor_invalid"),
+        ("unsealed", "memfd_seals_invalid"),
+        ("stale-session", "local_session_binding_invalid"),
+        ("dead-peer", "peer_changed"),
+    ],
+)
+def test_registry_credentials_require_one_live_current_session_descriptor(
+    tmp_path: Path,
+    condition: str,
+    expected_code: str,
+) -> None:
+    service, ledger, peer, _slurm, events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    request = {
+        "schema": LOCAL_SCHEMA,
+        "operation": "registry-credential",
+        "grant_id": str(GRANT),
+        "operation_id": str(LEASE_OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 1,
+        "component": "task",
+        "predecessor_credential_id": None,
+        "predecessor_generation": None,
+    }
+    descriptors: list[int] = []
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        if condition == "absent":
+            send_packet(client, _json(request))
+        elif condition == "multiple":
+            descriptors = [
+                create_sealed_memfd("session-a", current_wire, maximum=65536),
+                create_sealed_memfd("session-b", current_wire, maximum=65536),
+            ]
+            client.sendmsg(
+                [_json(request)],
+                [
+                    (
+                        socket.SOL_SOCKET,
+                        socket.SCM_RIGHTS,
+                        array.array("i", descriptors),
+                    )
+                ],
+            )
+        elif condition == "unsealed":
+            descriptor = protocol_module._memfd_create(
+                "unsealed-session",
+                0x0001 | 0x0002,
+            )
+            descriptors = [descriptor]
+            os.write(descriptor, current_wire)
+            client.sendmsg(
+                [_json(request)],
+                [
+                    (
+                        socket.SOL_SOCKET,
+                        socket.SCM_RIGHTS,
+                        array.array("i", descriptors),
+                    )
+                ],
+            )
+        else:
+            if condition == "dead-peer":
+                peer.alive = False
+                payload = current_wire
+            else:
+                payload = current_wire + b" "
+            descriptor = create_sealed_memfd("session", payload, maximum=65536)
+            descriptors = [descriptor]
+            send_packet(client, _json(request), descriptor=descriptor)
+
+        response_payload, response_descriptor = receive_request(client, maximum=4096)
+        assert response_descriptor is None
+        assert json.loads(response_payload) == {
+            "schema": LOCAL_SCHEMA,
+            "operation": "error",
+            "code": expected_code,
+        }
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        client.close()
+
+    assert "authority_registry_credential" not in events
+    service.close()
+    ledger.close()
+
+
+def test_publication_candidate_platform_must_match_the_current_session(
+    tmp_path: Path,
+) -> None:
+    service, ledger, _peer, _slurm, events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    service._uuid = iter(
+        (UUID("abababab-abab-4bab-8bab-abababababab"),)
+    ).__next__
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "publication-candidate",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(LEASE_OPERATION),
+                    "materialization_id": str(MATERIALIZATION),
+                    "attempt_id": str(ATTEMPT),
+                    "lease_epoch": 1,
+                    "credential_id": str(CREDENTIAL),
+                    "credential_generation": 1,
+                    "component": "task",
+                    "manifest_digest": "sha256:" + DIGEST_A,
+                    "manifest_size": 512,
+                    "oci_file_sha256": DIGEST_B,
+                    "oci_file_size": 4096,
+                    "platform": "linux/amd64",
+                }
+            ),
+            descriptor=current_fd,
+        )
+        os.close(current_fd)
+        response_payload, response_descriptor = receive_request(client, maximum=4096)
+        assert response_descriptor is None
+        assert json.loads(response_payload) == {
+            "schema": LOCAL_SCHEMA,
+            "operation": "error",
+            "code": "local_request_invalid",
+        }
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+
+    assert "authority_publication_candidate" not in events
     service.close()
     ledger.close()
 

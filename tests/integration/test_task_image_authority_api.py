@@ -14,9 +14,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
-from sqlalchemy import delete, null, select, update
+from sqlalchemy import delete, func, null, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.exceptions import StarletteDeprecationWarning
@@ -36,7 +37,9 @@ from loom.db.schema import (
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
     TaskImageMaterializationOperationEvent,
+    TaskImagePublicationCandidate,
     TaskImagePublicationEvidence,
+    TaskImageRegistryCredentialGeneration,
 )
 from loom.task_image_materialization import task_image_materialization_key
 from loom_task_image_authority import api
@@ -56,12 +59,17 @@ from loom_task_image_authority.contracts import (
     TaskImageMaterializationOperationRequestV1,
     TaskImageProjectionChallengeV1,
     TaskImageProjectionReceiptV1,
+    TaskImagePublicationCandidateRequestV1,
+    TaskImageRegistryCredentialRequestV1,
+    TaskImageRegistryCredentialV1,
     TaskImageSessionRenewalV1,
 )
 from loom_task_image_authority.http_contracts import (
     TaskImageMaterializationClaimResponseV1,
     TaskImageMaterializationOperationResponseV1,
+    TaskImagePublicationCandidateResponseV1,
 )
+from loom_task_image_authority.registry_token import DistributionRegistryTokenIssuer
 from tests.integration.test_task_image_projection_store import (
     CHALLENGE_NONCE,
     GRANT_ID,
@@ -84,6 +92,10 @@ _CLAIM_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 _START_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 _HEARTBEAT_ID = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
 _RELEASE_ID = UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+_REGISTRY_REQUEST_ID = UUID("abababab-abab-4bab-8bab-abababababab")
+_REGISTRY_CREDENTIAL_ID = UUID("acacacac-acac-4cac-8cac-acacacacacac")
+_CANDIDATE_OPERATION_ID = UUID("adadadad-adad-4dad-8dad-adadadadadad")
+_CANDIDATE_ID = UUID("aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae")
 
 
 class _FakeBundleBackend:
@@ -201,6 +213,8 @@ async def _clear_authority_rows(database_url: str) -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session:
+            await session.execute(delete(TaskImagePublicationCandidate))
+            await session.execute(delete(TaskImageRegistryCredentialGeneration))
             await session.execute(delete(TaskImageMaterializationOperationEvent))
             await session.execute(delete(TaskImagePublicationEvidence))
             await session.execute(delete(TaskImageMaterializationAttempt))
@@ -312,6 +326,7 @@ class _ApiContext:
 async def authority_api(
     tmp_path: Path,
     postgres_url: str,
+    registry_token_issuer: DistributionRegistryTokenIssuer,
 ) -> AsyncIterator[_ApiContext]:
     await _clear_authority_rows(postgres_url)
     await _seed_released_grant(postgres_url)
@@ -349,6 +364,9 @@ async def authority_api(
         session_token_factory=lambda: next(session_tokens),
         session_id_factory=lambda: _NEXT_SESSION_ID,
         bundle_capability_provider=capability_provider,
+        registry_token_issuer=registry_token_issuer,
+        credential_id_factory=lambda: _REGISTRY_CREDENTIAL_ID,
+        candidate_id_factory=lambda: _CANDIDATE_ID,
     )
     try:
         with TestClient(app) as client:
@@ -465,6 +483,60 @@ def _operation_request(
     )
 
 
+@pytest.fixture(scope="module")
+def registry_token_issuer() -> DistributionRegistryTokenIssuer:
+    return DistributionRegistryTokenIssuer(
+        private_key=rsa.generate_private_key(public_exponent=65537, key_size=3072),
+        registry_origin="https://registry.example:5443",
+        service="registry.example",
+        issuer="loom-task-image-authority",
+    )
+
+
+def _registry_credential_request(
+    build_session: TaskImageBuildSessionV2,
+    receipt: TaskImageMaterializationClaimResponseV1,
+    *,
+    request_id: UUID = _REGISTRY_REQUEST_ID,
+) -> TaskImageRegistryCredentialRequestV1:
+    return TaskImageRegistryCredentialRequestV1(
+        request_id=request_id,
+        grant_id=GRANT_ID,
+        session_id=build_session.session_id,
+        session_generation=build_session.generation,
+        session_token=build_session.session_token,
+        materialization_id=receipt.materialization_id,
+        attempt_id=receipt.attempt_id,
+        lease_epoch=receipt.lease_epoch,
+        component="task",
+    )
+
+
+def _publication_candidate_request(
+    build_session: TaskImageBuildSessionV2,
+    receipt: TaskImageMaterializationClaimResponseV1,
+    credential: TaskImageRegistryCredentialV1,
+) -> TaskImagePublicationCandidateRequestV1:
+    return TaskImagePublicationCandidateRequestV1(
+        operation_id=_CANDIDATE_OPERATION_ID,
+        grant_id=GRANT_ID,
+        session_id=build_session.session_id,
+        session_generation=build_session.generation,
+        session_token=build_session.session_token,
+        materialization_id=receipt.materialization_id,
+        attempt_id=receipt.attempt_id,
+        lease_epoch=receipt.lease_epoch,
+        credential_id=credential.credential_id,
+        credential_generation=credential.generation,
+        component="task",
+        manifest_digest="sha256:" + "a" * 64,
+        manifest_size=512,
+        oci_file_sha256="b" * 64,
+        oci_file_size=4096,
+        platform="linux/arm64",
+    )
+
+
 async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays(
     authority_api: _ApiContext,
 ) -> None:
@@ -488,6 +560,8 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
         "/v1/projections/{grant_id}/materializations/{materialization_id}/release",
         "/v1/projections/{grant_id}/materializations/{materialization_id}/fail",
         "/v1/projections/{grant_id}/materializations/{materialization_id}/bundle",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-candidate",
         "/v1/projections/{grant_id}/revocation",
     }
     for disabled in ("/openapi.json", "/docs", "/redoc"):
@@ -760,6 +834,209 @@ async def test_session_routes_drive_claim_bundle_and_lease_operations(
     assert failure.operation == "deterministic_fail"
     assert failure.state == "queued"
     assert failure.deterministic_failure_count == 1
+
+
+async def test_registry_routes_issue_exact_credentials_and_record_only_inert_candidates(
+    authority_api: _ApiContext,
+    postgres_url: str,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+    authority_api.now[0] = NOW + timedelta(seconds=14)
+    claim_response = _post(
+        authority_api,
+        f"/v1/projections/{GRANT_ID}/materializations/claim",
+        _claim_request(build_session),
+    )
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
+        claim_response.content
+    )
+    credential_request = _registry_credential_request(build_session, claim)
+    credential_path = (
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/"
+        "registry-credential"
+    )
+
+    authority_api.now[0] = NOW + timedelta(seconds=15)
+    credential_response = _put(authority_api, credential_path, credential_request)
+    assert credential_response.status_code == 200
+    credential = TaskImageRegistryCredentialV1.model_validate_json(
+        credential_response.content
+    )
+    assert credential.credential_id == _REGISTRY_CREDENTIAL_ID
+    assert credential.repository == (
+        f"loom-task-image-attempts/arm64/{claim.attempt_id}/task"
+    )
+    assert _put(authority_api, credential_path, credential_request).content == (
+        credential_response.content
+    )
+
+    candidate_request = _publication_candidate_request(
+        build_session,
+        claim,
+        credential,
+    )
+    candidate_path = (
+        f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/"
+        "publication-candidate"
+    )
+    authority_api.now[0] = NOW + timedelta(seconds=16)
+    candidate_response = _put(authority_api, candidate_path, candidate_request)
+    assert candidate_response.status_code == 200
+    candidate = TaskImagePublicationCandidateResponseV1.model_validate_json(
+        candidate_response.content
+    )
+    assert candidate.candidate_id == _CANDIDATE_ID
+    assert _put(authority_api, candidate_path, candidate_request).content == (
+        candidate_response.content
+    )
+
+    engine = create_async_engine(postgres_url)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            row = await session.get(TaskImageMaterialization, materialization_id)
+            assert row is not None
+            assert row.state == "claimed"
+            assert row.registry_images == {}
+            assert row.registry_image_history == []
+            assert row.ready_at is None
+            assert await session.scalar(
+                select(func.count(TaskImagePublicationCandidate.candidate_id))
+            ) == 1
+    finally:
+        await engine.dispose()
+
+    for wrong_path, request in (
+        (
+            f"/v1/projections/{uuid4()}/materializations/{materialization_id}/"
+            "registry-credential",
+            credential_request,
+        ),
+        (
+            f"/v1/projections/{GRANT_ID}/materializations/{uuid4()}/"
+            "registry-credential",
+            credential_request,
+        ),
+        (
+            f"/v1/projections/{uuid4()}/materializations/{materialization_id}/"
+            "publication-candidate",
+            candidate_request,
+        ),
+        (
+            f"/v1/projections/{GRANT_ID}/materializations/{uuid4()}/"
+            "publication-candidate",
+            candidate_request,
+        ),
+    ):
+        conflict = authority_api.client.put(
+            wrong_path,
+            headers=_HEADERS,
+            json=request.model_dump(mode="json"),
+        )
+        assert conflict.status_code == 409
+        assert conflict.json() == {"detail": "task-image authority conflict"}
+
+    raw = credential_request.model_dump_json()
+    request_key = f'"request_id":"{credential_request.request_id}"'
+    duplicate_body = raw.replace(request_key, f"{request_key},{request_key}", 1)
+    duplicate = authority_api.client.put(
+        credential_path,
+        headers={**_HEADERS, "content-type": "application/json"},
+        content=duplicate_body,
+    )
+    assert duplicate.status_code == 422
+    assert duplicate.json() == {"detail": "invalid task-image authority contract"}
+
+
+async def test_registry_credential_route_is_unavailable_without_a_signer(
+    authority_api: _ApiContext,
+    postgres_url: str,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+    authority_api.now[0] = NOW + timedelta(seconds=14)
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
+        _post(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/materializations/claim",
+            _claim_request(build_session),
+        ).content
+    )
+    request = _registry_credential_request(build_session, claim, request_id=uuid4())
+    app = create_app(
+        authority_api.settings,
+        verifier=TaskImagePrincipalVerifier.from_file(
+            authority_api.settings.principals_file
+        ),
+        now_factory=lambda: NOW + timedelta(seconds=15),
+    )
+    with TestClient(app) as client:
+        response = client.put(
+            f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/"
+            "registry-credential",
+            headers=_HEADERS,
+            json=request.model_dump(mode="json"),
+        )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "task-image authority unavailable"}
+    assert build_session.session_token not in response.text
+
+
+async def test_registry_signer_failure_is_rolled_back_and_redacted(
+    authority_api: _ApiContext,
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+    authority_api.now[0] = NOW + timedelta(seconds=14)
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
+        _post(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/materializations/claim",
+            _claim_request(build_session),
+        ).content
+    )
+    request = _registry_credential_request(build_session, claim, request_id=uuid4())
+    private_failure = f"registry-private-signing-failure {build_session.session_token}"
+
+    def fail_issue(
+        self: DistributionRegistryTokenIssuer,
+        *,
+        credential_id: UUID,
+        repository: str,
+        issued_at: datetime,
+        expires_at: datetime,
+    ) -> object:
+        del self, credential_id, repository, issued_at, expires_at
+        raise RuntimeError(private_failure)
+
+    monkeypatch.setattr(DistributionRegistryTokenIssuer, "issue", fail_issue)
+    authority_api.now[0] = NOW + timedelta(seconds=15)
+    with caplog.at_level(logging.INFO):
+        response = _put(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/"
+            "registry-credential",
+            request,
+        )
+        metrics = authority_api.client.get("/metrics")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "task-image authority unavailable"}
+    assert private_failure not in response.text
+    assert private_failure not in metrics.text
+    assert private_failure not in caplog.text
+
+    engine = create_async_engine(postgres_url)
+    try:
+        async with AsyncSession(engine) as session:
+            assert await session.scalar(
+                select(func.count(TaskImageRegistryCredentialGeneration.credential_id))
+            ) == 0
+    finally:
+        await engine.dispose()
 
 
 async def test_materialization_routes_bind_session_path_attempt_and_guard_identity(

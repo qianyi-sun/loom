@@ -788,6 +788,14 @@ def test_checked_in_release_spec_uses_inert_ops_script_destinations() -> None:
     assert spec["schema"] == "loom.task-image-builder-provider-release-spec/v1"
     assert spec["provider_install_root"] == "/opt/loom-task-image-builder-provider/releases"
     assert spec["supervisor_relative_path"] == "bin/loom-task-builder-supervisor"
+    assert [record["path"] for record in spec["supervisor"]["sources"]] == [
+        path.relative_to(ROOT).as_posix()
+        for path in sorted((ROOT / "cmd/loom-task-image-builder-supervisor").glob("*.go"))
+    ]
+    assert {
+        "cmd/loom-task-image-builder-supervisor/registry_credential.go",
+        "cmd/loom-task-image-builder-supervisor/registry_upload.go",
+    }.issubset({record["path"] for record in spec["supervisor"]["sources"]})
     assert [record["destination"] for record in spec["scripts"]] == [
         "ops/install_task_image_builder_provider_release.py",
         "ops/task_image_builder_provider_conformance.py",
@@ -802,7 +810,14 @@ def test_checked_in_release_spec_uses_inert_ops_script_destinations() -> None:
         record = spec[section]
         assert _digest((ROOT / record["path"]).read_bytes()) == record["sha256"]
     serialized = json.dumps(spec, sort_keys=True)
-    for forbidden in ("current", "systemctl", "activation", "credential"):
+    for forbidden in (
+        "current",
+        "systemctl",
+        "activation",
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY",
+        "registry_signing_key",
+        "registry-token",
+    ):
         assert forbidden not in serialized
 
 
