@@ -597,6 +597,11 @@ def test_material_client_validates_operator_subset_before_loading_encoder(
         return Client
 
     monkeypatch.setattr(material_client, "_load_module", load_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "scripts.ops.personal_dev_native_builder_runtime_authority_launcher",
+        launcher,
+    )
 
     assert material_client._load_validated_client() is Client
     assert validated and pinned

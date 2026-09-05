@@ -40,6 +40,22 @@ _BUILDKIT_NAME = "loom-native-conformance-buildkit"
 _CLIENT_NAME = "loom-native-conformance-client"
 _DENIAL_NAME = "loom-native-conformance-denial-target"
 _FOREIGN_CLIENT_NAME = "loom-native-conformance-foreign-client"
+CONFORMANCE_FAILURE_STAGES = frozenset(
+    {
+        "buildkit_create",
+        "buildkit_readiness",
+        "cleanup",
+        "client_create",
+        "client_execution",
+        "denial_create",
+        "denial_readiness",
+        "foreign_isolation",
+        "host_isolation",
+        "networks",
+        "postconditions",
+        "preconditions",
+    }
+)
 _DENIAL_READY_PROGRAM = """import socket
 connection=socket.create_connection(('127.0.0.1',1234),timeout=2)
 connection.close()
@@ -94,6 +110,12 @@ __import__('os').execvp('buildctl',('buildctl','--addr','tcp://buildkit-01234567
 
 class ConformanceError(RuntimeError):
     """The fixed probe failed without exposing command output or input values."""
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        if stage is not None and stage not in CONFORMANCE_FAILURE_STAGES:
+            raise ValueError("conformance stage is invalid")
+        self.stage = stage
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -759,8 +781,9 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
     """Run the exact two-sandbox gVisor KVM probe and return a public receipt."""
     created: list[tuple[str, str, str]] = []
     verified_absent: list[tuple[str, str, str]] = []
-    invocation = uuid.uuid4().hex
+    stage = "preconditions"
     try:
+        invocation = uuid.uuid4().hex
         for endpoint, kind, name in (
             (_NATIVE_ENDPOINT, "network", _NETWORK_NAME),
             (_NATIVE_ENDPOINT, "network", _DENIED_NETWORK_NAME),
@@ -774,6 +797,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         _expect_platform(runner, _NATIVE_ENDPOINT, inputs.builder_image)
         _expect_platform(runner, _PRIMARY_ENDPOINT, inputs.agent_image)
 
+        stage = "networks"
         _create_owned(
             runner,
             created,
@@ -815,6 +839,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             invocation=invocation,
         )
 
+        stage = "buildkit_create"
         buildkit_id = _create_owned(
             runner,
             created,
@@ -871,6 +896,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             invocation=invocation,
         )
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", buildkit_id))
+        stage = "buildkit_readiness"
         for attempt in range(60):
             logs = _run(runner, _docker(_NATIVE_ENDPOINT, "logs", buildkit_id), allow_failure=True)
             workers = _run(
@@ -892,6 +918,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             if attempt == 59:
                 raise ConformanceError("conformance failed")
             time.sleep(1)
+        stage = "host_isolation"
         buildkit_ip = _run(
             runner,
             _docker(
@@ -906,6 +933,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             raise ConformanceError("conformance failed")
         _run(runner, ("/usr/bin/python3", "-c", _HOST_DENIAL_PROGRAM, buildkit_ip))
 
+        stage = "foreign_isolation"
         foreign_id = _create_owned(
             runner,
             created,
@@ -954,6 +982,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             "0",
         )
 
+        stage = "denial_create"
         denial_id = _create_owned(
             runner,
             created,
@@ -1006,6 +1035,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             invocation=invocation,
         )
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", denial_id))
+        stage = "denial_readiness"
         for attempt in range(60):
             ready = _run(
                 runner,
@@ -1025,6 +1055,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 raise ConformanceError("conformance failed")
             time.sleep(1)
 
+        stage = "client_create"
         client_id = _create_owned(
             runner,
             created,
@@ -1078,12 +1109,14 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         )
         if client_id == buildkit_id:
             raise ConformanceError("conformance failed")
+        stage = "client_execution"
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", "-a", client_id))
         _expect(
             runner,
             _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.State.ExitCode}}", client_id),
             "0",
         )
+        stage = "postconditions"
         _expect(
             runner,
             _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Runtime}}", buildkit_id),
@@ -1104,12 +1137,15 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         try:
             _cleanup(runner, created, verified_absent)
         except BaseException as cleanup_failure:
-            raise ConformanceError("conformance cleanup failed") from cleanup_failure
-        if isinstance(primary_failure, ConformanceError):
-            raise
-        raise ConformanceError("conformance failed") from primary_failure
+            raise ConformanceError(
+                "conformance cleanup failed", stage="cleanup"
+            ) from cleanup_failure
+        raise ConformanceError("conformance failed", stage=stage) from primary_failure
 
-    _cleanup(runner, created, verified_absent)
+    try:
+        _cleanup(runner, created, verified_absent)
+    except BaseException as cleanup_failure:
+        raise ConformanceError("conformance cleanup failed", stage="cleanup") from cleanup_failure
     return {
         "schema": "loom-personal-dev-native-builder-conformance-v1",
         "status": "passed",
