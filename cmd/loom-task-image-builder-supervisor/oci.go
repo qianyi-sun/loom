@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -15,13 +16,14 @@ import (
 )
 
 type OCIOutput struct {
-	Path           string
-	TopLevelDigest string
-	ManifestSize   int64
-	FileSHA256     string
-	SizeBytes      int64
-	OS             string
-	Architecture   string
+	Path              string
+	TopLevelDigest    string
+	ManifestSize      int64
+	ManifestMediaType string
+	FileSHA256        string
+	SizeBytes         int64
+	OS                string
+	Architecture      string
 }
 
 type ociIndex struct {
@@ -65,129 +67,211 @@ type ociPlatform struct {
 	Architecture string `json:"architecture"`
 }
 
-func ValidateOCIOutput(path string, platform string) (OCIOutput, error) {
-	expectedOS, expectedArch, err := parsePlatform(platform)
-	if err != nil {
-		return OCIOutput{}, err
+const (
+	maxOCIJSONBytes   int64 = 4 << 20
+	maxOCIDescriptors       = 256
+	maxOCILayers            = 128
+	// Existing rootless provider / guard project quota (100 GiB).
+	maxOCITarBytes       int64 = 107374182400
+	ociManifestMediaType       = "application/vnd.oci.image.manifest.v1+json"
+)
+
+type ociEntry struct {
+	offset, size int64
+	digest       string
+}
+type scannedOCI struct {
+	entries  map[string]ociEntry
+	manifest ociManifest
+}
+type ociCountingReader struct {
+	ctx context.Context
+	r   io.Reader
+	n   int64
+}
+
+func (r *ociCountingReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
-	file, err := os.Open(path)
+	n, err := r.r.Read(p)
+	r.n += int64(n)
+	return n, err
+}
+
+func ValidateOCIOutput(name string, platform string) (OCIOutput, error) {
+	file, err := os.Open(name)
 	if err != nil {
-		return OCIOutput{}, err
+		return OCIOutput{}, errors.New("OCI file unavailable")
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	output, _, err := scanOCIFile(context.Background(), file, name, platform)
+	return output, err
+}
+
+// Only offsets, sizes and hashes survive the tar pass. JSON is read exactly from
+// bounded sections of the same open file; potentially large blobs are hashed.
+func scanOCIFile(ctx context.Context, file *os.File, name, platform string) (OCIOutput, scannedOCI, error) {
+	fail := func(message string) (OCIOutput, scannedOCI, error) {
+		return OCIOutput{}, scannedOCI{}, errors.New(message)
+	}
+	expectedOS, expectedArch, err := parsePlatform(platform)
 	if err != nil {
-		return OCIOutput{}, err
+		return fail("OCI platform invalid")
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxOCITarBytes {
+		return fail("OCI tar size invalid")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fail("OCI file unavailable")
 	}
 	hash := sha256.New()
-	reader := tar.NewReader(io.TeeReader(file, hash))
-	entries := map[string][]byte{}
+	counter := &ociCountingReader{ctx: ctx, r: io.TeeReader(io.LimitReader(file, maxOCITarBytes+1), hash)}
+	reader := tar.NewReader(counter)
+	entries := map[string]ociEntry{}
+	seen := map[string]bool{}
+	blobs := 0
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return OCIOutput{}, err
+			return fail("OCI tar invalid")
 		}
 		canonicalName, err := validateTarEntry(header)
 		if err != nil {
-			return OCIOutput{}, err
+			return fail("OCI tar entry invalid")
+		}
+		if header.Size < 0 || header.Size > maxOCITarBytes || header.Size > info.Size()-counter.n {
+			return fail("OCI tar entry size invalid")
+		}
+		if seen[canonicalName] {
+			return fail("OCI tar contains duplicate path")
+		}
+		seen[canonicalName] = true
+		if len(seen) > maxOCIDescriptors+16 {
+			return fail("OCI tar entry count exceeded")
 		}
 		if header.Typeflag == tar.TypeDir {
 			continue
 		}
-		if _, ok := entries[canonicalName]; ok {
-			return OCIOutput{}, errors.New("OCI tar contains duplicate path")
+		if canonicalName == "index.json" || canonicalName == "oci-layout" {
+			if header.Size > maxOCIJSONBytes {
+				return fail("OCI JSON size exceeded")
+			}
+		} else {
+			suffix, ok := strings.CutPrefix(canonicalName, "blobs/sha256/")
+			if !ok || !isDigest(suffix) {
+				return fail("OCI blob path invalid")
+			}
+			blobs++
+			if blobs > maxOCIDescriptors {
+				return fail("OCI descriptor count exceeded")
+			}
 		}
-		payload, err := io.ReadAll(reader)
-		if err != nil {
-			return OCIOutput{}, err
+		entry := ociEntry{offset: counter.n, size: header.Size}
+		h := sha256.New()
+		n, err := io.Copy(h, reader)
+		if err != nil || n != header.Size {
+			return fail("OCI tar entry size mismatch")
 		}
-		if int64(len(payload)) != header.Size {
-			return OCIOutput{}, errors.New("OCI tar entry size mismatch")
+		entry.digest = hex.EncodeToString(h.Sum(nil))
+		if strings.HasPrefix(canonicalName, "blobs/") && canonicalName != "blobs/sha256/"+entry.digest {
+			return fail("OCI descriptor digest mismatch")
 		}
-		entries[canonicalName] = payload
+		entries[canonicalName] = entry
 	}
-	if _, err := io.Copy(hash, file); err != nil {
-		return OCIOutput{}, err
+	if _, err := io.Copy(io.Discard, counter); err != nil || counter.n != info.Size() || counter.n > maxOCITarBytes {
+		return fail("OCI tar size changed")
 	}
-	indexPayload, ok := entries["index.json"]
-	if !ok {
-		return OCIOutput{}, errors.New("OCI index missing")
+	indexPayload, err := readOCIJSON(file, entries, "index.json")
+	if err != nil {
+		return fail("OCI index invalid")
 	}
-	if _, ok := entries["oci-layout"]; !ok {
-		return OCIOutput{}, errors.New("OCI layout missing")
+	layoutPayload, err := readOCIJSON(file, entries, "oci-layout")
+	if err != nil {
+		return fail("OCI layout missing")
+	}
+	var layout struct {
+		Version string `json:"imageLayoutVersion"`
+	}
+	if decodeStrictJSON(layoutPayload, &layout) != nil || layout.Version != "1.0.0" {
+		return fail("OCI layout invalid")
 	}
 	var index ociIndex
-	if err := decodeStrictJSON(indexPayload, &index); err != nil {
-		return OCIOutput{}, err
+	if decodeStrictJSON(indexPayload, &index) != nil || index.SchemaVersion != 2 || index.MediaType != "" && index.MediaType != "application/vnd.oci.image.index.v1+json" || len(index.Manifests) != 1 {
+		return fail("OCI index must contain exactly one manifest")
 	}
-	if index.SchemaVersion != 2 || index.MediaType != "" && index.MediaType != "application/vnd.oci.image.index.v1+json" || len(index.Manifests) != 1 {
-		return OCIOutput{}, errors.New("OCI index must contain exactly one manifest")
+	md := index.Manifests[0]
+	if md.MediaType != ociManifestMediaType || md.Platform == nil || md.Platform.OS != expectedOS || md.Platform.Architecture != expectedArch {
+		return fail("OCI manifest platform or type mismatch")
 	}
-	manifestDescriptor := index.Manifests[0]
-	if manifestDescriptor.Platform == nil || manifestDescriptor.Platform.OS != expectedOS || manifestDescriptor.Platform.Architecture != expectedArch {
-		return OCIOutput{}, errors.New("OCI manifest platform mismatch")
+	if _, err := descriptorEntry(entries, md); err != nil {
+		return fail("OCI manifest descriptor invalid")
 	}
-	manifestPayload, err := descriptorPayload(entries, manifestDescriptor)
+	manifestPayload, err := readOCIJSON(file, entries, "blobs/sha256/"+strings.TrimPrefix(md.Digest, "sha256:"))
 	if err != nil {
-		return OCIOutput{}, err
+		return fail("OCI manifest JSON invalid")
 	}
 	var manifest ociManifest
-	if err := decodeStrictJSON(manifestPayload, &manifest); err != nil {
-		return OCIOutput{}, err
+	if decodeStrictJSON(manifestPayload, &manifest) != nil || manifest.SchemaVersion != 2 || manifest.MediaType != ociManifestMediaType || len(manifest.Layers) > maxOCILayers {
+		return fail("OCI manifest invalid")
 	}
-	if manifest.SchemaVersion != 2 || manifest.MediaType != "application/vnd.oci.image.manifest.v1+json" {
-		return OCIOutput{}, errors.New("OCI manifest invalid")
+	if manifest.Config.MediaType != "application/vnd.oci.image.config.v1+json" {
+		return fail("OCI config type invalid")
 	}
-	configPayload, err := descriptorPayload(entries, manifest.Config)
-	if err != nil {
-		return OCIOutput{}, err
+	if _, err := descriptorEntry(entries, manifest.Config); err != nil {
+		return fail("OCI config descriptor invalid")
 	}
 	for _, layer := range manifest.Layers {
-		if _, err := descriptorPayload(entries, layer); err != nil {
-			return OCIOutput{}, err
+		switch layer.MediaType {
+		case "application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.v1.tar+zstd":
+		default:
+			return fail("OCI layer type invalid")
+		}
+		if _, err := descriptorEntry(entries, layer); err != nil {
+			return fail("OCI layer descriptor invalid")
 		}
 	}
+	configPayload, err := readOCIJSON(file, entries, "blobs/sha256/"+strings.TrimPrefix(manifest.Config.Digest, "sha256:"))
+	if err != nil {
+		return fail("OCI config JSON invalid")
+	}
 	var config ociConfig
-	if err := decodeStrictJSON(configPayload, &config); err != nil {
-		return OCIOutput{}, err
+	if decodeStrictJSON(configPayload, &config) != nil || config.OS != expectedOS || config.Architecture != expectedArch {
+		return fail("OCI config platform mismatch")
 	}
-	if config.OS != expectedOS || config.Architecture != expectedArch {
-		return OCIOutput{}, errors.New("OCI config platform mismatch")
-	}
-	return OCIOutput{
-		Path:           path,
-		TopLevelDigest: manifestDescriptor.Digest,
-		ManifestSize:   manifestDescriptor.Size,
-		FileSHA256:     hex.EncodeToString(hash.Sum(nil)),
-		SizeBytes:      info.Size(),
-		OS:             config.OS,
-		Architecture:   config.Architecture,
-	}, nil
+	return OCIOutput{Path: name, TopLevelDigest: md.Digest, ManifestSize: md.Size, ManifestMediaType: md.MediaType, FileSHA256: hex.EncodeToString(hash.Sum(nil)), SizeBytes: info.Size(), OS: config.OS, Architecture: config.Architecture}, scannedOCI{entries: entries, manifest: manifest}, nil
 }
 
-func descriptorPayload(entries map[string][]byte, descriptor ociDescriptor) ([]byte, error) {
-	digest, err := parseSHA256Descriptor(descriptor.Digest)
-	if err != nil {
-		return nil, err
+func descriptorEntry(entries map[string]ociEntry, d ociDescriptor) (ociEntry, error) {
+	digest, err := parseSHA256Descriptor(d.Digest)
+	if err != nil || d.Size < 0 || d.Size > maxOCITarBytes {
+		return ociEntry{}, errors.New("OCI descriptor invalid")
 	}
-	if descriptor.Size < 0 {
-		return nil, errors.New("OCI descriptor size invalid")
+	e, ok := entries["blobs/sha256/"+digest]
+	if !ok || e.size != d.Size || e.digest != digest {
+		return ociEntry{}, errors.New("OCI descriptor blob mismatch")
 	}
-	payload, ok := entries["blobs/sha256/"+digest]
-	if !ok {
-		return nil, errors.New("OCI descriptor blob missing")
+	return e, nil
+}
+
+func readOCIJSON(file *os.File, entries map[string]ociEntry, name string) ([]byte, error) {
+	e, ok := entries[name]
+	if !ok || e.size < 0 || e.size > maxOCIJSONBytes {
+		return nil, errors.New("OCI JSON size invalid")
 	}
-	if int64(len(payload)) != descriptor.Size {
-		return nil, errors.New("OCI descriptor size mismatch")
+	b := make([]byte, int(e.size))
+	if _, err := io.ReadFull(io.NewSectionReader(file, e.offset, e.size), b); err != nil {
+		return nil, errors.New("OCI JSON read failed")
 	}
-	sum := sha256.Sum256(payload)
-	if hex.EncodeToString(sum[:]) != digest {
-		return nil, errors.New("OCI descriptor digest mismatch")
+	sum := sha256.Sum256(b)
+	if hex.EncodeToString(sum[:]) != e.digest {
+		return nil, errors.New("OCI JSON changed")
 	}
-	return payload, nil
+	return b, nil
 }
 
 func parseSHA256Descriptor(value string) (string, error) {
