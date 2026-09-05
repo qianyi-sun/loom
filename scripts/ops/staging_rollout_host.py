@@ -179,6 +179,11 @@ _BACKUP_LEASE_ID_RE = re.compile(r"^lease-[a-z0-9][a-z0-9-]{7,63}$")
 _BACKUP_LEASE_REQUEST_ID_RE = re.compile(r"^req-[a-z0-9][a-z0-9-]{7,63}$")
 _BACKUP_COMPONENT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _BACKUP_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_BACKUP_PUBLIC_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_BACKUP_GUARD_REVISION_RE = re.compile(r"^guard_[0-9]{4}$")
+_BACKUP_SCHEMA_THREE_COMPONENTS = frozenset(
+    {"database_authority", "k8s_secrets", "object_inventory", "postgres"}
+)
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS = 30.0
 _ORPHANED_BACKUP_MAX_REQUESTS = 10_000
@@ -1782,7 +1787,7 @@ def _validate_backup_lease(
 ) -> None:
     if not isinstance(value, Mapping):
         raise ValueError("backup lease schema is invalid")
-    expected = {
+    historical = {
         "component_sha256",
         "created_at",
         "db_snapshot_identity",
@@ -1798,12 +1803,30 @@ def _validate_backup_lease(
         "schema_version",
         "source_request_id",
     }
+    schema_three = historical | {
+        "capacity_guard_schema_revision",
+        "checkpoint_schema_version",
+        "database_authority_digest",
+        "manager_authority_incarnation",
+        "manager_configuration_digest",
+        "manager_configuration_epoch",
+        "manager_executable_new_capacity_ceiling",
+        "manager_execution_epoch",
+        "manager_execution_manifest_sha256",
+        "manager_execution_state",
+        "manager_increase_freeze",
+        "manager_writer_epoch",
+        "public_schema_revision",
+        "restore_report_sha256",
+    }
+    schema_version = value.get("schema_version")
+    expected = historical if schema_version == 1 else schema_three
     components = value.get("component_sha256")
     mutation_epoch = value.get("mutation_epoch")
     if (
         set(value) != expected
-        or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or type(schema_version) is not int
+        or schema_version not in {1, 2}
         or type(mutation_epoch) is not int
         or mutation_epoch < 0
         or not isinstance(components, Mapping)
@@ -1827,6 +1850,85 @@ def _validate_backup_lease(
         or not _backup_sha256(value.get("object_inventory_root"))
     ):
         raise ValueError("backup lease schema is invalid")
+    if schema_version == 2:
+        checkpoint_schema_version = value.get("checkpoint_schema_version")
+        database_authority_digest = value.get("database_authority_digest")
+        public_schema_revision = value.get("public_schema_revision")
+        capacity_guard_schema_revision = value.get("capacity_guard_schema_revision")
+        manager_configuration_epoch = value.get("manager_configuration_epoch")
+        manager_configuration_digest = value.get("manager_configuration_digest")
+        manager_authority_incarnation = value.get("manager_authority_incarnation")
+        manager_writer_epoch = value.get("manager_writer_epoch")
+        manager_execution_state = value.get("manager_execution_state")
+        manager_execution_epoch = value.get("manager_execution_epoch")
+        manager_execution_manifest_sha256 = value.get("manager_execution_manifest_sha256")
+        manager_executable_new_capacity_ceiling = value.get(
+            "manager_executable_new_capacity_ceiling"
+        )
+        manager_increase_freeze = value.get("manager_increase_freeze")
+        restore_report_sha256 = value.get("restore_report_sha256")
+        db_snapshot_identity = value.get("db_snapshot_identity")
+        schema_revision = value.get("schema_revision")
+        if (
+            set(components) != _BACKUP_SCHEMA_THREE_COMPONENTS
+            or type(checkpoint_schema_version) is not int
+            or checkpoint_schema_version != 3
+            or not _backup_sha256(database_authority_digest)
+            or not isinstance(public_schema_revision, str)
+            or _BACKUP_PUBLIC_REVISION_RE.fullmatch(public_schema_revision) is None
+            or (
+                capacity_guard_schema_revision is not None
+                and (
+                    not isinstance(capacity_guard_schema_revision, str)
+                    or _BACKUP_GUARD_REVISION_RE.fullmatch(capacity_guard_schema_revision) is None
+                )
+            )
+            or type(manager_configuration_epoch) is not int
+            or manager_configuration_epoch < 1
+            or not _backup_sha256(manager_configuration_digest)
+            or not isinstance(manager_authority_incarnation, str)
+            or type(manager_writer_epoch) is not int
+            or manager_writer_epoch < 0
+            or manager_execution_state != "shadow"
+            or type(manager_execution_epoch) is not int
+            or manager_execution_epoch != 0
+            or manager_execution_manifest_sha256 is not None
+            or type(manager_executable_new_capacity_ceiling) is not int
+            or manager_executable_new_capacity_ceiling != 0
+            or manager_increase_freeze is not True
+            or not _backup_sha256(restore_report_sha256)
+            or not isinstance(db_snapshot_identity, str)
+            or components.get("postgres") != db_snapshot_identity.removeprefix("pgdump-sha256:")
+            or not isinstance(schema_revision, str)
+            or public_schema_revision != schema_revision
+        ):
+            raise ValueError("backup lease schema is invalid")
+        try:
+            authority_incarnation = uuid.UUID(manager_authority_incarnation)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("backup lease schema is invalid") from exc
+        authority_payload = {
+            "authority_incarnation": str(authority_incarnation),
+            "capacity_guard_schema_revision": capacity_guard_schema_revision,
+            "configuration_digest": manager_configuration_digest,
+            "configuration_epoch": manager_configuration_epoch,
+            "executable_new_capacity_ceiling": manager_executable_new_capacity_ceiling,
+            "execution_epoch": manager_execution_epoch,
+            "execution_manifest_sha256": manager_execution_manifest_sha256,
+            "execution_state": manager_execution_state,
+            "increase_freeze": manager_increase_freeze,
+            "public_schema_revision": public_schema_revision,
+            "schema_version": 1,
+            "writer_epoch": manager_writer_epoch,
+        }
+        authority_digest = hashlib.sha256(
+            (json.dumps(authority_payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        if (
+            authority_digest != database_authority_digest
+            or components.get("database_authority") != database_authority_digest
+        ):
+            raise ValueError("backup lease schema is invalid")
     created_at = _backup_timestamp(value.get("created_at"))
     expires_at = _backup_timestamp(value.get("expires_at"))
     restore_verified_at = _backup_timestamp(value.get("restore_verified_at"))
