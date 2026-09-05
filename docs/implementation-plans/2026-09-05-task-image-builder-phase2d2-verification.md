@@ -79,15 +79,22 @@ package and corresponding unit tests. Add explicit immutable envelope/key/epoch
 tables to `src/loom/db/schema.py` and the next unused public migration after a
 fresh fetch; test migration upgrade, downgrade and constraints.
 
-- [ ] Derive strict fields from the spec; freeze the canonical schema and domain
+- [x] Derive strict fields from the spec; freeze the canonical schema and domain
   before exposing any HTTP interface. Test every identity, timestamp, digest,
   algorithm and signature mutation using an independent Ed25519 verifier.
-- [ ] Implement a dedicated signer protocol with signer-clock and key-interval
+- [x] Implement a dedicated signer protocol with signer-clock and key-interval
   validation, bounded service replies and no production in-process private key.
-- [ ] Test active/verify-only/revoked states and historical verification. Reject
+- [x] Test active/verify-only/revoked states and historical verification. Reject
   backdating, unknown keys, canonical-byte substitution and cross-domain use.
-- [ ] Reserve one durable epoch lock order for later revocation/start authority.
+- [x] Reserve one durable epoch lock order for later revocation/start authority.
   Verify migration and all public head fixtures; review and commit.
+
+Task 3 evidence: 194 focused contracts/signing/migration/package-boundary tests
+and 20 migration/lifecycle regressions passed after local fixes. Independent
+review of both implementation commits found spec compliance and approved task
+quality with no findings. Strict timestamp spelling and locked refusal to discard
+used publication authority on downgrade are covered. Production signer transport
+and authenticated keyset distribution remain uncomposed; no readiness is granted.
 
 ## Task 4: Durable verification jobs and atomic readiness
 
