@@ -1727,6 +1727,7 @@ def _slurm_config_from_policy(
         ),
         exclusive=_optional_bool(actor_config.get("exclusive"), default=False),
         slurm_account=str(actor_config.get("slurm_account") or ""),
+        slurm_cluster_name=str(actor_config.get("slurm_cluster_name") or ""),
         slurm_qos=str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or ""),
         slurm_reservation=str(actor_config.get("slurm_reservation") or ""),
         sinfo_path=str(actor_config.get("sinfo_path") or "sinfo"),

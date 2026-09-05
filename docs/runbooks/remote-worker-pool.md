@@ -185,6 +185,68 @@ resource-aware mode needs explicit ownership evidence before activation.
 This admission check does not grant access to another user's reservation or
 recover an already-pending worker job or a queued trial's pool assignment.
 
+### Bounded memory observations
+
+Staging OLDLAB and GB10 enable `probe_mem_available`. GB10 enablement is the
+scoped owner decision in [#1801](https://github.com/qianyi-sun/loom/issues/1801),
+not a change to production/personal-dev policy or node/slot limits. The shared
+probe now requires fresh validated evidence; **failure does not fall back to
+FreeMem admission**, including on OLDLAB. A node with missing, failed or expired
+evidence reports `missing_fresh_memory_probe` and receives zero new slots.
+
+Before probing, the controller checks exact allowed-node snapshots, full state
+flags, finite nonnegative CPU load, idle CPU headroom, and enough unallocated
+Slurm memory for a slot. Active Loom nodes are excluded by the caller. Load
+ratios must be finite and positive; NaN/infinity/negative observations never
+authorize capacity ([#1803](https://github.com/qianyi-sun/loom/issues/1803)).
+Each probe is surrounded by fresh single-node state/CPU/load/AllocMem reads.
+Post-probe restrictions win; CPU and scheduler-memory counts use conservative
+bounds. Final admission remains `min(MemAvailable, RealMemory - AllocMem)`
+minus the existing reserved headroom, capped by existing CPU and slot limits.
+
+The installed external runner uses its existing service identity: remote UID
+must equal the local effective UID. This proves identity continuity, not a new
+authorization grant. No sudo or user switch occurs. The one-line `v1` response
+binds a random per-call nonce, Slurm NodeName and single-node nodelist, partition,
+cluster, configured account/QoS, UID, job ID, full candidate SHA, MemTotal and
+MemAvailable. OLDLAB's empty account/QoS settings retain Slurm defaults. The
+GB10 staging policy retains its explicit `loom-staging` account/QoS. Raw SSH
+readings, bare integers, duplicate/extra output, invalid counts and stale
+responses cannot authorize uplift. Freshness uses the local monotonic call
+start, not cross-host wall-clock assumptions, and expires after 15 seconds.
+Immediately before `sbatch`, the runner checks age and the full original policy
+again (only the three resource-aware requested sizes may differ), including
+candidate and QoS. A defensive snapshot copy authorizes at most one submission
+attempt per node; delayed, replayed or policy-swapped decisions fail closed.
+
+The synchronous `srun` request is one task/node, 1 CPU, 16 MiB, immediate within
+3 seconds, non-exclusive, with no reservation, GPU, overlap or priority boost.
+It retains only the administrator's `SLURM_CONF` client location; inherited
+allocation/job IDs, Slurm option variables and secrets are not exported. The
+remote command uses `--export=NONE`, absolute system binaries and `/proc/meminfo`,
+not a repository, worker env file, shared output directory or container. Its
+unique job name attributes environment/pool/nonce; the comment records candidate.
+
+The reader has a remote GNU timeout of 5 seconds plus 1-second kill grace;
+the client allows at most 10 seconds (or its shorter configured timeout).
+Timeout/cancellation terminates synchronous srun, allows 3 seconds to drain,
+then kills/reaps the local child; cancellation still propagates. No job-name
+scancel or foreign mutation is used. The memory sweep stops after 20 seconds
+(plus child cleanup), after the initial bounded three-command inventory read.
+Unprobed nodes remain closed. Slurm's `--time=00:01:00` is an additional server
+limit, **not a ten-second cleanup guarantee**: site KillWait/OverTimeLimit,
+controller timing and epilogs also apply. The observed Slurm 23.11.4 fleets had
+KillWait=30 seconds and OverTimeLimit=0; reverify them at fixed-candidate acceptance.
+See the [srun contract](https://slurm.schedmd.com/srun.html) and
+[23.11.4 environment metadata](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/common/env.c).
+
+Before closure, use the formal installer and supported rollout path to verify
+the actual service identity, successful cache-heavy admission, true-pressure
+rejection, exact job metadata, absence of leftover probe jobs, smoke completion
+and scale-down. Local subprocess/regression tests and protected CI do not prove
+those live outcomes. Never drop caches, cancel foreign jobs, change reservations
+or enlarge the approved node/resource envelope to obtain a passing result.
+
 ## Capacity and concurrency
 
 `LOOM_WORKER_MAX_CONCURRENT` limits in-flight trials for one worker process.
