@@ -5,7 +5,12 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from loom_service.debug_evidence import build_batch_debug_evidence, build_trial_debug_evidence
+from loom_service.debug_evidence import (
+    _next_actions_for_trial,
+    _summary_from_trials,
+    build_batch_debug_evidence,
+    build_trial_debug_evidence,
+)
 
 
 class _URL(str):
@@ -16,6 +21,20 @@ class _URL(str):
 class _Request:
     def url_for(self, name: str, **values: object) -> _URL:
         return _URL(f"http://test/{name}/{values.get('trial_id', '')}")
+
+
+def test_protected_pending_debug_evidence_is_active() -> None:
+    trial = SimpleNamespace(
+        state="protected-pending",
+        started_at=None,
+        pre_start_heartbeat_at=None,
+        failure_reason=None,
+    )
+
+    assert _summary_from_trials([trial])["protected-pending"] == 1
+    assert _next_actions_for_trial(trial) == [
+        "Wait for the worker to finish or inspect live trajectory events."
+    ]
 
 
 def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:

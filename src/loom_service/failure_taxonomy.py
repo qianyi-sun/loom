@@ -14,7 +14,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any, cast
 
-_ACTIVE_TRIAL_STATES = {"queued", "claimed", "running", "submitted"}
+_ACTIVE_TRIAL_STATES = {
+    "queued",
+    "protected-pending",
+    "claimed",
+    "running",
+    "submitted",
+}
 
 _AUTO_SAFE_REASONS: frozenset[str] = frozenset(
     {

@@ -21,7 +21,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import httpx
 import yaml
 from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1325,14 +1325,7 @@ class FrozenProtectedAutoscalingHarness:
             service_gid=os.getegid(),
             container_registry=_CONTAINER_REGISTRY,
         )
-        # These lifecycle scenarios exercise certificate validation on every
-        # readback. Fresh EC identities retain that coverage without repeatedly
-        # paying RSA private-key validation costs; the bootstrap unit tests also
-        # retain explicit RSA coverage.
-        _write_bootstrap(
-            bootstrap_runtime,
-            key_factory=lambda: ec.generate_private_key(ec.SECP256R1()),
-        )
+        _write_bootstrap(bootstrap_runtime)
         bootstrap_runtime._create_credential_seed()
         seed = bootstrap_runtime.read_credential_seed()
         bundle = bootstrap_runtime.read_execution_credential_bundle()

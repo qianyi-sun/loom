@@ -1936,8 +1936,8 @@ def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> N
     )
 
     assert result.passed
-    assert result.evidence["head"] == "0131"
-    assert result.evidence["revision-count"] == 132
+    assert result.evidence["head"] == "0132"
+    assert result.evidence["revision-count"] == 133
     assert result.evidence["linear"] is True
     assert result.evidence["policy-digest"] == policy_digest
 
@@ -2691,7 +2691,9 @@ def test_execution_prerequisite_check_defers_until_exact_lease() -> None:
     """Catch pre-lease publication or a contract change at late completion."""
     calls: list[object] = []
     evidence = {
+        "mode": "activation",
         "schema-version": 1,
+        "bootstrap-authority-sha256": "0" * 64,
         "artifact-path": f"/var/lib/loom/execution-prerequisites/{'1' * 64}.json",
         "artifact-sha256": "1" * 64,
         "core-artifact-bundle-sha256": "2" * 64,
@@ -2747,3 +2749,44 @@ def test_execution_prerequisite_check_defers_until_exact_lease() -> None:
         "external-supervisor.predecessor",
         "rehearsal.cleanup",
     )
+
+
+def test_execution_prerequisite_check_admits_only_explicit_zero_ceiling_bootstrap() -> None:
+    """Catch treating an ordinary missing execution authority as bootstrap-ready."""
+    bootstrap_authority = "a" * 64
+    evidence = {
+        "mode": "zero-ceiling-bootstrap",
+        "schema-version": 0,
+        "bootstrap-authority-sha256": bootstrap_authority,
+        "artifact-path": "/",
+        "artifact-sha256": "0" * 64,
+        "core-artifact-bundle-sha256": "0" * 64,
+        "execution-policy-sha256": "0" * 64,
+        "executor-profile-seed-sha256": "0" * 64,
+        "manager-route-sha256": "0" * 64,
+        "access-metadata-sha256": "0" * 64,
+        "coexistence-witness-sha256": "0" * 64,
+        "legacy-writer-sha256": "0" * 64,
+        "rollback-evidence-sha256": "0" * 64,
+    }
+    check = build_execution_prerequisite_check(
+        lambda _lease: evidence,
+        lease=object(),  # type: ignore[arg-type]
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": "a" * 40,
+            "candidate.tree": "b" * 40,
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "staging.mutation-epoch": 8,
+        }
+    )
+
+    probe = check.operations[CheckOperation.PROBE](context)
+
+    assert probe.passed
+    assert probe.evidence == evidence

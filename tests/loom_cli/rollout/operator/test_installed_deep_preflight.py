@@ -128,7 +128,7 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     )
     cluster = SimpleNamespace(
         artifacts_bucket="loom-staging-artifacts",
-        container_registry="registry.invalid",
+        container_registry="192.168.50.13:5000",
         container_registry_push="registry-push.invalid",
         k8s_worker=SimpleNamespace(enabled=True),
         lifecycle_legacy_buckets=("artifacts", "trajectories"),
@@ -335,6 +335,7 @@ spec:
                 credentials_root=tmp_path / "protected-capacity/credentials",
                 read_credential_seed=lambda: {},
                 read_execution_credential_bundle=lambda: object(),
+                zero_ceiling_bootstrap_authority=lambda _lease: "b" * 64,
                 construction=kwargs,
             ),
         ),
@@ -452,9 +453,13 @@ spec:
     assert callable(prerequisite_inputs["manager_configuration_source"])
     assert callable(prerequisite_inputs["configuration_seed_source"])
     assert callable(prerequisite_inputs["staging_protected_admission_source"])
+    assert (
+        prerequisite_inputs["zero_ceiling_bootstrap_authority_source"]("lease")
+        == "b" * 64
+    )
     authority_source_factory = prerequisite_inputs["authority_source_factory"]
     assert callable(authority_source_factory)
-    executor_image = "registry.invalid/loom-capacity-executor@sha256:" + "9" * 64
+    executor_image = "192.168.50.13:5000/loom-capacity-executor@sha256:" + "9" * 64
     execution_authority = authority_source_factory(candidate, executor_image)
     assert isinstance(
         execution_authority,

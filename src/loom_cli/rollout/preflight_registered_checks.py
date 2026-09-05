@@ -3240,6 +3240,7 @@ def build_execution_prerequisite_check(
             artifact_path = Path(str(evidence.get("artifact-path", "")))
             digest_fields = {
                 "artifact-sha256",
+                "bootstrap-authority-sha256",
                 "core-artifact-bundle-sha256",
                 "execution-policy-sha256",
                 "executor-profile-seed-sha256",
@@ -3257,15 +3258,41 @@ def build_execution_prerequisite_check(
                     or any(character not in "0123456789abcdef" for character in value)
                 )
 
-            if (
-                set(evidence) != {"schema-version", "artifact-path", *digest_fields}
-                or evidence["schema-version"] != 1
-                or not isinstance(artifact_sha256, str)
-                or not artifact_path.is_absolute()
-                or ".." in artifact_path.parts
-                or artifact_path.name != f"{artifact_sha256}.json"
-                or any(invalid_digest(evidence[name]) for name in digest_fields)
-            ):
+            if set(evidence) != {
+                "mode",
+                "schema-version",
+                "artifact-path",
+                *digest_fields,
+            } or any(invalid_digest(evidence[name]) for name in digest_fields):
+                raise ValueError("execution prerequisite publication evidence is invalid")
+            mode = evidence["mode"]
+            if mode == "activation":
+                if (
+                    evidence["schema-version"] != 1
+                    or evidence["bootstrap-authority-sha256"] != "0" * 64
+                    or not isinstance(artifact_sha256, str)
+                    or artifact_sha256 == "0" * 64
+                    or not artifact_path.is_absolute()
+                    or ".." in artifact_path.parts
+                    or artifact_path.name != f"{artifact_sha256}.json"
+                    or any(
+                        evidence[name] == "0" * 64
+                        for name in digest_fields - {"bootstrap-authority-sha256"}
+                    )
+                ):
+                    raise ValueError("execution prerequisite publication evidence is invalid")
+            elif mode == "zero-ceiling-bootstrap":
+                if (
+                    evidence["schema-version"] != 0
+                    or evidence["artifact-path"] != "/"
+                    or evidence["bootstrap-authority-sha256"] == "0" * 64
+                    or any(
+                        evidence[name] != "0" * 64
+                        for name in digest_fields - {"bootstrap-authority-sha256"}
+                    )
+                ):
+                    raise ValueError("execution prerequisite publication evidence is invalid")
+            else:
                 raise ValueError("execution prerequisite publication evidence is invalid")
         except Exception:
             return _empty_execution_prerequisite_probe()
@@ -3285,7 +3312,9 @@ def build_execution_prerequisite_check(
             mutation_class=MutationClass.ISOLATED,
             input_keys=tuple(sorted(expected_bindings)),
             evidence_schema=(
+                EvidenceField("mode", "string"),
                 EvidenceField("schema-version", "integer"),
+                EvidenceField("bootstrap-authority-sha256", "sha256"),
                 EvidenceField("artifact-path", "string"),
                 EvidenceField("artifact-sha256", "sha256"),
                 EvidenceField("core-artifact-bundle-sha256", "sha256"),
@@ -3302,7 +3331,7 @@ def build_execution_prerequisite_check(
             remediation="restore exact execution, lease, controller, credential, and writer authority",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -3311,7 +3340,9 @@ def _empty_execution_prerequisite_probe() -> CheckProbe:
     return CheckProbe(
         passed=False,
         evidence={
+            "mode": "unavailable",
             "schema-version": 0,
+            "bootstrap-authority-sha256": "0" * 64,
             "artifact-path": "unavailable",
             "artifact-sha256": "0" * 64,
             "core-artifact-bundle-sha256": "0" * 64,

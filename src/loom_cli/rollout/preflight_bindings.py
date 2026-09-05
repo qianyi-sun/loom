@@ -63,6 +63,17 @@ def _integer(value: object, label: str) -> int:
     return value
 
 
+def _sha256(value: object, label: str, *, allow_zero: bool = False) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        or (not allow_zero and value == "0" * 64)
+    ):
+        raise ValueError(f"preflight binding evidence {label} is missing")
+    return value
+
+
 def _controller_unit_maps(
     values: Mapping[str, str],
     *,
@@ -376,55 +387,77 @@ def derive_attestation_bindings(
         "manager_increase_freeze": backup_lease.manager_increase_freeze,
         "restore_report_sha256": backup_lease.restore_report_sha256,
     }
+    prerequisite_mode = _string(
+        evidence("execution.prerequisites", "mode"),
+        "execution prerequisite mode",
+    )
     prerequisite_schema = _integer(
         evidence("execution.prerequisites", "schema-version"),
         "execution prerequisite schema",
     )
-    if prerequisite_schema != 1:
-        raise ValueError("execution prerequisite schema is unsupported")
-    execution_prerequisites: dict[str, object] = {
-        "execution_prerequisite_schema_version": prerequisite_schema,
-        "execution_prerequisite_artifact_path": _string(
-            evidence("execution.prerequisites", "artifact-path"),
-            "execution prerequisite artifact path",
-        ),
-        "execution_prerequisite_artifact_sha256": _string(
-            evidence("execution.prerequisites", "artifact-sha256"),
-            "execution prerequisite artifact",
-        ),
-        "execution_core_artifact_bundle_sha256": _string(
-            evidence("execution.prerequisites", "core-artifact-bundle-sha256"),
-            "execution prerequisite core artifact bundle",
-        ),
-        "execution_policy_sha256": _string(
-            evidence("execution.prerequisites", "execution-policy-sha256"),
-            "execution policy",
-        ),
-        "executor_profile_seed_sha256": _string(
-            evidence("execution.prerequisites", "executor-profile-seed-sha256"),
-            "executor profile seed",
-        ),
-        "execution_manager_route_sha256": _string(
-            evidence("execution.prerequisites", "manager-route-sha256"),
-            "execution manager route",
-        ),
-        "execution_access_metadata_sha256": _string(
-            evidence("execution.prerequisites", "access-metadata-sha256"),
-            "execution access metadata",
-        ),
-        "execution_coexistence_witness_sha256": _string(
-            evidence("execution.prerequisites", "coexistence-witness-sha256"),
-            "execution coexistence witness",
-        ),
-        "execution_legacy_writer_sha256": _string(
-            evidence("execution.prerequisites", "legacy-writer-sha256"),
-            "execution legacy writer",
-        ),
-        "execution_rollback_evidence_sha256": _string(
-            evidence("execution.prerequisites", "rollback-evidence-sha256"),
-            "execution rollback evidence",
-        ),
+    bootstrap_authority = _sha256(
+        evidence("execution.prerequisites", "bootstrap-authority-sha256"),
+        "zero-ceiling bootstrap authority",
+        allow_zero=True,
+    )
+    execution_fields = {
+        "artifact-sha256": "execution prerequisite artifact",
+        "core-artifact-bundle-sha256": "execution prerequisite core artifact bundle",
+        "execution-policy-sha256": "execution policy",
+        "executor-profile-seed-sha256": "executor profile seed",
+        "manager-route-sha256": "execution manager route",
+        "access-metadata-sha256": "execution access metadata",
+        "coexistence-witness-sha256": "execution coexistence witness",
+        "legacy-writer-sha256": "execution legacy writer",
+        "rollback-evidence-sha256": "execution rollback evidence",
     }
+    execution_prerequisites: dict[str, object] = {}
+    if prerequisite_mode == "activation" and prerequisite_schema == 1:
+        if bootstrap_authority != "0" * 64:
+            raise ValueError("execution prerequisite bootstrap authority overlaps activation")
+        values = {
+            name: _sha256(evidence("execution.prerequisites", name), label)
+            for name, label in execution_fields.items()
+        }
+        execution_prerequisites = {
+            "execution_prerequisite_schema_version": prerequisite_schema,
+            "execution_prerequisite_artifact_path": _string(
+                evidence("execution.prerequisites", "artifact-path"),
+                "execution prerequisite artifact path",
+            ),
+            "execution_prerequisite_artifact_sha256": values["artifact-sha256"],
+            "execution_core_artifact_bundle_sha256": values[
+                "core-artifact-bundle-sha256"
+            ],
+            "execution_policy_sha256": values["execution-policy-sha256"],
+            "executor_profile_seed_sha256": values["executor-profile-seed-sha256"],
+            "execution_manager_route_sha256": values["manager-route-sha256"],
+            "execution_access_metadata_sha256": values["access-metadata-sha256"],
+            "execution_coexistence_witness_sha256": values[
+                "coexistence-witness-sha256"
+            ],
+            "execution_legacy_writer_sha256": values["legacy-writer-sha256"],
+            "execution_rollback_evidence_sha256": values[
+                "rollback-evidence-sha256"
+            ],
+        }
+    elif prerequisite_mode == "zero-ceiling-bootstrap" and prerequisite_schema == 0:
+        if (
+            bootstrap_authority == "0" * 64
+            or evidence("execution.prerequisites", "artifact-path") != "/"
+            or any(
+                evidence("execution.prerequisites", name) != "0" * 64
+                for name in execution_fields
+            )
+            or backup_lease.manager_execution_state != "shadow"
+            or backup_lease.manager_execution_epoch != 0
+            or backup_lease.manager_execution_manifest_sha256 is not None
+            or backup_lease.manager_executable_new_capacity_ceiling != 0
+            or backup_lease.manager_increase_freeze is not True
+        ):
+            raise ValueError("zero-ceiling bootstrap authority is unsafe")
+    else:
+        raise ValueError("execution prerequisite schema is unsupported")
 
     return AttestationBindings(
         candidate_sha=candidate_sha,

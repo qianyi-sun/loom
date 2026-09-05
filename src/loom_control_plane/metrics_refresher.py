@@ -81,14 +81,14 @@ SELECT count(*) FROM workers
 _QUEUE_DEPTH_SQL = text("""
 SELECT team_id::text, count(*) AS depth
   FROM trials
- WHERE state = 'queued'
+ WHERE state IN ('queued', 'protected-pending')
  GROUP BY team_id
 """)
 
 _TRIALS_INFLIGHT_SQL = text("""
 SELECT team_id::text, state, count(*) AS cnt
   FROM trials
- WHERE state IN ('queued', 'claimed', 'running')
+ WHERE state IN ('queued', 'protected-pending', 'claimed', 'running')
  GROUP BY team_id, state
 """)
 

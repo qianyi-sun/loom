@@ -19,6 +19,7 @@ from uuid import uuid4
 from loom_cli.capacity_control_plane import CapacityPoolExecutorBinding
 
 from .protected_controller_prerequisite_component import capacity_executor_image_digest
+from .protected_controller_prerequisite_transport import oldlab_runtime_executor_image
 from .protected_staging_capacity_execution_credentials import ExecutionCredentialBundle
 
 _POOL_IDS = frozenset({"gb10", "oldlab"})
@@ -368,14 +369,17 @@ class FixedOldlabPoolCredentialInvoker:
 
     image: str
     run: OldlabControllerRunner
+    runtime_image: str = field(init=False)
 
     def __post_init__(self) -> None:
         try:
             capacity_executor_image_digest(self.image)
+            runtime_image = oldlab_runtime_executor_image(self.image)
         except ValueError as exc:
             raise ValueError("OLDLAB pool credential channel is invalid") from exc
         if not callable(self.run):
             raise ValueError("OLDLAB pool credential channel is invalid")
+        object.__setattr__(self, "runtime_image", runtime_image)
 
     @property
     def authority_sha256(self) -> str:
@@ -386,7 +390,8 @@ class FixedOldlabPoolCredentialInvoker:
             "image": self.image,
             "installer": _INSTALLER,
             "pool_id": "oldlab",
-            "schema_version": 1,
+            "runtime_image": self.runtime_image,
+            "schema_version": 2,
         }
         return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
@@ -416,7 +421,7 @@ class FixedOldlabPoolCredentialInvoker:
             "type=bind,src=/,dst=/host,bind-propagation=rslave",
             "--entrypoint",
             "/usr/local/bin/python",
-            self.image,
+            self.runtime_image,
             _INSTALLER,
             "--host-root",
             "/host",

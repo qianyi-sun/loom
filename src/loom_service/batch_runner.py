@@ -54,7 +54,9 @@ from loom_service.usage_accounting import hard_budget_exceeded_diagnostic
 logger = logging.getLogger(__name__)
 
 _TERMINAL: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
-_IN_FLIGHT: frozenset[str] = frozenset({"queued", "claimed", "running"})
+_IN_FLIGHT: frozenset[str] = frozenset(
+    {"queued", "protected-pending", "claimed", "running"}
+)
 _NON_RETRYABLE_SUBMIT_STATUSES: frozenset[int] = frozenset({400, 403, 404, 409, 422})
 _MAX_SUBMIT_ERROR_DETAIL_LEN = 500
 
@@ -64,6 +66,15 @@ class _SubmitResult:
     ok: bool
     retryable: bool
     error: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _HardBudgetCancellation:
+    batch_id: UUID
+    trial_ids: tuple[UUID, ...]
+    diagnostic: dict[str, Any]
+    consumed: Decimal
+    budget: Decimal
 
 
 @dataclass(frozen=True)
@@ -725,13 +736,13 @@ async def _advance_batch_state(
 async def _cancel_batch_for_hard_budget(
     session: AsyncSession,
     batch: Batch,
-) -> bool:
+) -> _HardBudgetCancellation | None:
     if batch.state == "cancelled":
-        return True
+        return None
     if str(getattr(batch, "budget_policy", "none") or "none") != "hard":
-        return False
+        return None
     if batch.budget_usd is None:
-        return False
+        return None
 
     row = (
         await session.execute(
@@ -744,56 +755,88 @@ async def _cancel_batch_for_hard_budget(
         )
     ).one()
     if int(row.llm_calls_count or 0) == 0:
-        return False
+        return None
 
     consumed = Decimal(str(row.cost_usd or 0))
     budget = Decimal(str(batch.budget_usd))
     if consumed <= budget:
-        return False
+        return None
 
     diagnostic = hard_budget_exceeded_diagnostic(
         batch_id=batch.id,
         budget_usd=float(budget),
         estimated_cost_usd=float(consumed),
     )
+    trial_ids = tuple(
+        (
+            await session.execute(
+                select(Trial.id).where(
+                    Trial.batch_id == batch.id,
+                    Trial.state.in_(list(_IN_FLIGHT)),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return _HardBudgetCancellation(
+        batch_id=batch.id,
+        trial_ids=trial_ids,
+        diagnostic=diagnostic,
+        consumed=consumed,
+        budget=budget,
+    )
+
+
+async def _request_hard_budget_cancellation(
+    http_client: httpx.AsyncClient,
+    cancellation: _HardBudgetCancellation,
+    *,
+    authorization: str | None,
+) -> None:
+    headers = {"Authorization": authorization} if authorization else {}
+    for trial_id in cancellation.trial_ids:
+        try:
+            response = await http_client.post(
+                f"/trials/{trial_id}/cancel",
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError("hard-budget trial cancellation is unavailable") from exc
+        if response.status_code not in {200, 409}:
+            raise RuntimeError("hard-budget trial cancellation was rejected")
+
+
+async def _finalize_hard_budget_cancellation(
+    session: AsyncSession,
+    cancellation: _HardBudgetCancellation,
+) -> None:
+    batch = (
+        await session.execute(
+            select(Batch).where(Batch.id == cancellation.batch_id).with_for_update(),
+        )
+    ).scalar_one_or_none()
+    if batch is None or batch.state == "cancelled":
+        return
     diagnostics = [
-        item
-        for item in (batch.budget_diagnostics or [])
-        if isinstance(item, dict)
+        item for item in (batch.budget_diagnostics or []) if isinstance(item, dict)
     ]
     await session.execute(
         update(Batch)
-        .where(Batch.id == batch.id)
+        .where(Batch.id == cancellation.batch_id)
         .values(
             state="cancelled",
             result_status="cancelled",
             finished_at=datetime.now(UTC),
-            budget_diagnostics=[*diagnostics, diagnostic],
-        ),
-    )
-    await session.execute(
-        update(Trial)
-        .where(
-            Trial.batch_id == batch.id,
-            Trial.state.in_(list(_IN_FLIGHT)),
-        )
-        .values(
-            state="cancelled",
-            failure_reason="budget_hard_limit_exceeded",
-            failure_message=(
-                "batch hard budget was exceeded by recorded provider usage"
-            ),
-            cancellation_requested_at=datetime.now(UTC),
-            finished_at=datetime.now(UTC),
+            budget_diagnostics=[*diagnostics, cancellation.diagnostic],
         ),
     )
     logger.warning(
         "batch %s cancelled after hard budget exceeded: cost=%s budget=%s",
-        batch.id,
-        consumed,
-        budget,
+        cancellation.batch_id,
+        cancellation.consumed,
+        cancellation.budget,
     )
-    return True
 
 
 async def run_once(
@@ -840,6 +883,7 @@ async def run_once(
     # Each work item is (batch_id, pending units). A PendingUnit carries the
     # effective provider route for that task/combination/sample.
     work: list[tuple[UUID, list[PendingUnit]]] = []
+    hard_budget_cancellations: list[_HardBudgetCancellation] = []
     fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     async with session_factory() as s:
         batches_to_process = (await s.execute(
@@ -848,7 +892,9 @@ async def run_once(
             .with_for_update(skip_locked=True),
         )).scalars().all()
         for b in batches_to_process:
-            if await _cancel_batch_for_hard_budget(s, b):
+            hard_budget_cancellation = await _cancel_batch_for_hard_budget(s, b)
+            if hard_budget_cancellation is not None:
+                hard_budget_cancellations.append(hard_budget_cancellation)
                 continue
             existing_fanout_errors = _fanout_errors(b)
             failed_fanout_keys = _fanout_error_keys(existing_fanout_errors)
@@ -1053,7 +1099,17 @@ async def run_once(
                 work.append((b.id, pending_units))
         await s.commit()
 
-    # Phase 2: HTTP fanout. No DB locks.
+    # Phase 2: cancellation and fanout HTTP calls. No DB locks.
+    for cancellation in hard_budget_cancellations:
+        await _request_hard_budget_cancellation(
+            http_client,
+            cancellation,
+            authorization=cp_authorization,
+        )
+        async with session_factory() as s:
+            await _finalize_hard_budget_cancellation(s, cancellation)
+            await s.commit()
+
     for batch_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]

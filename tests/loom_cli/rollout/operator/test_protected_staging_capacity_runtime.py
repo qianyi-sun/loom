@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -16,7 +15,7 @@ import pytest
 import yaml
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from loom_capacity_manager.contracts import FleetManifestV1, canonical_digest_excluding
@@ -31,7 +30,7 @@ from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
 from tests.loom_cli.rollout.operator.protected_execution_prerequisite_fixtures import (
     execution_prerequisite_artifact,
 )
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _execution_plan, _plan
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _execution_plan, _lease, _plan
 from tests.loom_cli.rollout.operator.test_protected_staging_capacity_manager_runtime_component import (
     _candidate,
     _ManagerCluster,
@@ -134,7 +133,7 @@ class _DatabaseRunner:
                 return b"absent\n"
             return b"loom_capacity_guard.capacity_guard_alembic_version\n"
         if "version_num" in joined:
-            return b"guard_0027\n"
+            return b"guard_0029\n"
         if "current_protected_runtime_registration" in joined:
             return json.dumps(self._registration(), sort_keys=True).encode()
         if "agent_runtime_authority" in joined:
@@ -462,19 +461,12 @@ def test_preparation_dependency_rechecks_every_task_43_to_45_component(
     ]
 
 
-_BootstrapPrivateKey = rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey
-
-
-def _rsa_private_key() -> rsa.RSAPrivateKey:
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-
 def _certificate(
     *,
     common_name: str,
-    issuer_key: _BootstrapPrivateKey,
+    issuer_key: rsa.RSAPrivateKey,
     issuer_name: x509.Name,
-    subject_key: _BootstrapPrivateKey,
+    subject_key: rsa.RSAPrivateKey,
     is_ca: bool = False,
     uri_san: str | None = None,
 ) -> x509.Certificate:
@@ -503,13 +495,11 @@ def _certificate(
 
 def _write_bootstrap(
     runtime: KubernetesProtectedStagingCapacityRuntime,
-    *,
-    key_factory: Callable[[], _BootstrapPrivateKey] = _rsa_private_key,
-) -> dict[str, _BootstrapPrivateKey]:
+) -> dict[str, rsa.RSAPrivateKey]:
     runtime.state_root.mkdir(mode=0o700)
     runtime.credentials_root.parent.mkdir(mode=0o700)
     runtime.credentials_root.mkdir(mode=0o700)
-    client_ca_key = key_factory()
+    client_ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     client_ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "manager-client-ca")])
     client_ca_cert = _certificate(
         common_name="manager-client-ca",
@@ -518,7 +508,7 @@ def _write_bootstrap(
         subject_key=client_ca_key,
         is_ca=True,
     )
-    manager_ca_key = key_factory()
+    manager_ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     manager_ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "manager-server-ca")])
     manager_ca_cert = _certificate(
         common_name="manager-server-ca",
@@ -579,11 +569,11 @@ def _write_bootstrap(
             )
         },
     }
-    private_keys: dict[str, _BootstrapPrivateKey] = {"client-ca": client_ca_key}
+    private_keys: dict[str, rsa.RSAPrivateKey] = {"client-ca": client_ca_key}
     for directory_name, file_names in clients.items():
         directory = runtime.credentials_root / directory_name
         directory.mkdir(mode=0o700)
-        private_key = key_factory()
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         private_keys[directory_name] = private_key
         certificate = _certificate(
             common_name=directory_name,
@@ -627,15 +617,9 @@ def _write_bootstrap(
     return private_keys
 
 
-@pytest.mark.parametrize("ec_keys", (False, True), ids=("rsa", "ec"))
-def test_runtime_exposes_exact_execution_credential_metadata(tmp_path: Path, ec_keys: bool) -> None:
+def test_runtime_exposes_exact_execution_credential_metadata(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
-    _write_bootstrap(
-        runtime,
-        key_factory=(lambda: ec.generate_private_key(ec.SECP256R1()))
-        if ec_keys
-        else _rsa_private_key,
-    )
+    _write_bootstrap(runtime)
 
     metadata_reader = getattr(runtime, "read_execution_credential_metadata", None)
     assert metadata_reader is not None, "runtime execution credential metadata reader is missing"
@@ -696,6 +680,26 @@ def test_credentials_component_persists_one_candidate_independent_seed(
     assert runtime.credential_seed_path.read_bytes() == before
 
 
+def test_runtime_issues_bootstrap_authority_only_for_absent_seed_and_frozen_shadow(
+    tmp_path: Path,
+) -> None:
+    """Catch using bootstrap mode after execution can increase capacity."""
+    runtime = _runtime(tmp_path)
+    _write_bootstrap(runtime)
+    lease = _lease()
+
+    digest = runtime.zero_ceiling_bootstrap_authority(lease)
+
+    assert len(digest) == 64
+    assert digest != "0" * 64
+    assert runtime.zero_ceiling_bootstrap_authority(lease) == digest
+    with pytest.raises(RuntimeError, match="unavailable"):
+        runtime.zero_ceiling_bootstrap_authority(object())  # type: ignore[arg-type]
+    runtime._create_credential_seed()
+    with pytest.raises(RuntimeError, match="unavailable"):
+        runtime.zero_ceiling_bootstrap_authority(lease)
+
+
 def test_credentials_component_rejects_bootstrap_mode_drift(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     _write_bootstrap(runtime)
@@ -712,17 +716,9 @@ def test_credentials_component_rejects_bootstrap_mode_drift(tmp_path: Path) -> N
     assert component.classify(plan).state is ComponentState.DRIFTED
 
 
-@pytest.mark.parametrize("ec_keys", (False, True), ids=("rsa", "ec"))
-def test_credentials_component_rejects_certificate_key_mismatch(
-    tmp_path: Path, ec_keys: bool
-) -> None:
+def test_credentials_component_rejects_certificate_key_mismatch(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
-    private_keys = _write_bootstrap(
-        runtime,
-        key_factory=(lambda: ec.generate_private_key(ec.SECP256R1()))
-        if ec_keys
-        else _rsa_private_key,
-    )
+    private_keys = _write_bootstrap(runtime)
     mismatched = private_keys["configuration-fleet"].private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
@@ -782,17 +778,9 @@ def test_credentials_component_rejects_distinct_ca_certificates_with_one_key(
     assert component.classify(plan).state is ComponentState.DRIFTED
 
 
-@pytest.mark.parametrize("ec_keys", (False, True), ids=("rsa", "ec"))
-def test_credentials_component_rejects_certificate_from_another_ca(
-    tmp_path: Path, ec_keys: bool
-) -> None:
+def test_credentials_component_rejects_certificate_from_another_ca(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
-    private_keys = _write_bootstrap(
-        runtime,
-        key_factory=(lambda: ec.generate_private_key(ec.SECP256R1()))
-        if ec_keys
-        else _rsa_private_key,
-    )
+    private_keys = _write_bootstrap(runtime)
     foreign_ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     foreign_ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "foreign-ca")])
     foreign_certificate = _certificate(

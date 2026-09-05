@@ -480,7 +480,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "submitted_by_user_id, usage_attributed_user_id, "
                             "usage_attributed_actor, family_key, lifecycle_authority_id, "
                             "submitted_at, started_at, cancellation_requested_at, "
-                            "next_attempt_at, "
+                            "cancellation_observed_at, finished_at, next_attempt_at, "
                             "autoscaler_pool_name, worker_id, attempt_count, "
                             "execution_route_json) "
                             "ON TABLE public.trials TO {}"
@@ -490,7 +490,8 @@ class PsycopgPersonalDevCapacityDatabase:
                         sql.SQL(
                             "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, "
                             "worker_id, claimed_at, pre_start_heartbeat_at, failure_reason, "
-                            "failure_message, attempt_count, next_attempt_at) "
+                            "failure_message, attempt_count, next_attempt_at, "
+                            "cancellation_requested_at, cancellation_observed_at, finished_at) "
                             "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )

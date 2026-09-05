@@ -2052,6 +2052,7 @@ def _empty_trial_summary() -> dict[str, int]:
         k: 0
         for k in (
             "queued",
+            "protected-pending",
             "claimed",
             "running",
             "materializing",
@@ -2235,7 +2236,10 @@ def _result_status_from_trials(trials: Sequence[Any]) -> str | None:
     if not trials:
         return None
     states = [str(trial.state) for trial in trials]
-    if any(state in {"queued", "claimed", "running"} for state in states):
+    if any(
+        state in {"queued", "protected-pending", "claimed", "running"}
+        for state in states
+    ):
         return None
     succeeded = sum(1 for state in states if state == "succeeded")
     failed = len(states) - succeeded
@@ -2866,20 +2870,14 @@ async def cancel_batch(
         await s.execute(
             select(Trial.id).where(
                 Trial.batch_id == batch_id,
-                Trial.state.in_(["queued", "claimed", "running"]),
+                Trial.state.in_(["queued", "protected-pending", "claimed", "running"]),
             )
         )
     ).scalars().all()
-    # The explicit Batch backend owns the execution lifecycle. Ordinary
-    # user-uploaded tasks may receive the Nebius runtime plan automatically
-    # and therefore have no service_execution block in Task.config.
-    service_execution_ids = list(active_trial_ids) if b.backend == NEBIUS_BACKEND else []
-    legacy_ids = list(active_trial_ids) if b.backend != NEBIUS_BACKEND else []
-
-    # Service execution has a second, provider-facing lifecycle authority.
-    # Route cancellation through the Control Plane so the Trial update, lease
-    # generation revocation, and durable actuator command commit atomically.
-    for trial_id in service_execution_ids:
+    # The Control Plane owns the trial cancellation transition for every
+    # backend. In protected staging this is also the only path that can move a
+    # live claim to cancel-pending without releasing its concurrency lease.
+    for trial_id in active_trial_ids:
         response = await forward(
             request.app.state.http_client,
             method="POST",
@@ -2892,15 +2890,5 @@ async def cancel_batch(
     await s.execute(
         update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
     )
-    if legacy_ids:
-        await s.execute(
-            update(Trial)
-            .where(Trial.id.in_(legacy_ids))
-            .values(
-                state="cancelled",
-                cancellation_requested_at=now,
-                finished_at=now,
-            ),
-        )
     await s.commit()
     return {"batch_id": str(batch_id), "state": "cancelled"}

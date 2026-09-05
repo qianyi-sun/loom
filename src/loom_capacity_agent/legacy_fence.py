@@ -22,7 +22,7 @@ from loom_capacity_guard.contracts import (
 )
 
 LEGACY_MUTATION_INVENTORY_DIGEST = (
-    "607f561f4af380cb1452995512e2ec4ab32490c29552b7a6618a3f76fea168a4"
+    "b9ec5d44880251d00237463a9f534199087a13f9056107078b3bac2d2d7fb1e1"
 )
 MAX_LEGACY_WRITER_CURSORS = 64
 LEGACY_MUTATION_PATH_IDS = (
@@ -114,7 +114,7 @@ class _InertLegacyAuthorityV1(AgentRegistrationV1):
     """Common zero-authority ceiling for preparation and freeze evidence."""
 
     mutation_inventory_digest: Literal[
-        "607f561f4af380cb1452995512e2ec4ab32490c29552b7a6618a3f76fea168a4"
+        "b9ec5d44880251d00237463a9f534199087a13f9056107078b3bac2d2d7fb1e1"
     ]
     activation_epoch: Literal[0] = 0
     new_submission_authority: Literal[False] = False

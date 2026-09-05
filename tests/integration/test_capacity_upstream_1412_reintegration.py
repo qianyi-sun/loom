@@ -14,10 +14,11 @@ def _capacity_config_without_database() -> Config:
 
 def test_upstream_1412_union_has_one_exact_capacity_history() -> None:
     script = ScriptDirectory.from_config(_capacity_config_without_database())
-    assert tuple(script.get_heads()) == ("capacity_0014",)
+    assert tuple(script.get_heads()) == ("capacity_0015",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0014")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0015")
     ) == (
+        "capacity_0015",
         "capacity_0014",
         "capacity_0013",
         "capacity_0012",
@@ -34,5 +35,8 @@ def test_upstream_1412_union_has_one_exact_capacity_history() -> None:
     assert revision is not None
     assert revision.path.endswith("capacity_0006_executable_work_queue.py")
     protected_admission = script.get_revision("capacity_0014")
+    terminal_inventory = script.get_revision("capacity_0015")
     assert protected_admission is not None
+    assert terminal_inventory is not None
     assert protected_admission.path.endswith("capacity_0014_protected_admission_plan.py")
+    assert terminal_inventory.path.endswith("capacity_0015_terminal_inventory_evidence.py")

@@ -209,6 +209,74 @@ def test_detached_publisher_rejects_image_artifact_drift(tmp_path: Path) -> None
     assert not fixture.store.state_root.exists()
 
 
+def test_detached_publisher_selects_attested_zero_ceiling_bootstrap_when_seed_is_absent(
+    tmp_path: Path,
+) -> None:
+    """Catch deadlocking a safe legacy manager before protected apply can upgrade it."""
+    fixture = _source_fixture(tmp_path)
+    plan = fixture.plan
+    images = _images(candidate_sha=plan.candidate_sha)
+    loaded = SimpleNamespace(
+        images=images,
+        publication=SimpleNamespace(
+            bundle_digest=plan.artifact_bundle_digest,
+            candidate_sha=plan.candidate_sha,
+            candidate_tree=plan.candidate_tree,
+            mutation_epoch=plan.starting_mutation_epoch,
+            container_registry="registry.example",
+        ),
+    )
+    bootstrap_calls: list[object] = []
+
+    def seed_absent() -> dict[str, object]:
+        raise FileNotFoundError("protected seed is absent")
+
+    def bootstrap_authority(lease):  # type: ignore[no-untyped-def]
+        bootstrap_calls.append(lease)
+        return "b" * 64
+
+    factory = InstalledExecutionPrerequisitePublisherFactory(
+        store=fixture.store,
+        container_registry="registry.example",
+        manager_configuration_source=lambda: (_ for _ in ()).throw(
+            RuntimeError("legacy manager has no configuration endpoint")
+        ),
+        configuration_seed_source=seed_absent,
+        staging_protected_admission_source=(
+            lambda _candidate, _bundle, _epoch, _seed: fixture.protected_admission
+        ),
+        authority_source_factory=lambda _candidate, _image: lambda _desired: fixture.authority,
+        now=fixture.source.now,
+        zero_ceiling_bootstrap_authority_source=bootstrap_authority,
+    )
+    publisher = factory(
+        _candidate(plan),
+        plan.starting_mutation_epoch,
+        RuntimePurpose.DETACHED_REHEARSAL,
+        loaded,  # type: ignore[arg-type]
+    )
+
+    evidence = publisher(fixture.lease, images)
+
+    assert evidence == {
+        "mode": "zero-ceiling-bootstrap",
+        "schema-version": 0,
+        "bootstrap-authority-sha256": "b" * 64,
+        "artifact-path": "/",
+        "artifact-sha256": "0" * 64,
+        "core-artifact-bundle-sha256": "0" * 64,
+        "execution-policy-sha256": "0" * 64,
+        "executor-profile-seed-sha256": "0" * 64,
+        "manager-route-sha256": "0" * 64,
+        "access-metadata-sha256": "0" * 64,
+        "coexistence-witness-sha256": "0" * 64,
+        "legacy-writer-sha256": "0" * 64,
+        "rollback-evidence-sha256": "0" * 64,
+    }
+    assert bootstrap_calls == [fixture.lease]
+    assert not fixture.store.state_root.exists()
+
+
 def test_preflight_protected_admission_derivation_matches_final_apply(tmp_path: Path) -> None:
     """Catch preflight and protected apply deriving different reporter authority."""
     fixture = _source_fixture(tmp_path)

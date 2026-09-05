@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from .protected_controller_discovery import (
@@ -24,6 +24,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_WIRE_BYTES = 2 * 1024 * 1024
 _OLDLAB_DOCKER = "/usr/bin/docker"
 _INSTALLER = "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py"
+_OLDLAB_LOGICAL_IMAGE_PREFIX = "192.168.50.13:5000/loom-capacity-executor@sha256:"
+_OLDLAB_RUNTIME_IMAGE_PREFIX = "localhost:5000/loom-capacity-executor@sha256:"
 
 
 class ControllerCommandResult(Protocol):
@@ -185,14 +187,16 @@ class FixedOldlabControllerPrerequisiteInvoker:
 
     run: OldlabControllerRunner
     image: str
+    runtime_image: str = field(init=False)
 
     def __post_init__(self) -> None:
         try:
-            capacity_executor_image_digest(self.image)
+            runtime_image = oldlab_runtime_executor_image(self.image)
         except ValueError as exc:
             raise ValueError("OLDLAB controller prerequisite channel is invalid") from exc
         if not callable(self.run):
             raise ValueError("OLDLAB controller prerequisite channel is invalid")
+        object.__setattr__(self, "runtime_image", runtime_image)
 
     @property
     def authority_sha256(self) -> str:
@@ -203,7 +207,8 @@ class FixedOldlabControllerPrerequisiteInvoker:
             "installer": _INSTALLER,
             "image": self.image,
             "pool_id": "oldlab",
-            "schema_version": 1,
+            "runtime_image": self.runtime_image,
+            "schema_version": 2,
         }
         return hashlib.sha256(
             json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -231,6 +236,11 @@ class FixedOldlabControllerPrerequisiteInvoker:
             or (isinstance(request, ControllerPrerequisiteRequest) and request.image != self.image)
         ):
             raise ValueError("OLDLAB controller prerequisite request is invalid")
+        runtime_arguments = (
+            ("--runtime-image", self.runtime_image)
+            if isinstance(request, ControllerPrerequisiteRequest)
+            else ()
+        )
         argv = (
             _OLDLAB_DOCKER,
             "run",
@@ -247,10 +257,11 @@ class FixedOldlabControllerPrerequisiteInvoker:
             "type=bind,src=/,dst=/host,bind-propagation=rslave",
             "--entrypoint",
             "/usr/local/bin/python",
-            self.image,
+            self.runtime_image,
             _INSTALLER,
             "--host-root",
             "/host",
+            *runtime_arguments,
             "--operation",
             operation,
         )
@@ -283,6 +294,27 @@ def _require_authority_sha256(value: object) -> str:
     return value
 
 
+def oldlab_runtime_executor_image(image: object) -> str:
+    """Map the staging logical executor identity to OLDLAB1's host-local mirror."""
+
+    digest = capacity_executor_image_digest(image)
+    if image != f"{_OLDLAB_LOGICAL_IMAGE_PREFIX}{digest}":
+        raise ValueError("OLDLAB logical executor image is invalid")
+    runtime_image = f"{_OLDLAB_RUNTIME_IMAGE_PREFIX}{digest}"
+    if oldlab_runtime_executor_image_digest(runtime_image) != digest:  # pragma: no cover
+        raise ValueError("OLDLAB runtime executor image is invalid")
+    return runtime_image
+
+
+def oldlab_runtime_executor_image_digest(image: object) -> str:
+    """Validate one exact OLDLAB1 host-local executor image reference."""
+
+    digest = capacity_executor_image_digest(image)
+    if image != f"{_OLDLAB_RUNTIME_IMAGE_PREFIX}{digest}":
+        raise ValueError("OLDLAB runtime executor image is invalid")
+    return digest
+
+
 def _bytes(value: bytes | str) -> bytes:
     if isinstance(value, bytes):
         return value
@@ -304,4 +336,6 @@ __all__ = [
     "OldlabControllerRunner",
     "build_fixed_gb10_controller_prerequisite_transport",
     "build_fixed_oldlab_controller_prerequisite_transport",
+    "oldlab_runtime_executor_image",
+    "oldlab_runtime_executor_image_digest",
 ]

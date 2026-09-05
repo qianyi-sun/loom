@@ -110,6 +110,25 @@ async def runner_setup(
     captured: list[dict] = []
 
     def cp_handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST" and req.url.path.endswith("/cancel"):
+            trial_id = UUID(req.url.path.split("/")[-2])
+            captured.append({"cancel_trial_id": str(trial_id)})
+            e = create_engine(postgres_url)
+            local = sessionmaker(e)
+            try:
+                with local() as s:
+                    trial = s.get(Trial, trial_id)
+                    if trial is None:
+                        return httpx.Response(404)
+                    if trial.state in {"succeeded", "failed", "cancelled"}:
+                        return httpx.Response(409)
+                    trial.state = "cancelled"
+                    trial.cancellation_requested_at = datetime.now(UTC)
+                    trial.finished_at = datetime.now(UTC)
+                    s.commit()
+                return httpx.Response(200, json={"state": "cancelled"})
+            finally:
+                e.dispose()
         if req.url.path != "/trials" or req.method != "POST":
             return httpx.Response(404)
         body = _json.loads(req.content.decode())
@@ -631,11 +650,11 @@ async def test_runner_hard_cancels_batch_when_live_usage_exceeds_budget(
         ).scalar_one()
     sync_engine.dispose()
 
-    assert captured == []
+    assert captured == [{"cancel_trial_id": str(trial_id)}]
     assert batch_row.state == "cancelled"
     assert batch_row.result_status == "cancelled"
     assert trial_row.state == "cancelled"
-    assert trial_row.failure_reason == "budget_hard_limit_exceeded"
+    assert trial_row.cancellation_requested_at is not None
     assert batch_row.budget_diagnostics
     diagnostic = batch_row.budget_diagnostics[-1]
     assert diagnostic["reason"] == "budget_hard_limit_exceeded"

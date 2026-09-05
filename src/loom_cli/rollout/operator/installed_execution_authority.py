@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from pydantic import ValidationError
@@ -550,6 +550,141 @@ class InstalledExecutionAuthorityReader:
             raise ValueError("installed execution authority directory is unsafe")
 
 
+@dataclass(frozen=True, slots=True)
+class InstalledExecutionAuthorityPublisher:
+    """Create one canonical owner publication without replacing prior evidence."""
+
+    path: Path
+    expected_uid: int
+    expected_gid: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.path, Path)
+            or not self.path.is_absolute()
+            or ".." in self.path.parts
+            or self.path.name != "issue-906.json"
+            or type(self.expected_uid) is not int
+            or type(self.expected_gid) is not int
+            or min(self.expected_uid, self.expected_gid) < 0
+        ):
+            raise ValueError("installed execution authority publisher is invalid")
+
+    def __call__(
+        self,
+        publication: InstalledExecutionAuthorityPublication,
+    ) -> InstalledExecutionAuthorityPublication:
+        payload = canonical_installed_execution_authority_bytes(publication)
+        if len(payload) > _MAX_PUBLICATION_BYTES:
+            raise ValueError("installed execution authority is invalid")
+        directory = self._open_directory()
+        temporary = f".{self.path.name}.{uuid4().hex}.tmp"
+        temporary_created = False
+        try:
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory,
+                )
+                temporary_created = True
+            except OSError as exc:
+                raise ValueError("installed execution authority publication failed") from exc
+            try:
+                os.fchmod(descriptor, 0o600)
+                written = 0
+                while written < len(payload):
+                    count = os.write(descriptor, payload[written:])
+                    if count <= 0:
+                        raise OSError("authority publication write made no progress")
+                    written += count
+                os.fsync(descriptor)
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_uid != self.expected_uid
+                    or metadata.st_gid != self.expected_gid
+                    or metadata.st_nlink != 1
+                    or metadata.st_size != len(payload)
+                ):
+                    raise ValueError("installed execution authority temporary file is unsafe")
+            except OSError as exc:
+                raise ValueError("installed execution authority publication failed") from exc
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(
+                    temporary,
+                    self.path.name,
+                    src_dir_fd=directory,
+                    dst_dir_fd=directory,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                existing = InstalledExecutionAuthorityReader(
+                    path=self.path,
+                    expected_uid=self.expected_uid,
+                    expected_gid=self.expected_gid,
+                )()
+                if existing != publication:
+                    raise ValueError(
+                        "installed execution authority already exists with different evidence"
+                    ) from None
+                return existing
+            except OSError as exc:
+                raise ValueError("installed execution authority publication failed") from exc
+            os.unlink(temporary, dir_fd=directory)
+            temporary_created = False
+            os.fsync(directory)
+        finally:
+            if temporary_created:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+            os.close(directory)
+        admitted = InstalledExecutionAuthorityReader(
+            path=self.path,
+            expected_uid=self.expected_uid,
+            expected_gid=self.expected_gid,
+        )()
+        if admitted != publication:
+            raise ValueError("installed execution authority publication readback changed")
+        return admitted
+
+    def _open_directory(self) -> int:
+        try:
+            before = self.path.parent.stat(follow_symlinks=False)
+            descriptor = os.open(
+                self.path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise ValueError("installed execution authority directory is unsafe") from exc
+        opened = os.fstat(descriptor)
+        identity_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or not stat.S_ISDIR(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o700
+            or opened.st_uid != self.expected_uid
+            or opened.st_gid != self.expected_gid
+            or any(getattr(before, field) != getattr(opened, field) for field in identity_fields)
+        ):
+            os.close(descriptor)
+            raise ValueError("installed execution authority directory is unsafe")
+        return descriptor
+
+
 class ControllerDiscoveryTransport(Protocol):
     @property
     def authority_sha256(self) -> str: ...
@@ -932,6 +1067,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 __all__ = [
     "ControllerDiscoveryTransport",
     "InstalledExecutionAuthorityPublication",
+    "InstalledExecutionAuthorityPublisher",
     "InstalledExecutionAuthorityReader",
     "InstalledExecutionAuthoritySource",
     "KubernetesExecutionWitnessExportsSource",

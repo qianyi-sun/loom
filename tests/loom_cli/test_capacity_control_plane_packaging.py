@@ -39,6 +39,7 @@ _MIGRATION_RESOURCES = {
     "capacity_migrations/versions/capacity_0012_executable_intent_observed_state_check.py",
     "capacity_migrations/versions/capacity_0013_prepared_abort_evidence.py",
     "capacity_migrations/versions/capacity_0014_protected_admission_plan.py",
+    "capacity_migrations/versions/capacity_0015_terminal_inventory_evidence.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
@@ -262,4 +263,4 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
     assert postgres_service["metadata"]["name"] == "loom-capacity-postgres"
     assert postgres_statefulset["metadata"]["name"] == "loom-capacity-postgres"
     assert len(migration_jobs) == 1
-    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0014-")
+    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0015-")

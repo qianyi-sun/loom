@@ -254,6 +254,25 @@ def _validate_image_reference(image: str) -> str:
         ) from exc
 
 
+def _runtime_image_for_request(
+    request: ControllerPrerequisiteRequest,
+    runtime_image: str | None,
+) -> str:
+    logical_digest = _validate_image_reference(request.image)
+    selected = request.image if runtime_image is None else runtime_image
+    try:
+        runtime_digest = _validate_image_reference(selected)
+    except CapacityExecutorInstallError as exc:
+        raise CapacityExecutorInstallError(
+            "controller prerequisite runtime image is invalid"
+        ) from exc
+    if runtime_digest != logical_digest:
+        raise CapacityExecutorInstallError(
+            "controller prerequisite runtime image digest drifted"
+        )
+    return selected
+
+
 def _archive_path(name: str) -> PurePosixPath | None:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise CapacityExecutorInstallError("release archive member path is invalid")
@@ -1968,10 +1987,13 @@ class ControllerInstaller:
     def observe_prerequisite(
         self,
         request: ControllerPrerequisiteRequest,
+        *,
+        runtime_image: str | None = None,
     ) -> ControllerPrerequisiteEvidence | None:
         if self.effective_uid != 0:
             raise CapacityExecutorInstallError("capacity executor observation requires root")
         digest = _validate_image_reference(request.image)
+        selected_runtime_image = _runtime_image_for_request(request, runtime_image)
         uid, gid, executable_sha256, configuration_sha256 = self._local_authority(request)
         self._assert_quiescent()
         expected_release = self._release_root(
@@ -1983,7 +2005,7 @@ class ControllerInstaller:
         if current_target is None or current_target != str(expected_release):
             return None
         self._inspect_image(
-            request.image,
+            selected_runtime_image,
             source_sha=request.source_sha,
             architecture=request.architecture,
             pull=False,
@@ -2063,9 +2085,12 @@ class ControllerInstaller:
     def converge_prerequisite(
         self,
         request: ControllerPrerequisiteRequest,
+        *,
+        runtime_image: str | None = None,
     ) -> ControllerPrerequisiteEvidence:
+        selected_runtime_image = _runtime_image_for_request(request, runtime_image)
         uid, gid, _executables, _configuration = self._local_authority(request)
-        result = self.install(image=request.image, source_sha=request.source_sha)
+        result = self.install(image=selected_runtime_image, source_sha=request.source_sha)
         if result.architecture != request.architecture:
             raise CapacityExecutorInstallError("controller prerequisite release authority drifted")
         self._ensure_private_child_directory(
@@ -2084,7 +2109,7 @@ class ControllerInstaller:
             uid=uid,
             gid=gid,
         )
-        evidence = self.observe_prerequisite(request)
+        evidence = self.observe_prerequisite(request, runtime_image=selected_runtime_image)
         if evidence is None:
             raise CapacityExecutorInstallError("controller prerequisite convergence was incomplete")
         return evidence
@@ -2144,6 +2169,8 @@ def _controller_prerequisite_operation(
     installer: ControllerInstaller,
     operation: str,
     payload: bytes,
+    *,
+    runtime_image: str | None = None,
 ) -> bytes:
     if operation not in {"observe-prerequisite", "converge-prerequisite"}:
         raise CapacityExecutorInstallError("controller prerequisite operation is invalid")
@@ -2154,9 +2181,12 @@ def _controller_prerequisite_operation(
     except ValueError as exc:
         raise CapacityExecutorInstallError("controller prerequisite request is invalid") from exc
     if operation == "observe-prerequisite":
-        evidence = installer.observe_prerequisite(request)
+        evidence = installer.observe_prerequisite(request, runtime_image=runtime_image)
         return b"null\n" if evidence is None else evidence.to_bytes()
-    return installer.converge_prerequisite(request).to_bytes()
+    return installer.converge_prerequisite(
+        request,
+        runtime_image=runtime_image,
+    ).to_bytes()
 
 
 def _controller_discovery_operation(
@@ -2237,6 +2267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="install",
     )
     parser.add_argument("--image")
+    parser.add_argument("--runtime-image")
     parser.add_argument("--source-sha")
     parser.add_argument("--host-root", type=Path, default=Path("/"))
     args = parser.parse_args(argv)
@@ -2250,7 +2281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             runner=SubprocessRunner(),
         )
         if args.operation == "install":
-            if args.image is None or args.source_sha is None:
+            if args.image is None or args.source_sha is None or args.runtime_image is not None:
                 raise CapacityExecutorInstallError(
                     "capacity executor image and source SHA are required"
                 )
@@ -2265,11 +2296,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 response = _controller_discovery_operation(installer, payload)
             elif args.operation in {"observe-prerequisite", "converge-prerequisite"}:
                 payload = sys.stdin.buffer.read(_MAX_PREREQUISITE_REQUEST_BYTES + 1)
-                response = _controller_prerequisite_operation(installer, args.operation, payload)
+                response = _controller_prerequisite_operation(
+                    installer,
+                    args.operation,
+                    payload,
+                    runtime_image=args.runtime_image,
+                )
             elif args.operation in _PREPARED_OPERATIONS:
+                if args.runtime_image is not None:
+                    raise CapacityExecutorInstallError(
+                        "controller prerequisite operation has unexpected arguments"
+                    )
                 payload = sys.stdin.buffer.read(_MAX_PREPARED_REQUEST_BYTES + 1)
                 response = _prepared_controller_operation(installer, args.operation, payload)
             else:
+                if args.runtime_image is not None:
+                    raise CapacityExecutorInstallError(
+                        "controller prerequisite operation has unexpected arguments"
+                    )
                 payload = sys.stdin.buffer.read(_MAX_CREDENTIAL_REQUEST_BYTES + 1)
                 response = _pool_credential_operation(installer, args.operation, payload)
     except CapacityExecutorInstallError as exc:

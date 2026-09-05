@@ -53,8 +53,11 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
     ExecutableIntentBindingV2,
+    ExecutableInventoryRecordV2,
+    ExecutableOwnershipMetadataV2,
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
+    ExecutableTerminalInventoryEvidenceV2,
     ExecutionActivationV2,
     ExecutionAuthorityV2,
     ExecutionContextV2,
@@ -66,6 +69,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionRetirementExecutorCheckpointV2,
     ExecutionRetirementV2,
     ProtectedAdmissionAssignmentV2,
+    SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
     canonical_executable_digest,
     canonical_inventory_confirmation_journal_head,
@@ -189,6 +193,52 @@ def _v2_intent_binding() -> ExecutableIntentBindingV2:
             memory_bytes=1_073_741_824,
         ),
         node_ids=("oldlab1",),
+    )
+
+
+def _v2_terminal_inventory_evidence() -> ExecutableTerminalInventoryEvidenceV2:
+    binding = _v2_intent_binding()
+    metadata = ExecutableOwnershipMetadataV2(
+        binding=binding,
+        controller_authority_sha256="6" * 64,
+        trusted_launcher_sha256=binding.execution.trusted_fleet_release_sha256,
+        slurm_cluster="oldlab-controller",
+        submitter_identity="loom",
+        association="loom",
+        submitted_at=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+    )
+    proof = SignedExecutableOwnershipProofV2(
+        metadata=metadata,
+        signing_key_id="oldlab-key",
+        signature_base64=base64.b64encode(
+            OLDLAB_OWNERSHIP_PRIVATE_KEY.sign(canonical_executable_bytes(metadata))
+        ).decode("ascii"),
+    )
+    record = ExecutableInventoryRecordV2(
+        physical_identity="job-101",
+        physical_kind="slurm-job",
+        authority_scope="dedicated-loom-association",
+        state="terminal",
+        resources=binding.resources,
+        node_ids=binding.node_ids,
+        controller_evidence_sha256="7" * 64,
+        ownership_proof=proof,
+        terminal_evidence_sha256="8" * 64,
+    )
+    return ExecutableTerminalInventoryEvidenceV2(
+        binding=binding,
+        inventory_execution=ExecutionContextV2.model_validate(
+            binding.execution.model_dump(
+                mode="python",
+                exclude={"allocation_epoch", "executable"},
+            )
+        ),
+        inventory_sequence=4,
+        inventory_digest="9" * 64,
+        journal_sequence=5,
+        journal_digest="a" * 64,
+        record=record,
+        observed_at=datetime(2026, 9, 5, 12, 1, tzinfo=UTC),
     )
 
 
@@ -1381,6 +1431,10 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
             ("POST",),
         ),
         ("/v2/subjects/{subject_id}/bootstrap-work", ("GET",)),
+        (
+            "/v2/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence",
+            ("GET",),
+        ),
         ("/v2/subjects/{subject_id}/admission-work", ("GET",)),
         (
             "/v2/subjects/{subject_id}/intents/{intent_id}/bootstrap-acknowledgements",
@@ -3131,6 +3185,82 @@ def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledge
     _value, actor, received_key = calls[-1][1]  # type: ignore[misc]
     assert actor == "dev-reporter"
     assert received_key == idempotency_key
+
+
+def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
+    api_context_v2_executor_generation: tuple[
+        TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reporter for another subject or an executor must not read recovery proof."""
+
+    client, app, _settings, _allocator = api_context_v2_executor_generation
+    evidence = _v2_terminal_inventory_evidence()
+    calls: list[tuple[UUID, UUID, UUID, UUID]] = []
+
+    async def terminal_evidence(
+        _session,  # type: ignore[no-untyped-def]
+        *,
+        subject_id,
+        subject_incarnation,
+        reporter_incarnation,
+        intent_id,
+    ):
+        calls.append(
+            (subject_id, subject_incarnation, reporter_incarnation, intent_id)
+        )
+        return evidence if intent_id == evidence.binding.intent_id else None
+
+    monkeypatch.setattr(
+        app.state.execution_store,
+        "subject_terminal_inventory_evidence",
+        terminal_evidence,
+        raising=False,
+    )
+    reporter_headers = {"Authorization": f"Bearer {DEMAND_TOKEN}"}
+    executor_headers = {"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"}
+    endpoint = (
+        f"/v2/subjects/{SUBJECT_ID}/intents/{evidence.binding.intent_id}/"
+        "terminal-inventory-evidence"
+    )
+
+    response = client.get(endpoint, headers=reporter_headers)
+
+    assert response.status_code == 200, response.text
+    assert ExecutableTerminalInventoryEvidenceV2.model_validate_json(
+        response.content
+    ) == evidence
+    missing = client.get(
+        f"/v2/subjects/{SUBJECT_ID}/intents/{UUID(int=999)}/"
+        "terminal-inventory-evidence",
+        headers=reporter_headers,
+    )
+    assert missing.status_code == 200, missing.text
+    assert missing.json() is None
+    assert (
+        client.get(
+            f"/v2/subjects/{UUID(int=999)}/intents/{evidence.binding.intent_id}/"
+            "terminal-inventory-evidence",
+            headers=reporter_headers,
+        ).status_code
+        == 403
+    )
+    assert client.get(endpoint, headers=executor_headers).status_code == 403
+    assert calls == [
+        (
+            SUBJECT_ID,
+            SUBJECT_INCARNATION,
+            subject_configuration().demand_reporter_incarnation,
+            evidence.binding.intent_id,
+        ),
+        (
+            SUBJECT_ID,
+            SUBJECT_INCARNATION,
+            subject_configuration().demand_reporter_incarnation,
+            UUID(int=999),
+        ),
+    ]
 
 
 def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(

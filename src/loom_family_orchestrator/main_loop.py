@@ -56,6 +56,10 @@ class _AdapterLike(Protocol):
     ) -> str: ...
 
 
+class _TrialCancellationClient(Protocol):
+    async def cancel_trial(self, trial_id: str) -> None: ...
+
+
 _PICK_SQL = text("""
 SELECT batch_id,
        family_key,
@@ -69,6 +73,29 @@ SELECT batch_id,
    AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
  ORDER BY updated_at
  FOR UPDATE SKIP LOCKED
+ LIMIT 1
+""")
+
+_PICK_CANCELLATION_SQL = text("""
+SELECT cancellation.batch_id,
+       cancellation.family_key,
+       cancellation.state,
+       cancellation.task_sequence,
+       cancellation.current_index
+  FROM public.batch_family_state AS cancellation
+ WHERE cancellation.state = 'cancelling'
+    OR (
+      cancellation.state = 'aborted'
+      AND EXISTS (
+        SELECT 1
+          FROM public.trials AS pending_trial
+         WHERE pending_trial.batch_id = cancellation.batch_id
+           AND pending_trial.family_key = cancellation.family_key
+           AND pending_trial.state IN ('queued', 'protected-pending')
+      )
+    )
+ ORDER BY cancellation.updated_at
+ FOR UPDATE OF cancellation SKIP LOCKED
  LIMIT 1
 """)
 
@@ -136,13 +163,22 @@ UPDATE batch_family_state
    AND family_key = (:family_key)::text
 """)
 
-_CANCEL_REMAINING_SQL = text("""
-UPDATE trials
-   SET state = 'cancelled',
-       finished_at = NOW()
+_LOAD_REMAINING_TRIAL_IDS_SQL = text("""
+SELECT pending_trial.id
+  FROM public.trials AS pending_trial
+ WHERE pending_trial.batch_id = (:batch_id)::uuid
+   AND pending_trial.family_key = (:family_key)::text
+   AND pending_trial.state IN ('queued', 'protected-pending')
+ ORDER BY pending_trial.id
+""")
+
+_COMPLETE_CANCELLATION_SQL = text("""
+UPDATE public.batch_family_state
+   SET state = (:final_state)::text,
+       updated_at = NOW()
  WHERE batch_id = (:batch_id)::uuid
    AND family_key = (:family_key)::text
-   AND state = 'queued'
+   AND state = 'cancelling'
 """)
 
 
@@ -154,6 +190,15 @@ class _PickedFamily:
     current_index: int
     state_uri: str | None
     attempt_count: int
+
+
+@dataclass(frozen=True)
+class _PickedCancellation:
+    batch_id: UUID
+    family_key: str
+    state: str
+    task_sequence: tuple[str, ...]
+    current_index: int
 
 
 @dataclass
@@ -206,6 +251,7 @@ class OrchestratorContext:
 
     session_factory: async_sessionmaker[AsyncSession]
     gateway: Any = None
+    cancellation_client: _TrialCancellationClient | None = None
     object_store: Any = None
     artifacts_bucket: str | None = None
     state_backend_factory: Any = None
@@ -239,6 +285,47 @@ async def run_once(ctx: OrchestratorContext) -> bool:
     row was picked + processed, False when the queue was empty (poll
     would sleep next)."""
     async with ctx.session_factory() as session:
+        cancellation_row = (
+            await session.execute(_PICK_CANCELLATION_SQL)
+        ).mappings().one_or_none()
+        if cancellation_row is not None:
+            cancellation = _PickedCancellation(
+                batch_id=UUID(str(cancellation_row["batch_id"])),
+                family_key=str(cancellation_row["family_key"]),
+                state=str(cancellation_row["state"]),
+                task_sequence=tuple(cancellation_row["task_sequence"]),
+                current_index=int(cancellation_row["current_index"]),
+            )
+            pending_rows = (
+                await session.execute(
+                    _LOAD_REMAINING_TRIAL_IDS_SQL,
+                    {
+                        "batch_id": cancellation.batch_id,
+                        "family_key": cancellation.family_key,
+                    },
+                )
+            ).mappings().all()
+            trial_ids = tuple(UUID(str(item["id"])) for item in pending_rows)
+            await session.commit()
+            await _cancel_trials(ctx, trial_ids)
+            if cancellation.state == "cancelling":
+                final_state = (
+                    "done"
+                    if cancellation.current_index >= len(cancellation.task_sequence)
+                    else "pending"
+                )
+                async with ctx.session_factory() as completion_session:
+                    await completion_session.execute(
+                        _COMPLETE_CANCELLATION_SQL,
+                        {
+                            "batch_id": cancellation.batch_id,
+                            "family_key": cancellation.family_key,
+                            "final_state": final_state,
+                        },
+                    )
+                    await completion_session.commit()
+            return True
+
         row = (await session.execute(_PICK_SQL)).mappings().one_or_none()
         if row is None:
             await session.commit()
@@ -349,7 +436,7 @@ async def run_once(ctx: OrchestratorContext) -> bool:
                 exception=exc,
                 params=spec.failure_policy.params,
             )
-            await _apply_failure_action(
+            cancellation_trial_ids = await _apply_failure_action(
                 session,
                 picked=picked,
                 action=action,
@@ -357,6 +444,7 @@ async def run_once(ctx: OrchestratorContext) -> bool:
                 exception=exc,
             )
             await session.commit()
+            await _cancel_trials(ctx, cancellation_trial_ids)
             return True
 
         # Success: apply ADVANCE decision, then bump index / mark done.
@@ -388,7 +476,7 @@ async def _apply_failure_action(
     action: FailureAction,
     spec: ResolvedFamilyRunSpec,
     exception: BaseException,
-) -> None:
+) -> tuple[UUID, ...]:
     if action.kind == "retry_with_backoff":
         next_at = datetime.now(UTC) + timedelta(
             seconds=action.backoff_sec or 30.0,
@@ -399,7 +487,7 @@ async def _apply_failure_action(
             "next_attempt_at": next_at,
             "last_error": _short_repr(exception),
         })
-        return
+        return ()
     if action.kind == "skip_and_advance":
         bumped_index = picked.current_index + 1
         if bumped_index >= len(picked.task_sequence):
@@ -413,7 +501,7 @@ async def _apply_failure_action(
             "new_current_index": bumped_index,
             "new_state_uri": None,
         })
-        return
+        return ()
     if action.kind == "abort_family":
         # StallFamilyPolicy's terminal action arrives as abort_family;
         # spec says the operator-recoverable state is 'stalled'.
@@ -431,12 +519,30 @@ async def _apply_failure_action(
                 "family_key": picked.family_key,
                 "last_error": _short_repr(exception),
             })
-            await session.execute(_CANCEL_REMAINING_SQL, {
-                "batch_id": picked.batch_id,
-                "family_key": picked.family_key,
-            })
-        return
+            rows = (
+                await session.execute(
+                    _LOAD_REMAINING_TRIAL_IDS_SQL,
+                    {
+                        "batch_id": picked.batch_id,
+                        "family_key": picked.family_key,
+                    },
+                )
+            ).mappings().all()
+            return tuple(UUID(str(row["id"])) for row in rows)
+        return ()
     raise ValueError(f"unknown FailureAction.kind: {action.kind!r}")
+
+
+async def _cancel_trials(
+    ctx: OrchestratorContext,
+    trial_ids: tuple[UUID, ...],
+) -> None:
+    if not trial_ids:
+        return
+    if ctx.cancellation_client is None:
+        raise RuntimeError("family trial cancellation client is unavailable")
+    for trial_id in trial_ids:
+        await ctx.cancellation_client.cancel_trial(str(trial_id))
 
 
 def _reward_from_result(result: Any) -> float | None:

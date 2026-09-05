@@ -37,6 +37,7 @@ _SERVICE_EXECUTION_MAX_TTL_SEC = 600
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CANDIDATE_SHA = re.compile(r"^[0-9a-f]{40}$")
 _BEARER_CREDENTIAL = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
+FAMILY_ORCHESTRATOR_SCOPES = ("family:cancel", "family:evolve")
 
 _ROLE_SCOPES: dict[str, list[str]] = {
     "viewer": ["read:own"],
@@ -606,7 +607,7 @@ async def validate_bearer_token(
         if (
             not allow_family_orchestrator
             or row.team_id is not None
-            or list(row.scopes) != ["family:evolve"]
+            or tuple(row.scopes) != FAMILY_ORCHESTRATOR_SCOPES
             or row.created_by_user_id is not None
         ):
             return BearerValidationResult(context=None, reason="invalid_signature")

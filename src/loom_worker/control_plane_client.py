@@ -1256,6 +1256,8 @@ class HttpControlPlaneClient:
             )
             r.raise_for_status()
             body = r.json()
+            if body.get("cancellation_requested_at") is not None:
+                return "cancelled"
             return str(body["state"])
         finally:
             if owned:

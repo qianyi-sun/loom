@@ -762,6 +762,9 @@ def build_installed_deep_preflight_composition(
         staging_protected_admission_source=protected_admission_source,
         authority_source_factory=execution_authority_source_factory,
         now=now,
+        zero_ceiling_bootstrap_authority_source=(
+            protected_capacity_runtime.zero_ceiling_bootstrap_authority
+        ),
     )
 
     def backup_authority(mutation_epoch: int) -> BackupAdmissionAuthority:

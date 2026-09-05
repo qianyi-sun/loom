@@ -867,7 +867,7 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
     )
 
     assert configuration.protected_admission_sha256 == (
-        "69b3251eaf30269f7b690fc9878395d96feaf2cedaccee09e6eda254c887da46"
+        "5e9f5e2ba6393f7d9e593f3dc77a90d0926486bed0bbb530905d79e6e4bd0a85"
     )
 
 

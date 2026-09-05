@@ -183,3 +183,27 @@ async def test_gateway_non_2xx_propagates() -> None:
             team_id=_TEAM_ID,
             trial_id=_TRIAL_ID,
         )
+
+
+@pytest.mark.asyncio
+async def test_cancel_trial_posts_family_credential_to_control_plane() -> None:
+    captured: dict[str, Any] = {}
+
+    def cp_handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(
+            200,
+            json={"trial_id": _TRIAL_ID, "state": "cancelled"},
+        )
+
+    client = _client(
+        lambda _request: httpx.Response(500),
+        control_plane_handler=cp_handler,
+    )
+    await client.cancel_trial(_TRIAL_ID)
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == f"/trials/{_TRIAL_ID}/cancel"
+    assert captured["headers"]["authorization"] == "Bearer loom_fo_test"

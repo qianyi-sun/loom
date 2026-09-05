@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import re
@@ -49,22 +48,6 @@ _MANAGEMENT_FILES = {
     "capacity-reporter-private-key.pem",
     "config.json",
 }
-_DOCUMENT_CACHE_MAX_ENTRIES = 32
-_DOCUMENT_CACHE: dict[tuple[object, str], tuple[dict[str, Any], ...]] = {}
-
-
-def _parsed_documents(yaml_text: str) -> list[dict[str, Any]]:
-    """Parse rendered YAML once while isolating every test's mutable documents."""
-
-    loader = yaml.safe_load_all
-    key = (loader, yaml_text)
-    cached = _DOCUMENT_CACHE.get(key)
-    if cached is None:
-        cached = tuple(item for item in loader(yaml_text) if item)
-        if len(_DOCUMENT_CACHE) >= _DOCUMENT_CACHE_MAX_ENTRIES:
-            _DOCUMENT_CACHE.pop(next(iter(_DOCUMENT_CACHE)))
-        _DOCUMENT_CACHE[key] = copy.deepcopy(cached)
-    return copy.deepcopy(list(cached))
 
 
 def _release_value() -> dict[str, Any]:
@@ -82,7 +65,8 @@ def _release_value() -> dict[str, Any]:
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
             ),
             "personal_dev_native_builder_agent": (
-                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
+                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+                + "c" * 64
             ),
             "personal_dev_scanner_cache": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
@@ -131,7 +115,7 @@ def _prepared_profile(tmp_path: Path):
     source = _PROFILE.read_text(encoding="utf-8")
     replacements = {
         'prepared = false\nagent_instance_id = ""\nagent_key_id = ""\npublic_key_sha256 = ""\nhost_name = ""\nruntime_profile_sha256 = ""\npublic_store_origin = ""\npublic_store_endpoint_cidrs = []\nprovider = "gb10-gvisor-docker-v1"': (
-            "prepared = true\n"
+            'prepared = true\n'
             'agent_instance_id = "10000000-0000-0000-0000-000000000001"\n'
             'agent_key_id = "gb10-native-builder-v1"\n'
             f'public_key_sha256 = "{"d" * 64}"\n'
@@ -153,7 +137,7 @@ def _prepared_profile(tmp_path: Path):
 def _render(tmp_path: Path):
     profile, release = _inputs(tmp_path)
     rendered = render_shadow_personal_dev_control_plane(profile, release)
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
     return profile, release, rendered, documents
 
 
@@ -291,7 +275,9 @@ def _acceptance_render(tmp_path: Path):
             "host_boot_id": "20000000-0000-0000-0000-000000000001",
             "runtime_profile_sha256": profile.native_builder.runtime_profile_sha256,
             "public_store_origin": profile.native_builder.public_store_origin,
-            "public_store_endpoint_cidrs": list(profile.native_builder.public_store_endpoint_cidrs),
+            "public_store_endpoint_cidrs": list(
+                profile.native_builder.public_store_endpoint_cidrs
+            ),
             "provider": profile.native_builder.provider,
             "platform": profile.native_builder.platform,
             "protocol_version": profile.native_builder.protocol_version,
@@ -313,7 +299,7 @@ def _acceptance_render(tmp_path: Path):
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0131",
+            "schema_head": "0132",
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",
@@ -335,7 +321,7 @@ def _acceptance_render(tmp_path: Path):
         plan,
         now=_NOW,
     )
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
     return profile, release, plan, shadow, rendered, documents
 
 
@@ -364,7 +350,7 @@ def _operational_render(tmp_path: Path):
         plan,
         now=_NOW,
     )
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
     return profile, release, plan, shadow, rendered, documents
 
 
@@ -381,42 +367,6 @@ def _workload_pod_specs(documents: list[dict[str, Any]]):
     for document in documents:
         if document["kind"] in {"Deployment", "StatefulSet", "Job"}:
             yield document, document["spec"]["template"]["spec"]
-
-
-def test_render_helper_caches_only_parsing_and_isolates_documents(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _DOCUMENT_CACHE.clear()
-    actual_renderer = render_shadow_personal_dev_control_plane
-    actual_loader = yaml.safe_load_all
-    render_calls = 0
-    loader_calls = 0
-
-    _profile, _release, first_render, _first_documents = _render(tmp_path)
-
-    def counted_renderer(*args: Any, **kwargs: Any):
-        nonlocal render_calls
-        render_calls += 1
-        return actual_renderer(*args, **kwargs)
-
-    def counted_loader(yaml_text: str):
-        nonlocal loader_calls
-        loader_calls += 1
-        return actual_loader(yaml_text)
-
-    monkeypatch.setitem(globals(), "render_shadow_personal_dev_control_plane", counted_renderer)
-    monkeypatch.setattr(yaml, "safe_load_all", counted_loader)
-
-    _profile, _release, second_render, second_documents = _render(tmp_path)
-    second_documents[0]["metadata"]["name"] = "mutated-in-one-consumer"
-    _profile, _release, third_render, third_documents = _render(tmp_path)
-
-    assert first_render == second_render
-    assert second_render == third_render
-    assert third_documents[0]["metadata"]["name"] != "mutated-in-one-consumer"
-    assert render_calls == 2
-    assert loader_calls == 1
 
 
 def _stateful_sets(documents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -594,7 +544,7 @@ def test_previous_schema_renders_exact_api_only_rollback_shape(tmp_path: Path) -
     profile, release = _legacy_inputs(tmp_path)
 
     rendered = render_shadow_personal_dev_control_plane(profile, release)
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
 
     assert rendered.resource_count == 35
     assert not any(
@@ -628,8 +578,8 @@ def test_later_release_preserves_installed_stateful_claim_template_metadata(
         release_evidence_sha256="e" * 64,
     )
     later = render_shadow_personal_dev_control_plane(profile, later_release)
-    first_sets = _stateful_sets(_parsed_documents(first.yaml_text))
-    later_sets = _stateful_sets(_parsed_documents(later.yaml_text))
+    first_sets = _stateful_sets([item for item in yaml.safe_load_all(first.yaml_text) if item])
+    later_sets = _stateful_sets([item for item in yaml.safe_load_all(later.yaml_text) if item])
     expected_metadata = {
         "name": "data",
         "labels": {
@@ -676,7 +626,7 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
         plan,
         now=_NOW,
     )
-    shadow_documents = _parsed_documents(shadow.yaml_text)
+    shadow_documents = [item for item in yaml.safe_load_all(shadow.yaml_text) if item]
 
     assert repeated == rendered
     runtime_binding = parse_personal_dev_acceptance_runtime_binding(
@@ -731,7 +681,9 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
 
 
 def test_acceptance_render_rejects_predecessor_v2_plan(tmp_path: Path) -> None:
-    profile, release, native_plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    profile, release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     value = native_plan.canonical_value()
     value["schema_version"] = 2
     value.pop("native_builder")
@@ -749,7 +701,9 @@ def test_acceptance_render_rejects_predecessor_v2_plan(tmp_path: Path) -> None:
 
 
 def test_acceptance_plan_v2_rejects_native_identity_extension(tmp_path: Path) -> None:
-    _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     value = native_plan.canonical_value()
     value["schema_version"] = 2
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -772,7 +726,9 @@ def test_acceptance_plan_rejects_unmanaged_native_public_store_port(
     tmp_path: Path,
     public_store_origin: str,
 ) -> None:
-    _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     value = native_plan.canonical_value()
     value["native_builder"]["public_store_origin"] = public_store_origin
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -790,7 +746,9 @@ def test_enabled_render_rejects_native_identity_under_predecessor_schema(
     mode: str,
 ) -> None:
     if mode == "acceptance":
-        profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+        profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+            tmp_path
+        )
         with pytest.raises(PersonalDevAcceptancePlanError):
             render_acceptance_personal_dev_control_plane(
                 profile,
@@ -799,7 +757,9 @@ def test_enabled_render_rejects_native_identity_under_predecessor_schema(
                 now=_NOW,
             )
     else:
-        profile, release, plan, _shadow, _rendered, _documents = _operational_render(tmp_path)
+        profile, release, plan, _shadow, _rendered, _documents = _operational_render(
+            tmp_path
+        )
         with pytest.raises(PersonalDevOperationalPlanError):
             render_operational_personal_dev_control_plane(
                 profile,
@@ -815,7 +775,7 @@ def test_acceptance_render_preserves_shadow_claim_template_lineage(
     _profile, _release, plan, shadow, acceptance, acceptance_documents = _acceptance_render(
         tmp_path
     )
-    shadow_sets = _stateful_sets(_parsed_documents(shadow.yaml_text))
+    shadow_sets = _stateful_sets([item for item in yaml.safe_load_all(shadow.yaml_text) if item])
     acceptance_sets = _stateful_sets(acceptance_documents)
 
     assert acceptance.input_sha256 != shadow.input_sha256
@@ -906,9 +866,7 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     } in management_policy["spec"]["egress"]
     pod_spec = management["spec"]["template"]["spec"]
     native_volume = next(
-        volume
-        for volume in pod_spec["volumes"]
-        if volume["name"] == "native-builder-public-projected"
+        volume for volume in pod_spec["volumes"] if volume["name"] == "native-builder-public-projected"
     )
     assert native_volume["secret"] == {
         "defaultMode": 0o440,
@@ -918,7 +876,9 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     assert "private" not in json.dumps(native_volume, sort_keys=True).lower()
     assert not any("SLURM" in name for name in env)
     assert (
-        management["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"]
+        management["spec"]["template"]["spec"]["containers"][0]["readinessProbe"][
+            "httpGet"
+        ]["path"]
         == "/api/v1/health/personal-dev-acceptance"
     )
     assert deployments["loom-personal-dev-activation-agent"]["spec"]["replicas"] == 1
@@ -936,7 +896,7 @@ def test_prepared_shadow_keeps_public_store_egress_inert(tmp_path: Path) -> None
     profile = _prepared_profile(tmp_path)
 
     rendered = render_shadow_personal_dev_control_plane(profile, release)
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
     management_policy = next(
         item
         for item in documents
@@ -944,13 +904,17 @@ def test_prepared_shadow_keeps_public_store_egress_inert(tmp_path: Path) -> None
         and item["metadata"]["name"] == "loom-personal-dev-management"
     )
 
-    assert "207.35.188.227/32" not in yaml.safe_dump(management_policy["spec"]["egress"])
+    assert "207.35.188.227/32" not in yaml.safe_dump(
+        management_policy["spec"]["egress"]
+    )
 
 
 def test_enabled_render_rejects_direct_public_store_cidr_relaxation(
     tmp_path: Path,
 ) -> None:
-    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     assert profile.native_builder is not None
     assert plan.native_builder is not None
     relaxed_cidrs = ("0.0.0.0/0",)
@@ -991,7 +955,9 @@ def test_enabled_render_rejects_direct_public_store_cidr_relaxation(
 def test_enabled_render_rejects_direct_profile_schema_downgrade(
     tmp_path: Path,
 ) -> None:
-    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     downgraded_profile = replace(profile, schema_version=2)
     downgraded_shadow = render_shadow_personal_dev_control_plane(
         downgraded_profile,
@@ -1019,7 +985,9 @@ def test_enabled_render_rejects_direct_profile_schema_downgrade(
 def test_enabled_render_revalidates_direct_nested_native_plan(
     tmp_path: Path,
 ) -> None:
-    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     assert profile.native_builder is not None
     assert plan.native_builder is not None
     relaxed_origin = "http://objects.dev.yylx.world"
@@ -1060,7 +1028,9 @@ def test_enabled_render_revalidates_direct_nested_native_plan(
 def test_enabled_render_revalidates_direct_nested_profile(
     tmp_path: Path,
 ) -> None:
-    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
     relaxed_profile = replace(
         profile,
         network=replace(profile.network, kubernetes_api_cidr="0.0.0.0/0"),
@@ -1092,16 +1062,23 @@ def test_acceptance_builder_capabilities_use_cross_namespace_minio_identity(
     tmp_path: Path,
 ) -> None:
     """Catches presigning a namespace-local hostname for sandbox Jobs."""
-    _profile, _release, _plan, _shadow, _rendered, documents = _acceptance_render(tmp_path)
+    _profile, _release, _plan, _shadow, _rendered, documents = _acceptance_render(
+        tmp_path
+    )
     management = next(
         item
         for item in documents
-        if _identity(item) == ("Deployment", "loom-dev", "loom-personal-dev-management")
+        if _identity(item)
+        == ("Deployment", "loom-dev", "loom-personal-dev-management")
     )
     container = management["spec"]["template"]["spec"]["containers"][0]
-    environment = {item["name"]: item["value"] for item in container["env"] if "value" in item}
+    environment = {
+        item["name"]: item["value"] for item in container["env"] if "value" in item
+    }
 
-    assert environment["LOOM_SVC_MINIO_ENDPOINT"] == ("http://loom-dev-minio.loom-dev.svc:9000")
+    assert environment["LOOM_SVC_MINIO_ENDPOINT"] == (
+        "http://loom-dev-minio.loom-dev.svc:9000"
+    )
 
 
 def test_operational_render_is_durable_but_remains_zero_capacity(
@@ -1680,22 +1657,25 @@ def test_prepared_shadow_public_store_is_tls_bound_but_inert(tmp_path: Path) -> 
     _checked_in_profile, release = _inputs(tmp_path)
     profile = _prepared_profile(tmp_path)
     rendered = render_shadow_personal_dev_control_plane(profile, release)
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
 
     disabled_service = next(
         item
         for item in documents
-        if _identity(item) == ("Service", "loom-dev", "loom-personal-dev-object-store-disabled")
+        if _identity(item)
+        == ("Service", "loom-dev", "loom-personal-dev-object-store-disabled")
     )
     object_store_ingress = next(
         item
         for item in documents
-        if _identity(item) == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
+        if _identity(item)
+        == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
     )
     minio_policy = next(
         item
         for item in documents
-        if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
     )
 
     assert rendered.resource_count == 40
@@ -1749,32 +1729,40 @@ def test_enabled_public_store_routes_only_s3_and_shadow_reapply_closes_it(
 ) -> None:
     render = _acceptance_render if mode == "acceptance" else _operational_render
     profile, _release, _plan, shadow, rendered, documents = render(tmp_path)
-    shadow_documents = _parsed_documents(shadow.yaml_text)
+    shadow_documents = [item for item in yaml.safe_load_all(shadow.yaml_text) if item]
 
     enabled_ingress = next(
         item
         for item in documents
-        if _identity(item) == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
+        if _identity(item)
+        == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
     )
     shadow_ingress = next(
         item
         for item in shadow_documents
-        if _identity(item) == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
+        if _identity(item)
+        == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
     )
     enabled_minio_policy = next(
         item
         for item in documents
-        if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
     )
     shadow_minio_policy = next(
         item
         for item in shadow_documents
-        if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
     )
 
     assert rendered.resource_count == shadow.resource_count == 40
-    enabled_backend = enabled_ingress["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]
-    shadow_backend = shadow_ingress["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]
+    enabled_backend = enabled_ingress["spec"]["rules"][0]["http"]["paths"][0][
+        "backend"
+    ]["service"]
+    shadow_backend = shadow_ingress["spec"]["rules"][0]["http"]["paths"][0][
+        "backend"
+    ]["service"]
     assert enabled_backend == {"name": "loom-dev-minio", "port": {"number": 9000}}
     assert shadow_backend == {
         "name": "loom-personal-dev-object-store-disabled",
@@ -1820,7 +1808,7 @@ def test_management_ingress_ignores_legacy_controller_source_profile(
     profile = _legacy_host_profile(tmp_path)
     _checked_in_profile, release = _inputs(tmp_path)
     rendered = render_shadow_personal_dev_control_plane(profile, release)
-    documents = _parsed_documents(rendered.yaml_text)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
     management_ingress = next(
         item
         for item in documents
@@ -2732,7 +2720,9 @@ def test_management_admission_limits_protected_runtime_secret_to_control_plane(
         if "builder workload cannot acquire" in item["message"]
     )
     all_expressions = "\n".join(item["expression"] for item in policy["spec"]["validations"])
-    control_plane_secrets = "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime']"
+    control_plane_secrets = (
+        "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime']"
+    )
 
     assert "loom-protected-worker-runtime" in all_expressions
     assert "metadata.name.matches('^loom-control-plane-g[1-9][0-9]*$')" in workload

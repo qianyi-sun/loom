@@ -249,7 +249,7 @@ def _database_authority(*, public_revision: str = "0066") -> DatabaseAuthorityEv
     )
     return DatabaseAuthorityEvidence(
         public_schema_revision=public_revision,
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest=canonical_digest(snapshot),
         authority_incarnation=fleet.authority_incarnation,
@@ -266,7 +266,7 @@ def _application_database_authority_observation(
     *, public_revision: str = "0066"
 ) -> dict[str, object]:
     return {
-        "guard_revisions": ["guard_0027"],
+        "guard_revisions": ["guard_0028"],
         "guard_table_present": True,
         "public_revisions": [public_revision],
     }
@@ -1260,7 +1260,7 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
 @pytest.mark.parametrize(
     ("field", "drifted"),
     [
-        ("capacity_guard_schema_revision", "guard_0028"),
+        ("capacity_guard_schema_revision", "guard_0027"),
         ("configuration_epoch", 10),
         ("configuration_digest", "0" * 64),
         ("authority_incarnation", uuid.UUID("00000000-0000-4000-8000-0000000000bb")),
