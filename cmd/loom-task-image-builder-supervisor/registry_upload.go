@@ -29,6 +29,9 @@ const (
 	registryRequestTimeout = 15 * time.Second
 	registryRenewBefore    = registryRequestTimeout + time.Second
 	registryMaxRecoveries  = 3
+
+	registryAuthorizationPlaceholder = "Bearer __loom_registry_locked_token_placeholder__"
+	registryBearerPrefix             = "Bearer "
 )
 
 // RegistryUploadPolicy can only be constructed from independently trusted
@@ -98,9 +101,12 @@ func NewOCIRegistryUploader(policy RegistryUploadPolicy) (*OCIRegistryUploader, 
 // Next(nil) obtains the initial credential. Successful Next(predecessor) owns
 // closing that predecessor, as PublicationCredentialSource.Next already does.
 // On failure Next must leave predecessor owned by the caller. Close releases
-// the final (or rejected successor) credential exactly once. Calls are serial.
+// the final (or rejected successor) credential exactly once. UploadSucceeded is
+// invoked after exact manifest acknowledgement while the manifest credential is
+// still live and owned. Calls are serial.
 type RegistryUploadCredentialSource interface {
 	Next(context.Context, *RegistryCredential) (*RegistryCredential, error)
+	UploadSucceeded(context.Context, UploadedManifest, *RegistryCredential) error
 	Close(*RegistryCredential)
 }
 
@@ -132,6 +138,7 @@ func (u *OCIRegistryUploader) Upload(ctx context.Context, output OCIOutput, sour
 	if err != nil || checked != output {
 		return UploadedManifest{}, errors.New("registry upload OCI evidence mismatch")
 	}
+	s := registryUploadSession{policy: u.policy, source: source, platform: output.OS + "/" + output.Architecture}
 	transport := &http.Transport{
 		Proxy: nil, DialContext: (&net.Dialer{Timeout: registryRequestTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSClientConfig:     &tls.Config{RootCAs: u.policy.roots.Clone(), ServerName: u.policy.serverName, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
@@ -160,10 +167,15 @@ func (u *OCIRegistryUploader) Upload(ctx context.Context, output OCIOutput, sour
 			secured.Close()
 			return nil, errRegistryWireHeaders
 		}
-		return &registryWireConn{Conn: secured, reader: bufio.NewReaderSize(secured, registryResponseBytes+1)}, nil
+		wire := &registryWireConn{Conn: secured, reader: bufio.NewReaderSize(secured, registryResponseBytes+1)}
+		if s.credential == nil || len(s.credential.BearerToken) == 0 {
+			wire.Close()
+			return nil, errRegistryTransport
+		}
+		return newRegistryAuthorizationConn(wire, s.credential.BearerToken), nil
 	}
 	defer transport.CloseIdleConnections()
-	s := registryUploadSession{policy: u.policy, client: &http.Client{Transport: transport, Timeout: registryRequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, source: source, platform: output.OS + "/" + output.Architecture}
+	s.client = &http.Client{Transport: transport, Timeout: registryRequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer func() {
 		if s.credential != nil {
 			source.Close(s.credential)
@@ -203,7 +215,11 @@ func (u *OCIRegistryUploader) Upload(ctx context.Context, output OCIOutput, sour
 	if resp.StatusCode != http.StatusCreated || resp.Header.Get("Docker-Content-Digest") != output.TopLevelDigest || !s.validContentHeaders(resp, target) {
 		return UploadedManifest{}, errors.New("registry upload manifest acknowledgement invalid")
 	}
-	return UploadedManifest{Repository: s.repository, Digest: output.TopLevelDigest, MediaType: output.ManifestMediaType, Size: output.ManifestSize}, nil
+	manifestAck := UploadedManifest{Repository: s.repository, Digest: output.TopLevelDigest, MediaType: output.ManifestMediaType, Size: output.ManifestSize}
+	if err := source.UploadSucceeded(ctx, manifestAck, s.credential); err != nil {
+		return UploadedManifest{}, errors.New("registry upload success callback failed")
+	}
+	return manifestAck, nil
 }
 
 func (s *registryUploadSession) ensureCredential(ctx context.Context) error {
@@ -252,17 +268,135 @@ func (s *registryUploadSession) contentURL(kind, digest string) *url.URL {
 }
 
 var errRegistryTransport = errors.New("registry upload transport failed")
+var errRegistryAuthorizationHeader = errors.New("registry upload request authorization invalid")
+var errRegistryAuthorizationWrite = errors.New("registry upload request write failed")
+
+type registryAuthorizationConn struct {
+	net.Conn
+	token    []byte
+	header   []byte
+	complete bool
+	failed   bool
+}
+
+func newRegistryAuthorizationConn(conn net.Conn, token []byte) *registryAuthorizationConn {
+	return &registryAuthorizationConn{Conn: conn, token: token}
+}
+
+func (c *registryAuthorizationConn) Write(p []byte) (int, error) {
+	if c.complete {
+		return c.writeAll(p)
+	}
+	if c.failed {
+		return 0, errRegistryAuthorizationHeader
+	}
+	for i, b := range p {
+		c.header = append(c.header, b)
+		if len(c.header) > registryResponseBytes {
+			c.failed = true
+			c.cleanup()
+			return 0, errRegistryAuthorizationHeader
+		}
+		if len(c.header) < 4 || !bytes.Equal(c.header[len(c.header)-4:], []byte("\r\n\r\n")) {
+			continue
+		}
+		if err := c.flushHeader(); err != nil {
+			c.failed = true
+			return 0, err
+		}
+		c.complete = true
+		if i+1 < len(p) {
+			n, err := c.writeAll(p[i+1:])
+			if err != nil {
+				return i + 1 + n, err
+			}
+		}
+		return len(p), nil
+	}
+	return len(p), nil
+}
+
+func (c *registryAuthorizationConn) Close() error {
+	c.cleanup()
+	return c.Conn.Close()
+}
+
+func (c *registryAuthorizationConn) flushHeader() error {
+	placeholder := []byte(registryAuthorizationPlaceholder)
+	if bytes.Count(c.header, placeholder) != 1 {
+		c.cleanup()
+		return errRegistryAuthorizationHeader
+	}
+	prefix := []byte("Authorization: ")
+	marker := make([]byte, 0, len(prefix)+len(placeholder))
+	marker = append(marker, prefix...)
+	marker = append(marker, placeholder...)
+	lineStart := bytes.Index(c.header, marker)
+	if lineStart < 0 || (lineStart != 0 && (lineStart < 2 || !bytes.Equal(c.header[lineStart-2:lineStart], []byte("\r\n")))) {
+		c.cleanup()
+		return errRegistryAuthorizationHeader
+	}
+	valueStart := lineStart + len(prefix)
+	valueEnd := valueStart + len(placeholder)
+	if valueEnd+2 > len(c.header) || !bytes.Equal(c.header[valueEnd:valueEnd+2], []byte("\r\n")) {
+		c.cleanup()
+		return errRegistryAuthorizationHeader
+	}
+	if _, err := c.writeAll(c.header[:valueStart]); err != nil {
+		return err
+	}
+	if _, err := c.writeAll([]byte(registryBearerPrefix)); err != nil {
+		return err
+	}
+	if _, err := c.writeAll(c.token); err != nil {
+		return err
+	}
+	if _, err := c.writeAll(c.header[valueEnd:]); err != nil {
+		return err
+	}
+	c.cleanup()
+	return nil
+}
+
+func (c *registryAuthorizationConn) writeAll(p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		n, err := c.Conn.Write(p)
+		if n > len(p) {
+			n = len(p)
+		}
+		if n > 0 {
+			total += n
+			p = p[n:]
+		}
+		if err != nil {
+			c.cleanup()
+			return total, errRegistryAuthorizationWrite
+		}
+		if n == 0 {
+			c.cleanup()
+			return total, errRegistryAuthorizationWrite
+		}
+	}
+	return total, nil
+}
+
+func (c *registryAuthorizationConn) cleanup() {
+	zeroBytes(c.header)
+	c.header = nil
+	c.token = nil
+}
 
 // request owns each response body, discards at most budget+1 bytes, and removes
-// the temporary Go string header before returning. No net/http error is exposed:
-// those errors may include attacker-controlled URLs or response text.
+// the temporary placeholder header before returning. No net/http error is
+// exposed: those errors may include attacker-controlled URLs or response text.
 func (s *registryUploadSession) request(ctx context.Context, method string, target *url.URL, body []byte, mediaType, contentRange string) (*http.Response, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, registryRequestTimeout)
 	defer cancel()
 	if err := s.ensureCredential(requestCtx); err != nil {
 		return nil, err
 	}
-	if target == nil || target.Scheme != s.policy.origin.Scheme || target.Host != s.policy.origin.Host || target.User != nil || target.Fragment != "" || bytes.Contains([]byte(target.String()), s.credential.BearerToken) {
+	if target == nil || target.Scheme != s.policy.origin.Scheme || target.Host != s.policy.origin.Host || target.User != nil || target.Fragment != "" || registryURLContainsToken(target, s.credential.BearerToken) {
 		return nil, errors.New("registry upload request URL invalid")
 	}
 	req, err := http.NewRequestWithContext(requestCtx, method, target.String(), bytes.NewReader(body))
@@ -277,11 +411,7 @@ func (s *registryUploadSession) request(ctx context.Context, method string, targ
 	if contentRange != "" {
 		req.Header.Set("Content-Range", contentRange)
 	}
-	authorization := make([]byte, 7+len(s.credential.BearerToken))
-	copy(authorization, "Bearer ")
-	copy(authorization[7:], s.credential.BearerToken)
-	req.Header.Set("Authorization", string(authorization))
-	zeroBytes(authorization)
+	req.Header.Set("Authorization", registryAuthorizationPlaceholder)
 	defer req.Header.Del("Authorization")
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -344,6 +474,43 @@ func validRegistryHeaders(headers http.Header) bool {
 	return true
 }
 
+func containsTokenBytesInString(value string, token []byte) bool {
+	if len(token) == 0 || len(value) < len(token) {
+		return false
+	}
+	for start := 0; start <= len(value)-len(token); start++ {
+		if value[start] != token[0] {
+			continue
+		}
+		match := true
+		for i, b := range token {
+			if value[start+i] != b {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func registryURLContainsToken(u *url.URL, token []byte) bool {
+	if u == nil {
+		return false
+	}
+	for _, value := range []string{u.Scheme, u.Host, u.Path, u.RawPath, u.RawQuery, u.Fragment, u.Opaque} {
+		if containsTokenBytesInString(value, token) {
+			return true
+		}
+	}
+	if u.User != nil && containsTokenBytesInString(u.User.String(), token) {
+		return true
+	}
+	return false
+}
+
 var uploadIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$`)
 
 func (s *registryUploadSession) uploadLocation(base *url.URL, raw string) (*url.URL, error) {
@@ -371,14 +538,14 @@ func (s *registryUploadSession) uploadLocation(base *url.URL, raw string) (*url.
 		return fail()
 	}
 	for key, values := range query {
-		if s.credential != nil && (bytes.Contains([]byte(key), s.credential.BearerToken) || len(values) == 1 && bytes.Contains([]byte(values[0]), s.credential.BearerToken)) {
+		if s.credential != nil && (containsTokenBytesInString(key, s.credential.BearerToken) || len(values) == 1 && containsTokenBytesInString(values[0], s.credential.BearerToken)) {
 			return fail()
 		}
 		if key == "" || key == "digest" || len(values) != 1 {
 			return fail()
 		}
 	}
-	if s.credential != nil && bytes.Contains([]byte(resolved.String()), s.credential.BearerToken) {
+	if s.credential != nil && registryURLContainsToken(resolved, s.credential.BearerToken) {
 		return fail()
 	}
 	return resolved, nil

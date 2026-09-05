@@ -14,8 +14,10 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -36,6 +38,12 @@ type uploadTestSource struct {
 	rotate                        bool
 	fail                          bool
 	switchRepository              bool
+	onUploadSucceeded             func(context.Context, UploadedManifest, *RegistryCredential) error
+	uploadSucceededCalls          int
+	uploadSucceededCredential     *RegistryCredential
+	uploadSucceededLive           bool
+	uploadSucceededManifest       UploadedManifest
+	events                        []string
 }
 
 func (s *uploadTestSource) Next(ctx context.Context, prev *RegistryCredential) (*RegistryCredential, error) {
@@ -74,6 +82,7 @@ func (s *uploadTestSource) Next(ctx context.Context, prev *RegistryCredential) (
 		s.Close(prev)
 	}
 	s.issued = append(s.issued, c)
+	s.events = append(s.events, "next:"+c.ID)
 	return c, nil
 }
 func (s *uploadTestSource) Close(c *RegistryCredential) {
@@ -84,7 +93,21 @@ func (s *uploadTestSource) Close(c *RegistryCredential) {
 		s.closes = map[*RegistryCredential]int{}
 	}
 	s.closes[c]++
+	s.events = append(s.events, "close:"+c.ID)
 	c.Close()
+}
+func (s *uploadTestSource) UploadSucceeded(ctx context.Context, manifest UploadedManifest, c *RegistryCredential) error {
+	s.uploadSucceededCalls++
+	s.uploadSucceededCredential = c
+	s.uploadSucceededManifest = manifest
+	s.uploadSucceededLive = c != nil && c.secret != nil && !c.secret.closed && len(c.BearerToken) > 0
+	if c != nil {
+		s.events = append(s.events, "callback:"+c.ID)
+	}
+	if s.onUploadSucceeded != nil {
+		return s.onUploadSucceeded(ctx, manifest, c)
+	}
+	return nil
 }
 func (s *uploadTestSource) checkClosed() {
 	s.t.Helper()
@@ -97,6 +120,266 @@ func (s *uploadTestSource) checkClosed() {
 				s.t.Fatal("secret not zeroed")
 			}
 		}
+	}
+}
+
+type uploadRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f uploadRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRegistryUploadRequestUsesOnlyPlaceholderAuthorizationHeader(t *testing.T) {
+	source := &uploadTestSource{t: t, origin: "https://registry.test"}
+	credential, err := source.Next(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close(credential)
+	tokenText := "token-1.private.signature"
+	if !bytes.Equal(credential.BearerToken, []byte(tokenText)) {
+		t.Fatal("fixture token changed")
+	}
+	origin, err := url.Parse("https://registry.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := url.Parse("https://registry.test/v2/repository/tags/list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured *http.Request
+	session := registryUploadSession{
+		policy:     RegistryUploadPolicy{origin: *origin},
+		credential: credential,
+		client: &http.Client{Transport: uploadRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			captured = r
+			auth := r.Header.Get("Authorization")
+			if strings.Contains(auth, tokenText) {
+				t.Fatalf("high-level request retained bearer token in Authorization header: %q", auth)
+			}
+			if auth != registryAuthorizationPlaceholder {
+				t.Fatalf("Authorization header = %q, want fixed placeholder", auth)
+			}
+			return &http.Response{
+				StatusCode:    http.StatusNoContent,
+				ProtoMajor:    1,
+				Header:        http.Header{"Content-Length": []string{"0"}},
+				Body:          io.NopCloser(strings.NewReader("")),
+				ContentLength: 0,
+			}, nil
+		})},
+	}
+	if _, err := session.request(context.Background(), "GET", target, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if captured == nil {
+		t.Fatal("request was not sent")
+	}
+	if strings.Contains(captured.Header.Get("Authorization"), tokenText) {
+		t.Fatal("bearer token retained after request")
+	}
+}
+
+func TestRegistryAuthorizationConnInjectsBearerAcrossFragmentedHeaders(t *testing.T) {
+	token := []byte("writer-token.private.signature")
+	underlying := &uploadWriteOnlyConn{maxWrite: 3}
+	conn := newRegistryAuthorizationConn(underlying, token)
+	request := []byte("PUT /v2/repository/manifests/sha256:abc HTTP/1.1\r\nHost: registry.test\r\nAuthorization: " + registryAuthorizationPlaceholder + "\r\nContent-Type: application/vnd.oci.image.manifest.v1+json\r\n\r\n{}")
+	for start := 0; start < len(request); {
+		end := start + 7
+		if end > len(request) {
+			end = len(request)
+		}
+		n, err := conn.Write(request[start:end])
+		if err != nil {
+			t.Fatalf("fragment write error = %v", err)
+		}
+		if n != end-start {
+			t.Fatalf("fragment write n = %d, want %d", n, end-start)
+		}
+		start = end
+	}
+	got := underlying.String()
+	if !strings.Contains(got, "Authorization: Bearer writer-token.private.signature\r\n") {
+		t.Fatalf("Authorization header was not injected from locked bytes:\n%s", got)
+	}
+	if strings.Contains(got, registryAuthorizationPlaceholder) {
+		t.Fatal("placeholder reached the underlying connection")
+	}
+	if !strings.HasSuffix(got, "\r\n\r\n{}") {
+		t.Fatalf("body was not forwarded after header injection:\n%s", got)
+	}
+	if conn.token != nil || len(conn.header) != 0 {
+		t.Fatal("authorization writer retained secret/header scratch after success")
+	}
+}
+
+func TestRegistryAuthorizationConnRejectsInvalidPlaceholder(t *testing.T) {
+	validLine := "Authorization: " + registryAuthorizationPlaceholder + "\r\n"
+	for _, tc := range []struct {
+		name    string
+		request []byte
+	}{
+		{name: "missing", request: []byte("GET /v2/ HTTP/1.1\r\nHost: registry.test\r\n\r\n")},
+		{name: "duplicate", request: []byte("GET /v2/ HTTP/1.1\r\nHost: registry.test\r\n" + validLine + "X-Other: " + registryAuthorizationPlaceholder + "\r\n\r\n")},
+		{name: "wrong header", request: []byte("GET /v2/ HTTP/1.1\r\nHost: registry.test\r\nX-Authorization: " + registryAuthorizationPlaceholder + "\r\n\r\n")},
+		{name: "oversized", request: append([]byte("GET /v2/ HTTP/1.1\r\nHost: registry.test\r\nX-Fill: "), append(bytes.Repeat([]byte("a"), registryResponseBytes), []byte("\r\n"+validLine+"\r\n")...)...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			underlying := &uploadWriteOnlyConn{}
+			conn := newRegistryAuthorizationConn(underlying, []byte("writer-token.private.signature"))
+			if _, err := conn.Write(tc.request); err == nil {
+				t.Fatal("accepted invalid Authorization placeholder")
+			} else if strings.Contains(err.Error(), "writer-token") {
+				t.Fatal("writer error leaked bearer token")
+			}
+			if underlying.Len() != 0 {
+				t.Fatal("invalid header was written to the underlying connection")
+			}
+			if conn.token != nil || len(conn.header) != 0 {
+				t.Fatal("authorization writer retained scratch after rejection")
+			}
+		})
+	}
+}
+
+func TestRegistryAuthorizationConnCleansUpAfterFailedOrAbortedWrite(t *testing.T) {
+	t.Run("failed underlying write", func(t *testing.T) {
+		underlying := &uploadWriteOnlyConn{maxWrite: 5, failAt: 80}
+		conn := newRegistryAuthorizationConn(underlying, []byte("writer-token.private.signature"))
+		request := []byte("PATCH /v2/repository/blobs/uploads/id HTTP/1.1\r\nHost: registry.test\r\nAuthorization: " + registryAuthorizationPlaceholder + "\r\n\r\npayload")
+		if _, err := conn.Write(request); err == nil {
+			t.Fatal("write succeeded after underlying failure")
+		} else if strings.Contains(err.Error(), "writer-token") || strings.Contains(err.Error(), "PRIVATE-TOKEN") {
+			t.Fatal("underlying write error leaked")
+		}
+		if conn.token != nil || len(conn.header) != 0 {
+			t.Fatal("authorization writer retained scratch after failed write")
+		}
+	})
+	t.Run("close before header complete", func(t *testing.T) {
+		underlying := &uploadWriteOnlyConn{}
+		conn := newRegistryAuthorizationConn(underlying, []byte("writer-token.private.signature"))
+		if n, err := conn.Write([]byte("GET /v2/ HTTP/1.1\r\nAuthorization: ")); err != nil || n == 0 {
+			t.Fatalf("partial header write = %d, %v", n, err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if conn.token != nil || len(conn.header) != 0 {
+			t.Fatal("authorization writer retained scratch after close")
+		}
+	})
+}
+
+type uploadWriteOnlyConn struct {
+	bytes.Buffer
+	maxWrite int
+	failAt   int
+	closed   bool
+}
+
+func (c *uploadWriteOnlyConn) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *uploadWriteOnlyConn) Write(p []byte) (int, error) {
+	if c.failAt > 0 && c.Buffer.Len() >= c.failAt {
+		return 0, errors.New("underlying PRIVATE-TOKEN write failure")
+	}
+	limit := len(p)
+	if c.maxWrite > 0 && limit > c.maxWrite {
+		limit = c.maxWrite
+	}
+	if c.failAt > 0 && c.Buffer.Len()+limit > c.failAt {
+		limit = c.failAt - c.Buffer.Len()
+	}
+	if limit > 0 {
+		_, _ = c.Buffer.Write(p[:limit])
+	}
+	if c.failAt > 0 && c.Buffer.Len() >= c.failAt {
+		return limit, errors.New("underlying PRIVATE-TOKEN write failure")
+	}
+	return limit, nil
+}
+func (c *uploadWriteOnlyConn) Close() error                     { c.closed = true; return nil }
+func (c *uploadWriteOnlyConn) LocalAddr() net.Addr              { return uploadTestAddr("local") }
+func (c *uploadWriteOnlyConn) RemoteAddr() net.Addr             { return uploadTestAddr("remote") }
+func (c *uploadWriteOnlyConn) SetDeadline(time.Time) error      { return nil }
+func (c *uploadWriteOnlyConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *uploadWriteOnlyConn) SetWriteDeadline(time.Time) error { return nil }
+
+type uploadTestAddr string
+
+func (a uploadTestAddr) Network() string { return string(a) }
+func (a uploadTestAddr) String() string  { return string(a) }
+
+func TestRegistryUploadSuccessCallbackUsesLiveManifestCredential(t *testing.T) {
+	for _, tc := range []string{"success", "callback error", "manifest failure"} {
+		t.Run(tc, func(t *testing.T) {
+			out, f := newUploadFixture(t, 0)
+			if tc == "manifest failure" {
+				f.faultMethod = "PUT"
+				f.fault = "wrong digest"
+			}
+			var first sync.Once
+			s, ca := uploadTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				f.ServeHTTP(w, r)
+				first.Do(func() {
+					time.Sleep(700 * time.Millisecond)
+					f.mu.Lock()
+					f.rotated = true
+					f.mu.Unlock()
+				})
+			}))
+			source := &uploadTestSource{t: t, origin: s.URL, rotate: true}
+			if tc == "callback error" {
+				source.onUploadSucceeded = func(context.Context, UploadedManifest, *RegistryCredential) error {
+					return errors.New("PRIVATE-TOKEN callback failure")
+				}
+			}
+			manifest, err := uploadTestClient(t, s, ca).Upload(context.Background(), out, source)
+			source.checkClosed()
+			if tc == "manifest failure" {
+				if err == nil {
+					t.Fatal("accepted failed manifest acknowledgement")
+				}
+				if source.uploadSucceededCalls != 0 {
+					t.Fatal("success callback ran before exact manifest acknowledgement")
+				}
+				return
+			}
+			if tc == "callback error" {
+				if err == nil {
+					t.Fatal("upload succeeded after success callback failure")
+				}
+				if strings.Contains(err.Error(), "PRIVATE-TOKEN") {
+					t.Fatal("callback error leaked")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if source.uploadSucceededCalls != 1 {
+				t.Fatalf("success callback calls = %d, want 1", source.uploadSucceededCalls)
+			}
+			if len(source.issued) != 2 {
+				t.Fatalf("issued credentials = %d, want manifest renewal", len(source.issued))
+			}
+			finalCredential := source.issued[1]
+			if source.uploadSucceededCredential != finalCredential {
+				t.Fatal("success callback did not receive credential used for manifest PUT")
+			}
+			if !source.uploadSucceededLive {
+				t.Fatal("success callback credential was not live and owned")
+			}
+			want := UploadedManifest{Repository: uploadTestRepository, Digest: out.TopLevelDigest, MediaType: out.ManifestMediaType, Size: out.ManifestSize}
+			if source.uploadSucceededManifest != want {
+				t.Fatalf("callback manifest = %#v, want %#v", source.uploadSucceededManifest, want)
+			}
+			if tc == "success" && manifest != want {
+				t.Fatalf("upload manifest = %#v, want %#v", manifest, want)
+			}
+			wantEvents := []string{"next:credential-1", "close:credential-1", "next:credential-2", "callback:credential-2", "close:credential-2"}
+			if strings.Join(source.events, "|") != strings.Join(wantEvents, "|") {
+				t.Fatalf("credential events = %v, want %v", source.events, wantEvents)
+			}
+		})
 	}
 }
 
