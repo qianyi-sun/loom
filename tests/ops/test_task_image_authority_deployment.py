@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,13 @@ _EXAMPLE_PRINCIPALS = Path(
 _PROVIDER_POLICY = Path("deploy/task-image-builder/rootless-provider-v1.toml")
 _PREREQUISITES = Path("deploy/task-image-builder/prerequisites-v1.toml")
 _INERT_RELEASE_SPEC = Path("deploy/task-image-builder/provider-release-v1.json")
+_PHASE1_PATHS = (
+    Path("docs/runbooks/task-image-builder-phase1-site-convergence.md"),
+    Path("scripts/ops/task_image_builder_slurm_converge.py"),
+    Path("deploy/slurm/converge-loom-task-image-builder-prerequisites.sh"),
+    Path("deploy/slurm/install-loom-task-image-builder-controller-identity.sh"),
+    Path("deploy/slurm/install-loom-task-image-builder-node-prerequisites.sh"),
+)
 
 
 def _objects() -> dict[tuple[str, str], dict[str, Any]]:
@@ -132,11 +140,41 @@ def test_manifest_references_only_uncreated_runtime_and_tls_secrets() -> None:
         "BEGIN CERTIFICATE",
         "BEGIN PRIVATE KEY",
         "registry_signing_key",
+        "registry-token",
+        "registry-jwks",
         "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY",
         "hostPath",
         "privileged: true",
     ):
         assert forbidden not in rendered
+
+
+def test_manifest_has_no_registry_signing_secret_mount_or_environment() -> None:
+    deployment = _objects()[("Deployment", "loom-task-image-authority")]
+    pod = deployment["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    secret_names = {
+        volume["name"]
+        for volume in pod["volumes"]
+        if "secret" in volume
+        for value in volume["secret"].values()
+        if isinstance(value, str) and "registry" in value.lower()
+    }
+    mount_names = {
+        mount["name"]
+        for mount in container["volumeMounts"]
+        if "registry" in mount["name"].lower()
+        or "registry" in mount["mountPath"].lower()
+    }
+    env_names = {
+        item["name"]
+        for item in container["env"]
+        if item["name"].startswith("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY")
+    }
+
+    assert secret_names == set()
+    assert mount_names == set()
+    assert env_names == set()
 
 
 def test_example_registry_contains_only_documented_public_example_digests(
@@ -214,3 +252,13 @@ def test_phase1_and_rootless_activation_guards_remain_closed() -> None:
     assert prerequisites["unconditional_blockers"] == [
         "phase2_guard_provider_release_missing"
     ]
+
+
+def test_phase1_builder_operational_files_match_origin_dev() -> None:
+    for path in _PHASE1_PATHS:
+        original = subprocess.run(
+            ["git", "show", f"origin/dev:{path.as_posix()}"],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        assert path.read_bytes() == original, path

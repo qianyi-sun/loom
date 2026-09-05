@@ -405,20 +405,22 @@ func (g *credentialSourceGuard) RegistryCredential(ctx context.Context, request 
 	}
 	if request.PredecessorCredentialID == "" && request.PredecessorGeneration == 0 {
 		g.sawNullPredecessor = true
+		now := time.Now().UTC().Truncate(time.Second)
 		return &SecretBuffer{data: []byte(validRegistryCredentialJSON(registryCredentialMutation{
 			RequestID: request.OperationID,
-			IssuedAt:  time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
-			ExpiresAt: time.Now().UTC().Truncate(time.Second).Add(45 * time.Second).Format(time.RFC3339),
+			IssuedAt:  now.Format(time.RFC3339),
+			ExpiresAt: now.Add(45 * time.Second).Format(time.RFC3339),
 		}))}, nil
 	}
 	if request.PredecessorCredentialID != "77777777-7777-4777-8777-777777777777" || request.PredecessorGeneration != 1 {
 		return nil, errors.New("predecessor binding drift")
 	}
+	now := time.Now().UTC().Truncate(time.Second)
 	return &SecretBuffer{data: []byte(validRegistryCredentialJSON(registryCredentialMutation{
 		CredentialID:                "88888888-8888-4888-8888-888888888888",
 		RequestID:                   request.OperationID,
-		IssuedAt:                    time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
-		ExpiresAt:                   time.Now().UTC().Truncate(time.Second).Add(45 * time.Second).Format(time.RFC3339),
+		IssuedAt:                    now.Format(time.RFC3339),
+		ExpiresAt:                   now.Add(45 * time.Second).Format(time.RFC3339),
 		SessionGeneration:           2,
 		AttestationGeneration:       2,
 		Generation:                  2,
