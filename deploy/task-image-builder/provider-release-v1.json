@@ -148,8 +148,8 @@
       }
     ],
     "sha256": {
-      "x86_64": "4f4757b9f88cd3c12afe409a0e03dbac60bb965deceb07d5f83531a8b1362ac9",
-      "aarch64": "2e50dc50bf363891be65ac2c7a968f041e2803f4dc7db227c007a27a10e16fc7"
+      "x86_64": "6407167054f3561094f9aed21807a304169a73ab5cbf69d7470993ea1366aa0c",
+      "aarch64": "26e6c5116dc0aa4c4f4588f2ef1eca66ba82bfb7ba0c9536c472cfcad9103cfd"
     }
   },
   "configs": [
