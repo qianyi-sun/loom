@@ -106,6 +106,7 @@ def _rehearsal(
     checkpoint: CriticalCheckpointEvidence,
     *,
     cleanup: bool = True,
+    include_execution_prerequisites: bool = False,
 ) -> tuple[PreflightRehearsal, CheckContext]:
     def result(check_id: str) -> RehearsalResult:
         return RehearsalResult(
@@ -147,9 +148,38 @@ def _rehearsal(
             "staging.mutation-epoch": checkpoint.mutation_epoch,
         }
     )
-    executions = PreflightDag((*(_dependency(check_id) for check_id in external), *checks)).run(
-        context, through_tier=3, now=lambda: NOW
+    execution_prerequisites = (
+        (
+            RegisteredCheck(
+                spec=CheckSpec(
+                    check_id="execution.prerequisites",
+                    failure_code="execution.prerequisites.unavailable",
+                    tier=3,
+                    stage=StageCapability.ISOLATED_REHEARSAL,
+                    dependencies=("rehearsal.cleanup",),
+                    mutation_class=MutationClass.ISOLATED,
+                    input_keys=("runner.config.sha256",),
+                    evidence_schema=(EvidenceField("ready", "boolean"),),
+                    timeout_seconds=5,
+                    freshness_ttl_seconds=300,
+                    remediation="restore execution prerequisites",
+                    secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                ),
+                implementation_version="test-v1",
+                operations={
+                    CheckOperation.PROBE: lambda _context: CheckProbe(
+                        passed=True,
+                        evidence={"ready": True},
+                    )
+                },
+            ),
+        )
+        if include_execution_prerequisites
+        else ()
     )
+    executions = PreflightDag(
+        (*(_dependency(check_id) for check_id in external), *checks, *execution_prerequisites)
+    ).run(context, through_tier=3, now=lambda: NOW)
     return (
         PreflightRehearsal.from_executions(
             registry_digest="9" * 64,
@@ -180,6 +210,25 @@ def test_restore_proof_binds_every_tier_three_action_and_cleanup(tmp_path: Path)
     assert evidence.manager_configuration_digest == checkpoint.manager_configuration_digest
     assert len(evidence.report_sha256) == 64
     assert evidence.verification_id.startswith("restore-")
+
+
+def test_restore_proof_allows_passing_non_rehearsal_tier_three_evidence(
+    tmp_path: Path,
+) -> None:
+    checkpoint = _checkpoint(tmp_path)
+    rehearsal, context = _rehearsal(
+        checkpoint,
+        include_execution_prerequisites=True,
+    )
+
+    evidence = build_restore_verification_evidence(
+        checkpoint,
+        rehearsal,
+        context=context,
+        verified_at=NOW,
+    )
+
+    assert evidence.checkpoint_evidence_sha256 == checkpoint.evidence_digest
 
 
 def test_restore_proof_rejects_context_drift_and_incomplete_cleanup(tmp_path: Path) -> None:
