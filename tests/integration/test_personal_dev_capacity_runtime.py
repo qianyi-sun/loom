@@ -18,6 +18,8 @@ from psycopg.errors import InsufficientPrivilege
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+import loom.personal_dev_capacity_runtime as capacity_runtime_module
+import loom_cli.rollout.operator.protected_staging_capacity_database_component as capacity_database_component_module
 from loom.dev_instance import derive_identity
 from loom.personal_dev_capacity import (
     PersonalDevCapacityAvailability,
@@ -102,6 +104,27 @@ def _staging_seed(credentials) -> dict[str, object]:
     }
 
 
+def test_capacity_guard_passfile_handles_short_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: accepting a partial kernel write as a complete private passfile."""
+
+    real_write = os.write
+
+    def short_write(fd: int, payload: bytes) -> int:
+        return real_write(fd, payload[: max(1, len(payload) // 2)])
+
+    monkeypatch.setattr(capacity_runtime_module.os, "write", short_write)
+    password_free_url, fd = capacity_runtime_module._migration_url_with_passfile(
+        "postgresql://migrator:secret-password@postgres.example.test:5432/loom"
+    )
+    try:
+        assert "secret-password" not in password_free_url
+        assert os.read(fd, 4096) == (b"postgres.example.test:5432:loom:migrator:secret-password\n")
+    finally:
+        os.close(fd)
+
+
 @pytest.mark.asyncio
 async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal(
     postgres_url: str,
@@ -158,7 +181,8 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
     )
     component._arm_transient_migrator(seed)
     component._seal_transient_migrator()
-    arm_payload, seal_payload = runner.payloads
+    arm_payload, *seal_payloads = runner.payloads
+    assert len(seal_payloads) == 6
 
     async with await psycopg.AsyncConnection.connect(
         cluster_url,
@@ -224,7 +248,8 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             autocommit=True,
         ) as connection:
             await connection.execute("SET SESSION AUTHORIZATION postgres")
-            await connection.execute(seal_payload.decode("utf-8"))
+            for seal_payload in seal_payloads:
+                await connection.execute(seal_payload.decode("utf-8"))
 
         runtime_url = (
             parsed.set(
@@ -258,10 +283,10 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             assert await roles.fetchall() == sorted(
                 [
                     ("loom", True, False, False, False, False, False, False, True, False),
-                    (owner, False, False, False, False, False, False, False, False, False),
+                    (owner, False, False, False, False, False, False, False, False, True),
                     (migrator, False, True, False, False, False, False, False, False, True),
                     (agent, True, False, False, False, False, False, False, True, True),
-                    (executor, False, False, False, False, False, False, False, False, False),
+                    (executor, False, False, False, False, False, False, False, False, True),
                     (observer, True, False, False, False, False, False, False, True, True),
                     (runtime, True, False, False, False, False, False, False, True, True),
                 ]
@@ -287,6 +312,20 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
                 (migrator,),
             )
             assert await sessions.fetchone() == (0,)
+            details_result = await connection.execute(
+                capacity_database_component_module._DETAIL_SQL
+            )
+            details_row = await details_result.fetchone()
+            assert details_row is not None
+            details = details_row[0]
+            assert details["active_migrator_sessions"] == 0
+            assert details["database_privileges"] == {
+                "migrator_acl_count": 0,
+                "owner_create": False,
+            }
+            assert details["roles"][migrator]["credential_validity"] == "infinite"
+            for role in (agent, observer, runtime):
+                assert details["roles"][role]["credential_validity"] == "infinite"
         assert installation.runtime_database_url == runtime_url.replace(
             "postgresql://",
             "postgresql+psycopg://",
@@ -1284,7 +1323,8 @@ async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
     )
     component._arm_transient_migrator(_staging_seed(credentials))
     component._seal_transient_migrator()
-    arm_payload, seal_payload = runner.payloads
+    arm_payload, *seal_payloads = runner.payloads
+    assert len(seal_payloads) == 6
     parsed = make_url(postgres_url)
     identity = staging_capacity_identity()
     owner, migrator, agent, executor, observer, runtime = _role_names(identity)
@@ -1332,10 +1372,10 @@ async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
         )
         assert await armed_state.fetchall() == sorted(
             [
-                (owner, False, False, False, False, False),
+                (owner, False, False, False, False, True),
                 (migrator, True, True, False, True, True),
                 (agent, True, False, False, True, True),
-                (executor, False, False, False, False, False),
+                (executor, False, False, False, False, True),
                 (observer, True, False, False, True, True),
                 (runtime, True, False, False, True, True),
             ]
@@ -1357,12 +1397,35 @@ async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
             ]
         )
 
+    disable_payload, terminate_payload, cleanup_payload, *finish_payloads = seal_payloads
     async with await psycopg.AsyncConnection.connect(
         loom_superuser_url,
         autocommit=True,
     ) as connection:
         await connection.execute("SET SESSION AUTHORIZATION postgres")
-        await connection.execute(seal_payload.decode("utf-8"))
+        await connection.execute(disable_payload.decode("utf-8"))
+        await connection.execute(terminate_payload.decode("utf-8"))
+        await connection.execute("CREATE ROLE loom_cap_staging_foreign NOLOGIN")
+        await connection.execute("CREATE ROLE loom_cap_staging_dependent NOLOGIN")
+        await connection.execute(
+            "GRANT loom_cap_staging_foreign TO loom_cap_staging_migrator WITH ADMIN OPTION"
+        )
+        await connection.execute("SET ROLE loom_cap_staging_migrator")
+        await connection.execute("GRANT loom_cap_staging_foreign TO loom_cap_staging_dependent")
+        await connection.execute("RESET ROLE")
+        with pytest.raises(psycopg.errors.DependentObjectsStillExist):
+            await connection.execute(cleanup_payload.decode("utf-8"))
+        await connection.execute("ROLLBACK")
+        disabled = await connection.execute(
+            "SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid "
+            "WHERE rolname = 'loom_cap_staging_migrator'"
+        )
+        assert await disabled.fetchone() == (False, True)
+        await connection.execute("DROP ROLE loom_cap_staging_dependent")
+        await connection.execute(cleanup_payload.decode("utf-8"))
+        for seal_payload in finish_payloads:
+            await connection.execute(seal_payload.decode("utf-8"))
+        await connection.execute("DROP ROLE loom_cap_staging_foreign")
 
     async with await psycopg.AsyncConnection.connect(loom_superuser_url) as connection:
         migrator_state = await connection.execute(
@@ -1374,10 +1437,10 @@ async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
         )
         assert await migrator_state.fetchall() == sorted(
             [
-                (owner, False, False, False, False, False),
+                (owner, False, False, False, False, True),
                 (migrator, False, True, False, False, True),
                 (agent, True, False, False, True, True),
-                (executor, False, False, False, False, False),
+                (executor, False, False, False, False, True),
                 (observer, True, False, False, True, True),
                 (runtime, True, False, False, True, True),
             ]

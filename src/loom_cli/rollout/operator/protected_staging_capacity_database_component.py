@@ -140,6 +140,12 @@ _DETAIL_SQL = single_line_sql(
               'replication', role.rolreplication,
               'bypass_rls', role.rolbypassrls,
               'has_password', role.rolpassword IS NOT NULL,
+              'credential_validity', CASE
+                WHEN role.rolvaliduntil IS NULL THEN 'none'
+                WHEN role.rolvaliduntil = 'infinity'::timestamptz THEN 'infinite'
+                WHEN role.rolvaliduntil > CURRENT_TIMESTAMP THEN 'finite-valid'
+                ELSE 'expired'
+              END,
               'memberships', (
                 SELECT count(*)
                 FROM pg_catalog.pg_auth_members AS membership
@@ -158,6 +164,28 @@ _DETAIL_SQL = single_line_sql(
           'loom_cap_staging_observer',
           'loom_cap_staging_runtime'
         ])
+      ),
+      'database_privileges', (
+        SELECT jsonb_build_object(
+          'migrator_acl_count', (
+            SELECT count(*)
+            FROM pg_catalog.aclexplode(
+              COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))
+            ) AS privilege
+            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
+            WHERE grantee.rolname = 'loom_cap_staging_migrator'
+          ),
+          'owner_create', pg_catalog.has_database_privilege(
+            'loom_cap_staging_owner', 'loom', 'CREATE'
+          )
+        )
+        FROM pg_catalog.pg_database AS database
+        WHERE database.datname = 'loom'
+      ),
+      'active_migrator_sessions', (
+        SELECT count(*) FROM pg_catalog.pg_stat_activity
+        WHERE usename = 'loom_cap_staging_migrator'
+          AND pid <> pg_catalog.pg_backend_pid()
       )
     )
     """
@@ -222,26 +250,6 @@ class _Snapshot:
     evidence_digest: str
 
 
-def _resource_projection(document: Mapping[str, object]) -> dict[str, object]:
-    value = copy.deepcopy(dict(document))
-    value.pop("status", None)
-    metadata = value.get("metadata")
-    if not isinstance(metadata, dict):
-        raise ValueError("protected staging capacity database resource is invalid")
-    for field in (
-        "creationTimestamp",
-        "generation",
-        "managedFields",
-        "resourceVersion",
-        "uid",
-    ):
-        metadata.pop(field, None)
-    labels = metadata.get("labels")
-    if isinstance(labels, dict):
-        labels.pop(_CLEANUP_LABEL, None)
-    return value
-
-
 def _manifest_with_observed_cleanup_labels(
     manifest: bytes,
     observed: Mapping[str, Mapping[str, object]],
@@ -249,10 +257,11 @@ def _manifest_with_observed_cleanup_labels(
     documents: list[object] = []
     for document in yaml.safe_load_all(manifest):
         if not isinstance(document, dict):
-            documents.append(document)
             continue
         kind = document.get("kind")
         item = observed.get(str(kind))
+        if item is None:
+            continue
         metadata = item.get("metadata") if item is not None else None
         labels = metadata.get("labels") if isinstance(metadata, dict) else None
         if isinstance(labels, dict) and _CLEANUP_LABEL in labels:
@@ -265,6 +274,8 @@ def _manifest_with_observed_cleanup_labels(
                 raise ValueError("protected staging capacity database manifest is invalid")
             document_labels[_CLEANUP_LABEL] = labels[_CLEANUP_LABEL]
         documents.append(document)
+    if len(documents) != len(observed):
+        raise ValueError("protected staging capacity database manifest is invalid")
     return cast(str, yaml.safe_dump_all(documents, sort_keys=True, explicit_start=True)).encode()
 
 
@@ -358,52 +369,76 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 )
             self._delete_bootstrap_resources(plan, payload)
         else:
-            resources: _ResourceState = before.resources
-            if resources in {_ResourceState.FAILED, _ResourceState.RECOVERABLE}:
-                self._delete_bootstrap_resources(plan, payload)
-                resources = _ResourceState.ABSENT
+            self._compensate_bootstrap(plan, payload)
             arm_attempted = False
             try:
                 arm_attempted = True
                 self._arm_transient_migrator(seed)
-                if resources is _ResourceState.ABSENT:
-                    self.runner.run_checked(
-                        (
-                            "kubectl",
-                            "--namespace",
-                            _NAMESPACE,
-                            "create",
-                            "--validate=strict",
-                            f"--request-timeout={_REQUEST_TIMEOUT}",
-                            "-f",
-                            "-",
-                        ),
-                        env=self.runner.environment,
-                        input_payload=payload,
-                        timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
-                    )
-                elif resources is not _ResourceState.EXACT:
-                    raise RuntimeError("protected staging capacity database bootstrap drifted")
+                self.runner.run_checked(
+                    (
+                        "kubectl",
+                        "--namespace",
+                        _NAMESPACE,
+                        "create",
+                        "--validate=strict",
+                        f"--request-timeout={_REQUEST_TIMEOUT}",
+                        "-f",
+                        "-",
+                    ),
+                    env=self.runner.environment,
+                    input_payload=payload,
+                    timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+                )
                 self._wait_for_bootstrap_job(plan, payload)
+                self._disable_transient_credentials(preserve_runtime_credentials=True)
+                self._terminate_transient_sessions(preserve_runtime_credentials=True)
                 self._delete_bootstrap_resources(plan, payload, kinds=("Job",))
+                self._remove_transient_authority()
+                self._verify_transient_authority_sealed(
+                    preserve_runtime_credentials=True,
+                    durable_runtime_credentials=False,
+                )
+                if (
+                    self._database_state(plan, seed, durable_runtime_credentials=False)
+                    is not _DatabaseState.EXACT
+                ):
+                    raise RuntimeError(
+                        "protected staging capacity database bootstrap was not exact"
+                    )
+                self._finalize_runtime_credentials()
+                self._verify_transient_authority_sealed(
+                    preserve_runtime_credentials=True,
+                    durable_runtime_credentials=True,
+                )
+                if self._database_state(plan, seed) is not _DatabaseState.EXACT:
+                    raise RuntimeError(
+                        "protected staging capacity database bootstrap was not exact"
+                    )
+                resources, _evidence = self._resource_state(plan, payload)
+                if resources is not _ResourceState.RECOVERABLE:
+                    raise RuntimeError("protected staging capacity database bootstrap changed")
+                self._delete_bootstrap_resources(plan, payload, kinds=("Secret",))
             except Exception:
                 if arm_attempted:
-                    self._seal_transient_migrator(preserve_runtime_credentials=False)
+                    self._compensate_bootstrap(plan, payload)
                 raise
-            else:
-                self._seal_transient_migrator(preserve_runtime_credentials=True)
-            if self._database_state(plan, seed) is not _DatabaseState.EXACT:
-                raise RuntimeError("protected staging capacity database bootstrap was not exact")
-            resources, _evidence = self._resource_state(plan, payload)
-            if resources not in {_ResourceState.ABSENT, _ResourceState.RECOVERABLE}:
-                raise RuntimeError("protected staging capacity database bootstrap changed")
-            self._delete_bootstrap_resources(plan, payload, kinds=("Secret",))
         after = self._snapshot(plan, seed=seed, manifest=payload)
         if (
             after.database is not _DatabaseState.EXACT
             or after.resources is not _ResourceState.ABSENT
         ):
             raise RuntimeError("protected staging capacity database did not converge")
+
+    def _compensate_bootstrap(self, plan: FinalGatePlan, manifest: bytes) -> None:
+        self._disable_transient_credentials(preserve_runtime_credentials=False)
+        self._terminate_transient_sessions(preserve_runtime_credentials=False)
+        self._delete_bootstrap_resources(plan, manifest, kinds=("Job",))
+        self._remove_transient_authority()
+        self._verify_transient_authority_sealed(
+            preserve_runtime_credentials=False,
+            durable_runtime_credentials=True,
+        )
+        self._delete_bootstrap_resources(plan, manifest, kinds=("Secret",))
 
     def _snapshot(
         self,
@@ -432,6 +467,8 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         self,
         plan: FinalGatePlan,
         seed: dict[str, object],
+        *,
+        durable_runtime_credentials: bool = True,
     ) -> _DatabaseState:
         presence = self._query(_REVISION_PRESENCE_SQL).decode("ascii").strip()
         if presence == "absent":
@@ -468,10 +505,16 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             configuration_generation=configuration.configuration_generation,
         )
         expected_details: dict[str, object] = {
+            "active_migrator_sessions": 0,
             "agent_role": "loom_cap_staging_agent",
             "authority": expected_fence.model_dump(mode="json"),
+            "database_privileges": {"migrator_acl_count": 0, "owner_create": False},
             "registration": expected_registration.model_dump(mode="json"),
-            "roles": _expected_roles(),
+            "roles": _expected_roles(
+                runtime_credential_validity=(
+                    "infinite" if durable_runtime_credentials else "finite-valid"
+                )
+            ),
             "runtime_role": "loom_cap_staging_runtime",
         }
         if details == expected_details and runtime == expected_registration:
@@ -520,6 +563,31 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         manifest: bytes,
     ) -> tuple[_ResourceState, str]:
         del plan
+        observed, evidence_digest, exact = self._inventory_bootstrap_resources(manifest)
+        if not observed:
+            return _ResourceState.ABSENT, evidence_digest
+        if not exact:
+            return _ResourceState.DRIFTED, evidence_digest
+        job = observed.get("Job")
+        if job is not None:
+            status = job.get("status", {})
+            if not isinstance(status, dict):
+                return _ResourceState.DRIFTED, evidence_digest
+            failed = _job_failed(status)
+        else:
+            failed = False
+        if set(observed) != {"Secret", "Job"}:
+            return _ResourceState.RECOVERABLE, evidence_digest
+        return (
+            _ResourceState.FAILED if failed else _ResourceState.EXACT,
+            evidence_digest,
+        )
+
+    def _inventory_bootstrap_resources(
+        self,
+        manifest: bytes,
+    ) -> tuple[dict[str, dict[str, object]], str, bool]:
+        _manifest_resources(manifest)
         inventory = self.runner.capture_stdout(
             (
                 "kubectl",
@@ -540,13 +608,8 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             raise ValueError("protected staging capacity database inventory is invalid") from exc
         if not isinstance(document, dict) or not isinstance(document.get("items"), list):
             raise ValueError("protected staging capacity database inventory is invalid")
-        items = document["items"]
-        if not items:
-            return _ResourceState.ABSENT, hashlib.sha256(inventory).hexdigest()
-        expected = _manifest_resources(manifest)
-        observed: dict[str, dict[str, object]] = {}
-        failed = False
-        for item in items:
+        listed: dict[str, dict[str, object]] = {}
+        for item in document["items"]:
             if not isinstance(item, dict) or not isinstance(item.get("metadata"), dict):
                 raise ValueError("protected staging capacity database resource is invalid")
             metadata = item["metadata"]
@@ -559,19 +622,67 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     ("Secret", _NAMESPACE, _NAME),
                     ("Job", _NAMESPACE, _NAME),
                 }
-                or kind in observed
+                or kind in listed
             ):
-                return _ResourceState.DRIFTED, hashlib.sha256(inventory).hexdigest()
-            if _resource_projection(item) != _resource_projection(expected[str(kind)]):
-                return _ResourceState.DRIFTED, hashlib.sha256(inventory).hexdigest()
-            observed[str(kind)] = item
-            status = item.get("status", {})
-            if kind == "Job":
-                if not isinstance(status, dict):
-                    return _ResourceState.DRIFTED, hashlib.sha256(inventory).hexdigest()
-                failed = _job_failed(status)
-        if set(observed) != {"Secret", "Job"}:
-            return _ResourceState.RECOVERABLE, hashlib.sha256(inventory).hexdigest()
+                raise RuntimeError("protected staging capacity database bootstrap drifted")
+            listed[str(kind)] = item
+
+        observed: dict[str, dict[str, object]] = {}
+        direct_digests: dict[str, str] = {}
+        for kind in ("Secret", "Job"):
+            payload = self.runner.capture_stdout(
+                (
+                    "kubectl",
+                    "--namespace",
+                    _NAMESPACE,
+                    "get",
+                    f"{kind.lower()}/{_NAME}",
+                    "--ignore-not-found=true",
+                    "--output=json",
+                    f"--request-timeout={_REQUEST_TIMEOUT}",
+                ),
+                env=self.runner.environment,
+                timeout_seconds=_QUERY_TIMEOUT_SECONDS,
+            )
+            direct_digests[kind] = hashlib.sha256(payload).hexdigest()
+            if not payload:
+                continue
+            try:
+                item = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+            except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+                raise ValueError("protected staging capacity database resource is invalid") from exc
+            if not isinstance(item, dict) or not isinstance(item.get("metadata"), dict):
+                raise ValueError("protected staging capacity database resource is invalid")
+            metadata = item["metadata"]
+            labels = metadata.get("labels")
+            if (
+                item.get("apiVersion") != ("v1" if kind == "Secret" else "batch/v1")
+                or item.get("kind") != kind
+                or metadata.get("namespace") != _NAMESPACE
+                or metadata.get("name") != _NAME
+                or not isinstance(labels, dict)
+                or labels.get(_COMPONENT_LABEL) != _COMPONENT_LABEL_VALUE
+                or not isinstance(metadata.get("uid"), str)
+                or not isinstance(metadata.get("resourceVersion"), str)
+            ):
+                raise RuntimeError("protected staging capacity database bootstrap drifted")
+            observed[kind] = item
+        if set(observed) != set(listed):
+            raise RuntimeError("protected staging capacity database bootstrap drifted")
+        for kind, item in observed.items():
+            listed_metadata = listed[kind]["metadata"]
+            item_metadata = item["metadata"]
+            assert isinstance(listed_metadata, dict) and isinstance(item_metadata, dict)
+            if listed_metadata.get("uid") != item_metadata.get("uid"):
+                raise RuntimeError("protected staging capacity database bootstrap changed")
+        evidence_digest = _hash_json(
+            {
+                "direct": direct_digests,
+                "inventory": hashlib.sha256(inventory).hexdigest(),
+            }
+        )
+        if not observed:
+            return observed, evidence_digest, True
         comparison_manifest = _manifest_with_observed_cleanup_labels(manifest, observed)
         status = self.runner.run_status(
             (
@@ -588,13 +699,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             input_payload=comparison_manifest,
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
-        if status != 0:
-            state = _ResourceState.DRIFTED
-        elif failed:
-            state = _ResourceState.FAILED
-        else:
-            state = _ResourceState.EXACT
-        return state, hashlib.sha256(inventory).hexdigest()
+        return observed, evidence_digest, status == 0
 
     def _delete_bootstrap_resources(
         self,
@@ -670,49 +775,9 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         self,
         manifest: bytes,
     ) -> dict[str, dict[str, object]]:
-        expected = _manifest_resources(manifest)
-        inventory = self.runner.capture_stdout(
-            (
-                "kubectl",
-                "--namespace",
-                _NAMESPACE,
-                "get",
-                "secret,job",
-                f"--selector={_COMPONENT_LABEL}={_COMPONENT_LABEL_VALUE}",
-                "--output=json",
-                f"--request-timeout={_REQUEST_TIMEOUT}",
-            ),
-            env=self.runner.environment,
-            timeout_seconds=_QUERY_TIMEOUT_SECONDS,
-        )
-        try:
-            document = json.loads(inventory, object_pairs_hook=_reject_duplicate_keys)
-        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
-            raise ValueError("protected staging capacity database inventory is invalid") from exc
-        if not isinstance(document, dict) or not isinstance(document.get("items"), list):
-            raise ValueError("protected staging capacity database inventory is invalid")
-        observed: dict[str, dict[str, object]] = {}
-        for item in document["items"]:
-            if not isinstance(item, dict) or not isinstance(item.get("metadata"), dict):
-                raise ValueError("protected staging capacity database resource is invalid")
-            metadata = item["metadata"]
-            kind = item.get("kind")
-            if (
-                kind not in {"Secret", "Job"}
-                or (kind, metadata.get("namespace"), metadata.get("name"))
-                not in {
-                    ("Secret", _NAMESPACE, _NAME),
-                    ("Job", _NAMESPACE, _NAME),
-                }
-                or kind in observed
-                or _resource_projection(item) != _resource_projection(expected[str(kind)])
-            ):
-                raise RuntimeError("protected staging capacity database bootstrap drifted")
-            if not isinstance(metadata.get("uid"), str) or not isinstance(
-                metadata.get("resourceVersion"), str
-            ):
-                raise RuntimeError("protected staging capacity database bootstrap identity drifted")
-            observed[str(kind)] = item
+        observed, _evidence_digest, exact = self._inventory_bootstrap_resources(manifest)
+        if not exact:
+            raise RuntimeError("protected staging capacity database bootstrap drifted")
         return observed
 
     def _wait_for_bootstrap_job(self, plan: FinalGatePlan, manifest: bytes) -> None:
@@ -826,12 +891,12 @@ BEGIN
     END IF;
 END
 $loom$;
-ALTER ROLE loom_cap_staging_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-ALTER ROLE loom_cap_staging_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-ALTER ROLE loom_cap_staging_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-ALTER ROLE loom_cap_staging_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-ALTER ROLE loom_cap_staging_observer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-ALTER ROLE loom_cap_staging_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+ALTER ROLE loom_cap_staging_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_observer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
 ALTER ROLE loom_cap_staging_owner RESET ALL;
 ALTER ROLE loom_cap_staging_migrator RESET ALL;
 ALTER ROLE loom_cap_staging_agent RESET ALL;
@@ -1000,20 +1065,149 @@ COMMIT;
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
 
-    def _seal_transient_migrator(self, *, preserve_runtime_credentials: bool = True) -> None:
-        runtime_credential_sql = (
-            """
-        ALTER ROLE loom_cap_staging_agent LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';
-        ALTER ROLE loom_cap_staging_observer LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';
-        ALTER ROLE loom_cap_staging_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';
-"""
+    def _disable_transient_credentials(self, *, preserve_runtime_credentials: bool) -> None:
+        runtime_sql = (
+            ""
             if preserve_runtime_credentials
             else """
-        ALTER ROLE loom_cap_staging_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-        ALTER ROLE loom_cap_staging_observer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-        ALTER ROLE loom_cap_staging_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_agent') THEN
+        ALTER ROLE loom_cap_staging_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_observer') THEN
+        ALTER ROLE loom_cap_staging_observer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_runtime') THEN
+        ALTER ROLE loom_cap_staging_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+    END IF;
 """
         )
+        payload = f"""\
+BEGIN;
+DO $loom$
+BEGIN
+    IF current_user <> 'postgres'
+       OR NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_roles
+           WHERE rolname = current_user AND rolsuper
+       ) THEN
+        RAISE EXCEPTION 'protected staging capacity seal authority is invalid';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_migrator') THEN
+        ALTER ROLE loom_cap_staging_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+    END IF;
+{runtime_sql}
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_owner') THEN
+        ALTER ROLE loom_cap_staging_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_executor') THEN
+        ALTER ROLE loom_cap_staging_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
+    END IF;
+END
+$loom$;
+COMMIT;
+""".encode()
+        self._run_peer_payload(payload)
+
+    def _terminate_transient_sessions(self, *, preserve_runtime_credentials: bool) -> None:
+        session_roles = (
+            "'loom_cap_staging_migrator'"
+            if preserve_runtime_credentials
+            else (
+                "'loom_cap_staging_migrator', 'loom_cap_staging_agent', "
+                "'loom_cap_staging_observer', 'loom_cap_staging_runtime'"
+            )
+        )
+        payload = f"""\
+BEGIN;
+DO $loom$
+BEGIN
+    PERFORM pg_catalog.pg_terminate_backend(pid)
+    FROM pg_catalog.pg_stat_activity
+    WHERE usename = ANY(ARRAY[{session_roles}])
+      AND pid <> pg_catalog.pg_backend_pid();
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_stat_activity
+        WHERE usename = ANY(ARRAY[{session_roles}])
+          AND pid <> pg_catalog.pg_backend_pid()
+    ) THEN
+        RAISE EXCEPTION 'protected staging capacity transient sessions remain';
+    END IF;
+END
+$loom$;
+COMMIT;
+""".encode()
+        self._run_peer_payload(payload)
+
+    def _remove_transient_authority(self) -> None:
+        payload = b"""\
+BEGIN;
+DO $loom$
+DECLARE
+    granted_name text;
+    member_name text;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_migrator'
+    ) THEN
+        REVOKE ALL PRIVILEGES ON DATABASE loom FROM loom_cap_staging_migrator;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_owner'
+    ) THEN
+        REVOKE CREATE ON DATABASE loom FROM loom_cap_staging_owner;
+    END IF;
+    FOR granted_name, member_name IN
+        SELECT granted.rolname, member.rolname
+        FROM pg_catalog.pg_auth_members AS membership
+        JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+        JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+        WHERE member.rolname = ANY(ARRAY[
+            'loom_cap_staging_owner',
+            'loom_cap_staging_migrator',
+            'loom_cap_staging_agent',
+            'loom_cap_staging_executor',
+            'loom_cap_staging_observer',
+            'loom_cap_staging_runtime'
+        ])
+        OR granted.rolname = ANY(ARRAY[
+            'loom_cap_staging_owner',
+            'loom_cap_staging_migrator',
+            'loom_cap_staging_agent',
+            'loom_cap_staging_executor',
+            'loom_cap_staging_observer',
+            'loom_cap_staging_runtime'
+        ])
+    LOOP
+        EXECUTE format('REVOKE %I FROM %I', granted_name, member_name);
+    END LOOP;
+END
+$loom$;
+COMMIT;
+"""
+        self._run_peer_payload(payload)
+
+    def _verify_transient_authority_sealed(
+        self,
+        *,
+        preserve_runtime_credentials: bool,
+        durable_runtime_credentials: bool,
+    ) -> None:
+        if not preserve_runtime_credentials:
+            runtime_condition = """
+                rolcanlogin OR rolinherit OR rolpassword IS NOT NULL
+                OR rolvaliduntil IS DISTINCT FROM 'infinity'::timestamptz
+"""
+        elif durable_runtime_credentials:
+            runtime_condition = """
+                NOT rolcanlogin OR rolinherit OR rolpassword IS NULL
+                OR rolvaliduntil IS DISTINCT FROM 'infinity'::timestamptz
+"""
+        else:
+            runtime_condition = """
+                NOT rolcanlogin OR rolinherit OR rolpassword IS NULL
+                OR rolvaliduntil IS NULL OR rolvaliduntil <= CURRENT_TIMESTAMP
+                OR rolvaliduntil >= 'infinity'::timestamptz
+"""
         session_roles = (
             "'loom_cap_staging_migrator'"
             if preserve_runtime_credentials
@@ -1026,90 +1220,115 @@ COMMIT;
 BEGIN;
 DO $loom$
 DECLARE
-    granted_name text;
-    member_name text;
+    protected_names text[] := ARRAY[
+        'loom_cap_staging_owner',
+        'loom_cap_staging_migrator',
+        'loom_cap_staging_agent',
+        'loom_cap_staging_executor',
+        'loom_cap_staging_observer',
+        'loom_cap_staging_runtime'
+    ];
+    protected_count integer;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_migrator'
-    ) THEN
-        ALTER ROLE loom_cap_staging_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL VALID UNTIL 'infinity';
-{runtime_credential_sql}
-        ALTER ROLE loom_cap_staging_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-        ALTER ROLE loom_cap_staging_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
-        PERFORM pg_catalog.pg_terminate_backend(pid)
-        FROM pg_catalog.pg_stat_activity
-        WHERE usename = ANY(ARRAY[{session_roles}])
-          AND pid <> pg_catalog.pg_backend_pid();
-        IF EXISTS (
-            SELECT 1
-            FROM pg_catalog.pg_stat_activity
-            WHERE usename = ANY(ARRAY[{session_roles}])
-              AND pid <> pg_catalog.pg_backend_pid()
-        ) THEN
-            RAISE EXCEPTION 'protected staging capacity transient sessions remain';
-        END IF;
-        REVOKE ALL PRIVILEGES ON DATABASE loom FROM loom_cap_staging_migrator;
-        IF EXISTS (
-            SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_owner'
-        ) THEN
-            REVOKE CREATE ON DATABASE loom FROM loom_cap_staging_owner;
-        END IF;
-        FOR granted_name, member_name IN
-            SELECT granted.rolname, member.rolname
-            FROM pg_catalog.pg_auth_members AS membership
-            JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
-            JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
-            WHERE member.rolname = ANY(ARRAY[
-                'loom_cap_staging_owner',
-                'loom_cap_staging_migrator',
+    SELECT count(*) INTO protected_count
+    FROM pg_catalog.pg_authid WHERE rolname = ANY(protected_names);
+    IF protected_count NOT IN (0, 6) THEN
+        RAISE EXCEPTION 'protected staging capacity transient authority is not sealed';
+    END IF;
+    IF protected_count = 6 AND (
+        NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_authid
+            WHERE rolname = 'loom_cap_staging_migrator'
+              AND NOT rolcanlogin AND rolinherit AND NOT rolsuper
+              AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+              AND NOT rolbypassrls AND rolpassword IS NULL
+              AND rolvaliduntil = 'infinity'::timestamptz
+        )
+        OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_authid
+            WHERE rolname IN ('loom_cap_staging_owner', 'loom_cap_staging_executor')
+              AND (
+                  rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole
+                  OR rolreplication OR rolbypassrls OR rolpassword IS NOT NULL
+                  OR rolvaliduntil IS DISTINCT FROM 'infinity'::timestamptz
+              )
+        )
+        OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_authid
+            WHERE rolname IN (
                 'loom_cap_staging_agent',
-                'loom_cap_staging_executor',
                 'loom_cap_staging_observer',
                 'loom_cap_staging_runtime'
-            ])
-            OR granted.rolname = ANY(ARRAY[
-                'loom_cap_staging_owner',
-                'loom_cap_staging_migrator',
-                'loom_cap_staging_agent',
-                'loom_cap_staging_executor',
-                'loom_cap_staging_observer',
-                'loom_cap_staging_runtime'
-            ])
-        LOOP
-            EXECUTE format(
-                'REVOKE %I FROM %I',
-                granted_name,
-                member_name
-            );
-        END LOOP;
-        IF EXISTS (
+            )
+              AND (
+                  rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
+                  OR ({runtime_condition})
+              )
+        )
+        OR EXISTS (
             SELECT 1 FROM pg_catalog.pg_auth_members AS membership
             JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
             JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
-            WHERE member.rolname = ANY(ARRAY[
-                'loom_cap_staging_owner',
-                'loom_cap_staging_migrator',
-                'loom_cap_staging_agent',
-                'loom_cap_staging_executor',
-                'loom_cap_staging_observer',
-                'loom_cap_staging_runtime'
-            ])
-            OR granted.rolname = ANY(ARRAY[
-                'loom_cap_staging_owner',
-                'loom_cap_staging_migrator',
-                'loom_cap_staging_agent',
-                'loom_cap_staging_executor',
-                'loom_cap_staging_observer',
-                'loom_cap_staging_runtime'
-            ])
-        ) THEN
-            RAISE EXCEPTION 'protected staging capacity transient memberships remain';
-        END IF;
+            WHERE member.rolname = ANY(protected_names)
+               OR granted.rolname = ANY(protected_names)
+        )
+        OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_stat_activity
+            WHERE usename = ANY(ARRAY[{session_roles}])
+              AND pid <> pg_catalog.pg_backend_pid()
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_database AS database
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))
+            ) AS privilege
+            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
+            WHERE database.datname = 'loom'
+              AND grantee.rolname = 'loom_cap_staging_migrator'
+        )
+        OR pg_catalog.has_database_privilege(
+            'loom_cap_staging_owner', 'loom', 'CREATE'
+        )
+    ) THEN
+        RAISE EXCEPTION 'protected staging capacity transient authority is not sealed';
     END IF;
 END
 $loom$;
 COMMIT;
 """.encode()
+        self._run_peer_payload(payload)
+
+    def _finalize_runtime_credentials(self) -> None:
+        payload = b"""\
+BEGIN;
+ALTER ROLE loom_cap_staging_agent LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_observer LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';
+COMMIT;
+"""
+        self._run_peer_payload(payload)
+
+    def _seal_transient_migrator(self, *, preserve_runtime_credentials: bool = True) -> None:
+        self._disable_transient_credentials(
+            preserve_runtime_credentials=preserve_runtime_credentials
+        )
+        self._terminate_transient_sessions(
+            preserve_runtime_credentials=preserve_runtime_credentials
+        )
+        self._remove_transient_authority()
+        self._verify_transient_authority_sealed(
+            preserve_runtime_credentials=preserve_runtime_credentials,
+            durable_runtime_credentials=not preserve_runtime_credentials,
+        )
+        if preserve_runtime_credentials:
+            self._finalize_runtime_credentials()
+            self._verify_transient_authority_sealed(
+                preserve_runtime_credentials=True,
+                durable_runtime_credentials=True,
+            )
+
+    def _run_peer_payload(self, payload: bytes) -> None:
         self.runner.run_checked(
             _PEER_PSQL_COMMAND,
             env=self.runner.environment,
@@ -1377,11 +1596,21 @@ def staging_database_protected_admission_digest_for_candidate(
     )
 
 
-def _expected_roles() -> dict[str, dict[str, object]]:
-    def role(*, login: bool, inherit: bool, password: bool) -> dict[str, object]:
+def _expected_roles(
+    *,
+    runtime_credential_validity: str = "infinite",
+) -> dict[str, dict[str, object]]:
+    def role(
+        *,
+        login: bool,
+        inherit: bool,
+        password: bool,
+        credential_validity: str = "infinite",
+    ) -> dict[str, object]:
         return {
             "bypass_rls": False,
             "can_login": login,
+            "credential_validity": credential_validity,
             "create_db": False,
             "create_role": False,
             "has_password": password,
@@ -1395,12 +1624,27 @@ def _expected_roles() -> dict[str, dict[str, object]]:
         staging_capacity_identity()
     )
     return {
-        agent: role(login=True, inherit=False, password=True),
+        agent: role(
+            login=True,
+            inherit=False,
+            password=True,
+            credential_validity=runtime_credential_validity,
+        ),
         executor: role(login=False, inherit=False, password=False),
         migrator: role(login=False, inherit=True, password=False),
-        observer: role(login=True, inherit=False, password=True),
+        observer: role(
+            login=True,
+            inherit=False,
+            password=True,
+            credential_validity=runtime_credential_validity,
+        ),
         owner: role(login=False, inherit=False, password=False),
-        runtime: role(login=True, inherit=False, password=True),
+        runtime: role(
+            login=True,
+            inherit=False,
+            password=True,
+            credential_validity=runtime_credential_validity,
+        ),
     }
 
 

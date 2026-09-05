@@ -167,7 +167,12 @@ def _migration_url_with_passfile(migrator_url: str) -> tuple[str, int]:
     fd = _private_passfile_fd()
     try:
         os.fchmod(fd, 0o600)
-        os.write(fd, payload)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("protected capacity migration passfile write made no progress")
+            remaining = remaining[written:]
         os.lseek(fd, 0, os.SEEK_SET)
         query = dict(parsed.query)
         query["passfile"] = f"/proc/self/fd/{fd}"
