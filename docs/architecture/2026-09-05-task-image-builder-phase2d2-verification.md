@@ -114,6 +114,40 @@ output. Missing evidence cannot be represented as invented digests. Scratch
 builds have an explicitly empty observed set. Metadata remains build evidence,
 not an assertion that arbitrary network inputs were reproducible.
 
+The pinned runtime will emit opt-in exporter metadata under
+`loom.task-image-base-resolution.v1`, requested only by the trusted supervisor
+with `loom.capture-base-resolution=v1` and the fixed `dockerfile.v0` frontend.
+Its JSON object has exactly `schema` (`loom.task-image-base-resolution/v1`),
+`solve_ref`, `platform`, `output_digest`, and `observed_base_digests`. The runtime
+collects successful image-source resolutions across that solve's provenance
+bridges, even when the result has no filesystem reference, and emits a sorted
+unique list of SHA-256 digests. Empty means observed no image sources in that
+successful solve, not absence of a history record. The reserved response field
+is installed after frontend metadata copying; request/frontend metadata cannot
+choose its contents. Missing/unknown opt-in versions or unsupported frontends
+do not yield this evidence. Invalid observed digests or exceeded bounds fail
+the opted-in solve closed rather than dropping observations.
+
+Frontend identity is checked against the solver's recorded frontend request,
+not merely the outer client envelope: pinned `buildctl` intentionally clears
+the outer frontend while invoking `dockerfile.v0` through its gateway API.
+The empty gateway envelope alone is not evidence of an accepted frontend.
+Absent, ambiguous or unsupported recorded frontend paths cannot produce this
+record; tests must cover the real gateway-driven exporter flow.
+
+The response uses BuildKit's base64 JSON carrier, so `--metadata-file` exposes
+the record as a JSON object. Decoded metadata is bounded to 16 KiB, at most 128
+unique image digests, 4,096 raw resolution observations and 4,096 visited
+provenance bridges; solve references are 1–128 ASCII alphanumeric,
+underscore or hyphen characters, starting alphanumeric. Platform is exactly
+`linux/amd64` or `linux/arm64`. The supervisor must compare solve reference with
+its own `--ref-file`, platform with its frozen plan, and output digest with its
+exported OCI root. It captures bounded metadata through the existing contained
+launcher before executor cleanup, emits no raw source/history/log/host-statistics
+payload, and supplies same-attempt evidence to the authority's fixed operation.
+This runtime extension and its consumers require real exporter tests and new
+deterministic dual-architecture release hashes before composition.
+
 Production signing authority resides behind a dedicated host signing service or
 KMS/HSM; private keys do not enter the allocation or an authority HTTP request.
 Test signers use generated keys only. Key records distinguish active,
