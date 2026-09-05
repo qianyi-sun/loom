@@ -19,6 +19,27 @@ from loom_task_image_authority.oci_verification import (
 OCI = "application/vnd.oci.image."
 DOCKER = "application/vnd.docker.distribution."
 
+# Exact bytes from the pinned v0.32.2-loom.1 OCI exporter for FROM scratch + LABEL.
+# Independent exporter digests and sizes are asserted by the acceptance test.
+SCRATCH_CONFIG = (
+    b'{"architecture":"amd64","config":{"Env":["PATH=/usr/local/sbin:/usr/local/bin:'
+    b'/usr/sbin:/usr/bin:/sbin:/bin"],"WorkingDir":"/","Labels":'
+    b'{"loom.metadata-probe":"scratch"}},"created":null,"history":'
+    b'[{"created_by":"LABEL loom.metadata-probe=scratch","comment":'
+    b'"buildkit.dockerfile.v0","empty_layer":true}],"os":"linux",'
+    b'"rootfs":{"type":"layers","diff_ids":null}}'
+)
+SCRATCH_MANIFEST = b"""{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:bca44aac00510a017b2bdf51659857715fb6df19802e8a7e8e340f6cacbeca92",
+    "size": 359
+  },
+  "layers": null
+}"""
+
 
 class Reader:
     def __init__(self) -> None:
@@ -104,6 +125,100 @@ def _graph(
         media,
     )
     return reader, index, layer
+
+
+async def test_verifies_exact_buildkit_empty_scratch_export_without_rewriting_bytes() -> None:
+    reader = Reader()
+    config = reader.put(SCRATCH_CONFIG, OCI + "config.v1+json")
+    root = reader.put(SCRATCH_MANIFEST, OCI + "manifest.v1+json")
+    result = await verify_oci_graph(reader, root, "linux/amd64")
+    assert result.root.digest == (
+        "sha256:b6ec3b0cc39f2c4050beca5bc232260a4a09925ac19bfaac80e830066b5b1297"
+    )
+    assert result.root.size == 288
+    assert result.manifest == result.root
+    assert result.config.digest == (
+        "sha256:bca44aac00510a017b2bdf51659857715fb6df19802e8a7e8e340f6cacbeca92"
+    )
+    assert result.config.size == 359
+    assert result.total_bytes == 647
+    assert result.layers == ()
+    assert reader.requests == [("manifest", root.digest), ("blob", config.digest)]
+    assert reader.closed == [root.digest, config.digest]
+
+
+@pytest.mark.parametrize("layers", [None, []])
+@pytest.mark.parametrize("diff_ids", [None, []])
+async def test_empty_graph_accepts_explicit_null_or_empty_arrays(
+    layers: list[object] | None,
+    diff_ids: list[object] | None,
+) -> None:
+    reader = Reader()
+    config_doc = json.loads(SCRATCH_CONFIG)
+    config_doc["rootfs"]["diff_ids"] = diff_ids
+    config = reader.put(config_doc, OCI + "config.v1+json")
+    manifest = json.loads(SCRATCH_MANIFEST)
+    manifest["config"] = _descriptor(config)
+    manifest["layers"] = layers
+    root = reader.put(manifest, OCI + "manifest.v1+json")
+    result = await verify_oci_graph(reader, root, "linux/amd64")
+    assert result.layers == ()
+    assert result.root == root
+    assert result.config == config
+
+
+@pytest.mark.parametrize("field", ["layers", "diff_ids"])
+@pytest.mark.parametrize("value", ["missing", False, 0, "", {}, [None]])
+async def test_empty_graph_still_requires_explicit_typed_layer_lists(
+    field: str,
+    value: object,
+) -> None:
+    reader = Reader()
+    config_doc = json.loads(SCRATCH_CONFIG)
+    manifest = json.loads(SCRATCH_MANIFEST)
+    target = manifest if field == "layers" else config_doc["rootfs"]
+    if value == "missing":
+        del target[field]
+    else:
+        target[field] = value
+    config = reader.put(config_doc, OCI + "config.v1+json")
+    manifest["config"] = _descriptor(config)
+    root = reader.put(manifest, OCI + "manifest.v1+json")
+    with pytest.raises(OCIVerificationError, match="invalid OCI graph schema"):
+        await verify_oci_graph(reader, root, "linux/amd64")
+
+
+@pytest.mark.parametrize("empty_side", ["layers", "diff_ids"])
+async def test_null_layer_list_cannot_discard_nonempty_counterpart(empty_side: str) -> None:
+    reader, original, _ = _graph()
+    manifest = json.loads(reader.objects[original.digest])
+    if empty_side == "layers":
+        manifest["layers"] = None
+    else:
+        config_doc = json.loads(reader.objects[manifest["config"]["digest"]])
+        config_doc["rootfs"]["diff_ids"] = None
+        config = reader.put(config_doc, OCI + "config.v1+json")
+        manifest["config"] = _descriptor(config)
+    root = reader.put(manifest, OCI + "manifest.v1+json")
+    with pytest.raises(OCIVerificationError, match="OCI rootfs layer mismatch"):
+        await verify_oci_graph(reader, root, "linux/amd64")
+
+
+@pytest.mark.parametrize("mutation", ["digest", "size", "subject"])
+async def test_empty_graph_retains_descriptor_and_unknown_field_checks(mutation: str) -> None:
+    reader = Reader()
+    config = reader.put(SCRATCH_CONFIG, OCI + "config.v1+json")
+    manifest = json.loads(SCRATCH_MANIFEST)
+    if mutation == "digest":
+        reader.objects[config.digest] = SCRATCH_CONFIG.replace(b"scratch", b"altered")
+    elif mutation == "size":
+        manifest["config"]["size"] += 1
+    else:
+        manifest["subject"] = None
+    root = reader.put(manifest, OCI + "manifest.v1+json")
+    with pytest.raises(OCIVerificationError):
+        await verify_oci_graph(reader, root, "linux/amd64")
+    assert reader.closed == [digest for _, digest in reader.requests]
 
 
 @pytest.mark.parametrize("arch", ["amd64", "arm64"])

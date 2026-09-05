@@ -57,6 +57,10 @@ a direct OCI manifest, so this restriction accepts its complete production
 output without guessing how to interpret provenance. Config rootfs type and
 diff-ID cardinality must match the layer list. This checks structure; compressed
 blob hashes, rather than decompressed diff-ID verification, bind execution bytes.
+For empty images, BuildKit's explicit `null` spelling of manifest `layers` and
+config `rootfs.diff_ids` is accepted as an empty list. Both fields remain required;
+null cannot match a nonempty counterpart, and hashes/sizes bind the original
+unmodified bytes. No other JSON or signed-publication null rule is relaxed.
 
 Default ceilings: 4 MiB per JSON document, 128 layers, 256 descriptors, 100 GiB
 total declared/read graph bytes, 1 MiB per input chunk, depth 32. Limits may be

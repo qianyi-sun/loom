@@ -11,7 +11,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, fields
 from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 _OCI = "application/vnd.oci.image."
 _DOCKER = "application/vnd.docker.distribution."
@@ -121,17 +121,25 @@ class _Index(_ClosedModel):
     annotations: dict[str, str] = Field(default_factory=dict)
 
 
+def _empty_array_from_null(value: Any) -> Any:
+    # BuildKit encodes empty Go slices as null. This is used only for the two
+    # explicit layer lists; missing fields and every other type still reject.
+    return [] if value is None else value
+
+
 class _Manifest(_ClosedModel):
     schema_version: int = Field(alias="schemaVersion", ge=2, le=2)
     media_type: str = Field(alias="mediaType")
     config: _Descriptor
-    layers: Annotated[list[_Descriptor], Field(max_length=128)]
+    layers: Annotated[
+        list[_Descriptor], Field(max_length=128), BeforeValidator(_empty_array_from_null)
+    ]
     annotations: dict[str, str] = Field(default_factory=dict)
 
 
 class _RootFS(_ClosedModel):
     type: Literal["layers"]
-    diff_ids: Annotated[list[str], Field(max_length=128)]
+    diff_ids: Annotated[list[str], Field(max_length=128), BeforeValidator(_empty_array_from_null)]
 
 
 class _Config(_ClosedModel):
