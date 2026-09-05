@@ -781,9 +781,9 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
     """Run the exact two-sandbox gVisor KVM probe and return a public receipt."""
     created: list[tuple[str, str, str]] = []
     verified_absent: list[tuple[str, str, str]] = []
-    invocation = uuid.uuid4().hex
     stage = "preconditions"
     try:
+        invocation = uuid.uuid4().hex
         for endpoint, kind, name in (
             (_NATIVE_ENDPOINT, "network", _NETWORK_NAME),
             (_NATIVE_ENDPOINT, "network", _DENIED_NETWORK_NAME),

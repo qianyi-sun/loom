@@ -746,6 +746,23 @@ def test_failure_exposes_only_fixed_conformance_stage(
     assert "private registry token" not in str(raised.value)
 
 
+def test_failure_before_first_probe_is_secret_safe_preconditions_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches invocation identity generation escaping the fixed stage boundary."""
+    monkeypatch.setattr(
+        conformance.uuid,
+        "uuid4",
+        lambda: (_ for _ in ()).throw(RuntimeError("private entropy detail")),
+    )
+
+    with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+        run_conformance(_inputs(), RecordingDockerRunner())
+
+    assert raised.value.stage == "preconditions"
+    assert "private entropy detail" not in str(raised.value)
+
+
 def test_conformance_error_rejects_unallowlisted_stage() -> None:
     with pytest.raises(ValueError, match="conformance stage is invalid"):
         ConformanceError("conformance failed", stage="private-registry-token")
