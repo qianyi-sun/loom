@@ -151,6 +151,21 @@ binds the durable distributed keyset version and revocation epoch; the final
 transaction rechecks both. Until the later keyset-distribution composition is
 available, production signing eligibility remains closed. Its only
 operation signs this schema/domain; it does not expose arbitrary-byte signing.
+The signed statement additionally binds `signing_key_id`,
+`distributed_keyset_version` and `revocation_epoch` alongside signer-stamped
+`issued_at`. A trusted distribution snapshot must bind current durable version,
+epoch and key membership, and have whole-second UTC issue/expiry times valid at
+signing and reply verification, with at most a fifteen-minute snapshot lifetime.
+This freshness ceiling is distinct from the future signed keyset's lifetime.
+Snapshot validity must also be bounded by the underlying authenticated keyset
+and distribution evidence: re-stamping old evidence with fresh local timestamps
+cannot extend trust, and refresh requires current valid authority.
+It is the output of the future authenticated
+signed-keyset/distribution adapter, never a caller assertion; no production
+adapter is composed by D2. Replies allow at most five seconds of signer-clock
+skew around the authority's request/receive interval, and signer I/O has a
+bounded deadline (five seconds by default, never over ten).
+
 The authority receives the complete canonical statement and signature envelope,
 checks the canonical bytes, exact unchanged unsigned input, statement digest,
 algorithm, pinned public key, activation interval and bounded clock skew, and
