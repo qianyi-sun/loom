@@ -751,6 +751,66 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
     assert "database.schema.revision" in check.spec.input_keys
 
 
+def test_external_supervisor_predecessor_remains_fresh_through_rehearsal_cleanup() -> None:
+    """Catch a detached rehearsal outliving its late prerequisite dependency."""
+    current_time = [datetime(2026, 9, 5, 2, 30, tzinfo=UTC)]
+    predecessor = build_external_supervisor_predecessor_check(
+        lambda _context: _external_supervisor_snapshots(_external_supervisor_snapshot())
+    )
+
+    def finish_slow_rehearsal(_context: CheckContext) -> CheckProbe:
+        current_time[0] += timedelta(seconds=121)
+        return CheckProbe(passed=True, evidence={"ready": True})
+
+    cleanup = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="rehearsal.cleanup",
+            failure_code="rehearsal.cleanup.failed",
+            tier=3,
+            stage=StageCapability.ISOLATED_REHEARSAL,
+            dependencies=("external-supervisor.predecessor",),
+            mutation_class=MutationClass.ISOLATED,
+            input_keys=("candidate.sha",),
+            evidence_schema=(EvidenceField("ready", "boolean"),),
+            timeout_seconds=3600,
+            freshness_ttl_seconds=3600,
+            remediation="clean the exact isolated rehearsal",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="test-v1",
+        operations={CheckOperation.PROBE: finish_slow_rehearsal},
+    )
+    deferred = build_execution_prerequisite_check(
+        lambda _lease: {},
+        lease=None,
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            **dict(_external_supervisor_context().bindings),
+            "namespace": "loom-staging",
+            "staging.mutation-epoch": 8,
+        }
+    )
+
+    executions = PreflightDag(
+        (
+            _passing_dependency("candidate.identity"),
+            _passing_dependency("systemd.user-manager"),
+            predecessor,
+            cleanup,
+            deferred,
+        ),
+        max_concurrency=1,
+        attested_dependencies=frozenset({"artifacts.publish"}),
+    ).run(context, through_tier=3, now=lambda: current_time[0])
+
+    execution = next(item for item in executions if item.check_id == "execution.prerequisites")
+    assert not execution.passed
+
+
 def test_registered_external_supervisor_predecessor_binds_every_controller() -> None:
     gb10 = _external_supervisor_snapshot()
     snapshots = _external_supervisor_snapshots(gb10)
