@@ -18,7 +18,11 @@ unsafe Slurm state, an active Loom job, missing resource data, high load, or
 insufficient free CPU/memory. While sizing an inactive, otherwise-safe node,
 the OLDLAB policy uses a tiny immediate Slurm probe of Linux `MemAvailable`,
 which includes safely reclaimable page cache. A probe that cannot run or
-returns malformed data falls back to `FreeMem` and remains closed. The worker
+returns malformed data now reports missing fresh probe evidence and admits no
+new slots, rather than falling back to `FreeMem`. The shared candidate/identity,
+freshness and cleanup contract is documented under
+[bounded memory observations](../../../docs/runbooks/remote-worker-pool.md#bounded-memory-observations).
+The worker
 setup guard also delays Docker setup and build work when I/O pressure, swap, or
 D-state process thresholds are unsafe.
 

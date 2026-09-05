@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from loom_control_plane import elastic_slurm_worker_controller as controller
+from loom_control_plane import slurm_memory_probe
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmNodeCapacityPlan,
@@ -53,6 +54,18 @@ def _config(**overrides: object) -> ElasticSlurmWorkerControllerConfig:
     }
     values.update(overrides)
     return ElasticSlurmWorkerControllerConfig(**values)  # type: ignore[arg-type]
+
+
+def _memory_probe_output(args: tuple[str, ...], node: str, available: int) -> str:
+    partition = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--partition="))
+    return f"v1|{args[-2]}|{node}|{partition}|trt-oldlab|||{os.geteuid()}|123|{args[-1]}|130000000|{available * 1024}|{node}\n"
+
+
+def _wire_memory_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run(args: tuple[str, ...], *, timeout: float) -> str:
+        return (await controller._run_command(args, timeout=timeout)).stdout
+
+    monkeypatch.setattr(slurm_memory_probe, "_run_probe", run)
 
 
 def test_decision_submits_missing_capacity_without_reusing_active_nodes() -> None:
@@ -227,11 +240,16 @@ async def test_node_state_admission_gates_memory_probe_and_worker_submission(
                 stderr="",
             )
         assert args[0] == "/usr/bin/srun"
-        return controller._CommandResult(stdout="100000\n", stderr="")
+        return controller._CommandResult(
+            stdout=_memory_probe_output(args, "oldlab-4", 100000), stderr=""
+        )
 
     monkeypatch.setattr(controller, "_run_command", fake_run_command)
     config = _config(
         allowed_nodes=("oldlab-4",),
+        partition="loom-staging",
+        candidate_sha="a" * 40,
+        slurm_cluster_name="trt-oldlab",
         resource_aware=True,
         probe_mem_available=True,
         srun_path="/usr/bin/srun",
@@ -242,6 +260,7 @@ async def test_node_state_admission_gates_memory_probe_and_worker_submission(
         max_concurrency_per_node=6,
     )
     runner = SubprocessSlurmCommandRunner().bind_config(config)
+    _wire_memory_probe(monkeypatch)
     resources = await runner.query_node_resources(("oldlab-4",))
     decision = compute_controller_decision(
         config,
@@ -260,7 +279,7 @@ async def test_node_state_admission_gates_memory_probe_and_worker_submission(
     )
 
     assert [command[0] for command in commands] == (
-        ["sinfo", "scontrol", "sinfo", "/usr/bin/srun"]
+        ["sinfo", "scontrol", "sinfo"] * 2 + ["/usr/bin/srun"] + ["sinfo", "scontrol", "sinfo"]
         if eligible
         else ["sinfo", "scontrol", "sinfo"]
     )
@@ -1380,13 +1399,17 @@ async def test_query_node_resources_probes_linux_available_memory_when_enabled(
                 stdout="oldlab-3|mixed|24|120000|50000|1.0|0/24/0/24\n",
                 stderr="",
             )
-        return controller._CommandResult(stdout="122915\n", stderr="")
+        return controller._CommandResult(
+            stdout=_memory_probe_output(args, "oldlab-3", 122915), stderr=""
+        )
 
     monkeypatch.setattr(controller, "_run_command", fake_run_command)
     runner = SubprocessSlurmCommandRunner().bind_config(
         _config(
             allowed_nodes=("oldlab-3",),
             partition="all",
+            candidate_sha="a" * 40,
+            slurm_cluster_name="trt-oldlab",
             resource_aware=True,
             reserved_memory_mib=20_480,
             memory_mib_per_slot=8192,
@@ -1395,18 +1418,21 @@ async def test_query_node_resources_probes_linux_available_memory_when_enabled(
         ),
     )
 
+    _wire_memory_probe(monkeypatch)
     resources = await runner.query_node_resources(("oldlab-3",))
 
     assert resources["oldlab-3"].free_memory_mib == 50_000
     assert resources["oldlab-3"].available_memory_mib == 122_915
-    assert [command[0] for command in commands] == ["sinfo", "scontrol", "sinfo", "/usr/bin/srun"]
-    probe = commands[3]
+    assert [command[0] for command in commands] == ["sinfo", "scontrol", "sinfo"] * 2 + [
+        "/usr/bin/srun"
+    ] + ["sinfo", "scontrol", "sinfo"]
+    probe = commands[6]
     assert "--nodelist=oldlab-3" in probe
     assert "--partition=all" in probe
     assert "--immediate=3" in probe
     assert "--chdir=/tmp" in probe
-    assert "--export=NIL" in probe
-    assert probe[-1] == "/proc/meminfo"
+    assert "--export=NONE" in probe
+    assert "/proc/meminfo" in probe[-4]
 
 
 @pytest.mark.parametrize(
@@ -1416,7 +1442,7 @@ async def test_query_node_resources_probes_linux_available_memory_when_enabled(
         FileNotFoundError("srun is unavailable"),
     ],
 )
-async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_error(
+async def test_query_node_resources_requires_fresh_evidence_on_probe_error(
     monkeypatch: pytest.MonkeyPatch,
     probe_error: OSError | RuntimeError,
 ) -> None:
@@ -1444,12 +1470,16 @@ async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_err
     monkeypatch.setattr(controller, "_run_command", fake_run_command)
     config = _config(
         allowed_nodes=("oldlab-3",),
+        partition="loom-staging",
+        candidate_sha="a" * 40,
+        slurm_cluster_name="trt-oldlab",
         resource_aware=True,
         reserved_memory_mib=20_480,
         memory_mib_per_slot=8192,
         probe_mem_available=True,
     )
     runner = SubprocessSlurmCommandRunner().bind_config(config)
+    _wire_memory_probe(monkeypatch)
 
     resources = await runner.query_node_resources(("oldlab-3",))
     decision = compute_controller_decision(
@@ -1470,7 +1500,7 @@ async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_err
 
     assert resources["oldlab-3"].available_memory_mib is None
     assert decision.submit_nodes == ()
-    assert decision.node_capacity["oldlab-3"].reason == "insufficient_memory"
+    assert decision.node_capacity["oldlab-3"].reason == "missing_fresh_memory_probe"
 
 
 async def test_query_node_resources_does_not_probe_linux_memory_when_disabled(
