@@ -23,10 +23,13 @@ Before each mutable operation, record all of the following in the owning issue:
 4. budget/alert status, cleanup deadline, destroy owner, and residual-cost list;
 5. explicit owner approval for that exact operation and cost envelope.
 
-The 2026-09-02 live development readback found a 200 non-GPU-vCPU quota. The
-accepted 200-concurrency target requires 512 vCPUs and 16 VMs in
-`eu-north1`; both quota changes must be accepted before the full-capacity run.
-Quota is an admission ceiling, not a reservation or proof of regional stock.
+The 2026-09-02 live development readback found a 200 non-GPU-vCPU quota;
+refresh it rather than treating that historical value as current. Per the
+2026-09-05 owner revision of #1538, acceptance ends at the maximum batch
+concurrency supported by the current account quota and accepted task resource
+profile. Neither 200 concurrent tasks nor the pending 512-vCPU / 16-VM request
+is a closure prerequisite. Quota is an admission ceiling, not a reservation or
+proof of regional stock.
 Refresh price and quota immediately before apply and retain the provider request
 IDs with the owning issue.
 
@@ -86,16 +89,25 @@ terraform -chdir=deploy/terraform/nebius/modules/execution-target test
 Copy the sole shared-cluster input and its existing backend anchor to a protected
 directory. Replace the placeholder tenant, project, globally unique bucket
 name, and state bucket; do not change topology fields without changing and
-reviewing the canonical topology contract. While the 512-vCPU request is
-pending, the committed active target is `0..8` regular `16vcpu-64gb` execution
-nodes with 64 Pods per node. Its 128-vCPU execution envelope supports 56
+reviewing the canonical topology contract. The committed active envelope is
+`0..8` regular `16vcpu-64gb` execution nodes with 64 Pods per node. Its 128-vCPU
+execution envelope supports 56
 concurrent 2-vCPU tasks while preserving 2 vCPUs and 8 GiB per node for
 platform overhead. This smaller node shape avoids depending on currently
 unavailable 32- and 48-vCPU regional inventory and consumes at most eight of
-the twelve existing VM slots. The requested target remains `0..10` at
-`48vcpu-192gb` and 200 concurrent tasks; move the committed active target only
-after the provider quota readback reaches 512 non-GPU vCPUs and 16 VM slots and
-the requested shape has regional inventory.
+the twelve historically available VM slots. The capacity policy also retains
+the historical expansion proposal (`0..10` at `48vcpu-192gb`, 200 tasks,
+512 vCPUs / 16 VMs). Those target fields are not an acceptance requirement and
+must not trigger expansion automatically.
+
+Before the final #1538 batch, retain a fresh quota snapshot and the derivation
+of its maximum: subtract existing shared-account usage and required system
+capacity, then account for VM, CPU, memory and disk limits and per-node
+allocatable overhead for the unchanged task profile. Change only Loom's exact
+execution envelope through reviewed configuration if the existing 56-task
+ceiling is below that maximum. Do not stop or resize other users' resources to
+recover headroom. Record physical stock separately; a smaller stock-limited
+wave is useful evidence but cannot silently replace the quota-derived target.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
@@ -172,9 +184,9 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
 1. Apply only `development-eu-north1` with the committed execution bounds, the
    pinned `16vcpu-64gb` shape, and 64 Pods per node. The current-inventory
    profile is `0..8` and requires readback of at least 200 non-GPU vCPUs and 12
-   VM slots. The requested 200-task profile is `0..10` at `48vcpu-192gb` and may
-   be committed only after readback reaches 512 non-GPU vCPUs, 16 VM slots,
-   and regional inventory for that shape.
+   VM slots, with sufficient remaining headroom after shared-account usage.
+   Reconcile any later envelope to the fresh quota-derived target through its
+   reviewed plan; do not wait for or activate the historical 200-task proposal.
 2. Prove Terraform convergence and cloud-side Ready/readback.
 3. Create only the development binding namespace with its canonical topology
    labels and install only its environment-local identities/policies.
@@ -189,14 +201,14 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    readback; then verify Job cleanup and execution-node scale-down to zero.
    A manually created Pod or manually patched Task binding is not evidence for
    this gate.
-7. Run staged true-overlap acceptance up to the capacity declared by
-   `accepted_concurrency`; for the current inventory use 1, 20, 40, then 56 active
-   execution units. After the quota-backed target changes to 200, use 1, 20,
-   50, 100, 150, then 200 active execution units. At every stage prove the
-   persisted concurrency seats,
-   simultaneous non-terminal Jobs/Pods, node-backed capacity, successful
+7. Establish the current-quota maximum as described above, then run bounded
+   increasing true-overlap stages ending at that target. The checked
+   `accepted_concurrency=56` policy currently produces stages 1, 20, 40, 56;
+   passing these proves that envelope, not that 56 is the account maximum.
+   At every stage prove the persisted concurrency seats, simultaneous running
+   Jobs/Pods, node-backed capacity, successful
    results, artifact digests, released seats, no orphan Jobs, and return to zero
-   execution nodes. Merely submitting 200 queued tasks does not pass. Stop,
+   execution nodes. Merely submitting a large queued batch does not pass. Stop,
    diagnose, and clean up before advancing after any failed stage.
 8. Create the separately reviewed staging/production bindings without traffic,
    then attempt cross-environment namespace, bucket-prefix, and credential
@@ -356,6 +368,33 @@ attached identity, rolls out Control Plane then Service, applies the idempotent
 runtime, and deletes the remote and local staging directories. No human Nebius
 token is copied to the gateway.
 
+## Canonical destination and staging attachment
+
+The owner-selected final canonical destination for #1765 is the existing live
+staging Loom database and object store. The development helper above is not a
+staging attachment or a data migration tool: its Control Plane, Service,
+Gateway and database assumptions remain Nebius-local. Keep development
+history intact and distinguish new staging work from any separately approved
+historical-data migration.
+
+The materializer accepts separate source and canonical ObjectStore instances,
+but current application startup binds both to the same configured store.
+Before calling external canonical persistence deployed, #1765 must add durable
+independent spool configuration, retain canonical Gateway input reads, and
+verify complete transfer and acknowledgement-gated GC across the two stores.
+Keep Pod-facing output ingestion inside Nebius: its peer-IP/lease check must
+not be bypassed by moving it behind an unrelated public proxy.
+
+Staging activation requires persistent, scoped connectivity for the Nebius
+actuator/Gateway to the single staging DB, Gateway to canonical inputs,
+staging Control Plane to the source spool, and collector to Control Plane.
+Do not substitute a temporary SSH tunnel or a copied personal login token.
+Use the protected staging render/install/broker lane for changes to existing
+staging services, and a separately scoped Nebius attachment for execution
+components. Read the current broker status and coordinate the request owner
+before any deployment; a failed backup must be resolved without skipping the
+mandatory pre-mutation backup or reusing another initiator's request.
+
 ## Automated staged acceptance
 
 After the exact protected candidate is deployed and the execution pool has
@@ -371,7 +410,6 @@ uv run --no-sync python scripts/ops/build_nebius_acceptance_taskset.py \
 
 loom eval nebius-acceptance \
   --taskset-dir /secure/path/nebius-acceptance-taskset \
-  --provider MODEL_PROVIDER_CONNECTION \
   --model MODEL_ID \
   --candidate-sha MERGED_DEV_SHA \
   --capacity-policy deploy/k8s/nebius-development-capacity-policy.json \
@@ -379,14 +417,23 @@ loom eval nebius-acceptance \
 ```
 
 The command uses the persisted `loom auth login` session and only normal user
-APIs. It uploads and waits for the ordinary TaskSet, runs stages
-`1,20,40,accepted_concurrency` for the current envelope (deduplicated), or
-`1,20,50,100,150,200` after the checked policy reaches 200. Stages above 100
-use multiple legal sampling combinations; queued or merely claimed Trials do
-not count as overlap. Each stage must observe the requested number of
-simultaneously running execution units, at least one real execution node, all
-canonical successes, source cleanup, and a return to zero nodes and zero slots
-before the next stage. The acceptance verifier intentionally holds each Pod for
+APIs. Omitting `--provider` uses the already configured Gateway model and needs
+only the user's `read:own,submit` scopes; it does not create a Provider
+Connection or require `providers:manage`. To select an existing connection,
+add `--provider MODEL_PROVIDER_CONNECTION` with a model available on that
+connection. Neither mode copies provider credentials into the acceptance bundle.
+
+It uploads and waits for the ordinary TaskSet, then runs bounded stages ending
+at `accepted_concurrency` (currently `1,20,40,56`, deduplicated). There is no
+fixed 200-task endpoint. Explicit repeated `--stage` values permit a smaller
+canary, but cannot prove the policy ceiling unless that ceiling actually runs.
+Stages above 100 use multiple legal sampling combinations. Monitor evidence
+comes from `service_execution.targets` and batch-scoped observed lease states,
+not `resources.pools` legacy workers or the top-level Trial `claimed` count.
+Each stage must observe the requested number of simultaneously running
+execution units backed by Ready nodes, all canonical successes, complete
+bundle downloads, and a return to zero execution nodes and drained compute
+demand before the next stage. The acceptance verifier intentionally holds each Pod for
 three minutes so scale-from-zero timing cannot make a fast model response hide
 the real-overlap measurement.
 
@@ -396,8 +443,41 @@ directory. The runner verifies the response digest, safe archive inventory,
 and the candidate frozen on the Batch. A timeout cancels the acceptance Batch
 best-effort so failed validation does not intentionally leave paid work
 running. The final `acceptance.json` and checksum sidecar contain sanitized
-Batch, lifecycle, node, overlap, and bundle evidence; no database, MinIO,
-kubectl, Nebius CLI, or hand-connected transfer is part of the test path.
+Batch, lifecycle, node, overlap, and bundle evidence. The canonical archive
+places execution payloads below `files/`, including
+`files/artifacts/answer.txt` and `files/trajectory/events.jsonl`; required-output
+validation uses those archive paths without dropping the full inventory or
+digest checks. `progress.json` retains completed stage and current Batch
+evidence if later validation fails. No database, MinIO, kubectl, Nebius CLI,
+or hand-connected transfer is part of the test path.
+
+`accepted=true` in `acceptance.json` means the requested batch/download/compute
+cleanup stages passed. `maximum_proven_concurrency` and
+`policy_ceiling_reached` describe only those observed stages;
+`quota_maximum_acceptance=not_evaluated` deliberately leaves the fresh
+account-quota derivation to the owning #1538 preflight. A configured 56-task
+ceiling is not independently a proof of the current account maximum.
+
+Source retention is a separate phase. A canonical-ready Trial can retain its
+source for the configured 86400-second recovery window while compute is zero
+and canonical downloads work. Immediate acceptance records each source cleanup
+state and retain-until timestamp, and reports `source_gc_complete=false` until
+GC is actually observed. Do not shorten retention, reset retries or rerun the
+model/verifier to make an immediate smoke appear fully garbage-collected.
+After the recorded recovery window, perform a read-only continuation into a
+new evidence directory:
+
+```bash
+loom eval nebius-acceptance \
+  --resume-cleanup /secure/path/nebius-acceptance-MERGED_DEV_SHA \
+  --output /secure/path/nebius-cleanup-MERGED_DEV_SHA
+```
+
+This continuation reads the saved acceptance identities and fresh ordinary
+user API state; it never submits or cancels a Batch, changes retention or
+deletes source objects. Exit status 2 means cleanup is still pending, not that
+GC passed; status 0 requires observed completion and a healthy zero-compute
+readback. Preserve the original bundle/evidence and each subsequent report.
 
 Normal convergence preserves the existing `loom-nebius-model-provider`
 Secret and hashes its current value into the Gateway rollout annotation
@@ -421,7 +501,7 @@ accepted Batch rather than from mutable deployment configuration.
 
 The operation is idempotent. It applies the development-only Control Plane
 patch that enables the `nebius-cpu` scheduler and loads its image-admission
-keyring from the existing Secret, converges the repository-owned current-56 / target-200
+keyring from the existing Secret, converges the repository-owned current-56
 capacity policy through the authenticated admin API, reuses the existing
 single-scope Loom collector token, applies the active actuator and one-minute
 collector, and waits for both rollouts plus a scheduled collector Job. The
@@ -430,8 +510,10 @@ manifest stays disabled. The operation does not create a user Job or change the
 node-group target count. Subsequent users only upload/submit through Loom; the
 persisted scheduler, lease/outbox, actuator, and managed autoscaler complete the
 connection automatically and return execution nodes to zero after demand
-drains. The applied bound is currently `0..8`; `0..10` is the checked target
-only after the 512-vCPU quota and 48-vCPU regional stock are confirmed.
+drains. The applied bound is currently `0..8`; the historical expansion target
+is inactive and is not required for current-quota acceptance. A higher accepted
+envelope requires a fresh quota/headroom readback and reviewed plan, not an
+edit to an acceptance report.
 
 The recurring capacity observation publishes desired, creating, ready, failed,
 and deleting execution-node counts together with its source timestamp. The Loom
@@ -473,9 +555,10 @@ evidence-writers group only through a reviewed target-local bootstrap change.
 
 - A cluster/node upgrade affects all three bindings. Disable new placement.
   The execution group deliberately uses `max_surge=0` and
-  `max_unavailable=1` so a rolling replacement cannot exceed the 512-vCPU
-  quota; record active-workload retry/drain evidence before restoring each
-  environment. The fixed system group retains its independent surge policy.
+  `max_unavailable=1` so execution-node replacement adds no surge demand above
+  the accepted quota envelope; record active-workload retry/drain evidence
+  before restoring each environment. The fixed system group retains its
+  independent surge policy.
 - Change only the shared cluster variable file per plan. Quota exhaustion must leave
   work queued and observable; never increase limits or swap to reserved/GPU
   capacity silently.
