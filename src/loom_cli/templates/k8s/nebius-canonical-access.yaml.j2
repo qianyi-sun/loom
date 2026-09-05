@@ -1,0 +1,44 @@
+{% if nebius_execution.enabled %}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-nebius-canonical-access
+spec:
+  podSelector:
+    matchLabels: { app: loom-control-plane }
+  policyTypes: [Egress]
+  egress:
+{% for target in nebius_source_egress_rules %}
+    - to:
+        - ipBlock:
+            cidr: {{ target.cidr }}
+      ports:
+        - { port: {{ target.port }}, protocol: TCP }
+{% endfor %}
+{% for name, label, value, port in [
+  ("control-plane", "app", "loom-control-plane", 8080),
+  ("minio", "app", "loom-minio", 9000),
+  ("postgres", "app", "loom-postgres", 5432),
+  ("postgres-cnpg", "cnpg.io/cluster", "loom-postgres", 5432),
+  ("pgbouncer", "app", "loom-pgbouncer", 6432)
+] %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-nebius-to-{{ name }}
+spec:
+  podSelector:
+    matchLabels:
+      {{ label }}: {{ value }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+{% for cidr in nebius_execution_ingress_cidrs %}
+        - ipBlock:
+            cidr: {{ cidr }}
+{% endfor %}
+      ports:
+        - { port: {{ port }}, protocol: TCP }
+{% endfor %}
+{% endif %}

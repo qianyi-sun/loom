@@ -24,6 +24,7 @@ from loom.db.schema_startup import assert_schema_at_head
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
+from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution_output import ServiceExecutionOutputRouteService
@@ -102,6 +103,8 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 
 def create_app(settings: GatewaySettings) -> FastAPI:
+    source_config = ServiceExecutionSourceConfig.from_settings(settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(
@@ -122,16 +125,20 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             secret_key=settings.minio_secret_key.get_secret_value(),
             region=settings.minio_region,
         )
+        source_store = (
+            source_config.build_store(MinioObjectStore) if source_config else artifact_store
+        )
+        source_bucket = source_config.bucket if source_config else settings.artifacts_bucket
         artifact_repository = SqlArtifactCommitRepository(
             session_factory=app.state.session_factory,
-            store=artifact_store,
-            bucket=settings.artifacts_bucket,
+            store=source_store,
+            bucket=source_bucket,
         )
         app.state.artifact_store = artifact_store
         app.state.service_execution_output_service = ServiceExecutionOutputRouteService(
             service=ArtifactCommitService(
-                store=artifact_store,
-                bucket=settings.artifacts_bucket,
+                store=source_store,
+                bucket=source_bucket,
                 repository=artifact_repository,
             ),
             session_factory=app.state.session_factory,

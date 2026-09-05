@@ -377,23 +377,194 @@ Gateway and database assumptions remain Nebius-local. Keep development
 history intact and distinguish new staging work from any separately approved
 historical-data migration.
 
-The materializer accepts separate source and canonical ObjectStore instances,
-but current application startup binds both to the same configured store.
-Before calling external canonical persistence deployed, #1765 must add durable
-independent spool configuration, retain canonical Gateway input reads, and
-verify complete transfer and acknowledgement-gated GC across the two stores.
-Keep Pod-facing output ingestion inside Nebius: its peer-IP/lease check must
-not be bypassed by moving it behind an unrelated public proxy.
+Independent source-store wiring and both sides' offline rendering are now
+implemented; they are not evidence of a live staging deployment. The staging
+Control Plane reads the Nebius spool and writes the existing canonical MinIO;
+the Nebius-local Gateway reads TaskSet inputs from canonical storage and commits
+execution outputs to the spool. Only staging PostgreSQL owns these new Trials,
+outbox claims and Artifact metadata. Keeping all source settings unset preserves
+the existing same-store development behavior; partial source configuration fails
+startup instead of silently using canonical credentials.
 
-Staging activation requires persistent, scoped connectivity for the Nebius
-actuator/Gateway to the single staging DB, Gateway to canonical inputs,
-staging Control Plane to the source spool, and collector to Control Plane.
-Do not substitute a temporary SSH tunnel or a copied personal login token.
-Use the protected staging render/install/broker lane for changes to existing
-staging services, and a separately scoped Nebius attachment for execution
-components. Read the current broker status and coordinate the request owner
-before any deployment; a failed backup must be resolved without skipping the
-mandatory pre-mutation backup or reusing another initiator's request.
+Keep the Pod-facing Gateway inside Nebius. Its peer-IP/lease check requires the
+direct observed Pod address, not the NAT address of the public staging ingress.
+The Gateway and actuator use separately provisioned staging database role
+references. Gateway provider connections remain in staging's existing encrypted
+secret store; this attachment does not introduce a copied user/provider login.
+
+### Canonical staging side: opt-in protected render
+
+The canonical render profile is
+`deploy/environments/staging.multinode.cluster.toml`, selected by
+`deploy/environments/staging.toml`. Its checked-in default remains disabled.
+An explicitly approved candidate may add the following complete table to that
+profile. The revision below and documentation-only IP addresses are examples,
+not live credentials, routes or acceptance evidence:
+
+```toml
+[nebius_execution]
+enabled = true
+source_secret_name = "loom-nebius-staging-spool"
+runtime_profile_secret_name = "loom-nebius-staging-runtime"
+image_admission_secret_name = "loom-nebius-staging-admission"
+configuration_revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source_egress_allowlist = ["192.0.2.3:9443"]
+execution_ingress_cidrs = ["192.0.2.16/32"]
+```
+
+All fields are required when enabled. Existing namespace-local Secrets must
+contain these exact keys; rendering neither reads their values nor creates them:
+
+| Profile reference | Required keys | Consumer |
+| --- | --- | --- |
+| `source_secret_name` | `endpoint`, `region`, `bucket`, `access-key`, `secret-key` | Control Plane `LOOM_CP_SERVICE_EXECUTION_SOURCE_*` |
+| `runtime_profile_secret_name` | `runtime-profile-json` | Service's signed automatic Nebius task profile |
+| `image_admission_secret_name` | `public-keys-json` | Control Plane's image-admission keyring |
+
+`configuration_revision` is a 64-character lowercase SHA-256 deployment revision
+stamped on both Control Plane and Service Pod templates. Advance it through the
+same supported deployment path whenever the referenced configuration or
+Secret-backed values change, so restarted processes consume the new values.
+Mounted source credential files are also supported by application settings, but
+are read at startup, not a promise of hot credential reload.
+
+The opt-in enables the `staging`/`nebius-cpu` scheduler and materializer without
+changing canonical DB/storage settings or Docker backend selection. The renderer
+adds Control Plane egress only to `source_egress_allowlist` IP/CIDR-and-port
+destinations, and ingress from `execution_ingress_cidrs` only to the selected
+Control Plane, MinIO, PostgreSQL/CNPG and PgBouncer workload ports. These policies
+do not create a WAN route, TLS endpoint or database role. Actuator/runtime images
+remain in the release image plan, but Nebius workloads are not deployed as
+standing workloads inside the staging cluster.
+
+### Nebius side: explicit staging attachment
+
+The following is a minimal complete `staging-attachment.json` render example.
+Every domain/IP/image digest is illustrative. Replace them with approved
+durable service routes and released image digests; Secret values must never be
+put in this file. Secret names and key names here are configurable references
+in `loom-nebius-staging`, not claims that those objects already exist.
+
+```json
+{
+  "schema_version": "loom.nebius-staging-attachment.v1",
+  "environment": "staging",
+  "target_id": "nebius-eu-north1-staging",
+  "namespace": "loom-nebius-staging",
+  "canonical_database": "loom_staging",
+  "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "local_providers_secret_name": "staging-local-providers",
+  "gateway_image": "registry.example/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "canonical": {
+    "endpoint": "https://canonical.example:9443",
+    "region": "us-east-1",
+    "artifacts_bucket": "loom-staging-artifacts",
+    "trajectories_bucket": "loom-staging-trajectories",
+    "db_secret": {"name": "staging-db", "gateway_key": "gw-url", "actuator_key": "actuator-url"},
+    "storage_secret": {"name": "canonical-storage", "access_key": "access", "secret_key": "secret"}
+  },
+  "source": {
+    "endpoint": "https://spool.example:9443",
+    "region": "eu-north1",
+    "bucket": "loom-staging-spool",
+    "credentials_secret": {"name": "spool-storage", "access_key": "access", "secret_key": "secret"}
+  },
+  "gateway_secret": {"name": "staging-gateway", "step_jwt_key": "signing", "master_key": "master"},
+  "collector": {
+    "control_plane_url": "https://cp.example:8443",
+    "token_secret": {"name": "staging-collector", "key": "token"},
+    "nebius_secret": {"name": "nebius-observer", "key": "credentials.json"}
+  },
+  "network": {
+    "database": [{"cidr": "192.0.2.1/32", "port": 5432}],
+    "canonical_store": [{"cidr": "192.0.2.2/32", "port": 9443}],
+    "source_store": [{"cidr": "192.0.2.3/32", "port": 9443}],
+    "control_plane": [{"cidr": "192.0.2.4/32", "port": 8443}],
+    "kubernetes_api": [{"cidr": "192.0.2.5/32", "port": 443}],
+    "provider_api": [{"cidr": "192.0.2.6/32", "port": 443}],
+    "model_api": [{"cidr": "192.0.2.7/32", "port": 443}]
+  }
+}
+```
+
+Render into a new directory with a separately reviewed staging capacity policy:
+
+```bash
+uv run --no-sync python scripts/ops/render_nebius_runtime.py \
+  --environment staging \
+  --image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-actuator@sha256:DIGEST \
+  --capacity-policy /secure/path/nebius-staging-capacity-policy.json \
+  --staging-attachment /secure/path/staging-attachment.json \
+  --output /secure/path/nebius-staging-render
+```
+
+Attachment mode renders only the Nebius-local Gateway, target-bound actuator and
+collector, scoped network policies and capacity/evidence files. It emits no
+Control Plane/Service patches, database, new canonical object store or Secret
+payloads. Collector cluster-role names are staging-specific to avoid replacing
+the existing development collector binding. Credential-bearing URLs, cross-env
+bindings, unpinned Gateway images, incomplete Secret references and unscoped routes fail
+before output is written. JSON Secret references are shape-checked only; actual
+Secret existence/content and network DNS resolution remain deployment checks.
+
+Use the same `configuration_revision` on both sides of the attachment. The
+Nebius renderer stamps it on Gateway/actuator Pod templates and collector Job
+and Pod templates. Rotating values under an unchanged Secret name requires a
+new revision and supported reconciliation: this rolls the long-lived consumers
+and makes subsequent collector Jobs consume the replacement values. Hashing
+only the attachment JSON cannot detect a same-name Secret value change, and
+updating a CronJob template does not restart a Job already in progress.
+
+`local_providers_secret_name` is a required, dedicated Nebius-namespace Secret
+containing only the existing `LOOM_GW_LOCAL_<NAME>_BASE_URL` and
+`LOOM_GW_LOCAL_<NAME>_API_KEY` entries needed for staging's operator-configured
+models such as `local/yibu/...`. Use an empty dedicated Secret when no local
+models are configured. Verify this key allowlist before deployment: the
+renderer reads no Secret payload. The reference is loaded through `envFrom`;
+DB, canonical/source storage and identity bindings stay explicit `env` entries,
+which take precedence over `envFrom`. No new JSON provider parser or raw API key
+in the attachment file is required. Provider configuration/value changes also
+advance the shared deployment revision. Gateway rollout preserves the existing
+300-second termination grace and local `/drain` pre-stop hook for long LLM calls.
+
+### Activation and acceptance boundary
+
+Before any activation, read the current protected broker status and coordinate
+its request owner. Resolve the mandatory-backup failure tracked by #1807 through
+its owning lane; do not skip backup, resume another initiator's request, or
+substitute the development gateway helper for protected staging deployment.
+This render work does not transfer rollout ownership or authorize production.
+
+Deployment preflight still must verify:
+
+- Actual referenced actuator/Gateway DSNs reach the existing `loom_staging`
+  database with the intended roles, TLS and schema/candidate; the JSON database
+  label is not proof of endpoint identity. Keep secrets out of evidence.
+- Persistent, scoped routes for Nebius actuator/Gateway to staging DB, Gateway
+  to canonical input storage and model providers, staging Control Plane to the
+  source spool, and collector to its authenticated Control Plane endpoint.
+  HTTPS origins, DNS addresses, NAT source CIDRs and policy ports must agree;
+  temporary SSH tunnels do not satisfy this prerequisite. Collector HTTPS
+  currently requires a system-trusted certificate; no private-CA mount is
+  supplied by this attachment.
+- Source credentials and bucket agree between staging Control Plane and the
+  Nebius Gateway. Keep source and canonical credentials independently scoped;
+  collector uses its durable service token and Nebius observer identity, not
+  an expiring personal CLI login. Verify authorized service-secret replacement
+  and restart/reconciliation procedures before calling access persistent.
+- Gateway master/step-signing keys match the staging identities, local model
+  routes are configured, and the collector token is issued by staging with
+  target-bound `execution:capacity:observe` scope. Development credentials are
+  not substitutes; compare identities without exposing secret values.
+- Runtime profile/admission keys and both clusters' image digests match the
+  reviewed release, the staging target has a quota-backed capacity policy, and
+  ordinary-user `backend=nebius` upload, full-bundle transfer/download and
+  acknowledgement-gated retention GC pass after execution returns to zero.
+
+Existing development rendering and historical results remain unchanged. This
+attachment starts new staging work; it neither copies old databases nor imports
+historical development Trials. Such a migration, if requested, needs its own
+explicit scope and reconciliation evidence.
 
 ## Automated staged acceptance
 
