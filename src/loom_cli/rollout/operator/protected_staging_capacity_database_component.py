@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -13,6 +14,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 import yaml  # type: ignore[import-untyped]
+from psycopg import sql
 from sqlalchemy import URL
 
 from loom.personal_dev_capacity_identity import (
@@ -43,6 +45,19 @@ _REQUEST_TIMEOUT = "60s"
 _QUERY_TIMEOUT_SECONDS = 30.0
 _MUTATION_TIMEOUT_SECONDS = 60.0
 _WAIT_TIMEOUT_SECONDS = 660.0
+_WAIT_SLICE_SECONDS = 5
+_PEER_PSQL_COMMAND = (
+    "kubectl",
+    "--namespace",
+    _NAMESPACE,
+    "exec",
+    "-i",
+    "service/loom-postgres-rw",
+    "--",
+    "sh",
+    "-ceu",
+    "exec psql -U postgres -d loom -qAtX -v ON_ERROR_STOP=1",
+)
 _REVISION_RE = re.compile(r"^guard_([0-9]{4})$")
 _REVISION_PRESENCE_SQL = single_line_sql(
     """
@@ -191,6 +206,7 @@ class _DatabaseState(StrEnum):
 class _ResourceState(StrEnum):
     ABSENT = "absent"
     EXACT = "exact"
+    FAILED = "failed"
     DRIFTED = "drifted"
 
 
@@ -240,44 +256,39 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         if before.database is _DatabaseState.DRIFTED or before.resources is _ResourceState.DRIFTED:
             raise RuntimeError("protected staging capacity database state drifted")
         if before.database is _DatabaseState.EXACT:
-            if before.resources is not _ResourceState.EXACT:
+            if before.resources not in {_ResourceState.EXACT, _ResourceState.FAILED}:
                 raise RuntimeError(
                     "protected staging capacity database state changed before cleanup"
                 )
             self._delete_bootstrap_resources()
         else:
-            if before.resources is _ResourceState.ABSENT:
-                self.runner.run_checked(
-                    (
-                        "kubectl",
-                        "--namespace",
-                        _NAMESPACE,
-                        "create",
-                        "--validate=strict",
-                        f"--request-timeout={_REQUEST_TIMEOUT}",
-                        "-f",
-                        "-",
-                    ),
-                    env=self.runner.environment,
-                    input_payload=payload,
-                    timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
-                )
-            elif before.resources is not _ResourceState.EXACT:
-                raise RuntimeError("protected staging capacity database bootstrap drifted")
-            self.runner.run_checked(
-                (
-                    "kubectl",
-                    "--namespace",
-                    _NAMESPACE,
-                    "wait",
-                    "--for=condition=complete",
-                    "--timeout=600s",
-                    f"job/{_NAME}",
-                ),
-                env=self.runner.environment,
-                input_payload=None,
-                timeout_seconds=_WAIT_TIMEOUT_SECONDS,
-            )
+            resources: _ResourceState = before.resources
+            if resources is _ResourceState.FAILED:
+                self._delete_bootstrap_resources()
+                resources = _ResourceState.ABSENT
+            try:
+                self._arm_transient_migrator(seed)
+                if resources is _ResourceState.ABSENT:
+                    self.runner.run_checked(
+                        (
+                            "kubectl",
+                            "--namespace",
+                            _NAMESPACE,
+                            "create",
+                            "--validate=strict",
+                            f"--request-timeout={_REQUEST_TIMEOUT}",
+                            "-f",
+                            "-",
+                        ),
+                        env=self.runner.environment,
+                        input_payload=payload,
+                        timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+                    )
+                elif resources is not _ResourceState.EXACT:
+                    raise RuntimeError("protected staging capacity database bootstrap drifted")
+                self._wait_for_bootstrap_job(plan, payload)
+            finally:
+                self._seal_transient_migrator()
             if self._database_state(plan, seed) is not _DatabaseState.EXACT:
                 raise RuntimeError("protected staging capacity database bootstrap was not exact")
             resources, _evidence = self._resource_state(plan, payload)
@@ -448,7 +459,6 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 ("Job", _NAMESPACE, _NAME),
             }
             or len(identities) != 2
-            or failed
         ):
             return _ResourceState.DRIFTED, hashlib.sha256(inventory).hexdigest()
         status = self.runner.run_status(
@@ -466,10 +476,13 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             input_payload=manifest,
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
-        return (
-            _ResourceState.EXACT if status == 0 else _ResourceState.DRIFTED,
-            hashlib.sha256(inventory).hexdigest(),
-        )
+        if status != 0:
+            state = _ResourceState.DRIFTED
+        elif failed:
+            state = _ResourceState.FAILED
+        else:
+            state = _ResourceState.EXACT
+        return state, hashlib.sha256(inventory).hexdigest()
 
     def _delete_bootstrap_resources(self) -> None:
         for resource in ("job", "secret"):
@@ -489,6 +502,36 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
             )
 
+    def _wait_for_bootstrap_job(self, plan: FinalGatePlan, manifest: bytes) -> None:
+        deadline = time.monotonic() + _WAIT_TIMEOUT_SECONDS
+        while True:
+            completed = self.runner.run_status(
+                (
+                    "kubectl",
+                    "--namespace",
+                    _NAMESPACE,
+                    "wait",
+                    "--for=condition=complete",
+                    f"--timeout={_WAIT_SLICE_SECONDS}s",
+                    f"--request-timeout={_REQUEST_TIMEOUT}",
+                    f"job/{_NAME}",
+                ),
+                env=self.runner.environment,
+                input_payload=None,
+                timeout_seconds=_QUERY_TIMEOUT_SECONDS,
+            )
+            if completed == 0:
+                return
+            resources, _evidence = self._resource_state(plan, manifest)
+            if resources is _ResourceState.FAILED:
+                raise RuntimeError("protected staging capacity database bootstrap job failed")
+            if resources is not _ResourceState.EXACT:
+                raise RuntimeError(
+                    "protected staging capacity database bootstrap changed while waiting"
+                )
+            if time.monotonic() >= deadline:
+                raise RuntimeError("protected staging capacity database bootstrap job timed out")
+
     def _query(self, statement: str) -> bytes:
         return self.runner.capture_stdout(
             (
@@ -506,6 +549,140 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             ),
             env=self.runner.environment,
             timeout_seconds=_QUERY_TIMEOUT_SECONDS,
+        )
+
+    def _arm_transient_migrator(self, seed: Mapping[str, object]) -> None:
+        password = seed.get("migrator_database_password")
+        if not isinstance(password, str):
+            raise ValueError("protected staging capacity migrator credential is invalid")
+        password_literal = sql.Literal(password).as_string()
+        payload = f"""\
+BEGIN;
+DO $loom$
+DECLARE
+    protected_names text[] := ARRAY[
+        'loom_cap_staging_owner',
+        'loom_cap_staging_migrator',
+        'loom_cap_staging_agent',
+        'loom_cap_staging_executor',
+        'loom_cap_staging_observer',
+        'loom_cap_staging_runtime'
+    ];
+BEGIN
+    IF current_user <> 'postgres'
+       OR NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_roles
+           WHERE rolname = current_user AND rolsuper
+       )
+       OR (SELECT pg_catalog.pg_get_userbyid(datdba)
+           FROM pg_catalog.pg_database WHERE datname = 'loom') <> 'loom'
+       OR EXISTS (
+           SELECT 1 FROM pg_catalog.pg_roles
+           WHERE rolname = 'loom' AND (rolsuper OR rolcreaterole)
+       )
+       OR EXISTS (
+           SELECT 1 FROM pg_catalog.pg_roles
+           WHERE rolname = ANY(protected_names)
+             AND (rolsuper OR rolcreatedb OR rolreplication OR rolbypassrls)
+       ) THEN
+        RAISE EXCEPTION 'protected staging capacity role bootstrap authority is invalid';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_owner') THEN
+        CREATE ROLE loom_cap_staging_owner NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_migrator') THEN
+        CREATE ROLE loom_cap_staging_migrator NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_agent') THEN
+        CREATE ROLE loom_cap_staging_agent NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_executor') THEN
+        CREATE ROLE loom_cap_staging_executor NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_observer') THEN
+        CREATE ROLE loom_cap_staging_observer NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_runtime') THEN
+        CREATE ROLE loom_cap_staging_runtime NOLOGIN;
+    END IF;
+END
+$loom$;
+ALTER ROLE loom_cap_staging_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+ALTER ROLE loom_cap_staging_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+ALTER ROLE loom_cap_staging_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+ALTER ROLE loom_cap_staging_observer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+ALTER ROLE loom_cap_staging_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+ALTER ROLE loom_cap_staging_migrator LOGIN NOSUPERUSER NOCREATEDB CREATEROLE INHERIT NOREPLICATION NOBYPASSRLS PASSWORD {password_literal};
+ALTER ROLE loom_cap_staging_owner RESET ALL;
+ALTER ROLE loom_cap_staging_migrator RESET ALL;
+ALTER ROLE loom_cap_staging_agent RESET ALL;
+ALTER ROLE loom_cap_staging_executor RESET ALL;
+ALTER ROLE loom_cap_staging_observer RESET ALL;
+ALTER ROLE loom_cap_staging_runtime RESET ALL;
+GRANT loom TO loom_cap_staging_migrator WITH ADMIN FALSE, INHERIT TRUE, SET TRUE;
+GRANT loom_cap_staging_owner, loom_cap_staging_agent, loom_cap_staging_executor, loom_cap_staging_observer, loom_cap_staging_runtime
+TO loom_cap_staging_migrator WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+COMMIT;
+""".encode()
+        self.runner.run_checked(
+            _PEER_PSQL_COMMAND,
+            env=self.runner.environment,
+            input_payload=payload,
+            timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+        )
+
+    def _seal_transient_migrator(self) -> None:
+        payload = b"""\
+BEGIN;
+DO $loom$
+DECLARE
+    granted_name text;
+    member_name text;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_migrator'
+    ) THEN
+        REVOKE ALL PRIVILEGES ON DATABASE loom FROM loom_cap_staging_migrator;
+        IF EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'loom_cap_staging_owner'
+        ) THEN
+            REVOKE CREATE ON DATABASE loom FROM loom_cap_staging_owner;
+        END IF;
+        FOR granted_name IN
+            SELECT granted.rolname
+            FROM pg_catalog.pg_auth_members AS membership
+            JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+            JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+            WHERE member.rolname = 'loom_cap_staging_migrator'
+        LOOP
+            EXECUTE format(
+                'REVOKE %I FROM loom_cap_staging_migrator',
+                granted_name
+            );
+        END LOOP;
+        FOR member_name IN
+            SELECT member.rolname
+            FROM pg_catalog.pg_auth_members AS membership
+            JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+            JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+            WHERE granted.rolname = 'loom_cap_staging_migrator'
+        LOOP
+            EXECUTE format(
+                'REVOKE loom_cap_staging_migrator FROM %I',
+                member_name
+            );
+        END LOOP;
+        ALTER ROLE loom_cap_staging_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL;
+    END IF;
+END
+$loom$;
+COMMIT;
+"""
+        self.runner.run_checked(
+            _PEER_PSQL_COMMAND,
+            env=self.runner.environment,
+            input_payload=payload,
+            timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
 
     def _manifest(self, plan: FinalGatePlan, seed: dict[str, object]) -> bytes:
@@ -532,6 +709,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             "immutable": True,
             "type": "Opaque",
             "data": {
+                "admin-password": base64.b64encode(
+                    str(seed["migrator_database_password"]).encode("ascii")
+                ).decode("ascii"),
+                "admin-username": base64.b64encode(b"loom_cap_staging_migrator").decode("ascii"),
                 "reporter-configuration.json": base64.b64encode(
                     canonical_bytes(configuration)
                 ).decode("ascii"),
@@ -632,10 +813,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                                 "secret": {
                                     "defaultMode": 0o440,
                                     "items": [
-                                        {"key": "password", "path": "password"},
-                                        {"key": "username", "path": "username"},
+                                        {"key": "admin-password", "path": "password"},
+                                        {"key": "admin-username", "path": "username"},
                                     ],
-                                    "secretName": "loom-postgres-cnpg-credentials",
+                                    "secretName": _NAME,
                                 },
                             },
                             {

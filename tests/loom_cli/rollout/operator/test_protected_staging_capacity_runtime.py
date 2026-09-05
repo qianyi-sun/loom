@@ -45,7 +45,14 @@ class _NoCommandRunner:
 
 
 class _DatabaseRunner:
-    def __init__(self, plan, seed: dict[str, object], *, database_state: str) -> None:
+    def __init__(
+        self,
+        plan,
+        seed: dict[str, object],
+        *,
+        database_state: str,
+        fail_checked: str | None = None,
+    ) -> None:
         self.environment = {"KUBECONFIG": "/fixed"}
         self.plan = plan
         self.seed = seed
@@ -53,6 +60,9 @@ class _DatabaseRunner:
         self.objects: dict[str, dict[str, object]] = {}
         self.created_objects: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, ...]] = []
+        self.checked_inputs: list[tuple[tuple[str, ...], bytes]] = []
+        self.fail_checked = fail_checked
+        self.failed_checked = False
 
     def _registration(self) -> dict[str, object]:
         return {
@@ -150,10 +160,20 @@ class _DatabaseRunner:
 
     def run_status(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
-        assert timeout_seconds == 60.0
-        assert input_payload is not None
         command = tuple(argv)
         self.calls.append(command)
+        if "wait" in command:
+            assert timeout_seconds == 30.0
+            assert input_payload is None
+            if self.fail_checked == "wait" and not self.failed_checked:
+                self.failed_checked = True
+                self.objects["Job"]["status"] = {"failed": 1}
+                return 1
+            self.database_state = "exact"
+            self.objects["Job"]["status"] = {"succeeded": 1}
+            return 0
+        assert timeout_seconds == 60.0
+        assert input_payload is not None
         expected = {
             document["kind"]: document
             for document in yaml.safe_load_all(input_payload)
@@ -168,9 +188,20 @@ class _DatabaseRunner:
         assert env == self.environment
         command = tuple(argv)
         self.calls.append(command)
+        if "exec" in command:
+            assert timeout_seconds == 60.0
+            assert input_payload is not None
+            self.checked_inputs.append((command, input_payload))
+            if self.fail_checked == "exec" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
+            return
         if "create" in command:
             assert timeout_seconds == 60.0
             assert input_payload is not None
+            if self.fail_checked == "create" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
             self.objects = {
                 document["kind"]: document
                 for document in yaml.safe_load_all(input_payload)
@@ -179,12 +210,7 @@ class _DatabaseRunner:
             self.created_objects = deepcopy(self.objects)
             return
         if "wait" in command:
-            assert timeout_seconds == 660.0
-            assert input_payload is None
-            self.database_state = "exact"
-            job = self.objects["Job"]
-            job["status"] = {"succeeded": 1}
-            return
+            raise AssertionError("protected database used an unbounded Job wait")
         if "delete" in command:
             assert timeout_seconds == 60.0
             assert input_payload is None
@@ -913,6 +939,7 @@ def _database_component(
     tmp_path: Path,
     *,
     database_state: str,
+    fail_checked: str | None = None,
 ):
     seed_runtime = _runtime(tmp_path)
     _write_bootstrap(seed_runtime)
@@ -924,7 +951,12 @@ def _database_component(
     )
     seed_runtime.components(plan, epoch_guard=lambda _plan: epoch)[0].apply(plan)
     seed = json.loads(seed_runtime.credential_seed_path.read_text())
-    runner = _DatabaseRunner(plan, seed, database_state=database_state)
+    runner = _DatabaseRunner(
+        plan,
+        seed,
+        database_state=database_state,
+        fail_checked=fail_checked,
+    )
     runtime = KubernetesProtectedStagingCapacityRuntime(
         runner=runner,  # type: ignore[arg-type]
         state_root=seed_runtime.state_root,
@@ -947,6 +979,30 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
 
     assert component.classify(plan).state is ComponentState.EXACT
     assert runner.objects == {}
+    peer_commands = [call for call, _payload in runner.checked_inputs]
+    assert len(peer_commands) == 2
+    assert all(
+        call
+        == (
+            "kubectl",
+            "--namespace",
+            "loom-staging",
+            "exec",
+            "-i",
+            "service/loom-postgres-rw",
+            "--",
+            "sh",
+            "-ceu",
+            "exec psql -U postgres -d loom -qAtX -v ON_ERROR_STOP=1",
+        )
+        for call in peer_commands
+    )
+    password = str(runner.seed["migrator_database_password"])
+    assert all(password not in " ".join(call) for call in runner.calls)
+    assert password.encode() in runner.checked_inputs[0][1]
+    assert b"CREATEROLE" in runner.checked_inputs[0][1]
+    assert password.encode() not in runner.checked_inputs[1][1]
+    assert b"NOLOGIN" in runner.checked_inputs[1][1]
     mutations = [call for call in runner.calls if {"create", "wait", "delete"} & set(call)]
     assert [
         next(item for item in ("create", "wait", "delete") if item in call) for call in mutations
@@ -959,6 +1015,16 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     secret = runner.created_objects["Secret"]
     job = runner.created_objects["Job"]
     assert secret["immutable"] is True
+    assert set(secret["data"]) == {
+        "admin-password",
+        "admin-username",
+        "reporter-configuration.json",
+        "seed.json",
+    }
+    assert base64.b64decode(secret["data"]["admin-username"], validate=True) == (
+        b"loom_cap_staging_migrator"
+    )
+    assert base64.b64decode(secret["data"]["admin-password"], validate=True) == (password.encode())
     configuration = json.loads(
         base64.b64decode(secret["data"]["reporter-configuration.json"], validate=True)
     )
@@ -999,7 +1065,6 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     volumes = {volume["name"]: volume["secret"] for volume in pod_spec["volumes"]}
     assert {volume["secretName"] for volume in volumes.values()} == {
         "loom-staging-capacity-database-bootstrap",
-        "loom-postgres-cnpg-credentials",
         "loom-postgres-ca",
     }
     assert volumes["bootstrap"]["items"] == [
@@ -1007,9 +1072,10 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
         {"key": "seed.json", "path": "seed.json"},
     ]
     assert volumes["postgres-admin"]["items"] == [
-        {"key": "password", "path": "password"},
-        {"key": "username", "path": "username"},
+        {"key": "admin-password", "path": "password"},
+        {"key": "admin-username", "path": "username"},
     ]
+    assert volumes["postgres-admin"]["secretName"] == ("loom-staging-capacity-database-bootstrap")
     assert volumes["postgres-ca"]["items"] == [{"key": "ca.crt", "path": "ca.crt"}]
 
 
@@ -1028,6 +1094,69 @@ def test_database_component_recovers_exact_completed_residue_by_cleanup_only(
 
     assert runner.objects == {}
     assert all("create" not in call and "wait" not in call for call in runner.calls)
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+@pytest.mark.parametrize("fail_checked", ["exec", "create", "wait"])
+def test_database_component_always_seals_transient_authority_after_failure(
+    tmp_path: Path,
+    fail_checked: str,
+) -> None:
+    plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked=fail_checked,
+    )
+    password = str(runner.seed["migrator_database_password"])
+
+    failure_pattern = (
+        "protected staging capacity database bootstrap job failed"
+        if fail_checked == "wait"
+        else "injected protected database mutation failure"
+    )
+    with pytest.raises(RuntimeError, match=failure_pattern) as failure:
+        component.apply(plan)
+
+    assert password not in str(failure.value)
+    assert all(password not in " ".join(call) for call in runner.calls)
+    assert len(runner.checked_inputs) == 2
+    assert password.encode() in runner.checked_inputs[0][1]
+    assert password.encode() not in runner.checked_inputs[1][1]
+    assert b"NOLOGIN" in runner.checked_inputs[1][1]
+    assert b"NOCREATEROLE" in runner.checked_inputs[1][1]
+    if fail_checked == "wait":
+        assert sum("wait" in call for call in runner.calls) == 1
+
+
+def test_database_component_retries_exact_failed_component_owned_residue(
+    tmp_path: Path,
+) -> None:
+    plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked="wait",
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="protected staging capacity database bootstrap job failed",
+    ):
+        component.apply(plan)
+
+    runner.fail_checked = None
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+
+    mutations = [
+        next(item for item in ("delete", "create", "wait") if item in call)
+        for call in runner.calls
+        if {"delete", "create", "wait"} & set(call)
+    ]
+    assert mutations == ["delete", "delete", "create", "wait", "delete", "delete"]
+    assert len(runner.checked_inputs) == 2
+    assert runner.objects == {}
     assert component.classify(plan).state is ComponentState.EXACT
 
 

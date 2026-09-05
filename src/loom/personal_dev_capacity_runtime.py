@@ -252,9 +252,16 @@ class PersonalDevCapacityDatabase(Protocol):
 class PsycopgPersonalDevCapacityDatabase:
     """Provision least-privilege roles, migrate the guard, and bind the agent."""
 
-    def __init__(self, admin_url: str, *, migration_timeout_seconds: float = 180.0) -> None:
+    def __init__(
+        self,
+        admin_url: str,
+        *,
+        migration_timeout_seconds: float = 180.0,
+        transient_role_admin: bool = False,
+    ) -> None:
         self._admin_url = admin_url
         self._migration_timeout_seconds = migration_timeout_seconds
+        self._transient_role_admin = transient_role_admin
 
     @property
     def _connect_url(self) -> str:
@@ -278,6 +285,10 @@ class PsycopgPersonalDevCapacityDatabase:
             username=agent,
             password=credentials.agent_password,
         )
+        if self._transient_role_admin and make_url(self._admin_url).username != migrator:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity transient role authority is invalid"
+            )
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -294,51 +305,67 @@ class PsycopgPersonalDevCapacityDatabase:
                             "WHERE rolname = {}) THEN CREATE ROLE {}; END IF; END $loom$"
                         ).format(sql.Literal(role), sql.Identifier(role))
                     )
+                    if not self._transient_role_admin or role != migrator:
+                        await connection.execute(
+                            sql.SQL("ALTER ROLE {} RESET ALL").format(sql.Identifier(role))
+                        )
+                restricted_nologin = (
+                    "NOLOGIN NOINHERIT PASSWORD NULL"
+                    if self._transient_role_admin
+                    else (
+                        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+                        "NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+                    )
+                )
+                restricted_login = (
+                    "LOGIN NOINHERIT PASSWORD {}"
+                    if self._transient_role_admin
+                    else (
+                        "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+                        "NOREPLICATION NOBYPASSRLS PASSWORD {}"
+                    )
+                )
+                for role in (owner, executor):
                     await connection.execute(
-                        sql.SQL("ALTER ROLE {} RESET ALL").format(sql.Identifier(role))
+                        sql.SQL("ALTER ROLE {} " + restricted_nologin).format(sql.Identifier(role))
                     )
                 await connection.execute(
-                    sql.SQL(
-                        "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
-                    ).format(sql.Identifier(owner))
-                )
-                await connection.execute(
-                    sql.SQL(
-                        "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
-                    ).format(sql.Identifier(executor))
-                )
-                await connection.execute(
-                    sql.SQL(
-                        "ALTER ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                    ).format(
+                    sql.SQL("ALTER ROLE {} " + restricted_login).format(
                         sql.Identifier(runtime),
                         sql.Literal(credentials.runtime_password),
                     )
                 )
-                for role, password, inherit in (
-                    (migrator, credentials.migrator_password, "INHERIT"),
+                credential_roles: tuple[tuple[str, str, str], ...] = (
                     (agent, credentials.agent_password, "NOINHERIT"),
                     (observer, credentials.observer_password, "NOINHERIT"),
-                ):
+                )
+                if not self._transient_role_admin:
+                    credential_roles = (
+                        (migrator, credentials.migrator_password, "INHERIT"),
+                        *credential_roles,
+                    )
+                for role, password, inherit in credential_roles:
+                    credential_attributes = (
+                        f"LOGIN {inherit} PASSWORD {{}}"
+                        if self._transient_role_admin
+                        else (
+                            "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                            f"{inherit} NOREPLICATION NOBYPASSRLS PASSWORD {{}}"
+                        )
+                    )
                     await connection.execute(
-                        sql.SQL(
-                            "ALTER ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE {} "
-                            "NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                        ).format(
+                        sql.SQL("ALTER ROLE {} " + credential_attributes).format(
                             sql.Identifier(role),
-                            sql.SQL(inherit),
                             sql.Literal(password),
                         )
                     )
-                await connection.execute(
-                    sql.SQL("GRANT {} TO {}").format(
-                        sql.Identifier(owner),
-                        sql.Identifier(migrator),
+                if not self._transient_role_admin:
+                    await connection.execute(
+                        sql.SQL("GRANT {} TO {}").format(
+                            sql.Identifier(owner),
+                            sql.Identifier(migrator),
+                        )
                     )
-                )
                 await connection.execute(
                     sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
                         sql.Identifier(identity.database),
@@ -372,8 +399,13 @@ class PsycopgPersonalDevCapacityDatabase:
                     ),
                 )
                 observed = {(row[0], row[1]) for row in await memberships.fetchall()}
-                if observed != {(migrator, owner)}:
-                    for member, granted in sorted(observed - {(migrator, owner)}):
+                expected_memberships = {(migrator, owner)}
+                if self._transient_role_admin:
+                    temporary_admin_roles = {agent, executor, observer, runtime}
+                    expected_memberships.add((migrator, identity.db_role))
+                    expected_memberships.update((migrator, role) for role in temporary_admin_roles)
+                if observed != expected_memberships:
+                    for member, granted in sorted(observed - expected_memberships):
                         await connection.execute(
                             sql.SQL("REVOKE {} FROM {}").format(
                                 sql.Identifier(granted),
@@ -734,32 +766,46 @@ class PsycopgPersonalDevCapacityDatabase:
     ) -> None:
         """Remove transient schema authority and credentials between runs."""
 
+        if self._transient_role_admin:
+            return
+
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
                 autocommit=True,
             ) as connection:
-                await connection.execute(
-                    sql.SQL("REVOKE {} FROM {}").format(
-                        sql.Identifier(owner),
-                        sql.Identifier(migrator),
+                roles_result = await connection.execute(
+                    "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                    ([owner, migrator],),
+                )
+                existing = {row[0] for row in await roles_result.fetchall()}
+                if migrator in existing:
+                    await connection.execute(
+                        sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
+                            sql.Identifier(identity.database),
+                            sql.Identifier(migrator),
+                        )
                     )
-                )
-                await connection.execute(
-                    sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(sql.Identifier(migrator))
-                )
-                await connection.execute(
-                    sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
-                        sql.Identifier(identity.database),
-                        sql.Identifier(migrator),
+                if owner in existing:
+                    await connection.execute(
+                        sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
+                            sql.Identifier(identity.database),
+                            sql.Identifier(owner),
+                        )
                     )
-                )
-                await connection.execute(
-                    sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
-                        sql.Identifier(identity.database),
-                        sql.Identifier(owner),
+                if migrator in existing:
+                    if owner in existing:
+                        await connection.execute(
+                            sql.SQL("REVOKE {} FROM {}").format(
+                                sql.Identifier(owner),
+                                sql.Identifier(migrator),
+                            )
+                        )
+                    await connection.execute(
+                        sql.SQL("ALTER ROLE {} NOLOGIN NOCREATEROLE PASSWORD NULL").format(
+                            sql.Identifier(migrator)
+                        )
                     )
-                )
         except Exception:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity migration authority could not be sealed"
