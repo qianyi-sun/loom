@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sync"
 	"time"
 )
 
@@ -238,8 +239,7 @@ func ParseRegistryCredential(secret *SecretBuffer, binding RegistryCredentialBin
 		return nil, errors.New("registry credential actions invalid")
 	}
 	tokenLiteral := values["bearer_token"]
-	token, err := decodeJSONString(tokenLiteral)
-	if err != nil || !isNonEmptyJSONStringLiteral(tokenLiteral) {
+	if !isNonEmptyJSONStringLiteral(tokenLiteral) {
 		return nil, errors.New("registry credential token invalid")
 	}
 	tokenBytes := tokenLiteral[1 : len(tokenLiteral)-1]
@@ -256,7 +256,8 @@ func ParseRegistryCredential(secret *SecretBuffer, binding RegistryCredentialBin
 		attestationSHA256 != binding.AttestationSHA256 ||
 		materializationID != binding.MaterializationID ||
 		attemptID != binding.AttemptID ||
-		attemptNumber != binding.AttemptNumber ||
+		(binding.AttemptNumber != 0 && attemptNumber != binding.AttemptNumber) ||
+		(binding.AttemptNumber == 0 && generation != 1) ||
 		leaseEpoch != binding.LeaseEpoch ||
 		builderID != binding.BuilderID ||
 		purpose != "production" ||
@@ -292,13 +293,13 @@ func ParseRegistryCredential(secret *SecretBuffer, binding RegistryCredentialBin
 		!registryIdentityPattern.MatchString(registryIssuer) ||
 		!registryKeyIDPattern.MatchString(registryKeyID) ||
 		!bearerTokenPattern.Match(tokenBytes) ||
-		token != string(tokenBytes) ||
 		!registryOriginValid(registryOrigin) ||
 		!platformMatchesCPUArch(platform, cpuArch) ||
 		issuedAt.Nanosecond() != 0 ||
 		expiresAt.Nanosecond() != 0 ||
 		!expiresAt.After(issuedAt) ||
-		expiresAt.Sub(issuedAt) > maxRegistryCredentialLifetime {
+		expiresAt.Sub(issuedAt) > maxRegistryCredentialLifetime ||
+		issuedAt.After(binding.Now) || !binding.Now.Before(expiresAt) {
 		return nil, errors.New("registry credential binding invalid")
 	}
 	if generation == 1 {
@@ -344,7 +345,6 @@ type PublicationAttemptBinding struct {
 	GrantID           string
 	MaterializationID string
 	AttemptID         string
-	AttemptNumber     int
 	LeaseEpoch        int
 	BuilderID         string
 	CPUArch           string
@@ -361,101 +361,118 @@ type publicationCredentialGuard interface {
 	Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 }
 
+type ownedPublicationCredential struct {
+	credential                                           *RegistryCredential
+	id                                                   string
+	generation, sessionGeneration, attestationGeneration int
+}
+
 type PublicationCredentialSource struct {
-	session *SessionManager
-	guard   publicationCredentialGuard
-	binding PublicationAttemptBinding
+	mu            sync.Mutex
+	attemptNumber int
+	frozen        []BuiltComponent
+	owned         map[string]ownedPublicationCredential
+	session       *SessionManager
+	guard         publicationCredentialGuard
+	binding       PublicationAttemptBinding
 }
 
 func NewPublicationCredentialSource(session *SessionManager, guard publicationCredentialGuard, binding PublicationAttemptBinding) *PublicationCredentialSource {
-	return &PublicationCredentialSource{session: session, guard: guard, binding: binding}
+	return &PublicationCredentialSource{session: session, guard: guard, binding: binding, owned: make(map[string]ownedPublicationCredential)}
 }
 
+// Next and Record serialize publication state, including attempt discovery and
+// predecessor ownership. Session renewal, heartbeat and issuance additionally
+// hold the session manager lock so another session user cannot split them.
 func (s *PublicationCredentialSource) Next(ctx context.Context, set BuiltComponentSet, component string, predecessor *RegistryCredential) (*RegistryCredential, error) {
-	if s == nil || s.session == nil || s.guard == nil || !s.setMatches(set) || !componentPattern.MatchString(component) {
+	if s == nil {
 		return nil, errors.New("publication credential source invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session == nil || s.guard == nil || !s.setMatches(set) || !containsComponent(set, component) {
+		return nil, errors.New("publication credential source invalid")
+	}
+	if predecessor == nil {
+		if _, exists := s.owned[component]; exists {
+			return nil, errors.New("publication predecessor required")
+		}
+	} else if !s.owns(predecessor, component) || predecessor.Generation >= 512 {
+		return nil, errors.New("publication predecessor invalid")
+	}
+	if s.frozen == nil {
+		s.frozen = append([]BuiltComponent(nil), set.Components...)
 	}
 	generation := 1
 	var predecessorID string
 	var predecessorGeneration int
-	var heartbeatID string
 	if predecessor != nil {
 		generation = predecessor.Generation + 1
 		predecessorID = predecessor.ID
 		predecessorGeneration = predecessor.Generation
-		if _, err := s.session.Renew(ctx); err != nil {
-			return nil, err
-		}
-		var lease *LeaseResponse
-		operationID, err := newUUID()
-		if err != nil {
-			return nil, err
-		}
-		heartbeatID = operationID
-		if err := s.session.WithCurrentEnvelope(func(_ *SessionEnvelope, current *SecretBuffer) error {
-			var err error
-			lease, err = s.guard.Heartbeat(ctx, s.binding.GrantID, operationID, s.binding.MaterializationID, s.binding.AttemptID, s.binding.LeaseEpoch, current)
-			return err
-		}); err != nil {
-			return nil, err
-		}
-		if lease == nil || lease.MaterializationID != s.binding.MaterializationID || lease.AttemptID != s.binding.AttemptID || lease.LeaseEpoch != s.binding.LeaseEpoch || lease.OperationID != operationID || (lease.State != "claimed" && lease.State != "running") {
-			return nil, errors.New("publication credential heartbeat invalid")
-		}
 	}
 	var parsed *RegistryCredential
-	err := s.session.WithCurrentEnvelope(func(session *SessionEnvelope, current *SecretBuffer) error {
+	issue := func(session *SessionEnvelope, current *SecretBuffer) error {
+		var heartbeatID string
+		if predecessor != nil {
+			if session.Generation <= predecessor.SessionGeneration || session.AttestationGeneration <= predecessor.AttestationGeneration {
+				return errors.New("publication successor session is not newer")
+			}
+			operationID, err := newUUID()
+			if err != nil {
+				return err
+			}
+			heartbeatID = operationID
+			lease, err := s.guard.Heartbeat(ctx, s.binding.GrantID, operationID, s.binding.MaterializationID, s.binding.AttemptID, s.binding.LeaseEpoch, current)
+			if err != nil {
+				return err
+			}
+			if lease == nil || lease.Operation != "heartbeat" || lease.GrantID != s.binding.GrantID || lease.MaterializationID != s.binding.MaterializationID || lease.AttemptID != s.binding.AttemptID || lease.LeaseEpoch != s.binding.LeaseEpoch || lease.OperationID != operationID || (lease.State != "claimed" && lease.State != "running") {
+				return errors.New("publication credential heartbeat invalid")
+			}
+		}
 		requestID, err := newUUID()
 		if err != nil {
 			return err
 		}
 		secret, err := s.guard.RegistryCredential(ctx, RegistryCredentialRequest{
-			GrantID:                 s.binding.GrantID,
-			OperationID:             requestID,
-			MaterializationID:       s.binding.MaterializationID,
-			AttemptID:               s.binding.AttemptID,
-			LeaseEpoch:              s.binding.LeaseEpoch,
-			Component:               component,
-			PredecessorCredentialID: predecessorID,
-			PredecessorGeneration:   predecessorGeneration,
+			GrantID: s.binding.GrantID, OperationID: requestID,
+			MaterializationID: s.binding.MaterializationID, AttemptID: s.binding.AttemptID,
+			LeaseEpoch: s.binding.LeaseEpoch, Component: component,
+			PredecessorCredentialID: predecessorID, PredecessorGeneration: predecessorGeneration,
 		}, current)
 		if err != nil {
+			secret.Close()
 			return err
 		}
-		binding := RegistryCredentialBinding{
-			RequestID:                 requestID,
-			GrantID:                   s.binding.GrantID,
-			SessionID:                 session.SessionID,
-			SessionGeneration:         session.Generation,
-			AttestationGeneration:     session.AttestationGeneration,
-			AttestationSHA256:         session.AttestationSHA256,
-			MaterializationID:         s.binding.MaterializationID,
-			AttemptID:                 s.binding.AttemptID,
-			AttemptNumber:             s.binding.AttemptNumber,
-			LeaseEpoch:                s.binding.LeaseEpoch,
-			BuilderID:                 s.binding.BuilderID,
-			CPUArch:                   s.binding.CPUArch,
-			Platform:                  s.binding.Platform,
-			Component:                 component,
-			Generation:                generation,
-			PredecessorCredentialID:   predecessorID,
-			PredecessorGeneration:     predecessorGeneration,
-			LeaseHeartbeatOperationID: heartbeatID,
-			RegistryOrigin:            s.binding.RegistryOrigin,
-			RegistryService:           s.binding.RegistryService,
-			RegistryIssuer:            s.binding.RegistryIssuer,
-			RegistryKeyID:             s.binding.RegistryKeyID,
-			Now:                       time.Now().UTC(),
-		}
-		parsed, err = ParseRegistryCredential(secret, binding)
+		parsed, err = ParseRegistryCredential(secret, RegistryCredentialBinding{
+			RequestID: requestID, GrantID: s.binding.GrantID,
+			SessionID: session.SessionID, SessionGeneration: session.Generation,
+			AttestationGeneration: session.AttestationGeneration, AttestationSHA256: session.AttestationSHA256,
+			MaterializationID: s.binding.MaterializationID, AttemptID: s.binding.AttemptID,
+			AttemptNumber: s.attemptNumber, LeaseEpoch: s.binding.LeaseEpoch, BuilderID: s.binding.BuilderID,
+			CPUArch: s.binding.CPUArch, Platform: s.binding.Platform, Component: component,
+			Generation: generation, PredecessorCredentialID: predecessorID, PredecessorGeneration: predecessorGeneration,
+			LeaseHeartbeatOperationID: heartbeatID, RegistryOrigin: s.binding.RegistryOrigin,
+			RegistryService: s.binding.RegistryService, RegistryIssuer: s.binding.RegistryIssuer, RegistryKeyID: s.binding.RegistryKeyID,
+			Now: time.Now().UTC(),
+		})
 		if err != nil {
 			secret.Close()
 		}
 		return err
-	})
+	}
+	var err error
+	if predecessor != nil {
+		err = s.session.RenewWithCurrent(ctx, issue)
+	} else {
+		err = s.session.WithCurrentEnvelope(issue)
+	}
 	if err != nil {
 		return nil, err
 	}
+	s.attemptNumber = parsed.AttemptNumber
+	s.owned[component] = ownedPublicationCredential{parsed, parsed.ID, parsed.Generation, parsed.SessionGeneration, parsed.AttestationGeneration}
 	if predecessor != nil {
 		predecessor.Close()
 	}
@@ -463,73 +480,95 @@ func (s *PublicationCredentialSource) Next(ctx context.Context, set BuiltCompone
 }
 
 func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltComponentSet, credential *RegistryCredential, component BuiltComponent) (*PublicationCandidateAcknowledgement, error) {
-	if s == nil || s.session == nil || s.guard == nil || credential == nil || !s.setMatches(set) || component.Name != credential.Component {
+	if s == nil {
 		return nil, errors.New("publication candidate source invalid")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session == nil || s.guard == nil || !s.setMatches(set) || !s.owns(credential, component.Name) || !containsComponent(set, component.Name) {
+		return nil, errors.New("publication candidate source invalid")
+	}
+	var frozen BuiltComponent
+	for _, item := range s.frozen {
+		if item.Name == component.Name {
+			frozen = item
+		}
+	}
+	if frozen != component || component.Output.ManifestSize <= 0 || component.Output.SizeBytes <= 0 ||
+		parsePublicationManifestDigest(component.Output.TopLevelDigest) != nil || !isDigest(component.Output.FileSHA256) ||
+		component.Output.OS+"/"+component.Output.Architecture != s.binding.Platform {
+		return nil, errors.New("publication candidate evidence invalid")
+	}
 	var ack *PublicationCandidateAcknowledgement
+	var request PublicationCandidateRequest
 	err := s.session.WithCurrentEnvelope(func(session *SessionEnvelope, current *SecretBuffer) error {
 		operationID, err := newUUID()
 		if err != nil {
 			return err
 		}
-		ack, err = s.guard.PublicationCandidate(ctx, PublicationCandidateRequest{
-			GrantID:              s.binding.GrantID,
-			OperationID:          operationID,
-			CredentialID:         credential.ID,
-			CredentialGeneration: credential.Generation,
-			SessionID:            session.SessionID,
-			SessionGeneration:    session.Generation,
-			MaterializationID:    s.binding.MaterializationID,
-			AttemptID:            s.binding.AttemptID,
-			AttemptNumber:        s.binding.AttemptNumber,
-			LeaseEpoch:           s.binding.LeaseEpoch,
-			BuilderID:            s.binding.BuilderID,
-			Component:            component.Name,
-			ManifestDigest:       component.Output.TopLevelDigest,
-			ManifestSize:         descriptorSize(component.Output),
-			OCIFileSHA256:        component.Output.FileSHA256,
-			OCIFileSize:          component.Output.SizeBytes,
-			Platform:             s.binding.Platform,
-		}, current)
+		request = PublicationCandidateRequest{
+			GrantID: s.binding.GrantID, OperationID: operationID,
+			CredentialID: credential.ID, CredentialGeneration: credential.Generation,
+			SessionID: session.SessionID, SessionGeneration: session.Generation,
+			MaterializationID: s.binding.MaterializationID, AttemptID: s.binding.AttemptID,
+			AttemptNumber: s.attemptNumber, LeaseEpoch: s.binding.LeaseEpoch, BuilderID: s.binding.BuilderID,
+			Component: component.Name, ManifestDigest: component.Output.TopLevelDigest, ManifestSize: component.Output.ManifestSize,
+			OCIFileSHA256: component.Output.FileSHA256, OCIFileSize: component.Output.SizeBytes, Platform: s.binding.Platform,
+		}
+		ack, err = s.guard.PublicationCandidate(ctx, request, current)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCandidateAcknowledgement(ack, PublicationCandidateRequest{
-		GrantID:                 s.binding.GrantID,
-		CredentialID:            credential.ID,
-		CredentialGeneration:    credential.Generation,
-		MaterializationID:       s.binding.MaterializationID,
-		AttemptID:               s.binding.AttemptID,
-		AttemptNumber:           s.binding.AttemptNumber,
-		LeaseEpoch:              s.binding.LeaseEpoch,
-		BuilderID:               s.binding.BuilderID,
-		Component:               component.Name,
-		ManifestDigest:          component.Output.TopLevelDigest,
-		ManifestSize:            descriptorSize(component.Output),
-		OCIFileSHA256:           component.Output.FileSHA256,
-		OCIFileSize:             component.Output.SizeBytes,
-		Platform:                s.binding.Platform,
-		AuthorityResponseSHA256: "",
-	}); err != nil {
+	if err := validateCandidateAcknowledgement(ack, request); err != nil {
 		return nil, err
 	}
 	return ack, nil
 }
 
-func (s *PublicationCredentialSource) setMatches(set BuiltComponentSet) bool {
-	return set.GrantID == s.binding.GrantID &&
-		set.MaterializationID == s.binding.MaterializationID &&
-		set.AttemptID == s.binding.AttemptID &&
-		set.LeaseEpoch == s.binding.LeaseEpoch
+func containsComponent(set BuiltComponentSet, name string) bool {
+	found := false
+	seen := make(map[string]bool, len(set.Components))
+	for _, component := range set.Components {
+		if !componentPattern.MatchString(component.Name) || seen[component.Name] {
+			return false
+		}
+		seen[component.Name] = true
+		if component.Name == name {
+			found = true
+		}
+	}
+	return found
 }
 
-func descriptorSize(output OCIOutput) int64 {
-	if output.SizeBytes > 0 {
-		return output.SizeBytes
+func (s *PublicationCredentialSource) owns(c *RegistryCredential, component string) bool {
+	state, ok := s.owned[component]
+	return ok && c != nil && state.credential == c && c.secret != nil && !c.secret.closed &&
+		c.ID == state.id && c.Generation == state.generation && c.Generation > 0 && c.Generation <= 512 &&
+		c.SessionGeneration == state.sessionGeneration && c.AttestationGeneration == state.attestationGeneration &&
+		c.GrantID == s.binding.GrantID && c.MaterializationID == s.binding.MaterializationID &&
+		c.AttemptID == s.binding.AttemptID && c.AttemptNumber == s.attemptNumber && c.LeaseEpoch == s.binding.LeaseEpoch &&
+		c.BuilderID == s.binding.BuilderID && c.CPUArch == s.binding.CPUArch && c.Platform == s.binding.Platform && c.Component == component &&
+		c.RegistryOrigin == s.binding.RegistryOrigin && c.RegistryService == s.binding.RegistryService &&
+		c.RegistryIssuer == s.binding.RegistryIssuer && c.RegistryKeyID == s.binding.RegistryKeyID
+}
+
+func (s *PublicationCredentialSource) setMatches(set BuiltComponentSet) bool {
+	if set.GrantID != s.binding.GrantID || set.MaterializationID != s.binding.MaterializationID || set.AttemptID != s.binding.AttemptID || set.LeaseEpoch != s.binding.LeaseEpoch {
+		return false
 	}
-	return 1
+	if s.frozen != nil {
+		if len(s.frozen) != len(set.Components) {
+			return false
+		}
+		for i := range s.frozen {
+			if s.frozen[i] != set.Components[i] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func publicationRepository(cpuArch string, attemptID string, component string) (string, error) {
@@ -592,6 +631,10 @@ func parsePublicationManifestDigest(value string) error {
 
 func validateCandidateAcknowledgement(ack *PublicationCandidateAcknowledgement, request PublicationCandidateRequest) error {
 	if ack == nil ||
+		ack.OperationID != request.OperationID ||
+		ack.SessionID != request.SessionID ||
+		ack.SessionGeneration != request.SessionGeneration ||
+		(request.AuthorityResponseSHA256 != "" && ack.AuthorityResponseSHA256 != request.AuthorityResponseSHA256) ||
 		ack.GrantID != request.GrantID ||
 		ack.CredentialID != request.CredentialID ||
 		ack.CredentialGeneration != request.CredentialGeneration ||

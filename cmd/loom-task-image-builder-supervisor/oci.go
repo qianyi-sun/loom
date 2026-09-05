@@ -17,6 +17,7 @@ import (
 type OCIOutput struct {
 	Path           string
 	TopLevelDigest string
+	ManifestSize   int64
 	FileSHA256     string
 	SizeBytes      int64
 	OS             string
@@ -159,6 +160,7 @@ func ValidateOCIOutput(path string, platform string) (OCIOutput, error) {
 	return OCIOutput{
 		Path:           path,
 		TopLevelDigest: manifestDescriptor.Digest,
+		ManifestSize:   manifestDescriptor.Size,
 		FileSHA256:     hex.EncodeToString(hash.Sum(nil)),
 		SizeBytes:      info.Size(),
 		OS:             config.OS,

@@ -228,11 +228,10 @@ func (c *GuardClient) Project(ctx context.Context, grantID string) (*AllocationC
 		BuildEgressInode:   uint64(buildStat.Ino),
 	}
 	rights[1], rights[2] = -1, -1
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		caps.Close()
 		return nil, err
 	}
-	packet.fd = -1
 	return caps, nil
 }
 
@@ -472,10 +471,9 @@ func (c *GuardClient) PublicationCandidate(ctx context.Context, request Publicat
 		!isDigest(response.AuthorityResponseSHA256) {
 		return nil, errors.New("publication candidate response invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		return nil, err
 	}
-	packet.fd = -1
 	return &PublicationCandidateAcknowledgement{
 		CandidateID:             response.CandidateID,
 		OperationID:             response.OperationID,
@@ -543,10 +541,9 @@ func (c *GuardClient) Finish(ctx context.Context, grantID string, operationID st
 	if response.Schema != localSchema || response.Operation != "finishing" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return errors.New("finish response invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		return err
 	}
-	packet.fd = -1
 	return nil
 }
 
@@ -588,11 +585,10 @@ func (c *GuardClient) decodeSessionResponse(packet *responsePacket, rights []int
 		session.Secret.Close()
 		return nil, errors.New("session response binding invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		session.Secret.Close()
 		return nil, err
 	}
-	packet.fd = -1
 	return session, nil
 }
 
@@ -668,11 +664,18 @@ func (c *GuardClient) connect(ctx context.Context) (int, time.Time, error) {
 	}
 }
 
+// ackPacket centralizes the shared packet ownership handoff.
+func (c *GuardClient) ackPacket(packet *responsePacket, responseID string) error {
+	fd := packet.fd
+	packet.fd = -1
+	return c.sendAck(fd, responseID, packet.deadline)
+}
+
 func (c *GuardClient) sendAck(fd int, responseID string, deadline time.Time) error {
+	defer syscall.Close(fd)
 	if !isCanonicalNonZeroUUID(responseID) {
 		return errors.New("ack response id invalid")
 	}
-	defer syscall.Close(fd)
 	return sendLocalPacket(fd, deadline, map[string]any{
 		"schema":      localSchema,
 		"operation":   "ack",
@@ -713,10 +716,9 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		if response.Schema != localSchema || response.Operation != "claim" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) || response.Available == nil || *response.Available {
 			return nil, false, errors.New("secret response invalid")
 		}
-		if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+		if err := c.ackPacket(packet, response.ResponseID); err != nil {
 			return nil, false, err
 		}
-		packet.fd = -1
 		return nil, false, nil
 	}
 	if len(rights) != 1 {
@@ -796,11 +798,10 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		buffer.Close()
 		return nil, false, errors.New("secret payload digest mismatch")
 	}
-	if err := c.sendAck(packet.fd, responseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, responseID); err != nil {
 		buffer.Close()
 		return nil, false, err
 	}
-	packet.fd = -1
 	return buffer, true, nil
 }
 
@@ -838,10 +839,9 @@ func (c *GuardClient) leaseOperation(ctx context.Context, operation string, gran
 	if response.Operation != operation || response.GrantID != grantID || response.OperationID != operationID || response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return nil, errors.New("lease response invalid")
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if err := c.ackPacket(packet, response.ResponseID); err != nil {
 		return nil, err
 	}
-	packet.fd = -1
 	return &response, nil
 }
 

@@ -99,16 +99,19 @@ func TestPublicationCredentialSourceRenewsAfterHeartbeatAndKeepsPredecessorOnFai
 		{name: "credential failure keeps predecessor", credentialErr: errors.New("credential failed"), wantErr: true, wantEvents: "renew,heartbeat,registry-credential"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			guard := &credentialSourceGuard{heartbeatErr: tc.heartbeatErr, credentialErr: tc.credentialErr}
+			guard := &credentialSourceGuard{}
 			current := testSession(1, testNow.Add(10*time.Minute))
 			manager := NewSessionManager(testGrantID, current, guard)
 			source := NewPublicationCredentialSource(manager, guard, validPublicationAttemptBinding())
-			predecessorSecret := &SecretBuffer{data: []byte(validRegistryCredentialJSON(registryCredentialMutation{Generation: 1}))}
-			predecessor, err := ParseRegistryCredential(predecessorSecret, validRegistryCredentialBinding())
+			predecessor, err := source.Next(context.Background(), testBuiltSet(), "task", nil)
 			if err != nil {
 				t.Fatalf("predecessor parse error = %v", err)
 			}
 
+			predecessorSecret := predecessor.secret
+			guard.events = nil
+			guard.heartbeatErr = tc.heartbeatErr
+			guard.credentialErr = tc.credentialErr
 			successor, err := source.Next(context.Background(), testBuiltSet(), "task", predecessor)
 			if tc.wantErr {
 				if err == nil {
@@ -166,23 +169,15 @@ func TestPublicationCredentialSourceGetsGenerationOneDirectly(t *testing.T) {
 // or accepts acknowledgement drift in attempt number/builder/platform evidence.
 func TestPublicationCredentialSourceRecordValidatesCandidateBinding(t *testing.T) {
 	guard := &credentialSourceGuard{}
-	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(2, testNow.Add(10*time.Minute)), guard), guard, validPublicationAttemptBinding())
-	credential, err := ParseRegistryCredential(mustSecretBuffer(t, []byte(validRegistryCredentialJSON(registryCredentialMutation{Generation: 1}))), validRegistryCredentialBinding())
+	source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, testNow.Add(10*time.Minute)), guard), guard, validPublicationAttemptBinding())
+	credential, err := source.Next(context.Background(), testBuiltSet(), "task", nil)
 	if err != nil {
 		t.Fatalf("credential parse error = %v", err)
 	}
 	defer credential.Close()
 
-	ack, err := source.Record(context.Background(), testBuiltSet(), credential, BuiltComponent{
-		Name: "task",
-		Output: OCIOutput{
-			TopLevelDigest: "sha256:" + strings.Repeat("a", 64),
-			FileSHA256:     strings.Repeat("b", 64),
-			SizeBytes:      5678,
-			OS:             "linux",
-			Architecture:   "arm64",
-		},
-	})
+	guard.events = nil
+	ack, err := source.Record(context.Background(), testBuiltSet(), credential, testBuiltSet().Components[0])
 	if err != nil {
 		t.Fatalf("Record() error = %v", err)
 	}
@@ -256,6 +251,9 @@ func validRegistryCredentialJSON(m registryCredentialMutation) string {
 		BearerToken:                 "header.payload.signature",
 		IssuedAt:                    "2026-09-03T12:00:00Z",
 		ExpiresAt:                   "2026-09-03T12:00:30Z",
+	}
+	if m.AttemptNumber != 0 {
+		value.AttemptNumber = m.AttemptNumber
 	}
 	if m.CredentialID != "" {
 		value.CredentialID = m.CredentialID
@@ -357,7 +355,6 @@ func validPublicationAttemptBinding() PublicationAttemptBinding {
 		GrantID:           testGrantID,
 		MaterializationID: testMaterializationID,
 		AttemptID:         testAttemptID,
-		AttemptNumber:     11,
 		LeaseEpoch:        1,
 		BuilderID:         "rootless:22222222222242228222222222222222",
 		CPUArch:           "arm64",
@@ -375,7 +372,7 @@ func testBuiltSet() BuiltComponentSet {
 		MaterializationID: testMaterializationID,
 		AttemptID:         testAttemptID,
 		LeaseEpoch:        1,
-		Components:        []BuiltComponent{{Name: "task"}},
+		Components:        []BuiltComponent{{Name: "task", Output: OCIOutput{TopLevelDigest: "sha256:" + strings.Repeat("a", 64), ManifestSize: 321, FileSHA256: strings.Repeat("b", 64), SizeBytes: 5678, OS: "linux", Architecture: "arm64"}}},
 	}
 }
 
@@ -410,6 +407,8 @@ func (g *credentialSourceGuard) RegistryCredential(ctx context.Context, request 
 		g.sawNullPredecessor = true
 		return &SecretBuffer{data: []byte(validRegistryCredentialJSON(registryCredentialMutation{
 			RequestID: request.OperationID,
+			IssuedAt:  time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
+			ExpiresAt: time.Now().UTC().Truncate(time.Second).Add(45 * time.Second).Format(time.RFC3339),
 		}))}, nil
 	}
 	if request.PredecessorCredentialID != "77777777-7777-4777-8777-777777777777" || request.PredecessorGeneration != 1 {
@@ -418,6 +417,8 @@ func (g *credentialSourceGuard) RegistryCredential(ctx context.Context, request 
 	return &SecretBuffer{data: []byte(validRegistryCredentialJSON(registryCredentialMutation{
 		CredentialID:                "88888888-8888-4888-8888-888888888888",
 		RequestID:                   request.OperationID,
+		IssuedAt:                    time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
+		ExpiresAt:                   time.Now().UTC().Truncate(time.Second).Add(45 * time.Second).Format(time.RFC3339),
 		SessionGeneration:           2,
 		AttestationGeneration:       2,
 		Generation:                  2,

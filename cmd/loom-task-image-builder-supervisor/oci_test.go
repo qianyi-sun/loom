@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -241,4 +242,20 @@ func mustJSON(t *testing.T, value any) []byte {
 func sha256Hex(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func TestOCIFixRetainsManifestSize(t *testing.T) {
+	var size int64
+	p, _ := writeOCILayoutTar(t, "amd64", func(f *ociLayoutFixture) { size = f.index.Manifests[0].Size })
+	output, err := ValidateOCIOutput(p, "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := reflect.ValueOf(output).FieldByName("ManifestSize")
+	if !field.IsValid() {
+		t.Fatal("validated manifest size missing from OCIOutput")
+	}
+	if field.Int() != size || size <= 0 || size == output.SizeBytes {
+		t.Fatalf("manifest size=%d expected=%d archive=%d", field.Int(), size, output.SizeBytes)
+	}
 }
