@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout import preflight_contract
 from loom_cli.rollout.final_attestation_admission import (
     PostApplyDriftTransientError,
     validate_final_attestation,
     validate_post_apply_attestation_drift,
     validate_post_apply_resume_attestation,
 )
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import (
@@ -429,6 +432,69 @@ def _bindings() -> AttestationBindings:
     )
 
 
+def _current_checkpoint_bindings(
+    *,
+    with_execution_prerequisite: bool,
+) -> AttestationBindings:
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision="0067",
+        capacity_guard_schema_revision="guard_0027",
+        configuration_epoch=9,
+        configuration_digest="9" * 64,
+        authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
+        writer_epoch=4,
+        execution_state="shadow",
+        execution_epoch=0,
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
+    bindings = replace(
+        _bindings(),
+        db_snapshot_identity=f"pgdump-sha256:{'b' * 64}",
+        schema_revision=authority.public_schema_revision,
+        checkpoint_schema_version=3,
+        checkpoint_component_sha256={
+            "database_authority": authority.digest,
+            "k8s_secrets": "c" * 64,
+            "object_inventory": "d" * 64,
+            "postgres": "b" * 64,
+        },
+        database_authority_digest=authority.digest,
+        public_schema_revision=authority.public_schema_revision,
+        capacity_guard_schema_revision=authority.capacity_guard_schema_revision,
+        manager_configuration_epoch=authority.configuration_epoch,
+        manager_configuration_digest=authority.configuration_digest,
+        manager_authority_incarnation=str(authority.authority_incarnation),
+        manager_writer_epoch=authority.writer_epoch,
+        manager_execution_state=authority.execution_state,
+        manager_execution_epoch=authority.execution_epoch,
+        manager_execution_manifest_sha256=authority.execution_manifest_sha256,
+        manager_executable_new_capacity_ceiling=(authority.executable_new_capacity_ceiling),
+        manager_increase_freeze=authority.increase_freeze,
+        restore_report_sha256="e" * 64,
+    )
+    if not with_execution_prerequisite:
+        return bindings
+    prerequisite_sha256 = "f" * 64
+    return replace(
+        bindings,
+        execution_prerequisite_schema_version=1,
+        execution_prerequisite_artifact_path=(
+            f"/var/lib/loom-staging-rollout/execution-prerequisites/{prerequisite_sha256}.json"
+        ),
+        execution_prerequisite_artifact_sha256=prerequisite_sha256,
+        execution_core_artifact_bundle_sha256="1" * 64,
+        execution_policy_sha256="2" * 64,
+        executor_profile_seed_sha256="3" * 64,
+        execution_manager_route_sha256="4" * 64,
+        execution_access_metadata_sha256="5" * 64,
+        execution_coexistence_witness_sha256="6" * 64,
+        execution_legacy_writer_sha256="7" * 64,
+        execution_rollback_evidence_sha256="8" * 64,
+    )
+
+
 def _plan(checks: tuple[RegisteredCheck, ...]) -> CandidatePreflightPlan:
     candidate = _candidate()
     registry = PreflightRegistry(
@@ -456,12 +522,16 @@ def _plan(checks: tuple[RegisteredCheck, ...]) -> CandidatePreflightPlan:
     )
 
 
-def _attestation(plan: CandidatePreflightPlan) -> PreflightAttestation:
+def _attestation(
+    plan: CandidatePreflightPlan,
+    *,
+    bindings: AttestationBindings | None = None,
+) -> PreflightAttestation:
     executions = PreflightDag(
         tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
     ).run(plan.context, through_tier=2, now=lambda: NOW - timedelta(minutes=1))
     return PreflightAttestation.issue(
-        bindings=_bindings(),
+        bindings=_bindings() if bindings is None else bindings,
         executions=executions,
         checks=plan.registry.checks,
         issued_at=NOW - timedelta(minutes=1),
@@ -491,6 +561,54 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
     assert len(admission.tier2_executions) == 6
     assert all(execution.passed for execution in admission.tier2_executions)
     assert admission.preflight_plan is plan
+
+
+@pytest.mark.parametrize(
+    ("with_execution_prerequisite", "expected_schema"),
+    ((False, 4), (True, 5)),
+)
+def test_final_admission_accepts_current_protected_attestation_schemas(
+    with_execution_prerequisite: bool,
+    expected_schema: int,
+) -> None:
+    plan = _plan(_checks())
+    attestation = _attestation(
+        plan,
+        bindings=_current_checkpoint_bindings(
+            with_execution_prerequisite=with_execution_prerequisite,
+        ),
+    )
+
+    assert attestation.schema_version == expected_schema
+    admission = validate_final_attestation(
+        attestation=attestation,
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert admission.attestation is attestation
+
+
+def test_final_admission_rejects_readable_historical_schema_two() -> None:
+    plan = _plan(_checks())
+    payload = _attestation(plan).to_dict()
+    payload["schema_version"] = 2
+    payload.pop("identity_evidence_hashes")
+    payload.pop("attestation_digest")
+    payload["attestation_digest"] = preflight_contract._hash_json(payload)
+    attestation = PreflightAttestation.from_dict(payload)
+
+    assert attestation.schema_version == 2
+    with pytest.raises(ValueError, match="attestation identity drifted"):
+        validate_final_attestation(
+            attestation=attestation,
+            candidate=_candidate(),
+            plan=plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
 
 
 def test_final_admission_compares_identity_for_phase_dependency_closure() -> None:
