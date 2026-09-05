@@ -15,6 +15,7 @@ import (
 )
 
 const maxRegistryCredentialLifetime = 45 * time.Second
+const publicationCandidateReplayAttempts = 2
 
 var (
 	componentPattern        = regexp.MustCompile(`^(?:task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$`)
@@ -502,6 +503,9 @@ func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltCompo
 	var ack *PublicationCandidateAcknowledgement
 	var request PublicationCandidateRequest
 	err := s.session.WithCurrentEnvelope(func(session *SessionEnvelope, current *SecretBuffer) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		operationID, err := newUUID()
 		if err != nil {
 			return err
@@ -515,8 +519,17 @@ func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltCompo
 			Component: component.Name, ManifestDigest: component.Output.TopLevelDigest, ManifestSize: component.Output.ManifestSize,
 			OCIFileSHA256: component.Output.FileSHA256, OCIFileSize: component.Output.SizeBytes, Platform: s.binding.Platform,
 		}
-		ack, err = s.guard.PublicationCandidate(ctx, request, current)
-		return err
+		var candidateErr error
+		for attempt := 0; attempt < publicationCandidateReplayAttempts; attempt++ {
+			ack, candidateErr = s.guard.PublicationCandidate(ctx, request, current)
+			if candidateErr == nil {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return candidateErr
+			}
+		}
+		return candidateErr
 	})
 	if err != nil {
 		return nil, err
@@ -525,6 +538,22 @@ func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltCompo
 		return nil, err
 	}
 	return ack, nil
+}
+
+func (s *PublicationCredentialSource) Close(credential *RegistryCredential) {
+	if credential == nil {
+		return
+	}
+	if s == nil {
+		credential.Close()
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state, ok := s.owned[credential.Component]; ok && state.credential == credential {
+		delete(s.owned, credential.Component)
+	}
+	credential.Close()
 }
 
 func containsComponent(set BuiltComponentSet, name string) bool {

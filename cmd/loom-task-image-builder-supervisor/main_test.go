@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -119,6 +120,28 @@ func TestRunConstructsEnvironmentFromProjectedQuotaDirectory(t *testing.T) {
 	}
 	if got["TZ"] != "UTC" || got["LANG"] != "C.UTF-8" {
 		t.Fatalf("fixed environment missing: %#v", got)
+	}
+}
+
+func TestProductionOrchestratorKeepsDisabledPublicationHandoffInert(t *testing.T) {
+	cfg := Config{
+		CPUArch: runtime.GOARCH,
+		Guard: GuardConfig{
+			SocketPath:        "/run/loom-task-image-builder-guard/guard.sock",
+			MaxPacketBytes:    4096,
+			AckTimeoutSeconds: 5,
+		},
+	}
+
+	supervisor := productionOrchestrator("11111111-1111-4111-8111-111111111111", cfg)
+	if _, ok := supervisor.Handoff.(DisabledPublicationHandoff); !ok {
+		t.Fatalf("production handoff = %T, want DisabledPublicationHandoff", supervisor.Handoff)
+	}
+	if _, ok := supervisor.Handoff.(CredentialedPublicationHandoff); ok {
+		t.Fatalf("disabled production handoff unexpectedly requests publication credentials")
+	}
+	if err := supervisor.Handoff.Accept(context.Background(), BuiltComponentSet{}); !errors.Is(err, ErrPublicationPhaseUnavailable) {
+		t.Fatalf("disabled handoff error = %v, want ErrPublicationPhaseUnavailable", err)
 	}
 }
 
