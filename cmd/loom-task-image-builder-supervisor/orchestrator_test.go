@@ -44,6 +44,28 @@ func TestOrchestratorBuiltHandoffReleasesAndFinishesInOrder(t *testing.T) {
 	h.wantOutcome(t, BuildOutcomeBuilt, "built")
 }
 
+// Break caught: orchestration drops or substitutes same-solve evidence before handoff.
+func TestOrchestratorCarriesBaseResolutionEvidenceIntoBuiltComponents(t *testing.T) {
+	h := newOrchestratorHarness(t)
+	taskEvidence := BaseResolutionEvidence{json: `{"schema":"task-evidence"}`}
+	sidecarEvidence := BaseResolutionEvidence{json: `{"schema":"sidecar-evidence"}`}
+	h.executor.baseResolutions = map[string]BaseResolutionEvidence{
+		"task":          taskEvidence,
+		"sidecar:cache": sidecarEvidence,
+	}
+
+	if err := h.orchestrator().Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(h.handoff.accepted) != 1 || len(h.handoff.accepted[0].Components) != 2 {
+		t.Fatalf("handoff components = %#v", h.handoff.accepted)
+	}
+	components := h.handoff.accepted[0].Components
+	if components[0].BaseResolution != taskEvidence || components[1].BaseResolution != sidecarEvidence {
+		t.Fatalf("handoff evidence = %#v", components)
+	}
+}
+
 // Break caught: unavailable work exits immediately instead of retrying once after bounded IdleGrace.
 func TestOrchestratorIdleClaimExitsAfterBoundedIdleGrace(t *testing.T) {
 	h := newOrchestratorHarness(t)
@@ -1267,16 +1289,17 @@ func testClaimJSON(m claimMutation) string {
 }
 
 type fakeOrchestratorExecutor struct {
-	h          *orchestratorHarness
-	outputs    map[string]OCIOutput
-	buildErr   map[string]error
-	closeErr   error
-	closeCalls int
-	closeInit  sync.Once
-	closeOnce  sync.Once
-	closeCh    chan struct{}
-	afterBuild func(string)
-	blockBuild func(context.Context, string) (OCIOutput, error)
+	h               *orchestratorHarness
+	outputs         map[string]OCIOutput
+	baseResolutions map[string]BaseResolutionEvidence
+	buildErr        map[string]error
+	closeErr        error
+	closeCalls      int
+	closeInit       sync.Once
+	closeOnce       sync.Once
+	closeCh         chan struct{}
+	afterBuild      func(string)
+	blockBuild      func(context.Context, string) (OCIOutput, error)
 }
 
 func (e *fakeOrchestratorExecutor) Start(ctx context.Context) error {
@@ -1296,7 +1319,7 @@ func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildCom
 	if e.afterBuild != nil {
 		e.afterBuild(component.Name)
 	}
-	return BuildResult{Output: e.outputs[component.Name]}, nil
+	return BuildResult{Output: e.outputs[component.Name], BaseResolution: e.baseResolutions[component.Name]}, nil
 }
 
 func (e *fakeOrchestratorExecutor) Close(ctx context.Context) error {

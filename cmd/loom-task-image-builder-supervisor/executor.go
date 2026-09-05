@@ -257,12 +257,12 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 			}
 		}
 	}()
-	captureName, captureDir, captureFD, err := createBuildCaptureDirectory(e.capabilities.JobDirectoryFD, e.jobRoot)
+	captureDir, captureFD, err := createBuildCaptureDirectory(e.capabilities.JobDirectoryFD, e.jobRoot)
 	if err != nil {
 		return BuildResult{}, err
 	}
 	defer func() {
-		if cleanupErr := cleanupBuildCapture(e.capabilities.JobDirectoryFD, captureFD, captureName, captureDir); cleanupErr != nil {
+		if cleanupErr := cleanupBuildCapture(captureFD, captureDir); cleanupErr != nil {
 			result = BuildResult{}
 			cleanupOutput = true
 			err = errors.Join(err, fmt.Errorf("cleanup build capture: %w", cleanupErr))
@@ -309,20 +309,20 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 	return BuildResult{Output: output, BaseResolution: evidence}, nil
 }
 
-func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, string, int, error) {
+func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, int, error) {
 	id, err := newUUID()
 	if err != nil {
-		return "", "", -1, err
+		return "", -1, err
 	}
 	name := ".build-capture-" + id
 	if err := syscall.Mkdirat(jobFD, name, 0o700); err != nil {
-		return "", "", -1, err
+		return "", -1, err
 	}
 	path := filepath.Join(jobRoot, name)
 	fd, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		_ = os.Remove(path)
-		return "", "", -1, err
+		return "", -1, err
 	}
 	var statValue syscall.Stat_t
 	if err := syscall.Fstat(fd, &statValue); err != nil ||
@@ -332,11 +332,11 @@ func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, string, int
 		syscall.Close(fd)
 		_ = os.Remove(path)
 		if err != nil {
-			return "", "", -1, err
+			return "", -1, err
 		}
-		return "", "", -1, errors.New("build capture directory invalid")
+		return "", -1, errors.New("build capture directory invalid")
 	}
-	return name, path, fd, nil
+	return path, fd, nil
 }
 
 func readBoundedBuildCapture(dirFD int, name string, maxBytes int) ([]byte, error) {
@@ -366,7 +366,7 @@ func readBoundedBuildCapture(dirFD int, name string, maxBytes int) ([]byte, erro
 	return payload, nil
 }
 
-func cleanupBuildCapture(jobFD int, captureFD int, name string, path string) error {
+func cleanupBuildCapture(captureFD int, path string) error {
 	var errs []error
 	for _, leaf := range []string{"solve-ref", "metadata.json"} {
 		if err := syscall.Unlinkat(captureFD, leaf); err != nil && !errors.Is(err, syscall.ENOENT) {

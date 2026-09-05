@@ -255,7 +255,7 @@ func TestPublicationCredentialSourceFixFailures(t *testing.T) {
 	}
 }
 func TestPublicationCredentialSourceFixRejectInputsBeforeEffects(t *testing.T) {
-	for _, name := range []string{"absent component", "foreign source", "attempt", "component", "closed", "generation", "limit", "frozen evidence", "record evidence", "missing manifest", "negative manifest"} {
+	for _, name := range []string{"absent component", "foreign source", "attempt", "component", "closed", "generation", "limit", "frozen evidence", "frozen base resolution", "record evidence", "missing manifest", "negative manifest"} {
 		t.Run(name, func(t *testing.T) {
 			s, g, set := fixSource(t)
 			c := firstCredential(t, s, set)
@@ -281,6 +281,8 @@ func TestPublicationCredentialSourceFixRejectInputsBeforeEffects(t *testing.T) {
 				c.Generation = 512
 			case "frozen evidence":
 				set.Components[0].Output.FileSHA256 = strings.Repeat("c", 64)
+			case "frozen base resolution":
+				set.Components[0].BaseResolution = BaseResolutionEvidence{json: `{"schema":"replacement"}`}
 			case "record evidence":
 				record = true
 				candidate.Output.SizeBytes++
