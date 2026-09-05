@@ -1864,11 +1864,19 @@ async def _validate_current_task_image_build_session(
             ),
         ):
             state = cast(InstanceState[object], inspect(cached))
-            cached_grant_id = (
-                state.identity[0]
-                if isinstance(cached, TaskImageBuildGrant) and state.identity
-                else state.dict.get("grant_id")
-            )
+            assert state.identity is not None  # identity_map contains persisted identities
+            if isinstance(cached, TaskImageBuildGrant):
+                cached_grant_id = state.identity[0]
+            else:
+                # A deferred/expired (or locally edited) grant_id is not a safe
+                # scope discriminator. Read only persisted ownership by the ORM
+                # identity, without loading or discarding any cached attributes.
+                # This scalar read takes no row lock; authority is still reloaded
+                # and validated under the lock order below.
+                cached_model = type(cached)
+                cached_grant_id = await session.scalar(
+                    select(cached_model.grant_id).where(cached_model.id == state.identity[0])
+                )
             if cached_grant_id != grant_id:
                 continue
             if session.is_modified(cached):

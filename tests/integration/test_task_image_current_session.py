@@ -12,6 +12,7 @@ import pytest
 import rfc8785
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import defer
 
 from loom.db.schema import (
     TaskImageBuildContainmentAttestation,
@@ -286,6 +287,117 @@ async def test_current_session_rejects_committed_change_to_preloaded_authority(
                 grant_id=GRANT_ID,
                 clock=lambda: NOW + timedelta(seconds=14),
             )
+
+
+@pytest.mark.parametrize(
+    "cached_model",
+    [
+        TaskImageBuildProjection,
+        TaskImageBuildSessionGeneration,
+        TaskImageBuildContainmentAttestation,
+    ],
+)
+@pytest.mark.parametrize("identity_state", ["deferred", "expired"])
+@pytest.mark.parametrize("dirty", [False, True])
+async def test_current_session_refreshes_authority_with_unloaded_grant_id(
+    projection_session: async_sessionmaker[AsyncSession],
+    cached_model: type,
+    identity_state: str,
+    dirty: bool,
+) -> None:
+    async with projection_session() as session:
+        await _initial(session)
+        await session.commit()
+    async with projection_session() as worker, projection_session() as writer:
+        query = select(cached_model)
+        if identity_state == "deferred":
+            query = query.options(defer(cached_model.grant_id))
+        cached = await worker.scalar(query)
+        assert cached is not None
+        if identity_state == "expired":
+            worker.expire(cached, ["grant_id"])
+        digest_field = (
+            "attestation_sha256"
+            if cached_model is TaskImageBuildContainmentAttestation
+            else "session_sha256"
+        )
+        if dirty:
+            setattr(cached, digest_field, "e" * 64)
+        else:
+            await writer.execute(update(cached_model).values(**{digest_field: "e" * 64}))
+            await writer.commit()
+        with worker.no_autoflush:
+            with pytest.raises(
+                store.TaskImageProjectionAuthorizationError,
+                match="unflushed changes" if dirty else None,
+            ):
+                await store.validate_current_task_image_build_session(
+                    worker,
+                    grant_id=GRANT_ID,
+                    clock=lambda: NOW + timedelta(seconds=14),
+                )
+        if dirty:
+            assert worker.is_modified(cached)
+            assert getattr(cached, digest_field) == "e" * 64
+
+
+async def test_unloaded_unrelated_authority_edits_are_not_discarded_or_rejected(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    async with projection_session() as session:
+        await _initial(session)
+        await session.commit()
+    async with projection_session() as worker:
+        cached = await worker.scalar(
+            select(TaskImageBuildProjection).options(defer(TaskImageBuildProjection.grant_id))
+        )
+        assert cached is not None
+        cached.session_sha256 = "e" * 64
+        with worker.no_autoflush:
+            with pytest.raises(
+                store.TaskImageProjectionAuthorizationError, match="grant is unavailable"
+            ):
+                await store.validate_current_task_image_build_session(
+                    worker,
+                    grant_id=NEXT_SESSION_ID,
+                    clock=lambda: NOW + timedelta(seconds=14),
+                )
+        assert worker.is_modified(cached)
+        assert cached.session_sha256 == "e" * 64
+
+
+@pytest.mark.parametrize(
+    "cached_model",
+    [
+        TaskImageBuildProjection,
+        TaskImageBuildSessionGeneration,
+        TaskImageBuildContainmentAttestation,
+    ],
+)
+async def test_current_session_preserves_autoflush_for_unloaded_authority(
+    projection_session: async_sessionmaker[AsyncSession],
+    cached_model: type,
+) -> None:
+    async with projection_session() as session:
+        await _initial(session)
+        await session.commit()
+    async with projection_session() as worker:
+        cached = await worker.scalar(select(cached_model).options(defer(cached_model.grant_id)))
+        assert cached is not None
+        digest_field = (
+            "attestation_sha256"
+            if cached_model is TaskImageBuildContainmentAttestation
+            else "session_sha256"
+        )
+        setattr(cached, digest_field, "e" * 64)
+        with pytest.raises(store.TaskImageProjectionAuthorizationError):
+            await store.validate_current_task_image_build_session(
+                worker,
+                grant_id=GRANT_ID,
+                clock=lambda: NOW + timedelta(seconds=14),
+            )
+        assert not worker.is_modified(cached)
+        assert await worker.scalar(select(getattr(cached_model, digest_field))) == "e" * 64
 
 
 async def test_legacy_v1_binding_still_requires_exact_bearer_and_generation(
