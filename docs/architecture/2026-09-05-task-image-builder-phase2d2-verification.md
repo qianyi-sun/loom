@@ -148,6 +148,30 @@ payload, and supplies same-attempt evidence to the authority's fixed operation.
 This runtime extension and its consumers require real exporter tests and new
 deterministic dual-architecture release hashes before composition.
 
+### Versioned candidate evidence
+
+The D2 candidate request uses an explicit version 2 and requires the complete
+validated `base_resolution` object. Its output digest and platform must match
+the candidate and the authority-derived frozen plan. The solve reference is
+validated and retained as same-build provenance; it is not a new authorization
+credential. Empty observations are accepted only as an explicit array inside a
+valid record. Unknown fields, missing evidence and malformed bindings reject.
+
+Persist that record atomically with the candidate in a version-2 canonical
+acknowledgement using the existing `response_json` and `response_sha256` columns.
+The stored acknowledgement binds both the archive facts and the metadata; every
+replay and verification snapshot validates its schema, canonical digest and
+row bindings. A changed record at the same operation or attempt/component is a
+conflict. A second operation to attach metadata is unnecessary and would create
+a partial-state interval. The evidence remains immutable input, not readiness.
+
+Version-1 requests, responses and existing rows retain their original meaning.
+They cannot satisfy D2 verification, acquire synthetic empty observations, or be
+upgraded in place by replay. The new fixed guard/authority operation must carry
+and acknowledge version-2 evidence explicitly, with no fallback to version 1.
+No registry destination, signing authority or complete publication set becomes
+caller-selected. The later durable job freezes only complete validated V2 sets.
+
 Production signing authority resides behind a dedicated host signing service or
 KMS/HSM; private keys do not enter the allocation or an authority HTTP request.
 Test signers use generated keys only. Key records distinguish active,

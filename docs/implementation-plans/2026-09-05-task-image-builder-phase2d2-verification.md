@@ -147,11 +147,20 @@ buildctl invokes the Dockerfile frontend through a gateway whose outer frontend
 field is empty. The runtime metadata producer must validate the recorded inner
 request. The producer is implemented in `c2d034158`, with actual amd64 scratch,
 multistage, external COPY and zero-layer-image source probes plus measured
-dual-architecture binary hashes. Independent review and native arm64 execution
-remain pending. The standalone immutable supervisor parser is implemented in
-`31256d730`; full supervisor tests and race tests pass. Its independent review,
-contained file capture, transport/persistence and publication composition remain
-pending. Neither slice grants readiness or activates the provider.
+dual-architecture binary hashes. Independent review approved the bounded producer
+and parser slices; the controller checked their unchanged integration helpers.
+Native arm64/rootless/Slurm acceptance remains pending. The standalone immutable
+supervisor parser is implemented in `31256d730`.
+
+Contained capture and immutable orchestration propagation are implemented through
+`c2eba09b9`. Independent review found a real directory-rename cleanup defect,
+reproduced and fixed in `f850e1b48`. The fresh full supervisor suite and race suite
+passed after that fix; independent scoped re-review cleared the finding with no
+new breakage. Contained capture is complete for its bounded scope. The native
+scratch fixture now checks real metadata emission but was explicitly skipped
+without its native runtime prerequisite. Versioned candidate evidence persistence,
+guard/API transport, polling and publication composition remain pending. No slice
+grants readiness or activates the provider.
 
 ## Task 6: Retention and release integration
 
