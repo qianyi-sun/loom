@@ -25,12 +25,14 @@ from loom.security.secret_store import InvalidRefError, SecretStore, parse_ref
 from loom.task_image_build_plan import TaskImageBuildPlanV1
 from loom_task_image_authority.contracts import (
     TaskImagePublicationCandidateRequestV1,
+    TaskImagePublicationCandidateRequestV2,
     TaskImageRegistryCredentialRequestV1,
     TaskImageRegistryCredentialV1,
     canonical_public_binding_sha256,
 )
 from loom_task_image_authority.http_contracts import (
     TaskImagePublicationCandidateResponseV1,
+    TaskImagePublicationCandidateResponseV2,
 )
 from loom_task_image_authority.materializations import (
     TaskImageBuildSessionAuthorization,
@@ -85,8 +87,7 @@ def _validate_candidate_request(
 
 
 def _require_request_session(
-    request: TaskImageRegistryCredentialRequestV1
-    | TaskImagePublicationCandidateRequestV1,
+    request: TaskImageRegistryCredentialRequestV1 | TaskImagePublicationCandidateRequestV1,
     authorization: TaskImageBuildSessionAuthorization,
 ) -> None:
     if (
@@ -173,8 +174,7 @@ def _credential_row_matches_request(
         and row.lease_epoch == request.lease_epoch
         and row.component == request.component
         and row.predecessor_credential_id == request.predecessor_credential_id
-        and (row.generation - 1 if row.generation > 1 else None)
-        == request.predecessor_generation
+        and (row.generation - 1 if row.generation > 1 else None) == request.predecessor_generation
     )
 
 
@@ -224,12 +224,10 @@ async def _replay_credential(
             or credential.builder_id != row.builder_id
             or credential.component != row.component
             or credential.generation != row.generation
-            or credential.predecessor_credential_id
-            != row.predecessor_credential_id
+            or credential.predecessor_credential_id != row.predecessor_credential_id
             or credential.predecessor_generation
             != (row.generation - 1 if row.generation > 1 else None)
-            or credential.lease_heartbeat_operation_id
-            != row.lease_heartbeat_operation_id
+            or credential.lease_heartbeat_operation_id != row.lease_heartbeat_operation_id
             or credential.repository != row.repository
             or credential.registry_origin != row.registry_origin
             or credential.registry_service != row.registry_service
@@ -298,8 +296,7 @@ async def issue_session_registry_credential(
     latest = await session.scalar(
         select(TaskImageRegistryCredentialGeneration)
         .where(
-            TaskImageRegistryCredentialGeneration.materialization_attempt_id
-            == attempt.id,
+            TaskImageRegistryCredentialGeneration.materialization_attempt_id == attempt.id,
             TaskImageRegistryCredentialGeneration.component == request.component,
         )
         .order_by(TaskImageRegistryCredentialGeneration.generation.desc())
@@ -351,17 +348,13 @@ async def issue_session_registry_credential(
             select(TaskImageMaterializationOperationEvent)
             .where(
                 TaskImageMaterializationOperationEvent.operation_type == "heartbeat",
-                TaskImageMaterializationOperationEvent.materialization_attempt_id
-                == attempt.id,
+                TaskImageMaterializationOperationEvent.materialization_attempt_id == attempt.id,
                 TaskImageMaterializationOperationEvent.materialization_id == row.id,
-                TaskImageMaterializationOperationEvent.attempt_number
-                == attempt.attempt_number,
+                TaskImageMaterializationOperationEvent.attempt_number == attempt.attempt_number,
                 TaskImageMaterializationOperationEvent.lease_epoch == attempt.lease_epoch,
                 TaskImageMaterializationOperationEvent.builder_id == attempt.builder_id,
-                TaskImageMaterializationOperationEvent.grant_id
-                == authorization.grant_id,
-                TaskImageMaterializationOperationEvent.session_id
-                == authorization.session_id,
+                TaskImageMaterializationOperationEvent.grant_id == authorization.grant_id,
+                TaskImageMaterializationOperationEvent.session_id == authorization.session_id,
                 TaskImageMaterializationOperationEvent.session_generation
                 == authorization.session_generation,
                 TaskImageMaterializationOperationEvent.recorded_at > latest.issued_at,
@@ -473,9 +466,7 @@ async def issue_session_registry_credential(
         component=request.component,
         generation=generation,
         predecessor_credential_id=(latest.credential_id if latest is not None else None),
-        lease_heartbeat_operation_id=(
-            heartbeat.operation_id if heartbeat is not None else None
-        ),
+        lease_heartbeat_operation_id=(heartbeat.operation_id if heartbeat is not None else None),
         repository=repository,
         registry_origin=issued.registry_origin,
         registry_service=issued.service,
@@ -503,18 +494,24 @@ def _candidate_response_from_row(
     row: TaskImagePublicationCandidate,
     *,
     credential_generation: int,
+    response_model: type[
+        TaskImagePublicationCandidateResponseV1
+    ] = TaskImagePublicationCandidateResponseV1,
 ) -> TaskImagePublicationCandidateResponseV1:
     try:
-        response = TaskImagePublicationCandidateResponseV1.model_validate_json(
-            json.dumps(row.response_json)
-        )
+        response = response_model.model_validate_json(json.dumps(row.response_json))
     except ValidationError:
         raise TaskImageSessionMaterializationConflictError(
             "stored task-image publication candidate changed"
         ) from None
-    payload = rfc8785.dumps(response.model_dump(mode="json", exclude_none=False))
+    response_json = response.model_dump(mode="json", exclude_none=False)
+    payload = rfc8785.dumps(response_json)
     if (
-        response.candidate_id != row.candidate_id
+        (
+            isinstance(response, TaskImagePublicationCandidateResponseV2)
+            and response_json != row.response_json
+        )
+        or response.candidate_id != row.candidate_id
         or response.operation_id != row.operation_id
         or response.credential_id != row.credential_id
         or response.credential_generation != credential_generation
@@ -562,6 +559,13 @@ def _candidate_matches_request(
         and response.oci_file_sha256 == request.oci_file_sha256
         and response.oci_file_size == request.oci_file_size
         and response.platform == request.platform
+        and (
+            not isinstance(request, TaskImagePublicationCandidateRequestV2)
+            or (
+                isinstance(response, TaskImagePublicationCandidateResponseV2)
+                and response.base_resolution == request.base_resolution
+            )
+        )
     )
 
 
@@ -575,8 +579,56 @@ async def record_session_publication_candidate(
 ) -> TaskImagePublicationCandidateResponseV1:
     """Record inert upload evidence without granting readiness."""
 
+    return await _record_session_publication_candidate(
+        session,
+        authorization=authorization,
+        request=_validate_candidate_request(request),
+        now=now,
+        candidate_id_factory=candidate_id_factory,
+        response_model=TaskImagePublicationCandidateResponseV1,
+    )
+
+
+async def record_session_publication_candidate_v2(
+    session: AsyncSession,
+    *,
+    authorization: TaskImageBuildSessionAuthorization,
+    request: TaskImagePublicationCandidateRequestV2,
+    now: datetime,
+    candidate_id_factory: Callable[[], UUID],
+) -> TaskImagePublicationCandidateResponseV2:
+    """Atomically retain mandatory same-build evidence; never grant readiness."""
+
+    try:
+        request = TaskImagePublicationCandidateRequestV2.model_validate(
+            request.model_dump(mode="python")
+        )
+    except (AttributeError, ValidationError):
+        raise TaskImageSessionMaterializationAuthorizationError(
+            "task-image publication candidate request is invalid"
+        ) from None
+    response = await _record_session_publication_candidate(
+        session,
+        authorization=authorization,
+        request=request,
+        now=now,
+        candidate_id_factory=candidate_id_factory,
+        response_model=TaskImagePublicationCandidateResponseV2,
+    )
+    assert isinstance(response, TaskImagePublicationCandidateResponseV2)
+    return response
+
+
+async def _record_session_publication_candidate(
+    session: AsyncSession,
+    *,
+    authorization: TaskImageBuildSessionAuthorization,
+    request: TaskImagePublicationCandidateRequestV1,
+    now: datetime,
+    candidate_id_factory: Callable[[], UUID],
+    response_model: type[TaskImagePublicationCandidateResponseV1],
+) -> TaskImagePublicationCandidateResponseV1:
     now = _utc(now)
-    request = _validate_candidate_request(request)
     _require_request_session(request, authorization)
     await lock_current_task_image_build_session_authority(
         session,
@@ -637,6 +689,7 @@ async def record_session_publication_candidate(
         response = _candidate_response_from_row(
             replay,
             credential_generation=credential.generation,
+            response_model=response_model,
         )
         if not _candidate_matches_request(response, request):
             raise TaskImageSessionMaterializationConflictError(
@@ -657,28 +710,32 @@ async def record_session_publication_candidate(
         )
 
     try:
-        response = TaskImagePublicationCandidateResponseV1(
-            candidate_id=candidate_id_factory(),
-            operation_id=request.operation_id,
-            credential_id=credential.credential_id,
-            credential_generation=credential.generation,
-            grant_id=authorization.grant_id,
-            session_id=authorization.session_id,
-            session_generation=authorization.session_generation,
-            materialization_id=materialization.id,
-            attempt_id=attempt.id,
-            attempt_number=attempt.attempt_number,
-            lease_epoch=attempt.lease_epoch,
-            builder_id=attempt.builder_id,
-            component=request.component,
-            repository=repository,
-            manifest_digest=request.manifest_digest,
-            manifest_size=request.manifest_size,
-            oci_file_sha256=request.oci_file_sha256,
-            oci_file_size=request.oci_file_size,
-            platform=request.platform,
-            recorded_at=now,
-        )
+        response_values = {
+            "candidate_id": candidate_id_factory(),
+            "operation_id": request.operation_id,
+            "credential_id": credential.credential_id,
+            "credential_generation": credential.generation,
+            "grant_id": authorization.grant_id,
+            "session_id": authorization.session_id,
+            "session_generation": authorization.session_generation,
+            "materialization_id": materialization.id,
+            "attempt_id": attempt.id,
+            "attempt_number": attempt.attempt_number,
+            "lease_epoch": attempt.lease_epoch,
+            "builder_id": attempt.builder_id,
+            "component": request.component,
+            "repository": repository,
+            "manifest_digest": request.manifest_digest,
+            "manifest_size": request.manifest_size,
+            "oci_file_sha256": request.oci_file_sha256,
+            "oci_file_size": request.oci_file_size,
+            "platform": request.platform,
+            "recorded_at": now,
+        }
+        if isinstance(request, TaskImagePublicationCandidateRequestV2):
+            response_values["schema_version"] = "loom.task-image-publication-candidate.v2"
+            response_values["base_resolution"] = request.base_resolution
+        response = response_model.model_validate(response_values)
     except ValidationError:
         raise TaskImageSessionMaterializationAuthorizationError(
             "generated task-image publication candidate is invalid"
@@ -717,4 +774,5 @@ __all__ = [
     "TaskImageRegistryCredentialUnavailableError",
     "issue_session_registry_credential",
     "record_session_publication_candidate",
+    "record_session_publication_candidate_v2",
 ]
