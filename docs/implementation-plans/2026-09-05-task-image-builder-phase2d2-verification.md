@@ -58,14 +58,19 @@ Create `src/loom_task_image_authority/registry_reader.py` and
 `tests/unit/test_task_image_registry_reader.py`; extend authority configuration
 and package import allowlist only for the actual bounded transport dependency.
 
-- [ ] Test a local TLS Distribution fixture with GET manifests/blobs, exact
+- [x] Test a local TLS Distribution fixture with GET manifests/blobs, exact
   repository binding and independently issued read-only credentials.
-- [ ] Reject redirects, ambient proxies, credentials in URLs, wrong CA/name,
+- [x] Reject redirects, ambient proxies, credentials in URLs, wrong CA/name,
   cross-origin challenges, oversized headers/chunks and timeouts.
-- [ ] Implement the Task 1 reader protocol with streaming and unconditional
+- [x] Implement the Task 1 reader protocol with streaming and unconditional
   close. Authenticate only to the configured origin. Never retry with broader
   scope; refresh only the exact read capability.
-- [ ] Run transport plus graph tests against real streamed responses and review.
+- [x] Run transport plus graph tests against real streamed responses and review.
+
+Task 2 evidence: 199 graph/reader/token/config/package-boundary tests passed;
+Ruff, strict mypy and lock checks passed. Independent scoped re-review cleared
+admission and socket ownership races, shutdown cleanup and deadline enforcement
+after suspended yields. The reader remains uncomposed into production.
 
 ## Task 3: Publication contracts, signer and key records
 
