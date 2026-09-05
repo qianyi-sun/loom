@@ -54,9 +54,13 @@ MINIO_SECRET_KEY = "minio-secret-sensitive"
 TEST_MINIO_PORT = 39123
 
 
-def database_authority(*, writer_epoch: int = 0) -> DatabaseAuthorityEvidence:
+def database_authority(
+    *,
+    public_schema_revision: str = "0067_global_capacity",
+    writer_epoch: int = 0,
+) -> DatabaseAuthorityEvidence:
     return DatabaseAuthorityEvidence(
-        public_schema_revision="0067_global_capacity",
+        public_schema_revision=public_schema_revision,
         capacity_guard_schema_revision="guard_0027",
         configuration_epoch=9,
         configuration_digest="9" * 64,
@@ -428,10 +432,22 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
     assert runner.timeouts == [600.0, *([30.0] * 15)]
 
 
+@pytest.mark.parametrize(
+    "observations",
+    [
+        (
+            database_authority(public_schema_revision="0067_global_capacity"),
+            database_authority(public_schema_revision="0068_global_capacity"),
+        ),
+        (database_authority(writer_epoch=4), database_authority(writer_epoch=5)),
+    ],
+    ids=["application-database", "manager-database"],
+)
 def test_critical_checkpoint_rejects_database_authority_change_across_dump(
     tmp_path: Path,
+    observations: tuple[DatabaseAuthorityEvidence, DatabaseAuthorityEvidence],
 ) -> None:
-    observations = iter((database_authority(writer_epoch=4), database_authority(writer_epoch=5)))
+    authority_source = iter(observations)
 
     def inventory(created_at: datetime) -> ImmutableObjectInventory:
         return build_immutable_inventory(
@@ -451,7 +467,7 @@ def test_critical_checkpoint_rejects_database_authority_change_across_dump(
             minio=FailingMinioMirror(),
             now=lambda: FIXED_NOW,
             object_inventory_provider=inventory,
-            database_authority_provider=lambda: next(observations),
+            database_authority_provider=lambda: next(authority_source),
         ).create(make_request())
 
     assert caught.value.code == "database_authority_changed"
