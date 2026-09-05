@@ -259,8 +259,8 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
 
 [catalog_provisioning.kubernetes_port_forward]
 enabled = true
-postgres_service = "service/loom-postgres"
-postgres_remote_port = 5432
+postgres_service = "service/loom-pgbouncer"
+postgres_remote_port = 6432
 minio_service = "service/loom-minio"
 minio_remote_port = 9000
 
