@@ -42,6 +42,7 @@ type TrialArtifact = components["schemas"]["TrialDetail"]["artifacts"][number];
 
 const ACTIVE_TRIAL_STATES = new Set([
   "queued",
+  "protected-pending",
   "submitted",
   "claimed",
   "running",

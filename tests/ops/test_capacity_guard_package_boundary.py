@@ -135,6 +135,10 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         Path("src/loom_cli/rollout/operator/installed_execution_authority.py"): {
             "loom_capacity_agent.legacy_fence",
         },
+        Path("src/loom_cli/rollout/operator/legacy_writer_freeze_ceremony.py"): {
+            "loom_capacity_agent.contracts",
+            "loom_capacity_agent.legacy_fence",
+        },
         Path("src/loom_cli/rollout/operator/protected_staging_capacity_agent_component.py"): {
             "loom_capacity_agent.runtime",
             "loom_capacity_agent.secret_init",

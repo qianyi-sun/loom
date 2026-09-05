@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from loom_capacity_agent.admission import ExecutableTerminalInventoryImportReceiptV2
 from loom_capacity_agent.admission_convergence import (
     ProtectedAdmissionPlanCleanupWork,
     ProtectedAdmissionPlanCoordinator,
@@ -47,6 +48,7 @@ from loom_capacity_agent.reporter import build_lifecycle_demand_snapshot
 from loom_capacity_agent.store import (
     CapacityAgentStoreError,
     capture_lifecycle_demand_observation,
+    import_executable_terminal_inventory_evidence,
     read_agent_lifecycle_demand_observation,
     read_agent_reporter_high_water,
 )
@@ -58,6 +60,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
+    ExecutableTerminalInventoryEvidenceV2,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,11 @@ class DemandPublisher(Protocol):
     async def next_executable_bootstrap(
         self,
     ) -> ExecutableBootstrapProposalV2 | None: ...
+
+    async def get_executable_terminal_inventory_evidence(
+        self,
+        intent_id: UUID,
+    ) -> ExecutableTerminalInventoryEvidenceV2 | None: ...
 
     async def publish_executable_bootstrap_acknowledgement(
         self,
@@ -110,6 +118,11 @@ ProtectBootstrap = Callable[..., Awaitable[ProtectedExecutableBootstrapWork]]
 ConvergeAdmission = Callable[..., Awaitable[ProtectedAdmissionPlanWork]]
 AbandonAdmission = Callable[..., Awaitable[ProtectedAdmissionPlanCleanupWork]]
 AuthorizeAdmissionPublication = Callable[..., Awaitable[ProtectedAdmissionPlanWork]]
+ObservationSource = Callable[[], GuardLifecycleDemandObservationV2 | None]
+ImportTerminalEvidence = Callable[
+    ...,
+    Awaitable[ExecutableTerminalInventoryImportReceiptV2],
+]
 
 
 async def protect_executable_bootstrap(
@@ -248,6 +261,12 @@ class CapacityAgentRuntime:
         self._latest_observation: GuardLifecycleDemandObservationV2 | None = None
         self._initialized = False
         self.ready = False
+
+    @property
+    def latest_observation(self) -> GuardLifecycleDemandObservationV2 | None:
+        """Return the latest immutable protected view available to sibling loops."""
+
+        return self._latest_observation
 
     async def initialize(self) -> None:
         """Recover the durable publication edge before advertising readiness."""
@@ -424,21 +443,133 @@ class CapacityAgentRuntime:
             await asyncio.sleep(poll_interval_seconds)
 
 
+class ExecutableTerminalInventoryEvidenceRecoveryRuntime:
+    """Import manager-authenticated terminal evidence for assigned protected attempts."""
+
+    def __init__(
+        self,
+        *,
+        configuration: ReporterConfigurationV1,
+        session_factory: async_sessionmaker[AsyncSession],
+        publisher: DemandPublisher,
+        observation_source: ObservationSource,
+        import_evidence: ImportTerminalEvidence = (import_executable_terminal_inventory_evidence),
+    ) -> None:
+        self._registration = AgentRegistrationV1.model_validate(
+            {field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields}
+        )
+        self._session_factory = session_factory
+        self._publisher = publisher
+        self._observation_source = observation_source
+        self._import_evidence = import_evidence
+        self._attempt_cursor: UUID | None = None
+        self._failed_attempts: set[UUID] = set()
+        self._checked_sequence: int | None = None
+        self._ready = False
+
+    @property
+    def ready(self) -> bool:
+        try:
+            observation = self._observation_source()
+        except Exception:
+            return False
+        return (
+            self._ready
+            and observation is not None
+            and observation.sequence == self._checked_sequence
+        )
+
+    async def run_once(self) -> None:
+        """Check one assigned intent and import its exact terminal witness, if present."""
+
+        attempt = None
+        try:
+            observation = self._observation_source()
+            if observation is None:
+                self._checked_sequence = None
+                self._ready = False
+                return
+            candidates = tuple(
+                item
+                for item in observation.attempts
+                if item.lifecycle_state == "assigned" and item.submission_intent_id is not None
+            )
+            self._failed_attempts.intersection_update(
+                item.protected_attempt_id for item in candidates
+            )
+            attempt = next(
+                (
+                    item
+                    for item in candidates
+                    if self._attempt_cursor is None
+                    or item.protected_attempt_id.hex > self._attempt_cursor.hex
+                ),
+                candidates[0] if candidates else None,
+            )
+            if attempt is not None:
+                self._attempt_cursor = attempt.protected_attempt_id
+                intent_id = attempt.submission_intent_id
+                if intent_id is None:  # pragma: no cover - protected model invariant
+                    raise CapacityAgentStoreError(
+                        "assigned terminal inventory candidate has no intent"
+                    )
+                evidence = await self._publisher.get_executable_terminal_inventory_evidence(
+                    intent_id
+                )
+                if evidence is not None:
+                    async with self._session_factory() as session, session.begin():
+                        await self._import_evidence(
+                            session,
+                            registration=self._registration,
+                            protected_attempt_id=attempt.protected_attempt_id,
+                            evidence=evidence,
+                        )
+                self._failed_attempts.discard(attempt.protected_attempt_id)
+        except BaseException:
+            if attempt is not None:
+                self._failed_attempts.add(attempt.protected_attempt_id)
+            self._ready = False
+            raise
+        self._checked_sequence = observation.sequence
+        self._ready = not self._failed_attempts
+
+    async def run_forever(self, *, poll_interval_seconds: float) -> None:
+        if not 0 < poll_interval_seconds <= 300:
+            raise ValueError("capacity agent poll interval must be between 0 and 300 seconds")
+        while True:
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "capacity_agent_terminal_inventory_recovery_iteration_failed",
+                    extra={"error_type": type(exc).__name__},
+                )
+            await asyncio.sleep(poll_interval_seconds)
+
+
 class CapacityAgentServiceRuntime:
-    """Run both trusted publication loops with one composite health signal."""
+    """Run all trusted agent loops with one composite health signal."""
 
     def __init__(
         self,
         *,
         demand_runtime: LoopRuntime,
         release_runtime: LoopRuntime,
+        terminal_evidence_runtime: LoopRuntime,
     ) -> None:
         self._demand_runtime = demand_runtime
         self._release_runtime = release_runtime
+        self._terminal_evidence_runtime = terminal_evidence_runtime
 
     @property
     def ready(self) -> bool:
-        return self._demand_runtime.ready and self._release_runtime.ready
+        return (
+            self._demand_runtime.ready
+            and self._release_runtime.ready
+            and self._terminal_evidence_runtime.ready
+        )
 
     async def run_forever(self, *, poll_interval_seconds: float) -> None:
         async with asyncio.TaskGroup() as tasks:
@@ -447,6 +578,11 @@ class CapacityAgentServiceRuntime:
             )
             tasks.create_task(
                 self._release_runtime.run_forever(poll_interval_seconds=poll_interval_seconds)
+            )
+            tasks.create_task(
+                self._terminal_evidence_runtime.run_forever(
+                    poll_interval_seconds=poll_interval_seconds
+                )
             )
 
 
@@ -517,9 +653,16 @@ async def _main_async(arguments: argparse.Namespace) -> None:
         session_factory=session_factory,
         publisher=publisher,
     )
+    terminal_evidence_runtime = ExecutableTerminalInventoryEvidenceRecoveryRuntime(
+        configuration=configuration,
+        session_factory=session_factory,
+        publisher=publisher,
+        observation_source=lambda: demand_runtime.latest_observation,
+    )
     runtime = CapacityAgentServiceRuntime(
         demand_runtime=demand_runtime,
         release_runtime=release_runtime,
+        terminal_evidence_runtime=terminal_evidence_runtime,
     )
     server = await asyncio.start_server(
         lambda reader, writer: _health_response(reader, writer, runtime=runtime),
@@ -548,6 +691,7 @@ __all__ = [
     "CapacityAgentServiceRuntime",
     "DemandPublisher",
     "ExecutableProtectedReleaseReporterRuntime",
+    "ExecutableTerminalInventoryEvidenceRecoveryRuntime",
     "create_capacity_agent_engine",
     "load_database_url",
     "load_reporter_configuration",

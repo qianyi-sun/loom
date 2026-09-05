@@ -2171,6 +2171,79 @@ class CapacityExecutableIntent(Base):
     )
 
 
+class CapacityExecutableTerminalInventoryEvidence(Base):
+    """Append-only manager witness for one authenticated terminal inventory record."""
+
+    __tablename__ = "capacity_executable_terminal_inventory_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND pool_generation > 0 "
+            "AND inventory_sequence > 0 AND journal_sequence >= 0",
+            name="capacity_executable_terminal_inventory_quantity_check",
+        ),
+        CheckConstraint(
+            "pool_id IN ('oldlab','gb10') "
+            "AND physical_kind IN ('slurm-job','worker')",
+            name="capacity_executable_terminal_inventory_kind_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND inventory_digest ~ '^[0-9a-f]{64}$' "
+            "AND journal_digest ~ '^[0-9a-f]{64}$' "
+            "AND controller_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND terminal_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND evidence_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_terminal_inventory_digest_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence_payload) = 'object' "
+            "AND octet_length(evidence_payload::text) <= 8388608",
+            name="capacity_executable_terminal_inventory_payload_check",
+        ),
+        UniqueConstraint(
+            "intent_id",
+            name="capacity_executable_terminal_inventory_intent_key",
+        ),
+        UniqueConstraint(
+            "executor_incarnation",
+            "physical_kind",
+            "physical_identity",
+            name="capacity_executable_terminal_inventory_physical_key",
+        ),
+        ForeignKeyConstraint(
+            ("intent_id",),
+            ("capacity_executable_intents.intent_id",),
+            name="capacity_executable_terminal_inventory_intent_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    intent_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inventory_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inventory_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    journal_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    journal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    physical_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    physical_identity: Mapped[str] = mapped_column(Text, nullable=False)
+    controller_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    terminal_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class CapacityExecutableBootstrapProposal(Base):
     """Append-only executor proposal containing only a bootstrap-secret hash."""
 
@@ -2695,6 +2768,7 @@ __all__ = [
     "CapacityExecutableIntent",
     "CapacityExecutableLaunchRateBucket",
     "CapacityExecutableProtectedReleaseReceipt",
+    "CapacityExecutableTerminalInventoryEvidence",
     "CapacityExecutionEpoch",
     "CapacityExecutionExecutor",
     "CapacityExecutor",

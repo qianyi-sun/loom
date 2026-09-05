@@ -148,10 +148,16 @@ def test_transport_rejects_cross_pool_or_authority_request_before_invocation(
 def test_oldlab_transport_uses_only_the_fixed_host_pid_installer_channel(
     tmp_path: Path,
 ) -> None:
+    """Catch using the cluster-only logical image through host Docker."""
     component, _fixture_transport, plan, artifact, evidence = _component(
         tmp_path, pool_id="oldlab", evidence_present=False
     )
     initial = component._request(plan, artifact)
+    digest = initial.image.rsplit("@sha256:", 1)[1]
+    initial = replace(
+        initial,
+        image=f"192.168.50.13:5000/loom-capacity-executor@sha256:{digest}",
+    )
     calls: list[tuple[tuple[str, ...], str]] = []
 
     def run(argv, payload):  # type: ignore[no-untyped-def]
@@ -160,6 +166,7 @@ def test_oldlab_transport_uses_only_the_fixed_host_pid_installer_channel(
             returncode=0,
             stdout=replace(
                 evidence,
+                image=initial.image,
                 transport_authority_sha256=transport.authority_sha256,
             ).to_bytes(),
             stderr=b"",
@@ -177,6 +184,7 @@ def test_oldlab_transport_uses_only_the_fixed_host_pid_installer_channel(
     assert transport.converge(request).pool_id == "oldlab"
 
     argv, payload = calls[0]
+    runtime_image = f"localhost:5000/loom-capacity-executor@sha256:{digest}"
     assert argv == (
         "/usr/bin/docker",
         "run",
@@ -193,10 +201,12 @@ def test_oldlab_transport_uses_only_the_fixed_host_pid_installer_channel(
         "type=bind,src=/,dst=/host,bind-propagation=rslave",
         "--entrypoint",
         "/usr/local/bin/python",
-        request.image,
+        runtime_image,
         "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
         "--host-root",
         "/host",
+        "--runtime-image",
+        runtime_image,
         "--operation",
         "converge-prerequisite",
     )
@@ -207,7 +217,8 @@ def test_oldlab_transport_discovers_through_the_bound_executor_image() -> None:
     """Catch requiring a candidate-bound prerequisite before OLDLAB discovery."""
     calls: list[tuple[tuple[str, ...], str]] = []
     evidence = _discovery_evidence(pool_id="oldlab")
-    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    image = "192.168.50.13:5000/loom-capacity-executor@sha256:" + "a" * 64
+    runtime_image = "localhost:5000/loom-capacity-executor@sha256:" + "a" * 64
 
     def run(argv, payload):  # type: ignore[no-untyped-def]
         calls.append((tuple(argv), payload))
@@ -249,7 +260,7 @@ def test_oldlab_transport_discovers_through_the_bound_executor_image() -> None:
                 "type=bind,src=/,dst=/host,bind-propagation=rslave",
                 "--entrypoint",
                 "/usr/local/bin/python",
-                image,
+                runtime_image,
                 "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
                 "--host-root",
                 "/host",

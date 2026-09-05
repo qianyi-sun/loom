@@ -43,6 +43,7 @@ View = Literal["batches", "trials"]
 _BATCH_STATES = ("submitted", "running", "finished", "cancelled")
 _TRIAL_STATES = (
     "queued",
+    "protected-pending",
     "claimed",
     "running",
     "materializing",
@@ -362,7 +363,9 @@ def _resource_trials_stmt() -> Any:
             Trial.pre_start_heartbeat_at,
         )
         .select_from(Trial)
-        .where(Trial.state.in_(("queued", "claimed", "running")))
+        .where(
+            Trial.state.in_(("queued", "protected-pending", "claimed", "running"))
+        )
     )
 
 
@@ -484,6 +487,7 @@ async def get_monitor_summary(
         ),
     }
     queued = trial_counts["queued"]
+    protected_pending = trial_counts["protected-pending"]
     claimed = trial_counts["claimed"]
     running = trial_counts["running"]
     return {
@@ -508,14 +512,15 @@ async def get_monitor_summary(
         },
         "queue": {
             "queued": queued,
+            "protected_pending": protected_pending,
             "claimed": claimed,
             "running": running,
-            "waiting": queued + claimed,
+            "waiting": queued + protected_pending + claimed,
             "active_workers": active_workers,
             "available_backends": active_backends,
             "has_default_backend": "docker" in active_backends,
             "status": _queue_status(
-                queued=queued,
+                queued=queued + protected_pending,
                 claimed=claimed,
                 running=running,
                 active_workers=active_workers,

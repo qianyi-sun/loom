@@ -214,6 +214,59 @@ async def test_resource_summary_excludes_released_drained_workers(
         await engine.dispose()
 
 
+async def test_resource_summary_counts_protected_pending_as_queued(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    team_id = uuid4()
+    try:
+        async with session_factory() as session:
+            await session.execute(insert(Team).values(id=team_id, name="team-protected"))
+            await session.execute(
+                insert(Task).values(
+                    id="task-protected",
+                    checksum="0" * 64,
+                    config={},
+                )
+            )
+            await session.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="task-protected",
+                    config={},
+                    requires_caps={"cpu_arch": "arm64", "backend": "docker"},
+                    state="protected-pending",
+                )
+            )
+            await session.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    environment="production",
+                    pool_name="gb10",
+                    actuator="slurm",
+                    enabled=True,
+                    min_slots=0,
+                    max_slots=140,
+                    scale_up_threshold_slots=1,
+                    scale_down_idle_seconds=600,
+                    scale_up_cooldown_seconds=60,
+                    scale_down_cooldown_seconds=300,
+                    drain_timeout_seconds=600,
+                    actuator_config={"backend": "docker", "cpu_arch": "arm64"},
+                )
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            summary = await get_resource_pool_summary(session, freshness_sec=120)
+
+        assert summary["aggregate"]["queued_tasks"] == 1
+        assert summary["pools"][0]["queued_tasks"] == 1
+    finally:
+        await engine.dispose()
+
+
 async def test_resource_summary_exposes_pre_start_queue_diagnostics(
     postgres_url: str,
 ) -> None:

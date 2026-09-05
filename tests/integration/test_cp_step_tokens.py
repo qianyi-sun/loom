@@ -64,7 +64,7 @@ def seed(postgres_url: str) -> Iterator[dict]:
             insert(Token).values(
                 token_hash=hashlib.sha256(family_raw.encode()).digest(),
                 type="family_orchestrator",
-                scopes=["family:evolve"],
+                scopes=["family:cancel", "family:evolve"],
                 team_id=None,
                 issued_at=datetime.now(UTC),
                 expires_at=None,
@@ -631,7 +631,7 @@ def test_family_evolver_rejects_wrong_principal_before_resource_lookup(
             insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
                 type=token_type,
-                scopes=["family:evolve"],
+                scopes=["family:cancel", "family:evolve"],
                 team_id=principal_team_id,
                 issued_at=datetime.now(UTC),
                 expires_at=None,

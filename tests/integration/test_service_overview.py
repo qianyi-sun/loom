@@ -430,6 +430,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
     }
     assert body["run_activity"]["trials"] == {
         "queued": 1,
+        "protected-pending": 0,
         "claimed": 1,
         "running": 1,
         "succeeded": 1,
@@ -492,6 +493,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
     assert body["state_counts"]["trials"] == {
         "queued": 1,
+        "protected-pending": 0,
         "claimed": 1,
         "running": 1,
         "materializing": 0,
@@ -501,6 +503,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
     assert body["queue"] == {
         "queued": 1,
+        "protected_pending": 0,
         "claimed": 1,
         "running": 1,
         "waiting": 2,
@@ -641,6 +644,47 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
 
 
+async def test_monitor_summary_reports_protected_pending_as_waiting_demand(
+    overview_setup: tuple[FastAPI, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, team_id, latest_batch_id = overview_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    try:
+        with sl() as session:
+            session.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="humaneval/HumanEval/0",
+                    batch_id=latest_batch_id,
+                    config={"agent_name": "oracle"},
+                    requires_caps={"backend": "docker", "cpu_arch": "arm64"},
+                    state="protected-pending",
+                    submitted_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            await _login(ac)
+            response = await ac.get(
+                "/api/v1/monitor/summary",
+                params={"view": "trials", "team_id": str(team_id)},
+            )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state_counts"]["trials"]["protected-pending"] == 1
+        assert body["queue"]["protected_pending"] == 1
+        assert body["queue"]["waiting"] == 3
+        assert body["resources"]["aggregate"]["queued_tasks"] == 2
+    finally:
+        sync_engine.dispose()
+
+
 async def test_monitor_summary_search_scopes_batch_identity_counts(
     overview_setup: tuple[FastAPI, UUID, UUID],
 ) -> None:
@@ -671,6 +715,7 @@ async def test_monitor_summary_search_scopes_batch_identity_counts(
     }
     assert body["state_counts"]["trials"] == {
         "queued": 0,
+        "protected-pending": 0,
         "claimed": 1,
         "running": 1,
         "materializing": 0,

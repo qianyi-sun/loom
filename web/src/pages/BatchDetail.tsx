@@ -661,6 +661,7 @@ export default function BatchDetail(): JSX.Element {
                     const succeeded = row.trial_summary.succeeded ?? 0;
                     const running =
                       (row.trial_summary.queued ?? 0) +
+                      (row.trial_summary["protected-pending"] ?? 0) +
                       (row.trial_summary.claimed ?? 0) +
                       (row.trial_summary.running ?? 0) +
                       (row.trial_summary.materializing ?? 0);

@@ -510,6 +510,25 @@ describe("TrialDetail trajectory section", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps a protected pending trial active while awaiting admission", async () => {
+    fetchSpy(
+      { ok: true, body: { events: [], next_cursor: null } },
+      {
+        ...TRIAL_BODY,
+        state: "protected-pending",
+      },
+    );
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    expect(await screen.findByText("Trial is active")).toBeInTheDocument();
+    expect(screen.queryByText("Trial outcome unknown")).not.toBeInTheDocument();
+  });
+
   it("keeps a Nebius trial active while materializing and downloads the complete bundle", async () => {
     const fetchMock = fetchSpy(
       { ok: true, body: { events: [], next_cursor: null } },

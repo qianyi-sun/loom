@@ -131,7 +131,7 @@ def _checkpoint(tmp_path: Path, *, schema_version: int = 3) -> VerifiedBackup:
         if schema_version == 3:
             authority = DatabaseAuthorityEvidence(
                 public_schema_revision="0067_global_capacity",
-                capacity_guard_schema_revision="guard_0027",
+                capacity_guard_schema_revision="guard_0028",
                 configuration_epoch=9,
                 configuration_digest="9" * 64,
                 authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
@@ -228,7 +228,7 @@ def test_schema_v3_checkpoint_carries_typed_database_authority(tmp_path: Path) -
     )
     assert checkpoint.database_authority_digest == checkpoint.component_sha256["database_authority"]
     assert checkpoint.public_schema_revision == "0067_global_capacity"
-    assert checkpoint.capacity_guard_schema_revision == "guard_0027"
+    assert checkpoint.capacity_guard_schema_revision == "guard_0028"
     assert checkpoint.manager_configuration_epoch == 9
     assert checkpoint.manager_configuration_digest == "9" * 64
     assert checkpoint.manager_authority_incarnation == UUID("00000000-0000-4000-8000-0000000000aa")
@@ -285,7 +285,7 @@ def test_restore_evidence_schema_three_round_trip_rejects_mixed_fields(tmp_path:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("capacity_guard_schema_revision", "guard_0027"),
+        ("capacity_guard_schema_revision", "guard_0028"),
         ("manager_execution_manifest_sha256", "f" * 64),
     ],
 )

@@ -17,6 +17,9 @@ from .manifest_apply_contract import (
     server_side_apply_argv,
 )
 from .protected_controller_prerequisite_component import capacity_executor_image_digest
+from .protected_controller_prerequisite_transport import (
+    oldlab_runtime_executor_image_digest,
+)
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
@@ -190,11 +193,26 @@ class InstalledPreflightCommands:
             or not payload.endswith("\n")
         ):
             raise ValueError("OLDLAB controller payload is invalid")
+        image_index = len(_OLDLAB_CONTROLLER_PREFIX)
+        runtime_image = command[image_index]
+        operation = command[-1] if command else ""
+        base = (
+            *_OLDLAB_CONTROLLER_PREFIX,
+            runtime_image,
+            *_OLDLAB_CONTROLLER_SUFFIX[:-1],
+        )
+        expected = (
+            (*base, "--runtime-image", runtime_image, "--operation", operation)
+            if operation in {"observe-prerequisite", "converge-prerequisite"}
+            else (*base, "--operation", operation)
+        )
+        try:
+            oldlab_runtime_executor_image_digest(runtime_image)
+        except ValueError as exc:
+            raise ValueError("OLDLAB controller command is outside authority") from exc
         if (
-            len(command) != len(_OLDLAB_CONTROLLER_PREFIX) + 1 + len(_OLDLAB_CONTROLLER_SUFFIX) + 1
-            or command[: len(_OLDLAB_CONTROLLER_PREFIX)] != _OLDLAB_CONTROLLER_PREFIX
-            or command[len(_OLDLAB_CONTROLLER_PREFIX) + 1 : -1] != _OLDLAB_CONTROLLER_SUFFIX
-            or command[-1] not in _OLDLAB_CONTROLLER_OPERATIONS
+            command != expected
+            or operation not in _OLDLAB_CONTROLLER_OPERATIONS
         ):
             raise ValueError("OLDLAB controller command is outside authority")
         result = self._execute(command, input=payload, timeout=1500)

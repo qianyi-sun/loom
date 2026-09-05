@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from .protected_capacity_execution_preparation_component import (
@@ -193,14 +193,20 @@ class FixedOldlabPreparedControllerInvoker:
 
     run: OldlabPreparedControllerRunner
     image: str
+    runtime_image: str = field(init=False)
 
     def __post_init__(self) -> None:
         try:
             capacity_executor_image_digest(self.image)
+            prerequisite_invoker = FixedOldlabControllerPrerequisiteInvoker(
+                run=self.run,
+                image=self.image,
+            )
         except ValueError as exc:
             raise ValueError("OLDLAB prepared controller channel is invalid") from exc
         if not callable(self.run):
             raise ValueError("OLDLAB prepared controller channel is invalid")
+        object.__setattr__(self, "runtime_image", prerequisite_invoker.runtime_image)
 
     @property
     def authority_sha256(self) -> str:
@@ -239,7 +245,7 @@ class FixedOldlabPreparedControllerInvoker:
             "type=bind,src=/,dst=/host,bind-propagation=rslave",
             "--entrypoint",
             "/usr/local/bin/python",
-            self.image,
+            self.runtime_image,
             _INSTALLER,
             "--host-root",
             "/host",

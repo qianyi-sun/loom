@@ -5,7 +5,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -22,6 +22,7 @@ from loom_capacity_agent.admission_convergence import (
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
+    GuardLifecycleDemandAttemptV2,
     GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
@@ -30,6 +31,7 @@ from loom_capacity_agent.executable_release_reporter import (
     ExecutableProtectedReleaseReporterRuntime,
 )
 from loom_capacity_agent.runtime import CapacityAgentRuntime, load_database_url
+from loom_capacity_guard.contracts import SealedRequirementsV1
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -45,6 +47,9 @@ from loom_capacity_manager.executable_contracts import (
 )
 from tests.unit.test_capacity_agent_admission_contracts import publishable_release_fixture
 from tests.unit.test_capacity_agent_admission_convergence import _proposal as _admission_proposal
+from tests.unit.test_capacity_agent_client import (
+    _terminal_inventory_evidence as _manager_terminal_inventory_evidence,
+)
 
 
 def _configuration() -> ReporterConfigurationV1:
@@ -80,6 +85,50 @@ def _observation(configuration: ReporterConfigurationV1, sequence: int):
         sequence=sequence,
         source_observed_at=datetime(2026, 8, 11, tzinfo=UTC),
         attempts=(),
+    )
+
+
+def _assigned_observation(
+    configuration: ReporterConfigurationV1,
+    *,
+    protected_attempt_id: UUID,
+    submission_intent_id: UUID,
+    sequence: int = 1,
+) -> GuardLifecycleDemandObservationV2:
+    requirements = SealedRequirementsV1(
+        os="linux",
+        cpu_arch="x86_64",
+        gpu_vendor="none",
+        network_policies=("public",),
+        required_pool="oldlab",
+    )
+    attempt = GuardLifecycleDemandAttemptV2(
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=configuration.deployment_generation,
+        requirements=requirements,
+        requirements_digest=guard_canonical_digest(requirements),
+        lifecycle_sequence=2,
+        lifecycle_state="assigned",
+        allowance_id=UUID(int=811),
+        plan_id=UUID(int=812),
+        admission_incarnation=UUID(int=813),
+        manager_allocation_epoch=1,
+        pool_id="oldlab",
+        pool_generation=1,
+        profile_id="oldlab-profile",
+        profile_generation=1,
+        profile_digest="b" * 64,
+        shape_id="one-slot",
+        shape_instance_id="oldlab-slot-1",
+        submission_intent_id=submission_intent_id,
+        submit_priority=0,
+        submitted_at=datetime(2026, 9, 5, tzinfo=UTC),
+    )
+    return GuardLifecycleDemandObservationV2(
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
+        sequence=sequence,
+        source_observed_at=datetime(2026, 9, 5, tzinfo=UTC),
+        attempts=(attempt,),
     )
 
 
@@ -186,6 +235,9 @@ class _Publisher:
 
     async def next_executable_bootstrap(self):
         return self.bootstrap_work.pop(0) if self.bootstrap_work else None
+
+    async def get_executable_terminal_inventory_evidence(self, _intent_id: UUID):
+        return None
 
     async def publish_executable_bootstrap_acknowledgement(
         self, acknowledgement, *, idempotency_key
@@ -1151,40 +1203,238 @@ def test_capacity_agent_engine_uses_serializable_isolation(
     }
 
 
-def test_service_runtime_is_ready_only_when_both_loops_are_ready() -> None:
+@pytest.mark.asyncio
+async def test_terminal_evidence_runtime_imports_exact_assigned_attempt() -> None:
+    configuration = _configuration()
+    evidence = _manager_terminal_inventory_evidence(configuration)
+    protected_attempt_id = UUID(int=810)
+    observation = _assigned_observation(
+        configuration,
+        protected_attempt_id=protected_attempt_id,
+        submission_intent_id=evidence.binding.intent_id,
+    )
+    fetched: list[UUID] = []
+    imported: list[tuple[object, object, object]] = []
+
+    class Publisher(_Publisher):
+        async def get_executable_terminal_inventory_evidence(self, intent_id: UUID):
+            fetched.append(intent_id)
+            return evidence
+
+    async def import_evidence(*_args: object, **kwargs: object):
+        imported.append(
+            (
+                kwargs["registration"],
+                kwargs["protected_attempt_id"],
+                kwargs["evidence"],
+            )
+        )
+        return object()
+
+    recovery = runtime_module.ExecutableTerminalInventoryEvidenceRecoveryRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=Publisher(),
+        observation_source=lambda: observation,
+        import_evidence=import_evidence,
+    )
+
+    assert recovery.ready is False
+    await recovery.run_once()
+
+    assert recovery.ready is True
+    assert fetched == [evidence.binding.intent_id]
+    assert imported == [(recovery._registration, protected_attempt_id, evidence)]
+
+
+@pytest.mark.asyncio
+async def test_terminal_evidence_runtime_stays_not_ready_without_protected_observation() -> None:
+    configuration = _configuration()
+    fetched = False
+
+    class Publisher(_Publisher):
+        async def get_executable_terminal_inventory_evidence(self, _intent_id: UUID):
+            nonlocal fetched
+            fetched = True
+            return None
+
+    recovery = runtime_module.ExecutableTerminalInventoryEvidenceRecoveryRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=Publisher(),
+        observation_source=lambda: None,
+    )
+
+    await recovery.run_once()
+
+    assert recovery.ready is False
+    assert fetched is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_evidence_runtime_invalidates_readiness_for_new_observation() -> None:
+    configuration = _configuration()
+    current = [_observation(configuration, 1)]
+    recovery = runtime_module.ExecutableTerminalInventoryEvidenceRecoveryRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=_Publisher(),
+        observation_source=lambda: current[0],
+    )
+
+    await recovery.run_once()
+    assert recovery.ready is True
+
+    current[0] = _observation(configuration, 2)
+    assert recovery.ready is False
+
+    await recovery.run_once()
+    assert recovery.ready is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_evidence_runtime_rotates_assigned_intents_when_evidence_is_absent() -> None:
+    configuration = _configuration()
+    first_intent_id = UUID(int=821)
+    second_intent_id = UUID(int=822)
+    first = _assigned_observation(
+        configuration,
+        protected_attempt_id=UUID(int=820),
+        submission_intent_id=first_intent_id,
+    )
+    second = _assigned_observation(
+        configuration,
+        protected_attempt_id=UUID(int=823),
+        submission_intent_id=second_intent_id,
+    )
+    observation = GuardLifecycleDemandObservationV2(
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
+        sequence=1,
+        source_observed_at=datetime(2026, 9, 5, tzinfo=UTC),
+        attempts=(first.attempts[0], second.attempts[0]),
+    )
+    fetched: list[UUID] = []
+
+    class Publisher(_Publisher):
+        async def get_executable_terminal_inventory_evidence(self, intent_id: UUID):
+            fetched.append(intent_id)
+            return None
+
+    async def unexpected_import(*_args: object, **_kwargs: object):
+        raise AssertionError("absent evidence must not reach the guard import")
+
+    recovery = runtime_module.ExecutableTerminalInventoryEvidenceRecoveryRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=Publisher(),
+        observation_source=lambda: observation,
+        import_evidence=unexpected_import,
+    )
+
+    await recovery.run_once()
+    await recovery.run_once()
+
+    assert recovery.ready is True
+    assert fetched == [first_intent_id, second_intent_id]
+
+
+@pytest.mark.asyncio
+async def test_terminal_evidence_runtime_does_not_mask_one_intent_error_with_another() -> None:
+    configuration = _configuration()
+    first_intent_id = UUID(int=831)
+    second_intent_id = UUID(int=832)
+    first = _assigned_observation(
+        configuration,
+        protected_attempt_id=UUID(int=830),
+        submission_intent_id=first_intent_id,
+    )
+    second = _assigned_observation(
+        configuration,
+        protected_attempt_id=UUID(int=833),
+        submission_intent_id=second_intent_id,
+    )
+    observation = GuardLifecycleDemandObservationV2(
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
+        sequence=1,
+        source_observed_at=datetime(2026, 9, 5, tzinfo=UTC),
+        attempts=(first.attempts[0], second.attempts[0]),
+    )
+    fetched: list[UUID] = []
+
+    class Publisher(_Publisher):
+        async def get_executable_terminal_inventory_evidence(self, requested: UUID):
+            fetched.append(requested)
+            if requested == first_intent_id and fetched.count(requested) == 1:
+                raise RuntimeError("manager unavailable")
+            return None
+
+    recovery = runtime_module.ExecutableTerminalInventoryEvidenceRecoveryRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=Publisher(),
+        observation_source=lambda: observation,
+    )
+
+    with pytest.raises(RuntimeError, match="manager unavailable"):
+        await recovery.run_once()
+    assert recovery.ready is False
+
+    await recovery.run_once()
+    assert recovery.ready is False
+
+    await recovery.run_once()
+    assert recovery.ready is True
+    assert fetched == [first_intent_id, second_intent_id, first_intent_id]
+
+
+def test_service_runtime_is_ready_only_when_all_three_loops_are_ready() -> None:
     service = runtime_module.CapacityAgentServiceRuntime(
         demand_runtime=_LoopRuntime(ready=True),
         release_runtime=_LoopRuntime(ready=False),
+        terminal_evidence_runtime=_LoopRuntime(ready=True),
     )
     assert service.ready is False
 
     service = runtime_module.CapacityAgentServiceRuntime(
         demand_runtime=_LoopRuntime(ready=True),
         release_runtime=_LoopRuntime(ready=True),
+        terminal_evidence_runtime=_LoopRuntime(ready=False),
+    )
+    assert service.ready is False
+
+    service = runtime_module.CapacityAgentServiceRuntime(
+        demand_runtime=_LoopRuntime(ready=True),
+        release_runtime=_LoopRuntime(ready=True),
+        terminal_evidence_runtime=_LoopRuntime(ready=True),
     )
     assert service.ready is True
 
 
 @pytest.mark.asyncio
-async def test_service_runtime_runs_both_loops_and_cancels_them_together() -> None:
+async def test_service_runtime_runs_all_three_loops_and_cancels_them_together() -> None:
     demand = _LoopRuntime()
     release = _LoopRuntime()
+    terminal_evidence = _LoopRuntime()
     service = runtime_module.CapacityAgentServiceRuntime(
         demand_runtime=demand,
         release_runtime=release,
+        terminal_evidence_runtime=terminal_evidence,
     )
 
     task = asyncio.create_task(service.run_forever(poll_interval_seconds=0.25))
     await asyncio.wait_for(demand.started.wait(), timeout=1)
     await asyncio.wait_for(release.started.wait(), timeout=1)
+    await asyncio.wait_for(terminal_evidence.started.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
     assert demand.poll_intervals == [0.25]
     assert release.poll_intervals == [0.25]
+    assert terminal_evidence.poll_intervals == [0.25]
     assert demand.cancelled is True
     assert release.cancelled is True
+    assert terminal_evidence.cancelled is True
 
 
 @pytest.mark.asyncio
@@ -1248,6 +1498,7 @@ async def test_service_runtime_retries_demand_initialization_without_blocking_re
     service = runtime_module.CapacityAgentServiceRuntime(
         demand_runtime=demand_runtime,
         release_runtime=release_runtime,
+        terminal_evidence_runtime=_LoopRuntime(),
     )
 
     task = asyncio.create_task(service.run_forever(poll_interval_seconds=0.01))
@@ -1322,6 +1573,7 @@ async def test_service_runtime_retries_release_iteration_without_blocking_demand
     service = runtime_module.CapacityAgentServiceRuntime(
         demand_runtime=demand_runtime,
         release_runtime=release_runtime,
+        terminal_evidence_runtime=_LoopRuntime(),
     )
 
     task = asyncio.create_task(service.run_forever(poll_interval_seconds=0.01))
@@ -1336,13 +1588,14 @@ async def test_service_runtime_retries_release_iteration_without_blocking_demand
 
 
 @pytest.mark.asyncio
-async def test_main_async_cancels_both_loops_and_closes_shared_resources(
+async def test_main_async_cancels_all_loops_and_closes_shared_resources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     configuration = _configuration()
     demand = _LoopRuntime()
     release = _LoopRuntime()
+    terminal_evidence = _LoopRuntime()
 
     class _Engine:
         disposed = False
@@ -1395,11 +1648,22 @@ async def test_main_async_cancels_both_loops_and_closes_shared_resources(
         "ExecutableProtectedReleaseReporterRuntime",
         lambda **_kwargs: release,
     )
+    monkeypatch.setattr(
+        runtime_module,
+        "ExecutableTerminalInventoryEvidenceRecoveryRuntime",
+        lambda **_kwargs: terminal_evidence,
+    )
 
-    def _service_runtime(*, demand_runtime: object, release_runtime: object):
+    def _service_runtime(
+        *,
+        demand_runtime: object,
+        release_runtime: object,
+        terminal_evidence_runtime: object,
+    ):
         return original_service_runtime(
             demand_runtime=demand_runtime,
             release_runtime=release_runtime,
+            terminal_evidence_runtime=terminal_evidence_runtime,
         )
 
     monkeypatch.setattr(runtime_module, "CapacityAgentServiceRuntime", _service_runtime)
@@ -1425,12 +1689,14 @@ async def test_main_async_cancels_both_loops_and_closes_shared_resources(
     task = asyncio.create_task(runtime_module._main_async(arguments))
     await asyncio.wait_for(demand.started.wait(), timeout=1)
     await asyncio.wait_for(release.started.wait(), timeout=1)
+    await asyncio.wait_for(terminal_evidence.started.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
     assert demand.cancelled is True
     assert release.cancelled is True
+    assert terminal_evidence.cancelled is True
     assert publisher.closed is True
     assert engine.disposed is True
     assert server.entered is True

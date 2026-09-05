@@ -36,6 +36,8 @@ def test_store_publishes_private_immutable_prerequisite(tmp_path: Path) -> None:
     assert store.read(publication) == artifact
     assert store.attestation_evidence(publication) == {
         **artifact.attestation_evidence(),
+        "mode": "activation",
+        "bootstrap-authority-sha256": "0" * 64,
         "artifact-path": str(publication.path),
     }
     assert store.publish(artifact) == publication

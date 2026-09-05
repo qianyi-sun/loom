@@ -52,6 +52,18 @@ def test_reward_zero_is_score_failure_not_platform_failure() -> None:
     assert classification["rerun_recommendation"] == "not_rerunnable"
 
 
+def test_protected_pending_is_classified_as_active() -> None:
+    classification = classify_trial_outcome(
+        _trial(
+            task_id="local/protected-pending",
+            state="protected-pending",
+        )
+    )
+
+    assert classification["reason_code"] == "trial.protected-pending"
+    assert classification["platform_outcome"] == "active"
+
+
 def test_missing_required_artifacts_are_retryable_invalid_evidence() -> None:
     classification = classify_trial_outcome(
         _trial(

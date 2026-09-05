@@ -170,7 +170,13 @@ def test_transport_rejects_evidence_for_another_request(tmp_path: Path) -> None:
 def test_oldlab_transport_uses_only_fixed_host_pid_installer_channel(
     tmp_path: Path,
 ) -> None:
+    """Catch using the cluster-only logical image for prepared controller calls."""
     initial = _request(tmp_path, pool_id="oldlab")
+    digest = initial.prerequisite.image.rsplit("@sha256:", 1)[1]
+    logical_image = f"192.168.50.13:5000/loom-capacity-executor@sha256:{digest}"
+    runtime_image = f"localhost:5000/loom-capacity-executor@sha256:{digest}"
+    initial_prerequisite = replace(initial.prerequisite, image=logical_image)
+    initial = replace(initial, prerequisite=initial_prerequisite)
     calls: list[tuple[tuple[str, ...], str]] = []
 
     def run(argv, payload):  # type: ignore[no-untyped-def]
@@ -219,7 +225,7 @@ def test_oldlab_transport_uses_only_fixed_host_pid_installer_channel(
                 "type=bind,src=/,dst=/host,bind-propagation=rslave",
                 "--entrypoint",
                 "/usr/local/bin/python",
-                request.prerequisite.image,
+                runtime_image,
                 (
                     "/opt/loom-capacity-executor-release/payload/installer/"
                     "install_capacity_executor.py"

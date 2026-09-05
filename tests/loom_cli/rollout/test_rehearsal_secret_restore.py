@@ -168,7 +168,7 @@ def _checkpoint(
         _private_file(secrets / filename, payload)
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0066",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest="9" * 64,
         authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),

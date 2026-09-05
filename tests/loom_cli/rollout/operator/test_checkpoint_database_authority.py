@@ -89,7 +89,7 @@ def _observation() -> dict[str, object]:
                 "subject_incarnation": str(subject.subject_incarnation),
             },
         ],
-        "guard_revisions": ["guard_0027"],
+        "guard_revisions": ["guard_0028"],
         "guard_table_present": True,
         "public_revisions": ["0067_global_capacity"],
     }
@@ -148,13 +148,13 @@ def test_authority_parser_returns_only_typed_non_secret_checkpoint_fields() -> N
     evidence = parse_database_authority_observation(_payload(_observation()))
 
     assert evidence.public_schema_revision == "0067_global_capacity"
-    assert evidence.capacity_guard_schema_revision == "guard_0027"
+    assert evidence.capacity_guard_schema_revision == "guard_0028"
     assert evidence.configuration_epoch == 9
     assert evidence.authority_incarnation == UUID("00000000-0000-4000-8000-000000000001")
     assert evidence.writer_epoch == 0
     assert json.loads(evidence.payload) == {
         "authority_incarnation": "00000000-0000-4000-8000-000000000001",
-        "capacity_guard_schema_revision": "guard_0027",
+        "capacity_guard_schema_revision": "guard_0028",
         "configuration_digest": evidence.configuration_digest,
         "configuration_epoch": 9,
         "executable_new_capacity_ceiling": 0,

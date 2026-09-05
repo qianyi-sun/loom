@@ -59,7 +59,7 @@ def _dependency(check_id: str) -> RegisteredCheck:
 def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0067",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest="9" * 64,
         authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),

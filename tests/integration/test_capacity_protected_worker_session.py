@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -40,10 +41,18 @@ from loom_capacity_agent.admission import (
 )
 from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
+from loom_capacity_agent.store import import_executable_terminal_inventory_evidence
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableBootstrapRegistrationV2,
+    ExecutableInventoryRecordV2,
+    ExecutableOwnershipMetadataV2,
+    ExecutableTerminalInventoryEvidenceV2,
+    ExecutionContextV2,
+    SignedExecutableOwnershipProofV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
 )
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
@@ -876,7 +885,7 @@ def test_guard_0023_refuses_downgrade_with_protected_public_projection(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0027"
+                == "guard_0029"
             )
             assert (
                 connection.execute(
@@ -1515,6 +1524,326 @@ def test_protected_claim_routes_accept_guard_credential_instead_of_bearer_hash(
     assert response.status_code == 204, response.text
 
 
+def test_protected_pending_trial_cancel_is_guarded_atomic_and_idempotent(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_seed_protected_worker(capacity_guard_database))
+    team_id = uuid4()
+    user_id = uuid4()
+    submit_token = f"loom_team_{uuid4().hex}"
+    task_id = f"protected-cancel-{uuid4().hex}"
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                insert(Team).values(id=team_id, name=f"protected-cancel-{team_id}")
+            )
+            connection.execute(
+                insert(User).values(
+                    id=user_id,
+                    username=f"protected-cancel-{user_id.hex[:8]}",
+                    username_normalized=f"protected-cancel-{user_id.hex[:8]}",
+                    status="active",
+                    is_platform_admin=False,
+                )
+            )
+            connection.execute(insert(TeamQuota).values(team_id=team_id))
+            connection.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(submit_token.encode("ascii")).digest(),
+                    type="team",
+                    scopes=["submit"],
+                    team_id=team_id,
+                    created_by_user_id=user_id,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                )
+            )
+            connection.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="7" * 64,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
+                    },
+                )
+            )
+
+        app = _protected_cp_app(capacity_guard_database, monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            submitted = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {submit_token}"},
+                json={
+                    "task_id": task_id,
+                    "required_worker_pool": "oldlab",
+                    "config": {"agent_name": "oracle", "agent_model": None},
+                },
+            )
+            assert submitted.status_code == 201, submitted.text
+            trial_id = UUID(submitted.json()["trial_id"])
+
+            cancelled = client.post(
+                f"/trials/{trial_id}/cancel",
+                headers={"Authorization": f"Bearer {submit_token}"},
+            )
+            replay = client.post(
+                f"/trials/{trial_id}/cancel",
+                headers={"Authorization": f"Bearer {submit_token}"},
+            )
+
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json() == {
+            "trial_id": str(trial_id),
+            "state": "cancelled",
+        }
+        assert replay.status_code == 200, replay.text
+        assert replay.json() == cancelled.json()
+
+        with engine.connect() as connection:
+            state = (
+                connection.execute(
+                    text(
+                        "SELECT trial.state, trial.worker_id, trial.attempt_count, "
+                        "trial.cancellation_requested_at IS NOT NULL "
+                        "AS cancellation_requested, "
+                        "trial.cancellation_observed_at IS NOT NULL "
+                        "AS cancellation_observed, "
+                        "trial.finished_at IS NOT NULL AS finished, "
+                        "attempt.protected_attempt_id, head.transition_sequence, "
+                        "head.lifecycle_state, terminal.operation, "
+                        "terminal.previous_state, terminal.executable, "
+                        "terminal.payload->>'transition_reason' AS transition_reason, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.attempt_lifecycle_events AS event "
+                        "WHERE event.protected_attempt_id = attempt.protected_attempt_id "
+                        "AND event.operation = 'cancel') AS cancellation_events, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.executable_claim_leases AS claim "
+                        "WHERE claim.protected_attempt_id = attempt.protected_attempt_id) "
+                        "AS executable_claims, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.executable_claim_terminal_events AS event "
+                        "WHERE event.protected_attempt_id = attempt.protected_attempt_id) "
+                        "AS executable_terminal_events, "
+                        "(SELECT count(*) FROM public.execution_admission_reservations "
+                        "AS reservation WHERE reservation.trial_id = trial.id) "
+                        "AS admission_reservations "
+                        "FROM public.trials AS trial "
+                        "JOIN loom_capacity_guard.protected_runtime_trial_submissions "
+                        "AS runtime ON runtime.trial_id = trial.id "
+                        "JOIN loom_capacity_guard.trial_attempts AS attempt "
+                        "ON attempt.trial_id = runtime.trial_id "
+                        "AND attempt.protected_attempt_id = runtime.protected_attempt_id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS head "
+                        "ON head.protected_attempt_id = attempt.protected_attempt_id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_events AS terminal "
+                        "ON terminal.transition_id = head.transition_id "
+                        "WHERE trial.id = :trial_id"
+                    ),
+                    {"trial_id": trial_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(state) | {"protected_attempt_id": "attempt"} == {
+            "state": "cancelled",
+            "worker_id": None,
+            "attempt_count": 0,
+            "cancellation_requested": True,
+            "cancellation_observed": True,
+            "finished": True,
+            "protected_attempt_id": "attempt",
+            "transition_sequence": 1,
+            "lifecycle_state": "cancelled-terminal",
+            "operation": "cancel",
+            "previous_state": "pending-unassigned",
+            "executable": False,
+            "transition_reason": "protected-runtime-user-cancel",
+            "cancellation_events": 1,
+            "executable_claims": 0,
+            "executable_terminal_events": 0,
+            "admission_reservations": 0,
+        }
+    finally:
+        engine.dispose()
+
+
+def test_family_orchestrator_cancels_assigned_unclaimed_protected_trial(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = asyncio.run(_seed_protected_worker(capacity_guard_database))
+    team_id = uuid4()
+    user_id = uuid4()
+    batch_id = uuid4()
+    submit_token = f"loom_team_{uuid4().hex}"
+    family_token = f"loom_fo_{uuid4().hex}"
+    task_id = f"protected-family-cancel-{uuid4().hex}"
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                insert(Team).values(id=team_id, name=f"protected-family-{team_id}")
+            )
+            connection.execute(
+                insert(User).values(
+                    id=user_id,
+                    username=f"protected-family-{user_id.hex[:8]}",
+                    username_normalized=f"protected-family-{user_id.hex[:8]}",
+                    status="active",
+                    is_platform_admin=False,
+                )
+            )
+            connection.execute(insert(TeamQuota).values(team_id=team_id))
+            connection.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(submit_token.encode("ascii")).digest(),
+                    type="team",
+                    scopes=["submit"],
+                    team_id=team_id,
+                    created_by_user_id=user_id,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                )
+            )
+            connection.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(family_token.encode("ascii")).digest(),
+                    type="family_orchestrator",
+                    scopes=["family:cancel", "family:evolve"],
+                    team_id=None,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                )
+            )
+            connection.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="8" * 64,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
+                    },
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO public.batches "
+                    "(id, team_id, name, task_filter, trial_config, state, "
+                    "created_by_token_prefix) VALUES "
+                    "(:batch_id, :team_id, :name, '{}'::jsonb, '{}'::jsonb, "
+                    "'running', 'family')"
+                ),
+                {
+                    "batch_id": batch_id,
+                    "team_id": team_id,
+                    "name": f"protected-family-{batch_id}",
+                },
+            )
+
+        app = _protected_cp_app(capacity_guard_database, monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            submitted = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {submit_token}"},
+                json={
+                    "task_id": task_id,
+                    "required_worker_pool": "oldlab",
+                    "config": {"agent_name": "oracle", "agent_model": None},
+                },
+            )
+            assert submitted.status_code == 201, submitted.text
+            trial_id = UUID(submitted.json()["trial_id"])
+            with engine.connect() as connection:
+                attempt = (
+                    connection.execute(
+                        text(
+                            "SELECT attempt.protected_attempt_id, "
+                            "attempt.execution_generation, attempt.requirements_digest "
+                            "FROM loom_capacity_guard.atomic_trial_submissions AS submission "
+                            "JOIN loom_capacity_guard.trial_attempts AS attempt "
+                            "ON attempt.protected_attempt_id = "
+                            "submission.protected_attempt_id "
+                            "WHERE submission.trial_id = :trial_id"
+                        ),
+                        {"trial_id": trial_id},
+                    )
+                    .mappings()
+                    .one()
+                )
+            asyncio.run(
+                _assign_protected_attempt(
+                    capacity_guard_database,
+                    registration=seeded.registration,
+                    request=seeded.bootstrap,
+                    protected_attempt_id=attempt["protected_attempt_id"],
+                    execution_generation=attempt["execution_generation"],
+                    requirements_digest=attempt["requirements_digest"],
+                )
+            )
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE public.trials SET batch_id = :batch_id, "
+                        "family_key = 'family-a' WHERE id = :trial_id"
+                    ),
+                    {"batch_id": batch_id, "trial_id": trial_id},
+                )
+
+            cancelled = client.post(
+                f"/trials/{trial_id}/cancel",
+                headers={"Authorization": f"Bearer {family_token}"},
+            )
+
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json() == {
+            "trial_id": str(trial_id),
+            "state": "cancelled",
+        }
+        with engine.connect() as connection:
+            state = (
+                connection.execute(
+                    text(
+                        "SELECT trial.state, head.lifecycle_state, event.operation, "
+                        "event.previous_state, event.executable "
+                        "FROM public.trials AS trial "
+                        "JOIN loom_capacity_guard.protected_runtime_trial_submissions "
+                        "AS runtime ON runtime.trial_id = trial.id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS head "
+                        "ON head.protected_attempt_id = runtime.protected_attempt_id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_events AS event "
+                        "ON event.transition_id = head.transition_id "
+                        "WHERE trial.id = :trial_id"
+                    ),
+                    {"trial_id": trial_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(state) == {
+            "state": "cancelled",
+            "lifecycle_state": "cancelled-terminal",
+            "operation": "cancel",
+            "previous_state": "assigned",
+            "executable": False,
+        }
+    finally:
+        engine.dispose()
+
+
 def test_protected_work_claim_consumes_exact_manager_assignment(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1911,6 +2240,477 @@ async def _reclaim_expired_protected_trials(
         return count
     finally:
         await engine.dispose()
+
+
+def _terminal_inventory_evidence(
+    seeded: _ClaimedProtectedTrialSeed,
+) -> ExecutableTerminalInventoryEvidenceV2:
+    binding = seeded.worker.bootstrap.binding
+    metadata = ExecutableOwnershipMetadataV2(
+        binding=binding,
+        controller_authority_sha256="6" * 64,
+        trusted_launcher_sha256=binding.execution.trusted_fleet_release_sha256,
+        slurm_cluster="oldlab-controller",
+        submitter_identity="loom",
+        association="loom",
+        submitted_at=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+    )
+    record = ExecutableInventoryRecordV2(
+        physical_identity=_JOB_ID,
+        physical_kind="slurm-job",
+        authority_scope="dedicated-loom-association",
+        state="terminal",
+        resources=binding.resources,
+        node_ids=binding.node_ids,
+        controller_evidence_sha256="7" * 64,
+        ownership_proof=SignedExecutableOwnershipProofV2(
+            metadata=metadata,
+            signing_key_id="oldlab-key",
+            signature_base64=base64.b64encode(b"\0" * 64).decode("ascii"),
+        ),
+        terminal_evidence_sha256="8" * 64,
+    )
+    return ExecutableTerminalInventoryEvidenceV2(
+        binding=binding,
+        inventory_execution=ExecutionContextV2.model_validate(
+            binding.execution.model_dump(
+                mode="python",
+                exclude={"allocation_epoch", "executable"},
+            )
+        ),
+        inventory_sequence=4,
+        inventory_digest="9" * 64,
+        journal_sequence=5,
+        journal_digest="b" * 64,
+        record=record,
+        observed_at=datetime(2026, 9, 5, 12, 1, tzinfo=UTC),
+    )
+
+
+async def _import_terminal_inventory_evidence(
+    database: dict[str, object],
+    seeded: _ClaimedProtectedTrialSeed,
+    evidence: ExecutableTerminalInventoryEvidenceV2,
+) -> dict[str, object]:
+    engine = create_async_engine(
+        make_url(_value(database, "agent_url")),
+        isolation_level="SERIALIZABLE",
+    )
+    payload = canonical_executable_bytes(evidence)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            returned = (
+                await session.execute(
+                    text(
+                        "SELECT loom_capacity_guard.import_executable_terminal_inventory_evidence("
+                        ":agent_incarnation, :protected_attempt_id, CAST(:payload AS jsonb), "
+                        "CAST(:canonical_payload AS bytea), :evidence_digest)"
+                    ),
+                    {
+                        "agent_incarnation": seeded.worker.registration.agent_incarnation,
+                        "protected_attempt_id": seeded.first_attempt["protected_attempt_id"],
+                        "payload": payload.decode("ascii"),
+                        "canonical_payload": payload,
+                        "evidence_digest": canonical_executable_digest(evidence),
+                    },
+                )
+            ).scalar_one()
+            await session.commit()
+    finally:
+        await engine.dispose()
+    assert isinstance(returned, dict)
+    return returned
+
+
+async def _import_terminal_inventory_payload(
+    database: dict[str, object],
+    seeded: _ClaimedProtectedTrialSeed,
+    payload: dict[str, object],
+    *,
+    protected_attempt_id: UUID | None = None,
+    canonical_payload: bytes | None = None,
+    evidence_digest: str | None = None,
+    caller_url_key: str = "agent_url",
+) -> dict[str, object]:
+    canonical = canonical_payload or json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    digest = evidence_digest or hashlib.sha256(canonical).hexdigest()
+    engine = create_async_engine(
+        make_url(_value(database, caller_url_key)),
+        isolation_level="SERIALIZABLE",
+    )
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            returned = (
+                await session.execute(
+                    text(
+                        "SELECT loom_capacity_guard.import_executable_terminal_inventory_evidence("
+                        ":agent_incarnation, :protected_attempt_id, CAST(:payload AS jsonb), "
+                        "CAST(:canonical_payload AS bytea), :evidence_digest)"
+                    ),
+                    {
+                        "agent_incarnation": seeded.worker.registration.agent_incarnation,
+                        "protected_attempt_id": (
+                            protected_attempt_id
+                            or seeded.first_attempt["protected_attempt_id"]
+                        ),
+                        "payload": json.dumps(payload),
+                        "canonical_payload": canonical,
+                        "evidence_digest": digest,
+                    },
+                )
+            ).scalar_one()
+            await session.commit()
+    finally:
+        await engine.dispose()
+    assert isinstance(returned, dict)
+    return returned
+
+
+def test_terminal_inventory_import_latches_exact_live_claim_as_draining(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = _seed_claimed_protected_trial(
+        capacity_guard_database,
+        monkeypatch,
+        tmp_path,
+    )
+    evidence = _terminal_inventory_evidence(seeded)
+
+    receipt = asyncio.run(
+        _import_terminal_inventory_evidence(
+            capacity_guard_database,
+            seeded,
+            evidence,
+        )
+    )
+
+    assert receipt == {
+        "schema_version": 2,
+        "intent_id": str(evidence.binding.intent_id),
+        "protected_attempt_id": str(seeded.first_attempt["protected_attempt_id"]),
+        "worker_id": str(seeded.worker.worker.worker_id),
+        "worker_incarnation": str(seeded.worker.worker.worker_incarnation),
+        "physical_job_id": _JOB_ID,
+        "inventory_sequence": evidence.inventory_sequence,
+        "terminal_evidence_sha256": evidence.record.terminal_evidence_sha256,
+        "evidence_digest": canonical_executable_digest(evidence),
+        "import_state": "imported",
+        "executable": False,
+    }
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            state = (
+                connection.execute(
+                    text(
+                        "SELECT trial.state, trial.worker_id, "
+                        "claim_state.claim_high_water, claim_state.terminal_high_water, "
+                        "claim_state.draining, claim.operation_id AS claim_operation_id, "
+                        "evidence.claim_operation_id AS evidence_claim_operation_id, "
+                        "evidence.intent_id, "
+                        "evidence.protected_attempt_id, "
+                        "evidence.worker_id AS evidence_worker_id, "
+                        "evidence.worker_incarnation AS evidence_worker_incarnation, "
+                        "evidence.physical_job_id, evidence.inventory_sequence, "
+                        "evidence.terminal_evidence_sha256, evidence.evidence_digest "
+                        "FROM public.trials AS trial "
+                        "JOIN loom_capacity_guard.executable_claim_leases AS claim "
+                        "ON claim.protected_attempt_id = :protected_attempt_id "
+                        "JOIN loom_capacity_guard.executable_claim_state AS claim_state "
+                        "ON claim_state.intent_id = claim.intent_id "
+                        "JOIN loom_capacity_guard.executable_terminal_inventory_evidence "
+                        "AS evidence ON evidence.claim_operation_id = claim.operation_id "
+                        "WHERE trial.id = :trial_id"
+                    ),
+                    {
+                        "trial_id": seeded.trial_id,
+                        "protected_attempt_id": seeded.first_attempt["protected_attempt_id"],
+                    },
+                )
+                .mappings()
+                .one()
+            )
+    finally:
+        engine.dispose()
+    assert state["evidence_claim_operation_id"] == state["claim_operation_id"]
+    state = dict(state)
+    state.pop("evidence_claim_operation_id")
+    assert dict(state) == {
+        "state": "claimed",
+        "worker_id": seeded.worker.worker.worker_id,
+        "claim_high_water": 1,
+        "terminal_high_water": 0,
+        "draining": True,
+        "claim_operation_id": state["claim_operation_id"],
+        "intent_id": evidence.binding.intent_id,
+        "protected_attempt_id": seeded.first_attempt["protected_attempt_id"],
+        "evidence_worker_id": seeded.worker.worker.worker_id,
+        "evidence_worker_incarnation": seeded.worker.worker.worker_incarnation,
+        "physical_job_id": _JOB_ID,
+        "inventory_sequence": evidence.inventory_sequence,
+        "terminal_evidence_sha256": evidence.record.terminal_evidence_sha256,
+        "evidence_digest": canonical_executable_digest(evidence),
+    }
+
+
+def test_agent_store_terminal_inventory_import_is_typed_and_restart_idempotent(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = _seed_claimed_protected_trial(
+        capacity_guard_database,
+        monkeypatch,
+        tmp_path,
+    )
+    evidence = _terminal_inventory_evidence(seeded)
+
+    async def import_twice():  # type: ignore[no-untyped-def]
+        engine = create_async_engine(
+            make_url(_value(capacity_guard_database, "agent_url")),
+            isolation_level="SERIALIZABLE",
+        )
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session, session.begin():
+                first = await import_executable_terminal_inventory_evidence(
+                    session,
+                    registration=seeded.worker.registration,
+                    protected_attempt_id=seeded.first_attempt["protected_attempt_id"],
+                    evidence=evidence,
+                )
+            async with factory() as session, session.begin():
+                replay = await import_executable_terminal_inventory_evidence(
+                    session,
+                    registration=seeded.worker.registration,
+                    protected_attempt_id=seeded.first_attempt["protected_attempt_id"],
+                    evidence=evidence,
+                )
+        finally:
+            await engine.dispose()
+        return first, replay
+
+    first, replay = asyncio.run(import_twice())
+
+    assert replay == first
+    assert first.intent_id == evidence.binding.intent_id
+    assert first.protected_attempt_id == seeded.first_attempt["protected_attempt_id"]
+    assert first.worker_id == seeded.worker.worker.worker_id
+    assert first.worker_incarnation == seeded.worker.worker.worker_incarnation
+    assert first.physical_job_id == _JOB_ID
+    assert first.inventory_sequence == evidence.inventory_sequence
+    assert first.terminal_evidence_sha256 == evidence.record.terminal_evidence_sha256
+    assert first.evidence_digest == canonical_executable_digest(evidence)
+    assert first.import_state == "imported"
+    assert first.executable is False
+
+
+def test_terminal_inventory_import_rejects_inexact_untrusted_or_noncanonical_evidence(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = _seed_claimed_protected_trial(
+        capacity_guard_database,
+        monkeypatch,
+        tmp_path,
+    )
+    evidence = _terminal_inventory_evidence(seeded)
+    base = evidence.model_dump(mode="json", exclude_none=False)
+
+    def changed_binding(field: str, value: object) -> dict[str, object]:
+        payload = json.loads(json.dumps(base))
+        payload["binding"][field] = value
+        payload["record"]["ownership_proof"]["metadata"]["binding"] = json.loads(
+            json.dumps(payload["binding"])
+        )
+        return payload
+
+    cases: list[tuple[str, dict[str, object], UUID | None]] = [
+        ("wrong intent", changed_binding("intent_id", str(uuid4())), None),
+        ("wrong subject", changed_binding("subject_id", str(uuid4())), None),
+        (
+            "wrong subject incarnation",
+            changed_binding("subject_incarnation", str(uuid4())),
+            None,
+        ),
+        ("wrong executor", changed_binding("executor_id", "other-executor"), None),
+        ("wrong pool", changed_binding("pool_id", "gb10"), None),
+        (
+            "wrong physical job",
+            json.loads(json.dumps(base)),
+            None,
+        ),
+        (
+            "zero inventory sequence",
+            json.loads(json.dumps(base)),
+            None,
+        ),
+        ("invalid journal head", json.loads(json.dumps(base)), None),
+        ("foreign record", json.loads(json.dumps(base)), None),
+        ("wrong protected attempt", json.loads(json.dumps(base)), uuid4()),
+    ]
+    cases[5][1]["record"]["physical_identity"] = "99999"
+    cases[6][1]["inventory_sequence"] = 0
+    cases[7][1]["journal_sequence"] = 0
+    cases[8][1]["record"]["authority_scope"] = "foreign"
+    cases[8][1]["record"]["ownership_proof"] = None
+
+    for _label, payload, protected_attempt_id in cases:
+        with pytest.raises(DBAPIError):
+            asyncio.run(
+                _import_terminal_inventory_payload(
+                    capacity_guard_database,
+                    seeded,
+                    payload,
+                    protected_attempt_id=protected_attempt_id,
+                )
+            )
+
+    canonical = canonical_executable_bytes(evidence)
+    with pytest.raises(DBAPIError):
+        asyncio.run(
+            _import_terminal_inventory_payload(
+                capacity_guard_database,
+                seeded,
+                base,
+                canonical_payload=canonical + b" ",
+                evidence_digest=hashlib.sha256(canonical + b" ").hexdigest(),
+            )
+        )
+    with pytest.raises(DBAPIError):
+        asyncio.run(
+            _import_terminal_inventory_payload(
+                capacity_guard_database,
+                seeded,
+                base,
+                caller_url_key="runtime_url",
+            )
+        )
+
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT claim_state.draining, "
+                    "(SELECT count(*) FROM "
+                    "loom_capacity_guard.executable_terminal_inventory_evidence) "
+                    "AS evidence_rows "
+                    "FROM loom_capacity_guard.executable_claim_state AS claim_state "
+                    "WHERE claim_state.intent_id = :intent_id"
+                ),
+                {"intent_id": evidence.binding.intent_id},
+            ).mappings().one()
+        assert dict(row) == {"draining": False, "evidence_rows": 0}
+    finally:
+        engine.dispose()
+
+
+def test_terminal_inventory_import_is_idempotent_but_rejects_equivocation(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = _seed_claimed_protected_trial(
+        capacity_guard_database,
+        monkeypatch,
+        tmp_path,
+    )
+    evidence = _terminal_inventory_evidence(seeded)
+    first = asyncio.run(
+        _import_terminal_inventory_evidence(capacity_guard_database, seeded, evidence)
+    )
+    replay = asyncio.run(
+        _import_terminal_inventory_evidence(capacity_guard_database, seeded, evidence)
+    )
+    assert replay == first
+
+    equivocation = evidence.model_dump(mode="json", exclude_none=False)
+    equivocation["observed_at"] = "2026-09-05T12:02:00Z"
+    with pytest.raises(DBAPIError):
+        asyncio.run(
+            _import_terminal_inventory_payload(
+                capacity_guard_database,
+                seeded,
+                equivocation,
+            )
+        )
+
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "loom_capacity_guard.executable_terminal_inventory_evidence"
+                )
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_guard_0028_refuses_downgrade_after_terminal_evidence_import(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = _seed_claimed_protected_trial(
+        capacity_guard_database,
+        monkeypatch,
+        tmp_path,
+    )
+    asyncio.run(
+        _import_terminal_inventory_evidence(
+            capacity_guard_database,
+            seeded,
+            _terminal_inventory_evidence(seeded),
+        )
+    )
+    root = Path(__file__).resolve().parents[2]
+    config = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    for name, key in (
+        ("LOOM_CAPACITY_GUARD_DB_URL", "migrator_url"),
+        ("LOOM_CAPACITY_GUARD_OWNER_ROLE", "owner_role"),
+        ("LOOM_CAPACITY_GUARD_AGENT_ROLE", "agent_role"),
+        ("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", "executor_role"),
+        ("LOOM_CAPACITY_GUARD_OBSERVER_ROLE", "observer_role"),
+        ("LOOM_CAPACITY_GUARD_RUNTIME_ROLE", "runtime_role"),
+    ):
+        monkeypatch.setenv(name, _value(capacity_guard_database, key))
+
+    with pytest.raises(
+        RuntimeError,
+        match="cannot downgrade guard_0028 while terminal inventory evidence exists",
+    ):
+        command.downgrade(config, "guard_0027")
+
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT version_num FROM "
+                    "loom_capacity_guard.capacity_guard_alembic_version"
+                )
+            ).scalar_one() == "guard_0029"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "loom_capacity_guard.executable_terminal_inventory_evidence"
+                )
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
 
 
 def test_protected_prestart_retry_creates_a_new_inert_attempt_before_reclaim(
@@ -2548,7 +3348,7 @@ def test_protected_retry_never_exposes_trial_to_legacy_claim(
     }
 
 
-def test_protected_prestart_timeout_creates_fresh_inert_attempt(
+def test_protected_prestart_timeout_retains_claim_without_physical_terminal_evidence(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2570,7 +3370,7 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
                 {"trial_id": seeded.trial_id},
             )
 
-        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 1
+        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 0
         assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 0
 
         with engine.connect() as connection:
@@ -2580,14 +3380,9 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
                         "SELECT trial.state, trial.worker_id, trial.attempt_count, "
                         "trial.failure_reason, "
                         "reservation.state AS reservation_state, "
-                        "old_head.lifecycle_state AS old_lifecycle_state, "
+                        "head.lifecycle_state, "
                         "claim_state.claim_high_water, "
                         "claim_state.terminal_high_water, "
-                        "next_attempt.execution_generation, "
-                        "next_attempt.attempt_sequence, "
-                        "next_head.lifecycle_state AS next_lifecycle_state, "
-                        "runtime.public_attempt_count, "
-                        "runtime.not_before = trial.next_attempt_at AS retry_time_bound, "
                         "(SELECT count(*) FROM loom_capacity_guard.trial_attempts item "
                         "WHERE item.trial_id = trial.id) AS attempt_rows, "
                         "(SELECT count(*) FROM "
@@ -2601,20 +3396,12 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
                         "JOIN public.execution_admission_reservations AS reservation "
                         "ON reservation.trial_id = trial.id "
                         "AND reservation.owner_kind = 'protected_worker_claim' "
-                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS old_head "
-                        "ON old_head.protected_attempt_id = :first_attempt_id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS head "
+                        "ON head.protected_attempt_id = :first_attempt_id "
                         "JOIN loom_capacity_guard.executable_claim_leases AS claim "
                         "ON claim.protected_attempt_id = :first_attempt_id "
                         "JOIN loom_capacity_guard.executable_claim_state AS claim_state "
                         "ON claim_state.intent_id = claim.intent_id "
-                        "JOIN loom_capacity_guard.trial_attempts AS next_attempt "
-                        "ON next_attempt.trial_id = trial.id "
-                        "AND next_attempt.attempt_sequence = 1 "
-                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS next_head "
-                        "ON next_head.protected_attempt_id = next_attempt.protected_attempt_id "
-                        "JOIN loom_capacity_guard.protected_runtime_trial_submissions AS runtime "
-                        "ON runtime.trial_id = next_attempt.trial_id "
-                        "AND runtime.protected_attempt_id = next_attempt.protected_attempt_id "
                         "WHERE trial.id = :trial_id"
                     ),
                     {
@@ -2626,28 +3413,23 @@ def test_protected_prestart_timeout_creates_fresh_inert_attempt(
                 .one()
             )
         assert dict(state) == {
-            "state": "protected-pending",
-            "worker_id": None,
+            "state": "claimed",
+            "worker_id": seeded.worker.worker.worker_id,
             "attempt_count": 1,
-            "failure_reason": "worker_lost_claim",
-            "reservation_state": "released",
-            "old_lifecycle_state": "cancelled-terminal",
+            "failure_reason": None,
+            "reservation_state": "active",
+            "lifecycle_state": "assigned",
             "claim_high_water": 1,
-            "terminal_high_water": 1,
-            "execution_generation": (seeded.first_attempt["execution_generation"] + 1),
-            "attempt_sequence": 1,
-            "next_lifecycle_state": "pending-unassigned",
-            "public_attempt_count": 1,
-            "retry_time_bound": True,
-            "attempt_rows": 2,
-            "readiness_rows": 2,
-            "terminal_events": 1,
+            "terminal_high_water": 0,
+            "attempt_rows": 1,
+            "readiness_rows": 1,
+            "terminal_events": 0,
         }
     finally:
         engine.dispose()
 
 
-def test_protected_prestart_timeout_at_retry_ceiling_closes_terminally(
+def test_protected_prestart_timeout_at_retry_ceiling_retains_unproven_claim(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2670,7 +3452,7 @@ def test_protected_prestart_timeout_at_retry_ceiling_closes_terminally(
                 {"trial_id": seeded.trial_id},
             )
 
-        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 1
+        assert asyncio.run(_reclaim_expired_protected_trials(capacity_guard_database)) == 0
         with engine.connect() as connection:
             state = (
                 connection.execute(
@@ -2707,22 +3489,22 @@ def test_protected_prestart_timeout_at_retry_ceiling_closes_terminally(
                 .one()
             )
         assert dict(state) == {
-            "state": "failed",
+            "state": "claimed",
             "worker_id": seeded.worker.worker.worker_id,
-            "failure_reason": "retry_exhausted",
-            "finished": True,
-            "reservation_state": "released",
-            "lifecycle_state": "cancelled-terminal",
+            "failure_reason": None,
+            "finished": False,
+            "reservation_state": "active",
+            "lifecycle_state": "assigned",
             "claim_high_water": 1,
-            "terminal_high_water": 1,
+            "terminal_high_water": 0,
             "attempt_rows": 1,
-            "terminal_events": 1,
+            "terminal_events": 0,
         }
     finally:
         engine.dispose()
 
 
-def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
+def test_protected_dead_worker_after_start_retains_claim_without_terminal_evidence(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2754,15 +3536,12 @@ def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
                 {"worker_id": seeded.worker.worker.worker_id},
             )
 
-        assert (
-            asyncio.run(
-                _reclaim_expired_protected_trials(
-                    capacity_guard_database,
-                    claimed_without_start_expiry_sec=None,
-                )
+        assert asyncio.run(
+            _reclaim_expired_protected_trials(
+                capacity_guard_database,
+                claimed_without_start_expiry_sec=None,
             )
-            == 1
-        )
+        ) == 0
 
         with engine.connect() as connection:
             state = (
@@ -2770,9 +3549,10 @@ def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
                     text(
                         "SELECT trial.state, trial.worker_id, trial.failure_reason, "
                         "reservation.state AS reservation_state, "
-                        "old_head.lifecycle_state AS old_lifecycle_state, "
-                        "next_attempt.attempt_sequence, "
-                        "next_head.lifecycle_state AS next_lifecycle_state, "
+                        "head.lifecycle_state, claim_state.claim_high_water, "
+                        "claim_state.terminal_high_water, "
+                        "(SELECT count(*) FROM loom_capacity_guard.trial_attempts item "
+                        "WHERE item.trial_id = trial.id) AS attempt_rows, "
                         "(SELECT count(*) FROM "
                         "loom_capacity_guard.executable_claim_terminal_events event "
                         "WHERE event.protected_attempt_id = :first_attempt_id) "
@@ -2781,13 +3561,12 @@ def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
                         "JOIN public.execution_admission_reservations AS reservation "
                         "ON reservation.trial_id = trial.id "
                         "AND reservation.owner_kind = 'protected_worker_claim' "
-                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS old_head "
-                        "ON old_head.protected_attempt_id = :first_attempt_id "
-                        "JOIN loom_capacity_guard.trial_attempts AS next_attempt "
-                        "ON next_attempt.trial_id = trial.id "
-                        "AND next_attempt.attempt_sequence = 1 "
-                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS next_head "
-                        "ON next_head.protected_attempt_id = next_attempt.protected_attempt_id "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS head "
+                        "ON head.protected_attempt_id = :first_attempt_id "
+                        "JOIN loom_capacity_guard.executable_claim_leases AS claim "
+                        "ON claim.protected_attempt_id = :first_attempt_id "
+                        "JOIN loom_capacity_guard.executable_claim_state AS claim_state "
+                        "ON claim_state.intent_id = claim.intent_id "
                         "WHERE trial.id = :trial_id"
                     ),
                     {
@@ -2799,20 +3578,148 @@ def test_protected_dead_worker_after_start_creates_fresh_inert_attempt(
                 .one()
             )
         assert dict(state) == {
-            "state": "protected-pending",
-            "worker_id": None,
-            "failure_reason": "worker_lost_claim",
-            "reservation_state": "released",
-            "old_lifecycle_state": "cancelled-terminal",
-            "attempt_sequence": 1,
-            "next_lifecycle_state": "pending-unassigned",
-            "terminal_events": 1,
+            "state": "running",
+            "worker_id": seeded.worker.worker.worker_id,
+            "failure_reason": None,
+            "reservation_state": "active",
+            "lifecycle_state": "assigned",
+            "claim_high_water": 1,
+            "terminal_high_water": 0,
+            "attempt_rows": 1,
+            "terminal_events": 0,
         }
     finally:
         engine.dispose()
 
 
-def test_protected_user_cancel_closes_claim_exactly_once(
+def test_protected_dead_worker_reclaims_once_after_exact_terminal_evidence(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seeded = _seed_claimed_protected_trial(
+        capacity_guard_database,
+        monkeypatch,
+        tmp_path,
+    )
+    evidence = _terminal_inventory_evidence(seeded)
+    asyncio.run(
+        _import_terminal_inventory_evidence(
+            capacity_guard_database,
+            seeded,
+            evidence,
+        )
+    )
+
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE public.workers SET last_seen_at = statement_timestamp() "
+                    "- interval '2 hours' WHERE id = :worker_id"
+                ),
+                {"worker_id": seeded.worker.worker.worker_id},
+            )
+
+        assert asyncio.run(
+            _reclaim_expired_protected_trials(
+                capacity_guard_database,
+                claimed_without_start_expiry_sec=None,
+            )
+        ) == 1
+        assert asyncio.run(
+            _reclaim_expired_protected_trials(
+                capacity_guard_database,
+                claimed_without_start_expiry_sec=None,
+            )
+        ) == 0
+
+        with engine.connect() as connection:
+            state = (
+                connection.execute(
+                    text(
+                        "SELECT trial.state, trial.worker_id, trial.attempt_count, "
+                        "trial.failure_reason, "
+                        "reservation.state AS reservation_state, "
+                        "head.lifecycle_state, claim_state.draining, "
+                        "claim_state.claim_high_water, "
+                        "claim_state.terminal_high_water, "
+                        "(SELECT count(*) FROM loom_capacity_guard.trial_attempts item "
+                        "WHERE item.trial_id = trial.id) AS attempt_rows, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.protected_runtime_trial_submissions item "
+                        "WHERE item.trial_id = trial.id) AS submission_rows, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.executable_claim_terminal_events item "
+                        "WHERE item.protected_attempt_id = :first_attempt_id) "
+                        "AS terminal_events, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.executable_terminal_inventory_evidence item "
+                        "WHERE item.protected_attempt_id = :first_attempt_id) "
+                        "AS evidence_rows "
+                        "FROM public.trials AS trial "
+                        "JOIN public.execution_admission_reservations AS reservation "
+                        "ON reservation.trial_id = trial.id "
+                        "AND reservation.owner_kind = 'protected_worker_claim' "
+                        "JOIN loom_capacity_guard.attempt_lifecycle_heads AS head "
+                        "ON head.protected_attempt_id = :first_attempt_id "
+                        "JOIN loom_capacity_guard.executable_claim_leases AS claim "
+                        "ON claim.protected_attempt_id = :first_attempt_id "
+                        "JOIN loom_capacity_guard.executable_claim_state AS claim_state "
+                        "ON claim_state.intent_id = claim.intent_id "
+                        "WHERE trial.id = :trial_id"
+                    ),
+                    {
+                        "trial_id": seeded.trial_id,
+                        "first_attempt_id": seeded.first_attempt["protected_attempt_id"],
+                    },
+                )
+                .mappings()
+                .one()
+            )
+            successor = (
+                connection.execute(
+                    text(
+                        "SELECT protected_attempt_id, attempt_sequence, "
+                        "execution_generation, claim_state "
+                        "FROM loom_capacity_guard.trial_attempts "
+                        "WHERE trial_id = :trial_id AND attempt_sequence = 1"
+                    ),
+                    {"trial_id": seeded.trial_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(state) == {
+            "state": "protected-pending",
+            "worker_id": None,
+            "attempt_count": 1,
+            "failure_reason": "worker_lost_claim",
+            "reservation_state": "released",
+            "lifecycle_state": "cancelled-terminal",
+            "draining": True,
+            "claim_high_water": 1,
+            "terminal_high_water": 1,
+            "attempt_rows": 2,
+            "submission_rows": 2,
+            "terminal_events": 1,
+            "evidence_rows": 1,
+        }
+        assert successor["protected_attempt_id"] != seeded.first_attempt[
+            "protected_attempt_id"
+        ]
+        assert dict(successor) | {"protected_attempt_id": "successor"} == {
+            "protected_attempt_id": "successor",
+            "attempt_sequence": 1,
+            "execution_generation": seeded.first_attempt["execution_generation"] + 1,
+            "claim_state": "queued",
+        }
+    finally:
+        engine.dispose()
+
+
+def test_protected_user_cancel_retains_claim_until_worker_acknowledges_teardown(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2832,7 +3739,12 @@ def test_protected_user_cancel_closes_claim_exactly_once(
             headers={"Authorization": f"Bearer {seeded.submit_token}"},
         )
     assert cancelled.status_code == 200, cancelled.text
-    assert replay.status_code == 409, replay.text
+    assert replay.status_code == 200, replay.text
+    assert cancelled.json() == {
+        "trial_id": str(seeded.trial_id),
+        "state": "cancellation-requested",
+    }
+    assert replay.json() == cancelled.json()
 
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
@@ -2840,7 +3752,10 @@ def test_protected_user_cancel_closes_claim_exactly_once(
             state = (
                 connection.execute(
                     text(
-                        "SELECT trial.state, reservation.state AS reservation_state, "
+                        "SELECT trial.state, "
+                        "trial.cancellation_requested_at IS NOT NULL AS cancellation_requested, "
+                        "trial.finished_at IS NOT NULL AS finished, "
+                        "reservation.state AS reservation_state, "
                         "head.lifecycle_state, claim_state.claim_high_water, "
                         "claim_state.terminal_high_water, "
                         "(SELECT count(*) FROM "
@@ -2868,12 +3783,14 @@ def test_protected_user_cancel_closes_claim_exactly_once(
                 .one()
             )
         assert dict(state) == {
-            "state": "cancelled",
-            "reservation_state": "released",
-            "lifecycle_state": "cancelled-terminal",
+            "state": "claimed",
+            "cancellation_requested": True,
+            "finished": False,
+            "reservation_state": "active",
+            "lifecycle_state": "assigned",
             "claim_high_water": 1,
-            "terminal_high_water": 1,
-            "terminal_events": 1,
+            "terminal_high_water": 0,
+            "terminal_events": 0,
         }
     finally:
         engine.dispose()
@@ -2967,7 +3884,7 @@ def test_competing_protected_terminal_updates_close_claim_once(
         engine.dispose()
 
 
-def test_protected_stale_running_timeout_closes_claim_terminally(
+def test_protected_stale_running_timeout_retains_claim_without_terminal_evidence(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3037,7 +3954,7 @@ def test_protected_stale_running_timeout_closes_claim_terminally(
             finally:
                 await async_engine.dispose()
 
-        assert asyncio.run(reclaim_stale()) == 1
+        assert asyncio.run(reclaim_stale()) == 0
         with engine.connect() as connection:
             state = (
                 connection.execute(
@@ -3071,13 +3988,13 @@ def test_protected_stale_running_timeout_closes_claim_terminally(
                 .one()
             )
         assert dict(state) == {
-            "state": "failed",
-            "failure_reason": "agent_timeout",
-            "reservation_state": "released",
-            "lifecycle_state": "cancelled-terminal",
+            "state": "running",
+            "failure_reason": None,
+            "reservation_state": "active",
+            "lifecycle_state": "assigned",
             "claim_high_water": 1,
-            "terminal_high_water": 1,
-            "terminal_events": 1,
+            "terminal_high_water": 0,
+            "terminal_events": 0,
         }
     finally:
         engine.dispose()
@@ -3143,7 +4060,7 @@ def test_guard_0026_refuses_downgrade_with_requeueable_protected_claim(
                 .one()
             )
         assert dict(state) == {
-            "version_num": "guard_0027",
+            "version_num": "guard_0029",
             "state": "claimed",
             "reservation_state": "active",
             "lifecycle_state": "assigned",
@@ -3517,7 +4434,7 @@ def test_configured_protected_mixed_principal_routes_preserve_non_worker_callers
         capacity_guard_database,
         raw="protected-test-family-orchestrator",
         token_type="family_orchestrator",
-        scopes=["family:evolve"],
+        scopes=["family:cancel", "family:evolve"],
     )
     team_bearer = _seed_bearer(
         capacity_guard_database,

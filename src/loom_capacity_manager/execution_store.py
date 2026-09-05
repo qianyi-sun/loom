@@ -55,6 +55,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
     ExecutableSubmissionRecoveryV2,
+    ExecutableTerminalInventoryEvidenceV2,
     ExecutionContextV2,
     ExecutionFenceV2,
     ExecutionPreparationV2,
@@ -82,6 +83,7 @@ from loom_capacity_manager.models import (
     CapacityExecutableIntent,
     CapacityExecutableLaunchRateBucket,
     CapacityExecutableProtectedReleaseReceipt,
+    CapacityExecutableTerminalInventoryEvidence,
     CapacityExecutableTranche,
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
@@ -834,7 +836,134 @@ class CapacityExecutionStore:
                     continue
                 if not self._apply_inventory_observation(intent, inventory, record):
                     continue
+                if record.state == "terminal":
+                    if record.terminal_evidence_sha256 is None:
+                        raise ExecutionConflictError(
+                            "terminal inventory evidence digest is unavailable"
+                        )
+                    evidence = ExecutableTerminalInventoryEvidenceV2(
+                        binding=binding,
+                        inventory_execution=inventory.execution,
+                        inventory_sequence=inventory.inventory_sequence,
+                        inventory_digest=digest,
+                        journal_sequence=inventory.journal_sequence,
+                        journal_digest=inventory.journal_digest,
+                        record=record,
+                        observed_at=now,
+                    )
+                    await session.flush()
+                    session.add(
+                        CapacityExecutableTerminalInventoryEvidence(
+                            intent_id=binding.intent_id,
+                            subject_id=binding.subject_id,
+                            subject_incarnation=binding.subject_incarnation,
+                            execution_epoch=binding.execution.execution_epoch,
+                            execution_manifest_sha256=(
+                                binding.execution.execution_manifest_sha256
+                            ),
+                            executor_id=binding.executor_id,
+                            executor_incarnation=binding.executor_incarnation,
+                            pool_id=binding.pool_id,
+                            pool_generation=binding.pool_generation,
+                            inventory_sequence=inventory.inventory_sequence,
+                            inventory_digest=digest,
+                            journal_sequence=inventory.journal_sequence,
+                            journal_digest=inventory.journal_digest,
+                            physical_kind=record.physical_kind,
+                            physical_identity=record.physical_identity,
+                            controller_evidence_sha256=(
+                                record.controller_evidence_sha256
+                            ),
+                            terminal_evidence_sha256=(
+                                record.terminal_evidence_sha256
+                            ),
+                            evidence_digest=canonical_executable_digest(evidence),
+                            evidence_payload=evidence.model_dump(
+                                mode="json",
+                                exclude_none=False,
+                            ),
+                            observed_at=now,
+                        )
+                    )
             return IngestedExecutableInventory(inventory.inventory_sequence, digest, False)
+
+    async def subject_terminal_inventory_evidence(
+        self,
+        session: AsyncSession,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        reporter_incarnation: UUID,
+        intent_id: UUID,
+    ) -> ExecutableTerminalInventoryEvidenceV2 | None:
+        """Return one durable terminal witness only to its exact current reporter."""
+
+        async with _write_transaction(session):
+            await self._exact_subject_reporter(
+                session,
+                subject_id=subject_id,
+                subject_incarnation=subject_incarnation,
+                reporter_incarnation=reporter_incarnation,
+                operation="terminal inventory evidence",
+            )
+            row = (
+                await session.execute(
+                    select(CapacityExecutableTerminalInventoryEvidence)
+                    .join(
+                        CapacityExecutableIntent,
+                        CapacityExecutableIntent.intent_id
+                        == CapacityExecutableTerminalInventoryEvidence.intent_id,
+                    )
+                    .where(
+                        CapacityExecutableTerminalInventoryEvidence.intent_id == intent_id,
+                        CapacityExecutableTerminalInventoryEvidence.subject_id == subject_id,
+                        CapacityExecutableTerminalInventoryEvidence.subject_incarnation
+                        == subject_incarnation,
+                        CapacityExecutableIntent.state.in_(
+                            ("terminal", "closing", "released")
+                        ),
+                        CapacityExecutableIntent.inventory_sequence
+                        == CapacityExecutableTerminalInventoryEvidence.inventory_sequence,
+                        CapacityExecutableIntent.terminal_kind
+                        == CapacityExecutableTerminalInventoryEvidence.physical_kind,
+                        CapacityExecutableIntent.terminal_identity
+                        == CapacityExecutableTerminalInventoryEvidence.physical_identity,
+                        CapacityExecutableIntent.terminal_evidence_sha256
+                        == CapacityExecutableTerminalInventoryEvidence.terminal_evidence_sha256,
+                    )
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            try:
+                evidence = ExecutableTerminalInventoryEvidenceV2.model_validate_json(
+                    json.dumps(row.evidence_payload)
+                )
+            except ValueError as exc:
+                raise ExecutionConflictError(
+                    "stored terminal inventory evidence is invalid"
+                ) from exc
+            if (
+                evidence.binding.intent_id != row.intent_id
+                or evidence.binding.subject_id != row.subject_id
+                or evidence.binding.subject_incarnation != row.subject_incarnation
+                or evidence.inventory_sequence != row.inventory_sequence
+                or evidence.inventory_digest != row.inventory_digest
+                or evidence.journal_sequence != row.journal_sequence
+                or evidence.journal_digest != row.journal_digest
+                or evidence.record.physical_kind != row.physical_kind
+                or evidence.record.physical_identity != row.physical_identity
+                or evidence.record.controller_evidence_sha256
+                != row.controller_evidence_sha256
+                or evidence.record.terminal_evidence_sha256
+                != row.terminal_evidence_sha256
+                or canonical_executable_digest(evidence) != row.evidence_digest
+            ):
+                raise ExecutionConflictError(
+                    "stored terminal inventory evidence binding changed"
+                )
+            return evidence
 
     async def next_pool_work(
         self,

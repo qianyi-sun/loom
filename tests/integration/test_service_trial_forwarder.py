@@ -488,19 +488,28 @@ async def test_cancel_trial_forwards(
 
 
 @pytest.mark.parametrize(
-    ("backend", "task_config", "expected_forward_count"),
+    ("backend", "task_config", "trial_state"),
     [
-        ("nebius", {"service_execution": {"logical_pool_id": "nebius-cpu"}}, 1),
-        ("nebius", {}, 1),
-        ("docker", {"service_execution": {"logical_pool_id": "nebius-cpu"}}, 0),
+        (
+            "nebius",
+            {"service_execution": {"logical_pool_id": "nebius-cpu"}},
+            "running",
+        ),
+        ("nebius", {}, "running"),
+        (
+            "docker",
+            {"service_execution": {"logical_pool_id": "nebius-cpu"}},
+            "running",
+        ),
+        ("docker", {}, "protected-pending"),
     ],
 )
-async def test_cancel_batch_respects_explicit_backend_fence(
+async def test_cancel_batch_routes_every_active_trial_through_control_plane(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,
     backend: str,
     task_config: dict[str, object],
-    expected_forward_count: int,
+    trial_state: str,
 ) -> None:
     app, raw, team_id, captured = fwd_setup
     batch_id = uuid4()
@@ -536,7 +545,7 @@ async def test_cancel_batch_respects_explicit_backend_fence(
                 task_id=task_id,
                 team_id=team_id,
                 batch_id=batch_id,
-                state="running",
+                state=trial_state,
                 config={},
                 requires_caps={},
                 submitted_at=datetime.now(UTC),
@@ -555,10 +564,9 @@ async def test_cancel_batch_respects_explicit_backend_fence(
     assert response.status_code == 200, response.text
     assert response.json()["state"] == "cancelled"
     cancel_reqs = [req for req in captured["reqs"] if req["url"].endswith("/cancel")]
-    assert len(cancel_reqs) == expected_forward_count
-    if backend == "nebius":
-        assert cancel_reqs[0]["url"].endswith(f"/trials/{trial_id}/cancel")
-        assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
+    assert len(cancel_reqs) == 1
+    assert cancel_reqs[0]["url"].endswith(f"/trials/{trial_id}/cancel")
+    assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)

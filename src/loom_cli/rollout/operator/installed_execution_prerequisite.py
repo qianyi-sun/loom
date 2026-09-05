@@ -30,7 +30,10 @@ StagingProtectedAdmissionSource = Callable[
     str,
 ]
 ExecutionAuthoritySourceFactory = Callable[[CandidateBinding, str], ExecutionAuthoritySource]
+ZeroCeilingBootstrapAuthoritySource = Callable[[BackupLease], str]
 _REGISTRY_DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ZERO_SHA256 = "0" * 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +47,13 @@ class InstalledExecutionPrerequisitePublisherFactory:
     staging_protected_admission_source: StagingProtectedAdmissionSource
     authority_source_factory: ExecutionAuthoritySourceFactory
     now: Callable[[], datetime]
+    zero_ceiling_bootstrap_authority_source: ZeroCeilingBootstrapAuthoritySource | None = None
+
+    def __post_init__(self) -> None:
+        if self.zero_ceiling_bootstrap_authority_source is not None and not callable(
+            self.zero_ceiling_bootstrap_authority_source
+        ):
+            raise ValueError("zero-ceiling bootstrap authority source is invalid")
 
     def __call__(
         self,
@@ -124,9 +134,40 @@ class InstalledExecutionPrerequisitePublisherFactory:
                 artifact = self.store.read(prerequisite_publication)
                 evidence = cast(dict[str, EvidenceValue], artifact.attestation_evidence())
                 evidence["artifact-path"] = str(prerequisite_publication.path)
+                evidence["mode"] = "activation"
+                evidence["bootstrap-authority-sha256"] = _ZERO_SHA256
                 return evidence
             except ProtectedExecutionPrerequisiteSourceError:
-                raise
+                bootstrap_source = self.zero_ceiling_bootstrap_authority_source
+                if bootstrap_source is None:
+                    raise
+                try:
+                    bootstrap_authority = bootstrap_source(_lease)
+                    if (
+                        not isinstance(bootstrap_authority, str)
+                        or _SHA256_RE.fullmatch(bootstrap_authority) is None
+                        or bootstrap_authority == _ZERO_SHA256
+                    ):
+                        raise ValueError("zero-ceiling bootstrap authority is invalid")
+                except Exception:
+                    raise ProtectedExecutionPrerequisiteSourceError(
+                        "protected execution prerequisite authority is unavailable"
+                    ) from None
+                return {
+                    "mode": "zero-ceiling-bootstrap",
+                    "schema-version": 0,
+                    "bootstrap-authority-sha256": bootstrap_authority,
+                    "artifact-path": "/",
+                    "artifact-sha256": _ZERO_SHA256,
+                    "core-artifact-bundle-sha256": _ZERO_SHA256,
+                    "execution-policy-sha256": _ZERO_SHA256,
+                    "executor-profile-seed-sha256": _ZERO_SHA256,
+                    "manager-route-sha256": _ZERO_SHA256,
+                    "access-metadata-sha256": _ZERO_SHA256,
+                    "coexistence-witness-sha256": _ZERO_SHA256,
+                    "legacy-writer-sha256": _ZERO_SHA256,
+                    "rollback-evidence-sha256": _ZERO_SHA256,
+                }
             except Exception:
                 raise ProtectedExecutionPrerequisiteSourceError(
                     "protected execution prerequisite authority is unavailable"

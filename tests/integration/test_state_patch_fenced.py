@@ -1,11 +1,12 @@
 import hashlib
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial, Worker
@@ -144,6 +145,167 @@ def test_state_patch_terminal_state(
             assert row is not None
             assert row.result == result_payload
     finally:
+        engine.dispose()
+
+
+def test_family_skip_cancels_sibling_through_cancellation_authority(
+    app,
+    state_seed,
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+):  # type: ignore[no-untyped-def]
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    batch_id = uuid4()
+    sibling_id = uuid4()
+    family_spec = {
+        "enabled": True,
+        "family_key_extractor": {"name": "instance_id_prefix", "params": {}},
+        "sequencer": {"name": "alphabetical", "params": {}},
+        "advance_predicate": {"name": "always_on_terminal", "params": {}},
+        "adapter": {"name": "noop", "params": {}},
+        "failure_policy": {"name": "stall_family", "params": {}},
+        "state_backend": {"name": "s3_artifacts", "params": {}},
+        "mount_path": "/root/.skills",
+    }
+
+    class _SkipPredicate:
+        def decide(self, **_kwargs):  # type: ignore[no-untyped-def]
+            from loom.family_run.spec import AdvanceDecision
+
+            return AdvanceDecision.SKIP
+
+    monkeypatch.setattr(
+        "loom_control_plane.routes.state.resolve_plugin",
+        lambda _group, _ref: _SkipPredicate(),
+    )
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as connection:
+            team_id = connection.execute(
+                text("SELECT team_id FROM trials WHERE id = :trial_id"),
+                {"trial_id": trial_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO batches "
+                    "(id, team_id, name, task_filter, trial_config, state, "
+                    "created_by_token_prefix, family_run_spec) VALUES "
+                    "(:batch_id, :team_id, :name, '{}'::jsonb, '{}'::jsonb, "
+                    "'running', 'family', CAST(:spec AS jsonb))"
+                ),
+                {
+                    "batch_id": batch_id,
+                    "team_id": team_id,
+                    "name": f"state-family-{batch_id}",
+                    "spec": json.dumps(family_spec),
+                },
+            )
+            connection.execute(
+                text(
+                    "UPDATE trials SET batch_id = :batch_id, family_key = 'fam' "
+                    "WHERE id = :trial_id"
+                ),
+                {"batch_id": batch_id, "trial_id": trial_id},
+            )
+            connection.execute(
+                insert(Trial).values(
+                    id=sibling_id,
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={},
+                    state="queued",
+                    batch_id=batch_id,
+                    family_key="fam",
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO batch_family_state "
+                    "(batch_id, family_key, task_sequence, current_index, state, "
+                    "attempt_count) VALUES "
+                    "(:batch_id, 'fam', ARRAY['t', 't'], 0, 'running', 0)"
+                ),
+                {"batch_id": batch_id},
+            )
+
+        from loom_control_plane.routes import state as state_routes
+
+        authoritative_cancel = state_routes.cancel_trial_under_authority
+
+        async def cancel_after_family_is_non_runnable(**kwargs):  # type: ignore[no-untyped-def]
+            with engine.connect() as connection:
+                family_state = connection.execute(
+                    text(
+                        "SELECT state FROM batch_family_state "
+                        "WHERE batch_id = :batch_id AND family_key = 'fam'"
+                    ),
+                    {"batch_id": batch_id},
+                ).scalar_one()
+            assert family_state == "cancelling"
+            return await authoritative_cancel(**kwargs)
+
+        monkeypatch.setattr(
+            state_routes,
+            "cancel_trial_under_authority",
+            cancel_after_family_is_non_runnable,
+        )
+
+        with TestClient(app) as client:
+            response = client.patch(
+                f"/trials/{trial_id}/state",
+                headers={"Authorization": f"Bearer {raw_a}"},
+                json={"worker_id": str(worker_a), "state": "cancelled"},
+            )
+        assert response.status_code == 200, response.text
+        with engine.connect() as connection:
+            sibling = (
+                connection.execute(
+                    text(
+                        "SELECT state, cancellation_requested_at IS NOT NULL AS requested, "
+                        "cancellation_observed_at IS NOT NULL AS observed, "
+                        "finished_at IS NOT NULL AS finished FROM trials "
+                        "WHERE id = :trial_id"
+                    ),
+                    {"trial_id": sibling_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(sibling) == {
+            "state": "cancelled",
+            "requested": True,
+            "observed": True,
+            "finished": True,
+        }
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT state FROM batch_family_state "
+                        "WHERE batch_id = :batch_id AND family_key = 'fam'"
+                    ),
+                    {"batch_id": batch_id},
+                ).scalar_one()
+                == "pending"
+            )
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE trials SET batch_id = NULL, family_key = NULL "
+                    "WHERE batch_id = :batch_id"
+                ),
+                {"batch_id": batch_id},
+            )
+            connection.execute(
+                text("DELETE FROM batch_family_state WHERE batch_id = :batch_id"),
+                {"batch_id": batch_id},
+            )
+            connection.execute(
+                text("DELETE FROM batches WHERE id = :batch_id"),
+                {"batch_id": batch_id},
+            )
         engine.dispose()
 
 

@@ -29,12 +29,16 @@ from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
 from loom.terminal_result_semantics import terminal_result_conflicts
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
-from loom_control_plane.protected_worker_session import ProtectedBodyWorkerStateSession
+from loom_control_plane.protected_worker_session import (
+    ProtectedBodyWorkerStateSession,
+    ProtectedTrialCancellationError,
+)
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
     enforce_trial_execution_fence,
 )
+from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 
 router = APIRouter()
 
@@ -99,6 +103,7 @@ _TERMINAL = {
 _FAMILY_FINALIZE_LOAD_SQL = text("""
 SELECT t.family_key,
        t.batch_id,
+       t.team_id,
        t.task_id,
        t.attempt_count,
        t.state           AS trial_state,
@@ -129,15 +134,22 @@ UPDATE batch_family_state
    AND family_key = (:family_key)::text
 """)
 
-# #672 PR-1 shortcut: SKIP/ABORT decisions cancel any remaining queued
-# trials in the same family so the batch settles cleanly.
-_FAMILY_CANCEL_REMAINING_SQL = text("""
-UPDATE trials
-   SET state = 'cancelled',
-       finished_at = NOW()
+_FAMILY_REMAINING_TRIAL_IDS_SQL = text("""
+SELECT pending_trial.id
+  FROM public.trials AS pending_trial
+ WHERE pending_trial.batch_id = (:batch_id)::uuid
+   AND pending_trial.family_key = (:family_key)::text
+   AND pending_trial.state IN ('queued', 'protected-pending')
+ ORDER BY pending_trial.id
+""")
+
+_FAMILY_COMPLETE_CANCELLATION_SQL = text("""
+UPDATE batch_family_state
+   SET state = (:final_state)::text,
+       updated_at = NOW()
  WHERE batch_id = (:batch_id)::uuid
    AND family_key = (:family_key)::text
-   AND state = 'queued'
+   AND state = 'cancelling'
 """)
 
 
@@ -168,12 +180,21 @@ class _FamilyShim:
     attempt_count: int
 
 
+@dataclass(frozen=True)
+class _FamilyCancellation:
+    batch_id: UUID
+    family_key: str
+    team_id: UUID
+    trial_ids: tuple[UUID, ...]
+    final_state: str
+
+
 async def _finalize_family(
     session: Any,
     *,
     trial_id: UUID,
     new_state: TrialState,
-) -> None:
+) -> _FamilyCancellation | None:
     """Evaluate the family's advance predicate + persist the new state.
 
     Called from ``patch_state`` after a trial transitions to a terminal
@@ -194,7 +215,7 @@ async def _finalize_family(
         .one_or_none()
     )
     if row is None:
-        return
+        return None
 
     spec = ResolvedFamilyRunSpec.model_validate(row["spec"])
     predicate = resolve_plugin("loom.family.advance", spec.advance_predicate)
@@ -230,25 +251,38 @@ async def _finalize_family(
     persist_index = next_state.current_index
     persist_attempt = next_state.attempt_count
 
+    cancellation_needed = decision in (AdvanceDecision.SKIP, AdvanceDecision.ABORT)
     await session.execute(
         _FAMILY_FINALIZE_UPDATE_SQL,
         {
             "batch_id": row["batch_id"],
             "family_key": row["family_key"],
-            "new_state": persist_state,
+            "new_state": (
+                "cancelling" if decision == AdvanceDecision.SKIP else persist_state
+            ),
             "new_current_index": persist_index,
             "new_attempt_count": persist_attempt,
         },
     )
 
-    if decision in (AdvanceDecision.SKIP, AdvanceDecision.ABORT):
-        await session.execute(
-            _FAMILY_CANCEL_REMAINING_SQL,
-            {
-                "batch_id": row["batch_id"],
-                "family_key": row["family_key"],
-            },
+    if cancellation_needed:
+        remaining = (
+            await session.execute(
+                _FAMILY_REMAINING_TRIAL_IDS_SQL,
+                {
+                    "batch_id": row["batch_id"],
+                    "family_key": row["family_key"],
+                },
+            )
+        ).mappings().all()
+        return _FamilyCancellation(
+            batch_id=UUID(str(row["batch_id"])),
+            family_key=str(row["family_key"]),
+            team_id=UUID(str(row["team_id"])),
+            trial_ids=tuple(UUID(str(item["id"])) for item in remaining),
+            final_state=persist_state,
         )
+    return None
 
 
 @router.patch("/trials/{trial_id}/state")
@@ -261,6 +295,7 @@ async def patch_state(
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, Any]:
+    family_cancellation: _FamilyCancellation | None = None
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
     if ctx is None or "worker:report" not in ctx.scopes:
@@ -396,13 +431,43 @@ async def patch_state(
         # predicate + persist the family's new position within the same
         # transaction. No-op for non-family trials.
         if row is not None and new_state in _TERMINAL:
-            await _finalize_family(
+            family_cancellation = await _finalize_family(
                 session,
                 trial_id=trial_id,
                 new_state=new_state,
             )
 
         await session.commit()
+
+    if family_cancellation is not None:
+        protected_store = getattr(
+            request.app.state,
+            "protected_worker_session_store",
+            None,
+        )
+        try:
+            for family_trial_id in family_cancellation.trial_ids:
+                await cancel_trial_under_authority(
+                    session_factory=request.app.state.session_factory,
+                    protected_store=protected_store,
+                    trial_id=family_trial_id,
+                    team_id=family_cancellation.team_id,
+                )
+        except ProtectedTrialCancellationError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="protected family trial cancellation unavailable",
+            ) from exc
+        async with request.app.state.session_factory() as session:
+            await session.execute(
+                _FAMILY_COMPLETE_CANCELLATION_SQL,
+                {
+                    "batch_id": family_cancellation.batch_id,
+                    "family_key": family_cancellation.family_key,
+                    "final_state": family_cancellation.final_state,
+                },
+            )
+            await session.commit()
 
     if row is None:
         STATE_PATCH_TOTAL.labels(endpoint="state", result="fenced").inc()

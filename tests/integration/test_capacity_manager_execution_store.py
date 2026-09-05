@@ -38,6 +38,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
+    ExecutableTerminalInventoryEvidenceV2,
     ExecutionContextV2,
     ExecutionDrainV2,
     ExecutionPreparationV2,
@@ -6233,6 +6234,8 @@ async def test_crash_before_submit_recovery_quarantines_and_remains_charged(
     assert recovered.replayed is False
     assert row.state == "quarantined"
     assert row.inventory_sequence is None
+
+
     assert row.observed_state is None
     assert row.terminal_kind is None
     assert row.terminal_identity is None
@@ -6308,6 +6311,77 @@ async def test_crash_before_submit_recovery_quarantines_and_remains_charged(
     replay_row = await _intent_row(capacity_session, permit.binding.intent_id)
     assert replay_row.state == "quarantined"
     assert replay_row.terminal_kind is None
+
+
+async def test_terminal_inventory_evidence_survives_later_complete_inventory(
+    capacity_session: AsyncSession,
+) -> None:
+    """Dropping a terminal record from the latest snapshot must not erase recovery proof."""
+
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring(
+            {"gb10-key": EXECUTOR_KEYS["gb10"].public_key()}
+        )
+    )
+    assert hasattr(store, "subject_terminal_inventory_evidence")
+    permit = await _launch_ready(store, capacity_session)
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    terminal_inventory = await _next_inventory(
+        capacity_session,
+        _inventory_execution(permit.binding),
+        permit.binding,
+        records=(
+            _inventory_record(
+                permit.binding,
+                physical_identity="job-terminal-123",
+                state="terminal",
+                terminal_evidence_sha256="a" * 64,
+            ),
+        ),
+    )
+    await store.ingest_executor_inventory(capacity_session, terminal_inventory)
+    later_inventory = await _next_inventory(
+        capacity_session,
+        _inventory_execution(permit.binding),
+        permit.binding,
+    )
+    await store.ingest_executor_inventory(capacity_session, later_inventory)
+
+    evidence = await store.subject_terminal_inventory_evidence(
+        capacity_session,
+        subject_id=permit.binding.subject_id,
+        subject_incarnation=permit.binding.subject_incarnation,
+        reporter_incarnation=demand_snapshot().reporter_incarnation,
+        intent_id=permit.binding.intent_id,
+    )
+
+    assert isinstance(evidence, ExecutableTerminalInventoryEvidenceV2)
+    assert evidence.binding == permit.binding
+    assert evidence.inventory_sequence == terminal_inventory.inventory_sequence
+    assert evidence.inventory_digest == canonical_executable_digest(terminal_inventory)
+    assert evidence.journal_sequence == terminal_inventory.journal_sequence
+    assert evidence.journal_digest == terminal_inventory.journal_digest
+    assert evidence.record.physical_identity == "job-terminal-123"
+    assert evidence.record.terminal_evidence_sha256 == "a" * 64
+    assert evidence.observed_at.tzinfo is not None
+    assert (
+        await store.subject_terminal_inventory_evidence(
+            capacity_session,
+            subject_id=permit.binding.subject_id,
+            subject_incarnation=permit.binding.subject_incarnation,
+            reporter_incarnation=demand_snapshot().reporter_incarnation,
+            intent_id=UUID(int=999),
+        )
+        is None
+    )
 
 
 async def test_crash_before_submit_recovery_rejects_preconsumption_inventory(

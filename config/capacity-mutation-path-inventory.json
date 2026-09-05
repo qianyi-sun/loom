@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "generated_from_commit": "package-2c3-plus-unified-execution-attempt-audit",
+  "generated_from_commit": "package-2c3-plus-unified-execution-attempt-and-protected-cancellation-audit",
   "scope": "capacity eligibility, assignment, claim ownership, worker authority, retry, cancellation, recovery, and physical release",
   "activation_blocking": true,
   "closure_rule": "Every entry must be protected, disabled, or deleted before global activation.",
@@ -126,45 +126,51 @@
       "id": "single-trial-cancel",
       "category": "cancellation",
       "sources": [
-        "src/loom_control_plane/routes/trials.py:cancel_trial"
+        "src/loom_control_plane/routes/trials.py:cancel_trial",
+        "src/loom_control_plane/trial_cancellation.py:cancel_trial_under_authority"
       ],
-      "current_mutation": "Immediately marks queued, claimed, or running public trials cancelled and finished.",
+      "current_mutation": "Requests cancellation through the shared authority; protected unclaimed trials terminate in the guard transaction, while ordinary queued trials terminate and live public claims remain in place with cancellation requested.",
       "current_authority": "candidate control-plane submit/admin API",
-      "required_replacement": "Cancel unclaimed protected attempts terminally; move live claims to cancel-pending and retain their concurrency lease until scoped cessation evidence arrives.",
+      "required_replacement": "Freeze the ordinary fallback writer before activation; protected unclaimed cancellation must atomically close the guarded lifecycle, and live claims must retain their concurrency lease until exact cessation evidence.",
       "closure_status": "open"
     },
     {
       "id": "family-finalize-cascade",
       "category": "family-cancellation",
       "sources": [
-        "src/loom_control_plane/routes/state.py:_FAMILY_CANCEL_REMAINING_SQL",
-        "src/loom_family_orchestrator/main_loop.py:_CANCEL_REMAINING_SQL"
+        "src/loom_control_plane/routes/state.py:_finalize_family",
+        "src/loom_control_plane/trial_cancellation.py:cancel_trial_under_authority",
+        "src/loom_family_orchestrator/main_loop.py:_cancel_trials"
       ],
-      "current_mutation": "Cancels remaining queued family trials directly after skip or abort decisions.",
+      "current_mutation": "Collects remaining queued or protected-pending family trials, routes each cancellation through the shared protected-first Control Plane authority, and advances family state only after the cancellation requests commit.",
       "current_authority": "candidate control-plane and family orchestrator",
-      "required_replacement": "Invoke a protected family cancellation transaction for every current unclaimed attempt; any live member follows cancel-pending semantics.",
+      "required_replacement": "Freeze every ordinary fallback writer before activation; protected unclaimed members must close through the guard transaction and live members must retain their concurrency leases until exact cessation evidence.",
       "closure_status": "open"
     },
     {
       "id": "batch-user-cancel",
       "category": "batch-cancellation",
       "sources": [
-        "src/loom_service/routes/batches.py:cancel_batch"
+        "src/loom_service/routes/batches.py:cancel_batch",
+        "src/loom_control_plane/trial_cancellation.py:cancel_trial_under_authority"
       ],
-      "current_mutation": "Marks a batch and all queued/claimed/running public trials cancelled in one candidate-schema transaction.",
+      "current_mutation": "Enumerates every queued, protected-pending, claimed, or running batch trial, routes cancellation through the Control Plane authority, and marks the batch cancelled only after all trial requests succeed.",
       "current_authority": "candidate service API",
-      "required_replacement": "Coordinate a protected batch cancellation for each attempt and project results only after protected unclaimed-terminal or live cancel-pending transitions commit.",
+      "required_replacement": "Freeze the ordinary fallback writer before activation; every protected attempt must use guarded unclaimed-terminal or live cancel-pending semantics before the batch terminal projection commits.",
       "closure_status": "open"
     },
     {
       "id": "batch-hard-budget-cancel",
       "category": "budget-cancellation",
       "sources": [
-        "src/loom_service/batch_runner.py:_cancel_batch_for_hard_budget"
+        "src/loom_service/batch_runner.py:_cancel_batch_for_hard_budget",
+        "src/loom_service/batch_runner.py:_request_hard_budget_cancellation",
+        "src/loom_service/batch_runner.py:_finalize_hard_budget_cancellation",
+        "src/loom_control_plane/trial_cancellation.py:cancel_trial_under_authority"
       ],
-      "current_mutation": "Directly cancels all in-flight trials when recorded provider cost exceeds a hard batch budget.",
+      "current_mutation": "Detects a hard-budget breach, routes every in-flight trial through the Control Plane cancellation authority, and commits the batch terminal projection only after all trial requests succeed.",
       "current_authority": "candidate batch-runner background loop",
-      "required_replacement": "Use the same protected batch cancellation surface; budget authority may request cancellation but cannot release or reassign protected claims.",
+      "required_replacement": "Freeze the ordinary fallback writer before activation; budget authority may request protected cancellation but cannot directly release or reassign a guarded claim.",
       "closure_status": "open"
     },
     {

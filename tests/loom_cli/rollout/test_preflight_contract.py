@@ -1087,7 +1087,7 @@ def _bindings(**overrides: object) -> AttestationBindings:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("capacity_guard_schema_revision", "guard_0027"),
+        ("capacity_guard_schema_revision", "guard_0028"),
         ("manager_execution_manifest_sha256", "f" * 64),
     ],
 )

@@ -19,6 +19,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
+from .backup_lease import BackupLease
 from .final_gate_plan import FinalGatePlan
 from .protected_apply_journal import (
     ComponentObservation,
@@ -676,6 +677,40 @@ class KubernetesProtectedStagingCapacityRuntime:
     def read_execution_credential_metadata(self) -> dict[str, str]:
         """Return exact secret-free metadata for prerequisite production."""
         return dict(self.read_execution_credential_bundle().metadata_sha256)
+
+    def zero_ceiling_bootstrap_authority(self, lease: BackupLease) -> str:
+        """Prove that protected apply may converge foundations but not execution."""
+
+        if not isinstance(lease, BackupLease):
+            raise RuntimeError("zero-ceiling bootstrap authority is unavailable")
+        credential_state, credential_evidence = self._classify_credentials()
+        if (
+            credential_state is not ComponentState.READY
+            or lease.checkpoint_schema_version != 3
+            or lease.manager_execution_state != "shadow"
+            or lease.manager_execution_epoch != 0
+            or lease.manager_execution_manifest_sha256 is not None
+            or lease.manager_executable_new_capacity_ceiling != 0
+            or lease.manager_increase_freeze is not True
+        ):
+            raise RuntimeError("zero-ceiling bootstrap authority is unavailable")
+        return _hash_json(
+            {
+                "credential_evidence": credential_evidence,
+                "manager_authority_incarnation": str(lease.manager_authority_incarnation),
+                "manager_configuration_epoch": lease.manager_configuration_epoch,
+                "manager_execution_epoch": lease.manager_execution_epoch,
+                "manager_execution_state": lease.manager_execution_state,
+                "manager_increase_freeze": lease.manager_increase_freeze,
+                "manager_new_capacity_ceiling": (
+                    lease.manager_executable_new_capacity_ceiling
+                ),
+                "manager_writer_epoch": lease.manager_writer_epoch,
+                "mode": "zero-ceiling-bootstrap",
+                "restore_verified_lease_sha256": lease.evidence_digest,
+                "schema_version": 1,
+            }
+        )
 
     def _parse_credential_seed(self, payload: bytes) -> dict[str, object]:
         seed = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
