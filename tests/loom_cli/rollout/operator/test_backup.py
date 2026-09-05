@@ -2527,6 +2527,44 @@ def test_subprocess_runner_applies_explicit_command_timeouts(
     assert run_calls[0][1]["stderr"] == subprocess.DEVNULL
 
 
+def test_subprocess_runner_supplies_explicit_binary_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, dict(kwargs)))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"captured")
+
+    monkeypatch.setattr(backup_module.subprocess, "run", fake_run)
+    runner = SubprocessBackupCommandRunner()
+    capture_with_input = getattr(runner, "capture_stdout_with_input", None)
+
+    assert callable(capture_with_input)
+    assert (
+        capture_with_input(
+            ["psql", "--file=-"],
+            env={"PATH": "/usr/bin"},
+            input_payload=b"SELECT 1;\n",
+            timeout_seconds=30.0,
+        )
+        == b"captured"
+    )
+    assert calls == [
+        (
+            ["psql", "--file=-"],
+            {
+                "check": False,
+                "env": {"PATH": "/usr/bin"},
+                "input": b"SELECT 1;\n",
+                "stderr": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "timeout": 30.0,
+            },
+        )
+    ]
+
+
 def test_subprocess_stream_timeout_kills_and_reaps_child() -> None:
     started = time.monotonic()
 
