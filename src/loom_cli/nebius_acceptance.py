@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import sys
 import tarfile
@@ -35,11 +36,11 @@ _CHECKSUMS_PATH = "checksums/SHA256SUMS"
 _DEFAULT_POOL_ID = "nebius-cpu"
 _ACCEPTANCE_REQUIRED_OUTPUTS = frozenset(
     {
-        "artifacts/answer.txt",
-        "artifacts/reasoning.md",
-        "trajectory/events.jsonl",
-        "accounting/usage.json",
-        "verifier/output.json",
+        "files/artifacts/answer.txt",
+        "files/artifacts/reasoning.md",
+        "files/trajectory/events.jsonl",
+        "files/accounting/usage.json",
+        "files/verifier/output.json",
     }
 )
 
@@ -59,6 +60,12 @@ def _sha256(value: bytes) -> str:
 def _positive_int(value: object, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise NebiusAcceptanceError(f"{field} must be a positive integer")
+    return value
+
+
+def _nonnegative_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise NebiusAcceptanceError(f"{field} must be an observed nonnegative integer")
     return value
 
 
@@ -98,7 +105,7 @@ def acceptance_stages(accepted_concurrency: int, requested: Iterable[int]) -> li
     if supplied:
         stages = supplied
     elif accepted_concurrency >= 200:
-        stages = [1, 20, 50, 100, 150, 200]
+        stages = [1, 20, 50, 100, 150, 200, accepted_concurrency]
     else:
         stages = [
             *(stage for stage in (1, 20, 40) if stage <= accepted_concurrency),
@@ -229,21 +236,6 @@ def validate_trial_bundle(
     return cast(dict[str, Any], manifest), _sha256(files["bundle.json"])
 
 
-def _pool_snapshot(summary: dict[str, Any], *, pool_id: str) -> dict[str, Any]:
-    resources = summary.get("resources")
-    pools = resources.get("pools") if isinstance(resources, dict) else None
-    matches = [
-        row
-        for row in pools or []
-        if isinstance(row, dict)
-        and row.get("pool_name") == pool_id
-        and row.get("backend") == "nebius"
-    ]
-    if len(matches) != 1:
-        raise NebiusAcceptanceError(f"monitor must expose exactly one Nebius pool {pool_id!r}")
-    return cast(dict[str, Any], matches[0])
-
-
 def _target_snapshot(summary: dict[str, Any], *, pool_id: str, environment: str) -> dict[str, Any]:
     service_execution = summary.get("service_execution")
     targets = service_execution.get("targets") if isinstance(service_execution, dict) else None
@@ -271,51 +263,67 @@ def _read_monitor(
     body = assert_2xx(
         client.get("/api/v1/monitor/summary", params=params), action="read Nebius monitor"
     )
-    _pool_snapshot(body, pool_id=pool_id)
     _target_snapshot(body, pool_id=pool_id, environment=environment)
     return body
 
 
 def _capacity_sample(summary: dict[str, Any], *, pool_id: str, environment: str) -> dict[str, Any]:
-    pool = _pool_snapshot(summary, pool_id=pool_id)
     target = _target_snapshot(summary, pool_id=pool_id, environment=environment)
     observation = target.get("observation")
     if not isinstance(observation, dict) or observation.get("is_fresh") is not True:
         raise NebiusAcceptanceError("Nebius capacity observation is absent or stale")
     node_states = observation.get("node_states")
+    if not isinstance(node_states, dict):
+        raise NebiusAcceptanceError("Nebius observation is missing node lifecycle states")
+    node_states = {
+        name: _nonnegative_int(node_states.get(name), field=f"node_states.{name}")
+        for name in ("desired", "creating", "ready", "failed", "deleting")
+    }
+    activity = summary.get("service_execution", {}).get("activity")
+    execution = activity.get("execution_states") if isinstance(activity, dict) else None
+    if not isinstance(execution, dict):
+        raise NebiusAcceptanceError("Nebius monitor is missing observed lease execution states")
+    execution = {
+        state: _nonnegative_int(count, field=f"execution_states.{state}")
+        for state, count in execution.items()
+    }
+    blockers = target.get("blockers")
+    if not isinstance(blockers, list):
+        raise NebiusAcceptanceError("Nebius target is missing capacity blockers")
     return {
-        "active_nodes": int(observation.get("active_nodes") or 0),
-        "node_states": node_states if isinstance(node_states, dict) else {},
+        "active_nodes": _nonnegative_int(observation.get("active_nodes"), field="active_nodes"),
+        "node_states": node_states,
         "observed_at": observation.get("observed_at"),
         "fresh_until": observation.get("fresh_until"),
         "health_status": target.get("health_status"),
         "provider_capacity_state": observation.get("provider_capacity_state"),
         "autoscaler_state": observation.get("autoscaler_state"),
-        "command_backlog": int(target.get("command_backlog") or 0),
-        "current_active_slots": int(pool.get("current_active_slots") or 0),
-        "pending_slots": int(pool.get("pending_slots") or 0),
-        "desired_slots": int(pool.get("desired_slots") or 0),
-        "occupied_slots": int(pool.get("occupied_slots") or 0),
-        "running_tasks": int(pool.get("running_tasks") or 0),
-        "starting_tasks": int(pool.get("starting_tasks") or 0),
-        "queued_tasks": int(pool.get("queued_tasks") or 0),
-        "blocked_reason": pool.get("blocked_reason"),
+        "command_backlog": _nonnegative_int(target.get("command_backlog"), field="command_backlog"),
+        "requested_cpu_millis": _nonnegative_int(
+            observation.get("requested_cpu_millis"), field="requested_cpu_millis"
+        ),
+        "pending_jobs": _nonnegative_int(observation.get("pending_jobs"), field="pending_jobs"),
+        "execution_states": execution,
+        "running_tasks": int(execution.get("running") or 0),
+        "resource_profile": target.get("resource_profile"),
+        "blockers": blockers,
+        "blocked_reason": blockers or None,
     }
 
 
 def _pool_is_idle(sample: dict[str, Any]) -> bool:
-    return all(
-        sample[name] == 0
-        for name in (
-            "active_nodes",
-            "current_active_slots",
-            "pending_slots",
-            "desired_slots",
-            "occupied_slots",
-            "running_tasks",
-            "starting_tasks",
-            "queued_tasks",
-            "command_backlog",
+    return (
+        all(
+            sample[name] == 0
+            for name in ("active_nodes", "requested_cpu_millis", "pending_jobs", "command_backlog")
+        )
+        and all(
+            sample["node_states"].get(name) == 0
+            for name in ("desired", "creating", "ready", "failed", "deleting")
+        )
+        and all(
+            count == 0 or state in {"succeeded", "failed", "cancelled", "deleted"}
+            for state, count in sample["execution_states"].items()
         )
     )
 
@@ -381,7 +389,7 @@ def _batch_shape(
     trials_per_task: int,
     agent_name: str,
     agent_model: dict[str, str],
-    provider_connection_id: str,
+    provider_connection_id: str | None,
     provider_model_id: str,
 ) -> tuple[dict[str, Any], int, list[dict[str, Any]]]:
     """Return a legal API shape when one task needs over 100 samples."""
@@ -403,8 +411,14 @@ def _batch_shape(
                 "agent_model": agent_model,
                 "n_per_task": count,
                 "label": f"nebius-acceptance-{index}",
-                "provider_connection_id": provider_connection_id,
-                "provider_model_id": provider_model_id,
+                **(
+                    {
+                        "provider_connection_id": provider_connection_id,
+                        "provider_model_id": provider_model_id,
+                    }
+                    if provider_connection_id
+                    else {}
+                ),
             }
         )
         remaining -= count
@@ -428,6 +442,25 @@ def _write_exclusive(path: Path, payload: bytes) -> None:
         raise NebiusAcceptanceError(f"refusing to overwrite acceptance artifact {path}") from exc
 
 
+def _checkpoint(output_dir: Path, evidence: dict[str, Any]) -> None:
+    """Atomically retain progress owned by this new run, including before API mutations."""
+    evidence["updated_at"] = datetime.now(UTC).isoformat()
+    temporary = output_dir / "progress.json.tmp"
+    with temporary.open("wb") as handle:
+        handle.write(_canonical_bytes(evidence))
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(output_dir / "progress.json")
+
+
+def _write_report(output_dir: Path, evidence: dict[str, Any]) -> None:
+    payload = _canonical_bytes(evidence)
+    _write_exclusive(output_dir / "acceptance.json", payload)
+    _write_exclusive(
+        output_dir / "acceptance.json.sha256", f"{_sha256(payload)}  acceptance.json\n".encode()
+    )
+
+
 def run_acceptance(
     *,
     client: httpx.Client,
@@ -435,7 +468,7 @@ def run_acceptance(
     capacity_policy: dict[str, Any],
     task_set_id: str,
     task_count: int,
-    provider_connection: dict[str, Any],
+    provider_connection: dict[str, Any] | None,
     provider_model_id: str,
     agent_name: str,
     agent_provider: str,
@@ -484,6 +517,18 @@ def run_acceptance(
         raise NebiusAcceptanceError("Nebius execution pool is not healthy and unblocked")
 
     stage_evidence: list[dict[str, Any]] = []
+    progress: dict[str, Any] = {
+        "schema_version": "loom.nebius-acceptance-progress.v1",
+        "candidate_sha": candidate_sha,
+        "environment": environment,
+        "pool_id": pool_id,
+        "capacity_policy_sha256": capacity_policy["_sha256"],
+        "requested_stages": stages,
+        "task_set_id": task_set_id,
+        "initial_capacity": initial,
+        "completed_stages": stage_evidence,
+        "accepted": False,
+    }
     for stage in stages:
         if stage % task_count != 0:
             raise NebiusAcceptanceError(
@@ -499,7 +544,7 @@ def run_acceptance(
             trials_per_task=n_per_task,
             agent_name=agent_name,
             agent_model=agent_model,
-            provider_connection_id=str(provider_connection["id"]),
+            provider_connection_id=str(provider_connection["id"]) if provider_connection else None,
             provider_model_id=provider_model_id,
         )
         create_payload = {
@@ -510,14 +555,24 @@ def run_acceptance(
             "n_per_task": api_n_per_task,
             "combinations": combinations,
             "backend": "nebius",
-            "provider_connection_id": provider_connection["id"],
-            "provider_model_id": provider_model_id,
+            **(
+                {
+                    "provider_connection_id": provider_connection["id"],
+                    "provider_model_id": provider_model_id,
+                }
+                if provider_connection
+                else {}
+            ),
         }
+        progress["current_stage"] = {"stage": stage, "state": "submitting"}
+        _checkpoint(output_dir, progress)
         created = assert_2xx(
             client.post("/api/v1/batches", json=create_payload),
             action=f"create Nebius stage {stage}",
         )
         batch_id = str(created.get("batch_id") or created.get("id") or "")
+        progress["current_stage"].update({"batch_id": batch_id, "state": "submitted"})
+        _checkpoint(output_dir, progress)
         if (
             not batch_id
             or created.get("backend") != "nebius"
@@ -529,6 +584,7 @@ def run_acceptance(
 
         maxima = {"overlap": 0, "node_backed_overlap": 0, "nodes": 0}
         samples: list[dict[str, Any]] = []
+        progress["current_stage"].update({"maxima": maxima, "capacity_samples": samples})
 
         def read_batch_and_capacity(
             current_batch_id: str = batch_id,
@@ -550,16 +606,25 @@ def run_acceptance(
             summary = batch.get("trial_summary")
             if not isinstance(summary, dict):
                 raise NebiusAcceptanceError("batch response is missing trial_summary")
-            overlap = int(summary.get("running") or 0)
+            overlap = sample["running_tasks"]
+            if overlap > current_stage:
+                raise NebiusAcceptanceError(
+                    "observed running leases exceed the stage Trial inventory"
+                )
             current_maxima["overlap"] = max(current_maxima["overlap"], overlap)
             current_maxima["node_backed_overlap"] = max(
                 current_maxima["node_backed_overlap"],
-                min(overlap, sample["occupied_slots"], sample["current_active_slots"]),
+                overlap
+                if sample["node_states"].get("ready", 0) > 0
+                and (sample["requested_cpu_millis"] or 0) > 0
+                else 0,
             )
             current_maxima["nodes"] = max(current_maxima["nodes"], sample["active_nodes"])
             current_samples.append(
                 {"batch_state": batch.get("state"), "trial_summary": summary, **sample}
             )
+            progress["current_stage"]["state"] = batch.get("state")
+            _checkpoint(output_dir, progress)
             return batch, sample
 
         try:
@@ -592,7 +657,7 @@ def run_acceptance(
         if maxima["node_backed_overlap"] < stage:
             raise NebiusAcceptanceError(
                 f"Nebius stage {stage} only proved {maxima['node_backed_overlap']} "
-                "simultaneously running, pool-occupied execution units"
+                "simultaneously running observed leases backed by Ready execution nodes"
             )
         if maxima["nodes"] <= 0:
             raise NebiusAcceptanceError(f"Nebius stage {stage} never observed an execution node")
@@ -603,6 +668,7 @@ def run_acceptance(
         ):
             raise NebiusAcceptanceError(f"Nebius stage {stage} Trial inventory is incomplete")
         bundle_rows: list[dict[str, Any]] = []
+        progress["current_stage"]["bundles"] = bundle_rows
         bundle_dir = output_dir / f"stage-{stage}" / "trials"
         for item in sorted(trials, key=lambda row: str(row.get("id"))):
             trial_id = str(item.get("id") or "")
@@ -615,11 +681,12 @@ def run_acceptance(
                 detail.get("state") != "succeeded"
                 or not isinstance(materialization, dict)
                 or materialization.get("canonical_ready") is not True
-                or materialization.get("source_cleanup_state") != "complete"
+                or materialization.get("source_cleanup_state")
+                not in {"retained", "running", "complete"}
                 or not isinstance(bundle, dict)
             ):
                 raise NebiusAcceptanceError(
-                    f"Trial {trial_id} is not fully materialized and cleaned"
+                    f"Trial {trial_id} is not canonical-ready with a valid source cleanup state"
                 )
             response = client.get(f"/api/v1/trials/{trial_id}/bundle/download")
             assert_2xx_response(response, action=f"download complete Trial bundle {trial_id}")
@@ -643,8 +710,14 @@ def run_acceptance(
                     "manifest_sha256": manifest_sha256,
                     "file_count": len(manifest["files"]),
                     "content_sha256": manifest.get("content_sha256"),
+                    "source_cleanup_state": materialization.get("source_cleanup_state"),
+                    "source_retain_until": materialization.get("source_retain_until"),
+                    "source_cleanup_error_message": materialization.get(
+                        "source_cleanup_error_message"
+                    ),
                 }
             )
+            _checkpoint(output_dir, progress)
 
         final_sample = _wait_for(
             lambda: _capacity_sample(
@@ -652,9 +725,11 @@ def run_acceptance(
                 pool_id=pool_id,
                 environment=environment,
             ),
-            lambda sample: _pool_is_idle(sample)
-            and sample["health_status"] == "healthy"
-            and sample["blocked_reason"] is None,
+            lambda sample: (
+                _pool_is_idle(sample)
+                and sample["health_status"] == "healthy"
+                and sample["blocked_reason"] is None
+            ),
             timeout_seconds=scale_down_timeout_seconds,
             poll_seconds=poll_seconds,
             description=f"Nebius stage {stage} scale-to-zero and command drain",
@@ -671,15 +746,14 @@ def run_acceptance(
                 "trial_summary": trial_summary,
                 "service_execution_summary": execution_summary,
                 "max_overlapping_execution_units": maxima["overlap"],
-                "max_node_backed_overlapping_execution_units": maxima[
-                    "node_backed_overlap"
-                ],
+                "max_node_backed_overlapping_execution_units": maxima["node_backed_overlap"],
                 "max_active_nodes": maxima["nodes"],
                 "capacity_samples": samples,
                 "bundles": bundle_rows,
                 "final_capacity": final_sample,
             }
         )
+        _checkpoint(output_dir, progress)
 
     evidence: dict[str, Any] = {
         "schema_version": "loom.nebius-acceptance.v1",
@@ -696,24 +770,164 @@ def run_acceptance(
         "initial_capacity": initial,
         "stages": stage_evidence,
         "accepted": True,
+        "maximum_proven_concurrency": max(stages),
+        "policy_ceiling_reached": max(stages) == accepted_concurrency,
+        "quota_maximum_acceptance": "not_evaluated",
+        "source_gc_complete": all(
+            row["source_cleanup_state"] == "complete"
+            for stage in stage_evidence
+            for row in stage["bundles"]
+        ),
     }
-    evidence_bytes = _canonical_bytes(evidence)
-    evidence_path = output_dir / "acceptance.json"
-    _write_exclusive(evidence_path, evidence_bytes)
-    _write_exclusive(
-        output_dir / "acceptance.json.sha256",
-        f"{_sha256(evidence_bytes)}  acceptance.json\n".encode(),
-    )
+    _write_report(output_dir, evidence)
     return evidence
+
+
+def resume_cleanup(*, client: httpx.Client, evidence_dir: Path, output_dir: Path) -> dict[str, Any]:
+    """Read-only continuation: never submit, cancel, force GC, or modify prior evidence."""
+    raw = (evidence_dir / "acceptance.json").read_bytes()
+    ledger = (evidence_dir / "acceptance.json.sha256").read_text()
+    if ledger != f"{_sha256(raw)}  acceptance.json\n":
+        raise NebiusAcceptanceError("prior acceptance evidence checksum mismatch")
+    evidence = json.loads(raw)
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schema_version") != "loom.nebius-acceptance.v1"
+        or evidence.get("accepted") is not True
+        or _CANDIDATE_SHA.fullmatch(str(evidence.get("candidate_sha"))) is None
+        or evidence.get("pool_id") != _DEFAULT_POOL_ID
+        or evidence.get("environment") not in {"development", "staging", "production"}
+        or not isinstance(evidence.get("stages"), list)
+        or not evidence["stages"]
+    ):
+        raise NebiusAcceptanceError("prior evidence is not completed Nebius acceptance")
+    if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
+        raise NebiusAcceptanceError("cleanup output must be a new or empty directory")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pool_id, environment = evidence["pool_id"], evidence["environment"]
+    sample = _capacity_sample(
+        _read_monitor(client, pool_id=pool_id, environment=environment),
+        pool_id=pool_id,
+        environment=environment,
+    )
+    if not _pool_is_idle(sample) or sample["health_status"] != "healthy" or sample["blockers"]:
+        raise NebiusAcceptanceError("cleanup verification requires a healthy idle 0-node pool")
+    rows: list[dict[str, Any]] = []
+    report = {
+        "schema_version": "loom.nebius-source-cleanup-acceptance.v1",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "candidate_sha": evidence["candidate_sha"],
+        "prior_acceptance_sha256": _sha256(raw),
+        "initial_capacity": sample,
+        "trials": rows,
+        "accepted": False,
+        "source_gc_complete": False,
+    }
+    _checkpoint(output_dir, report)
+    for stage in evidence["stages"]:
+        batch_id = stage["batch_id"]
+        batch = assert_2xx(client.get(f"/api/v1/batches/{batch_id}"), action="read accepted Batch")
+        if (
+            batch.get("service_execution_runtime_profile") != stage["runtime_profile"]
+            or stage["runtime_profile"].get("candidate_sha") != evidence["candidate_sha"]
+            or batch.get("state") != "finished"
+            or batch.get("result_status") != "succeeded"
+        ):
+            raise NebiusAcceptanceError("accepted Batch candidate or terminal state changed")
+        inventory = _trial_items(client, batch_id)
+        expected_ids = {row["trial_id"] for row in stage["bundles"]}
+        if (
+            len(expected_ids) != stage["stage"]
+            or len(inventory) != stage["stage"]
+            or {row.get("id") for row in inventory} != expected_ids
+        ):
+            raise NebiusAcceptanceError("accepted Batch Trial inventory changed")
+        for row in stage["bundles"]:
+            trial_id = row["trial_id"]
+            archive = row["archive"]
+            if (
+                not isinstance(archive, str)
+                or not _safe_archive_name(archive)
+                or not (evidence_dir / archive).resolve().is_relative_to(evidence_dir.resolve())
+            ):
+                raise NebiusAcceptanceError("unsafe prior Trial archive path")
+            saved = (evidence_dir / archive).read_bytes()
+            if _sha256(saved) != row["archive_sha256"]:
+                raise NebiusAcceptanceError("prior Trial archive checksum mismatch")
+            detail = assert_2xx(
+                client.get(f"/api/v1/trials/{trial_id}"), action="read canonical Trial"
+            )
+            materialization = detail.get("materialization") or {}
+            if (
+                detail.get("state") != "succeeded"
+                or materialization.get("canonical_ready") is not True
+                or materialization.get("source_cleanup_state")
+                not in {"retained", "running", "complete"}
+            ):
+                raise NebiusAcceptanceError("Trial is not canonical-ready with valid cleanup state")
+            response = client.get(f"/api/v1/trials/{trial_id}/bundle/download")
+            assert_2xx_response(response, action="redownload canonical Trial after compute cleanup")
+            if _sha256(response.content) != _expected_header_sha(response):
+                raise NebiusAcceptanceError("Trial archive checksum mismatch")
+            manifest, manifest_sha = validate_trial_bundle(
+                response.content, trial_id=trial_id, required_outputs=_ACCEPTANCE_REQUIRED_OUTPUTS
+            )
+            if (
+                manifest_sha != row["manifest_sha256"]
+                or manifest.get("content_sha256") != row["content_sha256"]
+            ):
+                raise NebiusAcceptanceError("canonical Trial bundle identity changed")
+            rows.append(
+                {
+                    "trial_id": trial_id,
+                    "batch_id": batch_id,
+                    "source_cleanup_state": materialization["source_cleanup_state"],
+                    "source_retain_until": materialization.get("source_retain_until"),
+                    "source_cleanup_error_message": materialization.get(
+                        "source_cleanup_error_message"
+                    ),
+                    "archive_sha256": _sha256(response.content),
+                }
+            )
+            _checkpoint(output_dir, report)
+    final = _capacity_sample(
+        _read_monitor(client, pool_id=pool_id, environment=environment),
+        pool_id=pool_id,
+        environment=environment,
+    )
+    if not _pool_is_idle(final) or final["health_status"] != "healthy" or final["blockers"]:
+        raise NebiusAcceptanceError(
+            "pool did not remain healthy and idle during cleanup verification"
+        )
+    complete = bool(rows) and all(row["source_cleanup_state"] == "complete" for row in rows)
+    report.update({"final_capacity": final, "accepted": complete, "source_gc_complete": complete})
+    _write_report(output_dir, report)
+    return report
 
 
 def run_cli(args: argparse.Namespace) -> int:
     def _body() -> int:
+        if getattr(args, "resume_cleanup", None):
+            cfg = require_logged_in()
+            with authed_client(cfg, timeout=args.http_timeout) as client:
+                result = resume_cleanup(
+                    client=client,
+                    evidence_dir=Path(args.resume_cleanup).resolve(),
+                    output_dir=Path(args.output).resolve(),
+                )
+            print(
+                "Source cleanup complete."
+                if result["source_gc_complete"]
+                else "Source cleanup pending; retention is not GC success. Resume later with the original evidence."
+            )
+            return 0 if result["source_gc_complete"] else 2
         policy = load_capacity_policy(Path(args.capacity_policy).resolve())
         stages = acceptance_stages(int(policy["accepted_concurrency"]), args.stage)
         submit_files = (
             _collect_submit_files(Path(args.taskset_dir).resolve()) if args.taskset_dir else None
         )
+        if not getattr(args, "candidate_sha", None) or not getattr(args, "model", None):
+            raise NebiusAcceptanceError("new acceptance requires --candidate-sha and --model")
         cfg = require_logged_in()
         with authed_client(cfg, timeout=args.http_timeout) as client:
             if submit_files is not None:
@@ -737,7 +951,7 @@ def run_cli(args: argparse.Namespace) -> int:
                 sleeper=time.sleep,
             )
             task_count = _positive_int(taskset.get("task_count"), field="TaskSet task_count")
-            connection = _resolve_by_name(client, args.provider)
+            connection = _resolve_by_name(client, args.provider) if args.provider else None
             evidence = run_acceptance(
                 client=client,
                 output_dir=Path(args.output).resolve(),
@@ -757,12 +971,21 @@ def run_cli(args: argparse.Namespace) -> int:
                 scale_down_timeout_seconds=args.scale_down_timeout,
             )
         print(f"Nebius acceptance passed: {len(evidence['stages'])} stages")
+        if not evidence["source_gc_complete"]:
+            print("Canonical downloads and compute cleanup passed; source GC remains pending.")
         print(f"evidence: {Path(args.output).resolve() / 'acceptance.json'}")
         return 0
 
     try:
         return _run_with_error_handling(_body)
-    except (NebiusAcceptanceError, _IdNotFoundError) as exc:
+    except (
+        NebiusAcceptanceError,
+        _IdNotFoundError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
@@ -777,12 +1000,22 @@ def configure_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     source.add_argument(
         "--taskset-dir", help="TaskSet directory to submit through the public API first."
     )
-    parser.add_argument("--provider", required=True, help="Persisted provider connection name.")
-    parser.add_argument("--model", required=True, help="Provider model id.")
+    source.add_argument(
+        "--resume-cleanup",
+        help="Prior successful acceptance directory; GET-only source GC verification.",
+    )
+    parser.add_argument(
+        "--provider",
+        help="Optional persisted provider connection name; omit for an existing gateway-configured model.",
+    )
+    parser.add_argument(
+        "--model",
+        help="Model id; required for new acceptance, including gateway-configured models.",
+    )
     parser.add_argument("--agent", default="litellm", help="Agent name (default: litellm).")
     parser.add_argument("--agent-provider", default="openai", help="Agent model provider dialect.")
     parser.add_argument(
-        "--candidate-sha", required=True, help="Exact deployed 40-character Git SHA."
+        "--candidate-sha", help="Exact deployed 40-character Git SHA; required for new acceptance."
     )
     parser.add_argument(
         "--capacity-policy",
@@ -816,6 +1049,7 @@ __all__ = [
     "acceptance_stages",
     "configure_parser",
     "load_capacity_policy",
+    "resume_cleanup",
     "run_acceptance",
     "run_cli",
     "validate_trial_bundle",
