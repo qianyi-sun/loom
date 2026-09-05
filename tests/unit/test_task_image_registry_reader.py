@@ -58,9 +58,13 @@ def _descriptor(media_type: str, payload: bytes) -> OCIDescriptor:
 class _Response:
     status: int = 200
     headers: list[tuple[str, str]] = field(default_factory=list)
+    informational: tuple[tuple[int, list[tuple[str, str]]], ...] = ()
+    trailers: list[tuple[str, str]] = field(default_factory=list)
     chunks: tuple[bytes, ...] = ()
     initial_delay: float = 0.0
     chunk_delay: float = 0.0
+    wait_for_peer_close_before_response: bool = False
+    wait_for_peer_close: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,9 @@ class _TLSRegistry:
         self.server: asyncio.AbstractServer | None = None
         self.active_requests = 0
         self.maximum_active_requests = 0
+        self.peer_closed = asyncio.Event()
+        self.request_received = asyncio.Event()
+        self.first_chunk_sent = asyncio.Event()
 
     @property
     def origin(self) -> str:
@@ -124,9 +131,20 @@ class _TLSRegistry:
                 for name, value in (line.split(":", 1),)
             }
             self.requests.append(_Request(method, target, headers))
+            self.request_received.set()
             response = self.routes.get(target, _Response(status=404))
+            if response.wait_for_peer_close_before_response:
+                if await reader.read(1) == b"":
+                    self.peer_closed.set()
+                return
             if response.initial_delay:
                 await asyncio.sleep(response.initial_delay)
+            for status, headers in response.informational:
+                head = f"HTTP/1.1 {status} Early Hints\r\n" + "".join(
+                    f"{name}: {value}\r\n" for name, value in headers
+                )
+                writer.write(head.encode("ascii") + b"\r\n")
+                await writer.drain()
             reason = {200: "OK", 302: "Found", 401: "Unauthorized", 404: "Not Found"}[
                 response.status
             ]
@@ -148,8 +166,16 @@ class _TLSRegistry:
                 else:
                     writer.write(f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n")
                 await writer.drain()
+                self.first_chunk_sent.set()
+            if response.wait_for_peer_close:
+                if await reader.read(1) == b"":
+                    self.peer_closed.set()
+                return
             if not content_length:
-                writer.write(b"0\r\n\r\n")
+                trailer_block = "".join(
+                    f"{name}: {value}\r\n" for name, value in response.trailers
+                )
+                writer.write(b"0\r\n" + trailer_block.encode("ascii") + b"\r\n")
             await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError, TimeoutError):
             pass
@@ -257,6 +283,11 @@ async def test_real_tls_streams_repository_bound_graph_with_fresh_pull_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("all_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
     layer = b"compressed-layer-bytes"
     layer_descriptor = _descriptor(OCI_LAYER, layer)
     config = _json_bytes(
@@ -324,6 +355,7 @@ async def test_real_tls_streams_repository_bound_graph_with_fresh_pull_tokens(
         for claim in claims
     )
     assert all(request.headers["accept-encoding"] == "identity" for request in tls_registry.requests)
+    assert all(request.headers["connection"] == "close" for request in tls_registry.requests)
 
 
 async def _read_all(
@@ -375,6 +407,57 @@ async def test_redirects_and_cross_origin_challenges_are_not_followed(
 
     assert raised.value.retryable is retryable
     assert [request.target for request in tls_registry.requests] == [target]
+
+
+@pytest.mark.asyncio
+async def test_informational_response_is_rejected_before_final_response(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+) -> None:
+    payload = b"manifest"
+    descriptor = _descriptor(OCI_MANIFEST, payload)
+    target = f"/v2/{REPOSITORY}/manifests/{descriptor.digest}"
+    tls_registry.routes[target] = _Response(
+        informational=(
+            (103, [("Link", "</untrusted-one>; rel=preload")]),
+            (103, [("Link", "</untrusted-two>; rel=preload")]),
+        ),
+        headers=[("Content-Type", OCI_MANIFEST)],
+        chunks=(payload,),
+    )
+
+    async with HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    ) as reader:
+        with pytest.raises(RegistryReadError, match="informational"):
+            await _read_all(reader, "manifest", descriptor)
+
+    assert [request.target for request in tls_registry.requests] == [target]
+
+
+@pytest.mark.asyncio
+async def test_response_trailers_are_parsed_bounded_and_rejected(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+) -> None:
+    payload = b"manifest"
+    descriptor = _descriptor(OCI_MANIFEST, payload)
+    target = f"/v2/{REPOSITORY}/manifests/{descriptor.digest}"
+    tls_registry.routes[target] = _Response(
+        headers=[("Content-Type", OCI_MANIFEST)],
+        chunks=(payload,),
+        trailers=[("Docker-Content-Digest", descriptor.digest)],
+    )
+
+    async with HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    ) as reader:
+        with pytest.raises(RegistryReadError, match="trailers"):
+            await _read_all(reader, "manifest", descriptor)
 
 
 @pytest.mark.asyncio
@@ -607,6 +690,103 @@ async def test_queued_read_has_total_deadline_and_mints_only_after_admission(
         await held_stream.aclose()
         assert await _read_all(reader, "blob", descriptor) == payload
         assert issued_count == 2
+
+
+@pytest.mark.asyncio
+async def test_aclose_aborts_active_socket_and_queued_read_before_mint(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"close-reader"
+    descriptor = _descriptor(OCI_LAYER, payload)
+    _route(tls_registry, "blob", descriptor, payload)
+    issuer = _issuer(tls_registry, token_key)
+    issued_count = 0
+    issue_pull = DistributionRegistryTokenIssuer.issue_pull
+
+    def counted_issue_pull(
+        token_issuer: DistributionRegistryTokenIssuer,
+        **kwargs: object,
+    ) -> object:
+        nonlocal issued_count
+        issued_count += 1
+        return issue_pull(token_issuer, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(DistributionRegistryTokenIssuer, "issue_pull", counted_issue_pull)
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=issuer,
+        ca_file=tls_registry.ca_file,
+        limits=RegistryReaderLimits(total_timeout_seconds=1.0, maximum_concurrent_reads=1),
+    )
+    held_stream = reader.read("blob", descriptor)
+    assert await anext(held_stream) == payload[: len(payload) // 2]
+    queued = asyncio.create_task(_read_all(reader, "blob", descriptor))
+    await asyncio.sleep(0)
+
+    await reader.aclose()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await asyncio.wait_for(queued, timeout=0.2)
+    assert issued_count == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        await anext(held_stream)
+    await held_stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_closes_inflight_tls_response(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+) -> None:
+    payload = b"cancel-reader"
+    descriptor = _descriptor(OCI_LAYER, payload)
+    target = f"/v2/{REPOSITORY}/blobs/{descriptor.digest}"
+    tls_registry.routes[target] = _Response(
+        headers=[("Content-Type", "application/octet-stream")],
+        chunks=(payload[:4],),
+        wait_for_peer_close=True,
+    )
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    )
+    task = asyncio.create_task(_read_all(reader, "blob", descriptor))
+    await asyncio.wait_for(tls_registry.first_chunk_sent.wait(), timeout=1.0)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(tls_registry.peer_closed.wait(), timeout=1.0)
+    await reader.aclose()
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_closes_tls_connection_while_awaiting_headers(
+    tls_registry: _TLSRegistry,
+    token_key: rsa.RSAPrivateKey,
+) -> None:
+    payload = b"cancel-headers"
+    descriptor = _descriptor(OCI_MANIFEST, payload)
+    target = f"/v2/{REPOSITORY}/manifests/{descriptor.digest}"
+    tls_registry.routes[target] = _Response(wait_for_peer_close_before_response=True)
+    reader = HTTPSRegistryReader(
+        repository=REPOSITORY,
+        token_issuer=_issuer(tls_registry, token_key),
+        ca_file=tls_registry.ca_file,
+    )
+    task = asyncio.create_task(_read_all(reader, "manifest", descriptor))
+    await asyncio.wait_for(tls_registry.request_received.wait(), timeout=1.0)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(tls_registry.peer_closed.wait(), timeout=1.0)
+    await reader.aclose()
 
 
 def _settings(tmp_path: Path, token_key: rsa.RSAPrivateKey, registry: _TLSRegistry) -> TaskImageAuthoritySettings:
