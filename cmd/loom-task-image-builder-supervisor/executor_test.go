@@ -650,6 +650,75 @@ func TestExecutorBuildCleanupFailureReturnsZeroAndRemovesOCIOutput(t *testing.T)
 	}
 }
 
+// Break caught: path-based cleanup loses a renamed pinned directory and returns success.
+func TestExecutorBuildRejectsRenamedCaptureAndCleansPinnedContents(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(fmt.Sprint(replacement), func(t *testing.T) {
+			fixture, executor, component := newStartedCaptureExecutor(t)
+			var original, moved string
+			outside := filepath.Join(fixture.root, "outside-capture")
+			if err := os.WriteFile(outside, []byte("preserve outside"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			executorRunBuildctl = func(_ context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+				refPath := valueAfterArg(t, argv, "--ref-file")
+				original = filepath.Dir(refPath)
+				if err := os.WriteFile(refPath, []byte("solve_1-abc"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(valueAfterArg(t, argv, "--metadata-file"), baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(original, "temporary"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(original, "temporary", ".metadata.tmp"), []byte("interrupted metadata"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(original, "outside-link")); err != nil {
+					t.Fatal(err)
+				}
+				moved = original + "-moved"
+				if err := os.Rename(original, moved); err != nil {
+					t.Fatal(err)
+				}
+				if replacement {
+					if err := os.Mkdir(original, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(original, "replacement"), []byte("preserve replacement"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil
+			}
+			executorValidateOCIOutput = func(path, platform string) (OCIOutput, error) {
+				if err := os.WriteFile(path, []byte("validated oci"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, OS: "linux", Architecture: "amd64"}, nil
+			}
+			result, err := executor.Build(context.Background(), component)
+			if err == nil || result != (BuildResult{}) {
+				t.Fatalf("renamed capture returned usable result=%#v err=%v", result, err)
+			}
+			if _, err := os.Stat(filepath.Join(fixture.jobRoot, "oci", component.Name+".tar")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("OCI survived renamed capture: %v", err)
+			}
+			entries, err := os.ReadDir(moved)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("pinned contents survived rename: %v, %v", entries, err)
+			}
+			if got := string(mustReadFile(t, outside)); got != "preserve outside" {
+				t.Fatalf("cleanup followed external link: %q", got)
+			}
+			if replacement && string(mustReadFile(t, filepath.Join(original, "replacement"))) != "preserve replacement" {
+				t.Fatal("cleanup changed replacement directory")
+			}
+		})
+	}
+}
+
 func TestExecutorCloseTerminatesDaemonAndRejectsSurvivors(t *testing.T) {
 	fixture := newExecutorFixture(t)
 	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{

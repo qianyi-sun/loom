@@ -262,7 +262,7 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 		return BuildResult{}, err
 	}
 	defer func() {
-		if cleanupErr := cleanupBuildCapture(captureFD, captureDir); cleanupErr != nil {
+		if cleanupErr := cleanupBuildCapture(e.capabilities.JobDirectoryFD, captureFD, filepath.Base(captureDir)); cleanupErr != nil {
 			result = BuildResult{}
 			cleanupOutput = true
 			err = errors.Join(err, fmt.Errorf("cleanup build capture: %w", cleanupErr))
@@ -296,6 +296,9 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 	if err := validateBuildCaptureDirectory(captureFD); err != nil {
 		return BuildResult{}, errBaseResolutionInvalid
 	}
+	if err := validateBuildCapturePath(e.capabilities.JobDirectoryFD, captureFD, filepath.Base(captureDir)); err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
 	ref, err := readBoundedBuildCapture(captureFD, "solve-ref", 128)
 	if err != nil || len(ref) == 0 {
 		return BuildResult{}, errBaseResolutionInvalid
@@ -324,10 +327,11 @@ func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, int, error)
 	path := filepath.Join(jobRoot, name)
 	fd, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return "", -1, errors.Join(err, os.Remove(path))
+		// Without a pinned descriptor we cannot safely clean a replaced pathname.
+		return "", -1, err
 	}
 	if err := validateBuildCaptureDirectory(fd); err != nil {
-		return "", -1, errors.Join(err, cleanupBuildCapture(fd, path))
+		return "", -1, errors.Join(err, cleanupBuildCapture(jobFD, fd, name))
 	}
 	return path, fd, nil
 }
@@ -376,17 +380,57 @@ func readBoundedBuildCapture(dirFD int, name string, maxBytes int) ([]byte, erro
 	return payload, nil
 }
 
-func cleanupBuildCapture(captureFD int, path string) error {
+func validateBuildCapturePath(jobFD, captureFD int, name string) error {
+	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		return errors.New("build capture directory identity changed")
+	}
+	namedFD, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return errors.New("build capture directory identity changed")
+	}
+	defer syscall.Close(namedFD)
+	var pinned, named syscall.Stat_t
+	if syscall.Fstat(captureFD, &pinned) != nil || syscall.Fstat(namedFD, &named) != nil ||
+		pinned.Dev != named.Dev || pinned.Ino != named.Ino {
+		return errors.New("build capture directory identity changed")
+	}
+	return nil
+}
+
+func cleanupBuildCapture(jobFD, captureFD int, name string) (result error) {
+	directory := os.NewFile(uintptr(captureFD), "build capture directory")
+	if directory == nil {
+		return errors.New("build capture cleanup descriptor invalid")
+	}
+	defer func() { result = errors.Join(result, directory.Close()) }()
 	var errs []error
-	for _, leaf := range []string{"solve-ref", "metadata.json"} {
-		if err := syscall.Unlinkat(captureFD, leaf); err != nil && !errors.Is(err, syscall.ENOENT) {
-			errs = append(errs, err)
+	// The kernel procfd link anchors every recursive removal to the pinned
+	// directory, even if its original name has been moved or replaced. Never
+	// recursively remove through the original, now possibly foreign, pathname.
+	pinnedPath := filepath.Join("/proc/self/fd", strconv.Itoa(captureFD))
+	for batches := 0; ; batches++ {
+		if batches == 64 {
+			errs = append(errs, errors.New("build capture cleanup entry bound exceeded"))
+			break
+		}
+		names, readErr := directory.Readdirnames(64)
+		for _, leaf := range names {
+			if err := os.RemoveAll(filepath.Join(pinnedPath, leaf)); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				errs = append(errs, readErr)
+			}
+			break
 		}
 	}
-	if err := syscall.Close(captureFD); err != nil {
+	if err := validateBuildCapturePath(jobFD, captureFD, name); err != nil {
+		// Contents were cleaned through the FD, but an unnamed/moved directory
+		// still requires allocation cleanup. Surface that residual and fail closed.
 		errs = append(errs, err)
-	}
-	if err := os.RemoveAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if err := os.Remove(filepath.Join("/proc/self/fd", strconv.Itoa(jobFD), name)); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
