@@ -145,8 +145,13 @@ Runtime integration exposed two upstream shapes: empty scratch exports use
 explicit null layer lists (now narrowly accepted with independent review), and
 buildctl invokes the Dockerfile frontend through a gateway whose outer frontend
 field is empty. The runtime metadata producer must validate the recorded inner
-request. Its actual-export regression and dual-architecture release work remain
-in progress; no supervisor metadata consumer is implemented yet.
+request. The producer is implemented in `c2d034158`, with actual amd64 scratch,
+multistage, external COPY and zero-layer-image source probes plus measured
+dual-architecture binary hashes. Independent review and native arm64 execution
+remain pending. The standalone immutable supervisor parser is implemented in
+`31256d730`; full supervisor tests and race tests pass. Its independent review,
+contained file capture, transport/persistence and publication composition remain
+pending. Neither slice grants readiness or activates the provider.
 
 ## Task 6: Retention and release integration
 
