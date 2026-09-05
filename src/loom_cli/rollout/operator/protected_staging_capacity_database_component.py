@@ -51,6 +51,8 @@ _MUTATION_TIMEOUT_SECONDS = 60.0
 _WAIT_TIMEOUT_SECONDS = 660.0
 _WAIT_SLICE_SECONDS = 5
 _CLEANUP_PATCH_ATTEMPTS = 3
+_CLEANUP_DELETE_ATTEMPTS = 3
+_CLEANUP_DELETE_WAIT_SECONDS = 55
 _PEER_PSQL_COMMAND = (
     "kubectl",
     "--namespace",
@@ -279,9 +281,11 @@ def _manifest_with_observed_cleanup_labels(
             document_metadata = document.get("metadata")
             if not isinstance(document_metadata, dict):
                 raise ValueError("protected staging capacity database manifest is invalid")
-            document_labels = document_metadata.setdefault("labels", {})
+            document_labels = document_metadata.get("labels", {})
             if not isinstance(document_labels, dict):
                 raise ValueError("protected staging capacity database manifest is invalid")
+            document_labels = dict(document_labels)
+            document_metadata["labels"] = document_labels
             document_labels[_CLEANUP_LABEL] = labels[_CLEANUP_LABEL]
         documents.append(document)
     if len(documents) != len(observed):
@@ -857,38 +861,27 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             raise ValueError("protected staging capacity database cleanup target is invalid")
         observed = self._observed_bootstrap_resources(manifest)
         cleanup_token = secrets.token_urlsafe(32)
-        labelled: set[str] = set()
+        labelled: dict[str, dict[str, object]] = {}
         for kind in kinds:
             item = observed.get(kind)
             if item is None:
                 continue
-            if self._label_bootstrap_resource_for_cleanup(
+            labelled_item = self._label_bootstrap_resource_for_cleanup(
                 kind=kind,
                 item=item,
                 cleanup_token=cleanup_token,
                 manifest=manifest,
-            ):
-                labelled.add(kind)
+            )
+            if labelled_item is not None:
+                labelled[kind] = labelled_item
         for kind in kinds:
-            if kind not in labelled:
+            item = labelled.get(kind)
+            if item is None:
                 continue
-            argv = [
-                "kubectl",
-                "--namespace",
-                _NAMESPACE,
-                "delete",
-                kind.lower(),
-                f"--selector={_CLEANUP_LABEL}={cleanup_token}",
-                "--wait=true",
-                f"--request-timeout={_REQUEST_TIMEOUT}",
-            ]
-            if kind == "Job":
-                argv.insert(6, "--cascade=foreground")
-            self.runner.run_checked(
-                tuple(argv),
-                env=self.runner.environment,
-                input_payload=None,
-                timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+            self._delete_bootstrap_resource_by_identity(
+                kind=kind,
+                item=item,
+                manifest=manifest,
             )
         remaining = self._observed_bootstrap_resources(manifest)
         if any(kind in remaining for kind in target_kinds):
@@ -903,7 +896,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         item: dict[str, object],
         cleanup_token: str,
         manifest: bytes,
-    ) -> bool:
+    ) -> dict[str, object] | None:
         metadata = item["metadata"]
         assert isinstance(metadata, dict)
         original_uid = metadata["uid"]
@@ -933,11 +926,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     input_payload=json.dumps(patch, sort_keys=True).encode("utf-8"),
                     timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
                 )
-                return True
             except Exception:
                 refreshed = self._observed_bootstrap_resources(manifest).get(kind)
                 if refreshed is None:
-                    return False
+                    return None
                 refreshed_metadata = refreshed["metadata"]
                 assert isinstance(refreshed_metadata, dict)
                 if refreshed_metadata["uid"] != original_uid:
@@ -946,8 +938,112 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                         "during cleanup"
                     ) from None
                 metadata = refreshed_metadata
+                refreshed_labels = metadata.get("labels")
+                if (
+                    isinstance(refreshed_labels, dict)
+                    and refreshed_labels.get(_CLEANUP_LABEL) == cleanup_token
+                ):
+                    return refreshed
+                continue
+            refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+            if refreshed is None:
+                return None
+            refreshed_metadata = refreshed["metadata"]
+            assert isinstance(refreshed_metadata, dict)
+            if refreshed_metadata["uid"] != original_uid:
+                raise RuntimeError(
+                    "protected staging capacity database bootstrap identity changed during cleanup"
+                ) from None
+            return refreshed
         raise RuntimeError(
             "protected staging capacity database bootstrap cleanup patch did not stabilize"
+        ) from None
+
+    def _delete_bootstrap_resource_by_identity(
+        self,
+        *,
+        kind: str,
+        item: dict[str, object],
+        manifest: bytes,
+    ) -> None:
+        metadata = item["metadata"]
+        assert isinstance(metadata, dict)
+        original_uid = metadata["uid"]
+        resource_path = (
+            f"/api/v1/namespaces/{_NAMESPACE}/secrets/{_NAME}"
+            if kind == "Secret"
+            else f"/apis/batch/v1/namespaces/{_NAMESPACE}/jobs/{_NAME}"
+        )
+        for _attempt in range(_CLEANUP_DELETE_ATTEMPTS):
+            delete_options = {
+                "apiVersion": "v1",
+                "kind": "DeleteOptions",
+                "preconditions": {
+                    "resourceVersion": metadata["resourceVersion"],
+                    "uid": original_uid,
+                },
+                "propagationPolicy": "Foreground",
+            }
+            try:
+                self.runner.run_checked(
+                    (
+                        "kubectl",
+                        "--namespace",
+                        _NAMESPACE,
+                        "delete",
+                        "--raw",
+                        resource_path,
+                        "-f",
+                        "-",
+                        f"--request-timeout={_REQUEST_TIMEOUT}",
+                    ),
+                    env=self.runner.environment,
+                    input_payload=json.dumps(delete_options, sort_keys=True).encode("utf-8"),
+                    timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+                if refreshed is None:
+                    return
+                refreshed_metadata = refreshed["metadata"]
+                assert isinstance(refreshed_metadata, dict)
+                if refreshed_metadata["uid"] != original_uid:
+                    raise RuntimeError(
+                        "protected staging capacity database bootstrap identity changed "
+                        "during cleanup"
+                    ) from None
+                metadata = refreshed_metadata
+                continue
+
+            self.runner.run_status(
+                (
+                    "kubectl",
+                    "--namespace",
+                    _NAMESPACE,
+                    "wait",
+                    "--for=delete",
+                    f"--timeout={_CLEANUP_DELETE_WAIT_SECONDS}s",
+                    f"--request-timeout={_REQUEST_TIMEOUT}",
+                    f"{kind.lower()}/{_NAME}",
+                ),
+                env=self.runner.environment,
+                input_payload=None,
+                timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+            )
+            refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+            if refreshed is None:
+                return
+            refreshed_metadata = refreshed["metadata"]
+            assert isinstance(refreshed_metadata, dict)
+            if refreshed_metadata["uid"] != original_uid:
+                raise RuntimeError(
+                    "protected staging capacity database bootstrap identity changed during cleanup"
+                ) from None
+            raise RuntimeError(
+                "protected staging capacity database bootstrap cleanup was not exact"
+            ) from None
+        raise RuntimeError(
+            "protected staging capacity database bootstrap cleanup delete did not stabilize"
         ) from None
 
     def _observed_bootstrap_resources(

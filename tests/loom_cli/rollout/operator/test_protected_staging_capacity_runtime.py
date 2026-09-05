@@ -72,12 +72,15 @@ class _DatabaseRunner:
         self.calls: list[tuple[str, ...]] = []
         self.checked_inputs: list[tuple[tuple[str, ...], bytes]] = []
         self.patch_inputs: list[tuple[tuple[str, ...], bytes]] = []
+        self.delete_inputs: list[tuple[tuple[str, ...], bytes]] = []
         self.fail_checked = fail_checked
         self.failed_checked = False
         self._sequence = 0
         self.replace_after_patch_kind: str | None = None
+        self.replace_after_selector_match_kind: str | None = None
         self.replace_before_patch_kind: str | None = None
         self.disappear_before_patch_kind: str | None = None
+        self.fail_patch_after_mutation_kind: str | None = None
         self.patch_churn_counts: dict[str, int] = {}
         self.api_default_jobs = False
         self.create_failure_leaves_all = False
@@ -237,7 +240,7 @@ class _DatabaseRunner:
 
     @staticmethod
     def _projection(document: dict[str, object]) -> dict[str, object]:
-        value = deepcopy(document)
+        value = json.loads(json.dumps(document))
         value.pop("status", None)
         metadata = value["metadata"]
         assert isinstance(metadata, dict)
@@ -367,6 +370,12 @@ class _DatabaseRunner:
         assert env == self.environment
         command = tuple(argv)
         self.calls.append(command)
+        if "wait" in command and "--for=delete" in command:
+            assert timeout_seconds == 60.0
+            assert input_payload is None
+            kind = "Job" if any("job/" in item for item in command) else "Secret"
+            self.events.append(f"wait-delete-{kind.lower()}")
+            return 0 if kind not in self.objects else 1
         if "wait" in command:
             self.events.append("wait")
             assert timeout_seconds == 30.0
@@ -477,9 +486,10 @@ class _DatabaseRunner:
                     cleanup_label = (
                         operation["path"].removeprefix("/metadata/labels/").replace("~1", "/")
                     )
-                    labels = observed_metadata.setdefault("labels", {})
+                    labels = deepcopy(observed_metadata.setdefault("labels", {}))
                     assert isinstance(labels, dict)
                     labels[cleanup_label] = operation["value"]
+                    observed_metadata["labels"] = labels
             assert cleanup_label == "loom.carin.dev/protected-cleanup"
             self.patch_inputs.append((command, input_payload))
             if self.replace_after_patch_kind == kind:
@@ -490,6 +500,51 @@ class _DatabaseRunner:
                 assert isinstance(labels, dict)
                 labels.pop(cleanup_label, None)
                 self.objects[kind] = self._stored(replacement)
+            else:
+                self._sequence += 1
+                observed_metadata["resourceVersion"] = str(self._sequence)
+            if self.fail_patch_after_mutation_kind == kind:
+                self.fail_patch_after_mutation_kind = None
+                raise RuntimeError("injected protected cleanup patch response loss")
+            return
+        if "delete" in command and "--raw" in command:
+            assert timeout_seconds == 60.0
+            assert input_payload is not None
+            resource_path = next(item for item in command if item.startswith("/api"))
+            kind = "Job" if "/jobs/" in resource_path else "Secret"
+            self.events.append(f"delete-{kind.lower()}")
+            self.delete_inputs.append((command, input_payload))
+            if kind == "Job" and self.fail_delete_job_before_mutation > 0:
+                self.fail_delete_job_before_mutation -= 1
+                raise RuntimeError("injected protected compensation phase failure")
+            observed = self.objects.get(kind)
+            if observed is None:
+                raise RuntimeError("injected protected cleanup delete absence")
+            if self.replace_after_selector_match_kind == kind:
+                self.replace_after_selector_match_kind = None
+                replacement = self._projection(observed)
+                replacement_metadata = replacement["metadata"]
+                assert isinstance(replacement_metadata, dict)
+                replacement_labels = replacement_metadata["labels"]
+                assert isinstance(replacement_labels, dict)
+                replacement_labels.pop("loom.carin.dev/protected-cleanup", None)
+                self.objects[kind] = self._stored(replacement)
+                observed = self.objects[kind]
+            observed_metadata = observed["metadata"]
+            assert isinstance(observed_metadata, dict)
+            delete_options = json.loads(input_payload)
+            assert delete_options["apiVersion"] == "v1"
+            assert delete_options["kind"] == "DeleteOptions"
+            assert delete_options["propagationPolicy"] == "Foreground"
+            if delete_options["preconditions"] != {
+                "resourceVersion": observed_metadata["resourceVersion"],
+                "uid": observed_metadata["uid"],
+            }:
+                raise RuntimeError("injected protected cleanup delete precondition failure")
+            self.objects.pop(kind)
+            if self.fail_checked == "delete" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
             return
         if "delete" in command:
             assert timeout_seconds == 60.0
@@ -510,6 +565,15 @@ class _DatabaseRunner:
             key, value = selector.removeprefix("--selector=").split("=", 1)
             if labels.get(key) != value:
                 return
+            if self.replace_after_selector_match_kind == kind:
+                self.replace_after_selector_match_kind = None
+                replacement = self._projection(observed)
+                replacement_metadata = replacement["metadata"]
+                assert isinstance(replacement_metadata, dict)
+                replacement_labels = replacement_metadata["labels"]
+                assert isinstance(replacement_labels, dict)
+                replacement_labels.pop("loom.carin.dev/protected-cleanup", None)
+                self.objects[kind] = self._stored(replacement)
             if kind == "Job":
                 assert "--cascade=foreground" in command
                 assert "--wait=true" in command
@@ -1318,7 +1382,13 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
         if payload is not arm_payload
     )
     assert runner.events.index("cleanup") < runner.events.index("arm")
-    mutations = [call for call in runner.calls if {"create", "wait", "delete"} & set(call)]
+    mutations = [
+        call
+        for call in runner.calls
+        if "create" in call
+        or "delete" in call
+        or ("wait" in call and "--for=condition=complete" in call)
+    ]
     assert [
         next(item for item in ("create", "wait", "delete") if item in call) for call in mutations
     ] == [
@@ -1545,7 +1615,9 @@ def test_database_component_recovers_exact_completed_residue_by_cleanup_only(
     component.apply(plan)
 
     assert runner.objects == {}
-    assert all("create" not in call and "wait" not in call for call in runner.calls)
+    assert all(
+        "create" not in call and "--for=condition=complete" not in call for call in runner.calls
+    )
     assert component.classify(plan).state is ComponentState.EXACT
 
 
@@ -1636,7 +1708,7 @@ def test_database_component_always_seals_transient_authority_after_failure(
     assert b"loom_cap_staging_observer NOLOGIN" in disable_payload
     assert b"loom_cap_staging_runtime NOLOGIN" in disable_payload
     if fail_checked == "wait":
-        assert sum("wait" in call for call in runner.calls) == 1
+        assert sum("--for=condition=complete" in call for call in runner.calls) == 1
 
 
 @pytest.mark.parametrize("fail_checked", ["create", "wait"])
@@ -1817,7 +1889,7 @@ def test_database_component_does_not_revoke_when_job_shutdown_is_unconfirmed(
         if document is not None
     }
     runner.objects["Job"]["status"] = {"failed": 1}
-    runner.fail_delete_job_before_mutation = 2
+    runner.fail_delete_job_before_mutation = 100
 
     with pytest.raises(RuntimeError, match="could not confirm safe shutdown: job"):
         component.apply(plan)
@@ -1825,7 +1897,7 @@ def test_database_component_does_not_revoke_when_job_shutdown_is_unconfirmed(
     assert set(runner.objects) == {"Job", "Secret"}
     assert runner.events.count("disable-all") == 2
     assert runner.events.count("terminate") == 2
-    assert runner.events.count("delete-job") == 2
+    assert runner.events.count("delete-job") == 6
     assert "cleanup" not in runner.events
 
 
@@ -1895,10 +1967,7 @@ def test_database_component_does_not_delete_replacement_after_cleanup_label_race
     runner.checked_inputs.clear()
     runner.patch_inputs.clear()
 
-    with pytest.raises(
-        RuntimeError,
-        match="protected staging capacity database bootstrap cleanup was not exact",
-    ):
+    with pytest.raises(RuntimeError, match="identity changed during cleanup"):
         component.apply(plan)
 
     replacement = runner.objects[kind]
@@ -1908,6 +1977,48 @@ def test_database_component_does_not_delete_replacement_after_cleanup_label_race
     assert isinstance(labels, dict)
     assert "loom.carin.dev/protected-cleanup" not in labels
     assert runner.patch_inputs
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_does_not_delete_replacement_after_cleanup_selection_race(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """Break caught: selector listing an original before deleting its name replacement."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    original_uid = runner.objects[kind]["metadata"]["uid"]
+    runner.replace_after_selector_match_kind = kind
+
+    with pytest.raises(RuntimeError, match="identity changed during cleanup"):
+        component.apply(plan)
+
+    assert runner.objects[kind]["metadata"]["uid"] != original_uid
+    assert "loom.carin.dev/protected-cleanup" not in runner.objects[kind]["metadata"]["labels"]
+
+
+def test_database_component_recovers_from_ambiguous_successful_job_cleanup_patch(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a YAML labels alias making a confirmed patch appear drifted."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.fail_patch_after_mutation_kind = "Job"
+    runner.events.clear()
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count("patch-job") == 1
+    assert component.classify(plan).state is ComponentState.EXACT
 
 
 @pytest.mark.parametrize("kind", ["Secret", "Job"])
@@ -2013,7 +2124,9 @@ def test_database_component_retries_after_failed_bootstrap_is_safely_compensated
     mutations = [
         next(item for item in ("delete", "create", "wait") if item in call)
         for call in runner.calls
-        if {"delete", "create", "wait"} & set(call)
+        if "create" in call
+        or "delete" in call
+        or ("wait" in call and "--for=condition=complete" in call)
     ]
     assert mutations == ["create", "wait", "delete", "delete"]
     assert runner.events.index("cleanup") < runner.events.index("arm")
