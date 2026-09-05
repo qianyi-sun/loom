@@ -197,6 +197,45 @@ class DistributionRegistryTokenIssuer:
     ) -> IssuedRegistryToken:
         """Sign one short-lived pull/push grant for an exact repository."""
 
+        return self._issue(
+            credential_id=credential_id,
+            repository=repository,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            subject_prefix="loom-task-image-builder",
+            actions=("pull", "push"),
+        )
+
+    def issue_pull(
+        self,
+        *,
+        credential_id: UUID,
+        repository: str,
+        issued_at: datetime,
+        expires_at: datetime,
+    ) -> IssuedRegistryToken:
+        """Sign one independently identified verifier pull grant."""
+
+        return self._issue(
+            credential_id=credential_id,
+            repository=repository,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            subject_prefix="loom-task-image-verifier",
+            actions=("pull",),
+        )
+
+    def _issue(
+        self,
+        *,
+        credential_id: UUID,
+        repository: str,
+        issued_at: datetime,
+        expires_at: datetime,
+        subject_prefix: str,
+        actions: tuple[str, ...],
+    ) -> IssuedRegistryToken:
+
         if type(credential_id) is not UUID or credential_id.int == 0:
             raise TypeError("registry credential ID must be a nonzero UUID")
         repository = _validate_repository(repository)
@@ -208,7 +247,7 @@ class DistributionRegistryTokenIssuer:
         issued_epoch = int(issued_at.timestamp())
         claims: dict[str, Any] = {
             "iss": self._issuer,
-            "sub": f"loom-task-image-builder:{credential_id}",
+            "sub": f"{subject_prefix}:{credential_id}",
             "aud": self._service,
             "exp": int(expires_at.timestamp()),
             "nbf": issued_epoch,
@@ -218,7 +257,7 @@ class DistributionRegistryTokenIssuer:
                 {
                     "type": "repository",
                     "name": repository,
-                    "actions": ["pull", "push"],
+                    "actions": list(actions),
                 }
             ],
         }

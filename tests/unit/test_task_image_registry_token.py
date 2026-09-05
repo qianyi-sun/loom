@@ -206,6 +206,37 @@ def test_loaded_issuer_signs_one_exact_standard_distribution_scope(
     assert "<redacted>" in rendered
 
 
+def test_issuer_mints_independent_pull_only_verifier_scope(tmp_path: Path) -> None:
+    private_key = _private_key()
+    key_path = _owner_only(tmp_path / "registry-signing.pem", _pem(private_key))
+    issuer = load_distribution_registry_token_issuer(_settings(tmp_path, key_path))
+    repository = f"loom-task-image-attempts/arm64/{ATTEMPT_ID}/task"
+
+    issued = issuer.issue_pull(
+        credential_id=CREDENTIAL_ID,
+        repository=repository,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(seconds=45),
+    )
+
+    claims = jwt.decode(
+        issued.token,
+        private_key.public_key(),
+        algorithms=["RS256"],
+        audience="registry.example",
+        issuer="loom-task-image-authority",
+        options={"verify_exp": False, "verify_nbf": False, "verify_iat": False},
+    )
+    assert claims["sub"] == f"loom-task-image-verifier:{CREDENTIAL_ID}"
+    assert claims["access"] == [
+        {
+            "type": "repository",
+            "name": repository,
+            "actions": ["pull"],
+        }
+    ]
+
+
 def test_key_id_is_stable_for_the_same_public_key(tmp_path: Path) -> None:
     private_key = _private_key()
     first_path = _owner_only(tmp_path / "first.pem", _pem(private_key))

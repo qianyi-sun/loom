@@ -37,6 +37,7 @@ ALLOWED_AUTHORITY_STDLIB_IMPORTS = {
 ALLOWED_AUTHORITY_IMPORT_ROOTS = {
     "cryptography",
     "fastapi",
+    "httpx",
     "jwt",
     "loom_task_image_authority",
     "prometheus_client",

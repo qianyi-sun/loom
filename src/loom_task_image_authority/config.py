@@ -89,6 +89,31 @@ class TaskImageAuthoritySettings(BaseSettings):
         pattern=_REGISTRY_IDENTITY_PATTERN,
     )
     registry_signing_key_file: Path | None = None
+    registry_reader_ca_file: Path | None = None
+    registry_connect_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    registry_idle_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
+    registry_total_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
+    registry_maximum_response_header_bytes: int = Field(
+        default=32 * 1024,
+        ge=1,
+        le=64 * 1024,
+    )
+    registry_maximum_chunk_bytes: int = Field(
+        default=1024 * 1024,
+        ge=1,
+        le=1024 * 1024,
+    )
+    registry_maximum_manifest_bytes: int = Field(
+        default=4 * 1024**2,
+        ge=1,
+        le=4 * 1024**2,
+    )
+    registry_maximum_response_bytes: int = Field(
+        default=100 * 1024**3,
+        ge=1,
+        le=100 * 1024**3,
+    )
+    registry_read_concurrency_limit: int = Field(default=4, ge=1, le=32)
 
     @model_validator(mode="after")
     def _bundle_configuration_is_complete_and_safe(
@@ -133,6 +158,10 @@ class TaskImageAuthoritySettings(BaseSettings):
             raise ValueError("registry credential configuration must be all present or absent")
         if self.registry_origin is not None:
             _validate_https_origin(self.registry_origin, label="registry origin")
+        if self.registry_reader_ca_file is not None and self.registry_origin is None:
+            raise ValueError(
+                "registry reader configuration requires fixed registry credentials"
+            )
         return self
 
 

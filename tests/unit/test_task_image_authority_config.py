@@ -90,6 +90,15 @@ def test_settings_are_frozen_strict_and_use_only_the_authority_prefix(
     assert settings.registry_service is None
     assert settings.registry_issuer is None
     assert settings.registry_signing_key_file is None
+    assert settings.registry_reader_ca_file is None
+    assert settings.registry_connect_timeout_seconds == 5.0
+    assert settings.registry_idle_timeout_seconds == 10.0
+    assert settings.registry_total_timeout_seconds == 120.0
+    assert settings.registry_maximum_response_header_bytes == 32 * 1024
+    assert settings.registry_maximum_chunk_bytes == 1024 * 1024
+    assert settings.registry_maximum_manifest_bytes == 4 * 1024**2
+    assert settings.registry_maximum_response_bytes == 100 * 1024**3
+    assert settings.registry_read_concurrency_limit == 4
     with pytest.raises(ValidationError):
         settings.port = 8446  # type: ignore[misc]
     with pytest.raises(ValidationError):
@@ -190,6 +199,91 @@ def test_registry_configuration_is_optional_but_complete_and_environment_scoped(
     assert settings.registry_service == "registry.example"
     assert settings.registry_issuer == "loom-task-image-authority"
     assert settings.registry_signing_key_file == tmp_path / "registry-signing.pem"
+
+
+def test_registry_reader_configuration_is_explicit_and_environment_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in _settings_values(tmp_path).items():
+        monkeypatch.setenv(f"LOOM_TASK_IMAGE_AUTHORITY_{name.upper()}", str(value))
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_ORIGIN",
+        "https://registry.example:5443",
+    )
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_SERVICE", "registry.example")
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_ISSUER",
+        "loom-task-image-authority",
+    )
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_SIGNING_KEY_FILE",
+        str(tmp_path / "registry-signing.pem"),
+    )
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_READER_CA_FILE",
+        str(tmp_path / "registry-ca.pem"),
+    )
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_CONNECT_TIMEOUT_SECONDS", "3.5")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_IDLE_TIMEOUT_SECONDS", "4.5")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_TOTAL_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_MAXIMUM_RESPONSE_HEADER_BYTES", "8192"
+    )
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_MAXIMUM_CHUNK_BYTES", "65536")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_MAXIMUM_MANIFEST_BYTES", "524288")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_MAXIMUM_RESPONSE_BYTES", "1048576")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_READ_CONCURRENCY_LIMIT", "2")
+
+    settings = TaskImageAuthoritySettings()
+
+    assert settings.registry_reader_ca_file == tmp_path / "registry-ca.pem"
+    assert settings.registry_connect_timeout_seconds == 3.5
+    assert settings.registry_idle_timeout_seconds == 4.5
+    assert settings.registry_total_timeout_seconds == 30.0
+    assert settings.registry_maximum_response_header_bytes == 8192
+    assert settings.registry_maximum_chunk_bytes == 65536
+    assert settings.registry_maximum_manifest_bytes == 524288
+    assert settings.registry_maximum_response_bytes == 1048576
+    assert settings.registry_read_concurrency_limit == 2
+
+
+def test_registry_reader_ca_requires_the_fixed_registry_configuration(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="reader configuration"):
+        TaskImageAuthoritySettings(
+            **_settings_values(tmp_path),
+            registry_reader_ca_file=tmp_path / "registry-ca.pem",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("registry_connect_timeout_seconds", 0.0),
+        ("registry_connect_timeout_seconds", 30.1),
+        ("registry_idle_timeout_seconds", 0.0),
+        ("registry_idle_timeout_seconds", 60.1),
+        ("registry_total_timeout_seconds", 0.0),
+        ("registry_total_timeout_seconds", 600.1),
+        ("registry_maximum_response_header_bytes", 0),
+        ("registry_maximum_response_header_bytes", 64 * 1024 + 1),
+        ("registry_maximum_chunk_bytes", 0),
+        ("registry_maximum_chunk_bytes", 1024 * 1024 + 1),
+        ("registry_maximum_manifest_bytes", 0),
+        ("registry_maximum_manifest_bytes", 4 * 1024**2 + 1),
+        ("registry_maximum_response_bytes", 0),
+        ("registry_maximum_response_bytes", 100 * 1024**3 + 1),
+        ("registry_read_concurrency_limit", 0),
+        ("registry_read_concurrency_limit", 33),
+    ],
+)
+def test_registry_reader_limits_reject_unbounded_values(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskImageAuthoritySettings(**(_settings_values(tmp_path) | {field: value}))
 
 
 @pytest.mark.parametrize(
