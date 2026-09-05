@@ -259,10 +259,69 @@ validate_native_authority_receipt() {
   fi
   printf '%s' "$receipt" | jq -a -cS -j -e . || return 1
 }
+validate_native_authority_failure_receipt() {
+  local operation="$1"
+  local request_id="$2"
+  local receipt
+  receipt="$(cat)"
+  test -n "$receipt" || return 1
+  printf '%s' "$receipt" | jq -e \
+    --arg operation "$operation" --arg request_id "$request_id" \
+    --arg source "$authority_source_sha" --arg tree "$authority_source_tree" \
+    --arg profile "$runtime_profile_sha256" '
+      type == "object" and keys == [
+        "authority_source_sha","authority_source_tree","cleanup_status",
+        "error_code","failure_phase","operation","request_id",
+        "runtime_profile_sha256","schema","status"
+      ] and
+      .schema == "loom.personal-dev-native-builder-runtime-authority-failure.v1" and
+      .status == "failed" and .operation == $operation and $operation == "prepare" and
+      .request_id == $request_id and
+      .authority_source_sha == $source and .authority_source_tree == $tree and
+      .runtime_profile_sha256 == $profile and
+      (.error_code | IN(
+        "address_pool_conflict","agent_binding_invalid","agent_material_invalid",
+        "agent_stage_invalid","agent_template_invalid","archive_changed",
+        "archive_cleanup_failed","archive_destination_invalid","archive_invalid",
+        "archive_member_invalid","atomic_publish_failed","atomic_publish_unavailable",
+        "authority_invalid","cgroup_v2_invalid","cleanup_failed",
+        "command_boundary_invalid","command_cleanup_failed","command_failed",
+        "command_interrupted","command_invalid","command_output_invalid",
+        "command_timeout","context_invalid","convergence_plan_invalid",
+        "dedicated_daemon_busy","dedicated_daemon_invalid","dedicated_socket_invalid",
+        "destination_changed","docker_command_failed","docker_endpoint_invalid",
+        "docker_identity_invalid","docker_output_invalid","docker_timeout",
+        "generated_input_invalid","host_capacity_invalid","host_command_invalid",
+        "host_identity_invalid","host_mutation_failed","host_state_invalid",
+        "identity_conflict","identity_install_invalid","image_identity_invalid",
+        "image_in_use","image_inventory_invalid","image_race_detected",
+        "image_retention_invalid","image_revision_invalid","internal_error",
+        "kvm_device_invalid","managed_file_invalid","managed_objects_invalid",
+        "nftables_state_invalid","parent_directory_invalid","path_invalid",
+        "phase_invalid","previous_release_invalid","public_key_invalid",
+        "release_binding_invalid","release_config_invalid","release_revision_mismatch",
+        "required_image_missing","runsc_version_invalid","runtime_directory_invalid",
+        "service_state_invalid","staged_state_invalid","staging_cleanup_invalid",
+        "state_invalid","state_publish_failed","transition_failed"
+      )) and
+      (.failure_phase | IN(
+        "archive_cleanup","archive_copy","cleanup","conformance",
+        "dockerd_start","dockerd_stop","inert_check","installer_install",
+        "installer_preflight","installer_verify","network_load","network_remove",
+        "precondition","release_apply","release_plan","release_verify","state_publish"
+      )) and
+      (.cleanup_status | IN("inert","unchanged","unproven"))
+    ' >/dev/null || return 1
+  printf '%s' "$receipt" | jq -a -cS -j -e . || return 1
+}
 native_authority_request() {
   local operation="$1"
   local request_id="$2"
   local output="$3"
+  local failure="$output.failure"
+  local part
+  local component request_status=0
+  local -a pipeline_status=()
   shift 3
   [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
     || return 1
@@ -270,50 +329,77 @@ native_authority_request() {
     status|prepare|stage-agent|activate|remove) ;;
     *) return 1 ;;
   esac
-  if ! {
-    {
-    if test "$operation" = stage-agent; then
-      native_authority_stage_agent "$request_id" "$@"
+  test ! -e "$output" && test ! -L "$output" &&
+    test ! -e "$failure" && test ! -L "$failure" || return 1
+  (
+    part="$(/usr/bin/mktemp -- "$output.part.XXXXXXXXXX")" || exit 1
+    trap '/usr/bin/rm -f -- "$part"' EXIT
+    trap 'exit 1' HUP INT TERM
+    if
+      {
+        if test "$operation" = stage-agent; then
+          native_authority_stage_agent "$request_id" "$@"
+        else
+          "${native_authority_client[@]}" "$operation" \
+            --authority-source-sha "$authority_source_sha" \
+            --authority-source-tree "$authority_source_tree" \
+            --request-id "$request_id" \
+            --runtime-profile-sha256 "$runtime_profile_sha256" \
+            --schema-version 1 \
+            "$@"
+        fi
+      } | sudo -n -- /usr/bin/ssh -F /dev/null \
+        -o HostName=207.35.188.227 \
+        -o Port=2221 \
+        -o User=qianyi \
+        -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+        -o IdentitiesOnly=yes \
+        -o PubkeyAuthentication=yes \
+        -o PreferredAuthentications=publickey \
+        -o GSSAPIAuthentication=no \
+        -o HostbasedAuthentication=no \
+        -o PasswordAuthentication=no \
+        -o KbdInteractiveAuthentication=no \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=yes \
+        -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+        -o GlobalKnownHostsFile=/dev/null \
+        -o UpdateHostKeys=no \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ConnectTimeout=10 \
+        trt-gb10-1 \
+        'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
+        | jq -cS -j -s '
+          if length == 1 and (.[0] | type) == "object" then .[0]
+          else error("authority receipt cardinality") end
+        ' > "$part"
+    then
+      pipeline_status=("${PIPESTATUS[@]}")
     else
-      "${native_authority_client[@]}" "$operation" \
-        --authority-source-sha "$authority_source_sha" \
-        --authority-source-tree "$authority_source_tree" \
-        --request-id "$request_id" \
-        --runtime-profile-sha256 "$runtime_profile_sha256" \
-        --schema-version 1 \
-        "$@"
+      pipeline_status=("${PIPESTATUS[@]}")
     fi
-  } | sudo -n -- /usr/bin/ssh -F /dev/null \
-    -o HostName=207.35.188.227 \
-    -o Port=2221 \
-    -o User=qianyi \
-    -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
-    -o IdentitiesOnly=yes \
-    -o PubkeyAuthentication=yes \
-    -o PreferredAuthentications=publickey \
-    -o GSSAPIAuthentication=no \
-    -o HostbasedAuthentication=no \
-    -o PasswordAuthentication=no \
-    -o KbdInteractiveAuthentication=no \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes \
-    -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
-    -o GlobalKnownHostsFile=/dev/null \
-    -o UpdateHostKeys=no \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
-    -o ConnectTimeout=10 \
-    trt-gb10-1 \
-    'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
-    | jq -cS -j -s '
-      if length == 1 and (.[0] | type) == "object" then .[0]
-      else error("authority receipt cardinality") end
-    ' | validate_native_authority_receipt "$operation" "$request_id"
-  } > "$output"; then
-    rm -f -- "$output"
-    return 1
-  fi
-  chmod 0600 "$output"
+    for component in "${pipeline_status[@]}"; do
+      if test "$request_status" -eq 0 && test "$component" -ne 0; then
+        request_status="$component"
+      fi
+    done
+    if ! /usr/bin/chmod 0600 "$part" 2>/dev/null; then
+      exit 1
+    fi
+    if test "$request_status" -eq 0; then
+      if validate_native_authority_receipt "$operation" "$request_id" \
+        < "$part" >/dev/null &&
+        /usr/bin/ln -T -- "$part" "$output"; then
+        exit 0
+      fi
+    elif validate_native_authority_failure_receipt "$operation" "$request_id" \
+      < "$part" >/dev/null &&
+      /usr/bin/ln -T -- "$part" "$failure"; then
+      exit "$request_status"
+    fi
+    exit 1
+  )
 }
 native_authority_stage_archive() {
   (
@@ -1088,6 +1174,18 @@ The fixed broker opens the resulting owner-only remote file, copies it into its
 root-private state directory, verifies the digest, and performs preflight,
 installation, release convergence, the fixed two-container conformance asset,
 and compensation back to inert state.
+
+If the broker reaches the fixed `prepare` transition boundary and it fails,
+the broker returns nonzero after publishing one canonical public failure
+receipt. The transport retains that receipt at `<requested-output>.failure`
+only when its source, tree, profile, operation, request UUID, fixed failure
+phase, bounded error code, and cleanup status all validate exactly.
+`cleanup_status="inert"` means compensation re-verified the inert host, or the
+request made no host mutation after its inert precondition; `unchanged` means
+a precondition rejected the request before transition, while `unproven`
+requires separate recovery before any new window. A failure receipt is
+diagnostic evidence, never permission to resume the failed request or advance
+to activation.
 
 ```bash
 archive="$evidence_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
