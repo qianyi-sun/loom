@@ -24,7 +24,10 @@ from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
 from loom_cli.rollout.gb10_slurm_acceptance import GB10_SLURM_WORKER_HOSTS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
-from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.preflight_artifact_store import (
+    PreflightArtifactStore,
+    PreflightArtifactStoreError,
+)
 from loom_cli.rollout.preflight_contract import DependencyExpiredError
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
@@ -45,7 +48,7 @@ from .backup_rotation import (
 )
 from .candidate import CandidateBindingError, bind_configured_candidate
 from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
-from .config import OperatorConfig, environment_authority
+from .config import ConfigError, OperatorConfig, environment_authority
 from .envelope import fixed_operator_config_path
 from .final_gate_store import FinalGateExecutionStore, FinalGateStoreError
 from .installed_backup_retention import (
@@ -79,6 +82,7 @@ from .preflight_artifact_references import (
     InstalledResumeEligibility,
     resume_binding_matches,
 )
+from .preflight_diagnostics import PreflightDiagnosticContext, PreflightDiagnosticStore
 from .protected_apply_journal import (
     ProtectedApplyJournalError,
     ReconciliationOutcomeStatus,
@@ -195,6 +199,8 @@ def _parser(*, default_environment: str | None = None) -> argparse.ArgumentParse
     start.add_argument("--dry-run", action="store_true")
 
     commands.add_parser("preflight")
+    diagnostics = commands.add_parser("preflight-diagnostics")
+    diagnostics.add_argument("digest", type=_artifact_bundle_sha256)
 
     status = commands.add_parser("status")
     status.add_argument("request_id", nargs="?")
@@ -300,6 +306,65 @@ class BrokerDependencies:
     backup_recovery: Any | None = None
     preflight_artifact_retention: Any | None = None
     resume_runtime_upgrade: ResumeRuntimeUpgradeAuthority | None = None
+    diagnostic_context: PreflightDiagnosticContext | None = None
+
+
+def _diagnostic_stage(dependencies: BrokerDependencies, stage: str) -> None:
+    if dependencies.diagnostic_context is not None:
+        dependencies.diagnostic_context.stage = stage
+
+
+def _preflight_failure(
+    dependencies: BrokerDependencies,
+    code: str,
+    *,
+    public: dict[str, object] | None = None,
+    check_ids: tuple[str, ...] = (),
+    dependency_ids: tuple[str, ...] = (),
+) -> int:
+    context = dependencies.diagnostic_context
+    if code == "preflight-check-failed":
+        classification_ids = set(check_ids)
+        if public is not None and isinstance(public.get("blockers"), list):
+            classification_ids = {
+                blocker["check_id"]
+                for blocker in cast(list[dict[str, Any]], public["blockers"])
+                if blocker.get("outcome") in {"fail", "timeout"}
+            }
+        if classification_ids & {"checkout", "candidate.identity", "runner.install"}:
+            code = "preflight-identity-drift"
+        elif "artifacts.publish" in classification_ids:
+            code = "preflight-artifact-publication-failed"
+    if context is None:
+        context = PreflightDiagnosticContext(dependencies.config.short_name, "preflight")
+    payload = context.failure(code, check_ids=check_ids, dependency_ids=dependency_ids)
+    # Legacy typed reports retain their public shape. Only the curated projection
+    # above is persisted, never report evidence, exception text, or remediation.
+    if public is not None:
+        payload.update(public)
+    _write_json(dependencies.stderr, payload)
+    return 1
+
+
+def _preflight_exception(
+    context: PreflightDiagnosticContext | None,
+    dependencies: BrokerDependencies | None,
+    error: Exception,
+) -> bool:
+    if context is None or not context.active:
+        return False
+    if context.stage == "authorization":
+        code = "preflight-authorization-rejected"
+    elif context.stage in {"configuration", "candidate-binding"} or isinstance(error, ConfigError):
+        code = "preflight-identity-drift"
+    elif context.stage == "artifact-reference" or isinstance(error, PreflightArtifactStoreError):
+        code = "preflight-artifact-publication-failed"
+    else:
+        code = "preflight-internal-error"
+    _write_json(
+        dependencies.stderr if dependencies is not None else sys.stderr, context.failure(code)
+    )
+    return True
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -497,9 +562,12 @@ def _assess_preflight(
     except DependencyExpiredError as exc:
         # Use the installer's existing failed-check report contract. This is an
         # incomplete diagnostic, never a passing or persisted assessment.
-        _write_json(
-            dependencies.stderr,
-            {
+        _preflight_failure(
+            dependencies,
+            "preflight-dependency-expired",
+            check_ids=(exc.check_id,),
+            dependency_ids=exc.dependency_ids,
+            public={
                 "assessment_complete": False,
                 "candidate_sha": candidate.resolved_sha,
                 "mutation_epoch": mutation_epoch,
@@ -529,26 +597,39 @@ def _preflight_only(
     if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
         caller
     ):
-        return _safe_error(
-            dependencies,
-            "sealed cumulative preflight requires coordinator authority",
-        )
+        _diagnostic_stage(dependencies, "authorization")
+        return _preflight_failure(dependencies, "preflight-authorization-rejected")
     if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
-        return _safe_error(dependencies, "deep rollout preflight is not configured")
+        return _preflight_failure(dependencies, "preflight-not-configured")
+    _diagnostic_stage(dependencies, "report")
     report = dependencies.preflight()
     if not report.passed:
-        _write_json(dependencies.stderr, report.to_dict())
-        return 1
+        return _preflight_failure(
+            dependencies,
+            "preflight-check-failed",
+            public=report.to_dict(),
+            check_ids=tuple(check.name for check in report.checks if not check.passed),
+        )
+    _diagnostic_stage(dependencies, "candidate-binding")
     candidate = dependencies.bind_candidate()
+    if dependencies.diagnostic_context is not None:
+        dependencies.diagnostic_context.candidate_sha = candidate.resolved_sha
+    _diagnostic_stage(dependencies, "mutation-epoch")
     mutation_epoch = dependencies.read_mutation_epoch()
     if type(mutation_epoch) is not int or mutation_epoch < 0:
         raise ValueError("staging mutation epoch is invalid")
+    _diagnostic_stage(dependencies, "assessment")
     assessment = _assess_preflight(dependencies, candidate, mutation_epoch)
     if assessment is None:
         return 1
     if not assessment.passed:
-        _write_json(dependencies.stderr, assessment.to_dict())
-        return 1
+        return _preflight_failure(
+            dependencies,
+            "preflight-check-failed",
+            public=assessment.to_dict(),
+            check_ids=tuple(blocker.check_id for blocker in assessment.blockers),
+        )
+    _diagnostic_stage(dependencies, "artifact-reference")
     artifact_reference = _preflight_artifact_reference(assessment)
     _write_json(
         dependencies.stdout,
@@ -777,21 +858,36 @@ def _start_staged(
     assert dependencies.assess_preflight is not None
     assert dependencies.read_mutation_epoch is not None
     if dependencies.mutation_guard is None and not dry_run:
-        return _safe_error(dependencies, "staging mutation guard is not configured")
+        return _preflight_failure(dependencies, "preflight-not-configured")
+    _diagnostic_stage(dependencies, "report")
     report = dependencies.preflight()
     if not report.passed:
-        _write_json(dependencies.stderr, report.to_dict())
-        return 1
+        return _preflight_failure(
+            dependencies,
+            "preflight-check-failed",
+            public=report.to_dict(),
+            check_ids=tuple(check.name for check in report.checks if not check.passed),
+        )
+    _diagnostic_stage(dependencies, "candidate-binding")
     candidate = dependencies.bind_candidate()
+    if dependencies.diagnostic_context is not None:
+        dependencies.diagnostic_context.candidate_sha = candidate.resolved_sha
+    _diagnostic_stage(dependencies, "mutation-epoch")
     mutation_epoch = dependencies.read_mutation_epoch()
     if type(mutation_epoch) is not int or mutation_epoch < 0:
         raise ValueError("staging mutation epoch is invalid")
+    _diagnostic_stage(dependencies, "assessment")
     assessment = _assess_preflight(dependencies, candidate, mutation_epoch)
     if assessment is None:
         return 1
     if not assessment.passed:
-        _write_json(dependencies.stderr, assessment.to_dict())
-        return 1
+        return _preflight_failure(
+            dependencies,
+            "preflight-check-failed",
+            public=assessment.to_dict(),
+            check_ids=tuple(blocker.check_id for blocker in assessment.blockers),
+        )
+    _diagnostic_stage(dependencies, "artifact-reference")
     artifact_reference = _preflight_artifact_reference(assessment)
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
     rollout_id = validate_safe_identifier(
@@ -814,6 +910,8 @@ def _start_staged(
         preview=dry_run,
     )
 
+    if dependencies.diagnostic_context is not None:
+        dependencies.diagnostic_context.active = False
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
@@ -1009,25 +1107,36 @@ def _start(
     if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
         caller
     ):
-        return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
+        _diagnostic_stage(dependencies, "authorization")
+        return _preflight_failure(dependencies, "preflight-authorization-rejected")
     if dependencies.assess_preflight is not None or dependencies.read_mutation_epoch is not None:
         if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
-            return _safe_error(dependencies, "detached preflight dependencies are incomplete")
+            return _preflight_failure(dependencies, "preflight-not-configured")
         return _start_staged(dependencies, caller, dry_run=dry_run)
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
+        _diagnostic_stage(dependencies, "report")
         report = dependencies.preflight()
         if not report.passed:
-            _write_json(dependencies.stderr, report.to_dict())
-            return 1
+            return _preflight_failure(
+                dependencies,
+                "preflight-check-failed",
+                public=report.to_dict(),
+                check_ids=tuple(check.name for check in report.checks if not check.passed),
+            )
+        _diagnostic_stage(dependencies, "candidate-binding")
         candidate = dependencies.bind_candidate()
+        if dependencies.diagnostic_context is not None:
+            dependencies.diagnostic_context.candidate_sha = candidate.resolved_sha
         if dependencies.authorize_preflight is None:
-            return _safe_error(dependencies, "deep rollout preflight is not configured")
+            return _preflight_failure(dependencies, "preflight-not-configured")
+        _diagnostic_stage(dependencies, "assessment")
         deep_preflight = dependencies.authorize_preflight(candidate)
         if not deep_preflight.passed:
-            _write_json(dependencies.stderr, deep_preflight.to_dict())
-            return 1
+            return _preflight_failure(
+                dependencies, "preflight-check-failed", public=deep_preflight.to_dict()
+            )
         request = _request(
             dependencies,
             caller,
@@ -1035,6 +1144,8 @@ def _start(
             deep_preflight,
             preview=dry_run,
         )
+        if dependencies.diagnostic_context is not None:
+            dependencies.diagnostic_context.active = False
         dependencies.store.create_request(request)
         dependencies.store.append_event(
             _event(
@@ -2494,25 +2605,57 @@ def _main(
         ).parse_args(list(argv) if argv is not None else None)
     except (_ArgumentError, SystemExit):
         return 2
+    diagnostic = (
+        PreflightDiagnosticContext(args.env, args.command)
+        if args.command in {"preflight", "start"}
+        else None
+    )
     try:
         authority = environment_authority(args.env)
         if dependencies is not None:
             if dependencies.config.short_name != authority.short_name:
                 raise PolicyError("selected environment does not match injected authority")
             deps = dependencies
+            if diagnostic is not None:
+                diagnostic.stage = "authorization"
             caller = deps.authenticate()
+            config = dependencies.config
         else:
             config = OperatorConfig.load(
                 fixed_operator_config_path(environment=authority.short_name),
                 authority=authority,
             )
+            if diagnostic is not None:
+                diagnostic.stage = "authorization"
             caller = caller_from_sudo(
                 config,
                 os.environ,
                 euid=os.geteuid(),
                 groups=_groups,
             )
+        # Operator authentication is not sealed-lane command authorization.
+        # Reject before constructing a store or any heavyweight dependency:
+        # even a factory failure must not publish diagnostics for this caller.
+        if (
+            args.command in {"preflight", "start"}
+            and config.source_mode == "sealed-cumulative"
+            and not _has_coordinator_authority(caller)
+        ):
+            raise PolicyError("sealed cumulative preflight requires coordinator authority")
+        if args.command == "preflight-diagnostics":
+            record = PreflightDiagnosticStore(config.state_root).read(args.digest)
+            if record["environment"] != authority.short_name:
+                raise PolicyError("diagnostic environment mismatch")
+            _write_json(deps.stdout if deps is not None else sys.stdout, record)
+            return 0
+        if diagnostic is not None:
+            diagnostic.initiator_uid = caller.uid
+            diagnostic.store = PreflightDiagnosticStore(config.state_root)
+            diagnostic.stage = "dependency-initialization"
+        if dependencies is None:
             deps = _default_dependencies(config)
+        assert deps is not None
+        deps.diagnostic_context = diagnostic
         if args.command == "preflight":
             return _preflight_only(deps, caller)
         if args.command == "start":
@@ -2570,7 +2713,9 @@ def _main(
                 approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
             )
         return 2
-    except (ValueError, PolicyError):
+    except (ValueError, PolicyError) as exc:
+        if _preflight_exception(diagnostic, deps, exc):
+            return 1
         if deps is None:
             sys.stderr.write("error: request authorization or validation failed\n")
             return 1
@@ -2588,12 +2733,16 @@ def _main(
         RequestStoreError,
         SystemdOperationError,
         UnitLaunchError,
-    ):
+    ) as exc:
+        if _preflight_exception(diagnostic, deps, exc):
+            return 1
         if deps is None:
             sys.stderr.write("error: staging rollout operation failed safely\n")
             return 1
         return _safe_error(deps, "staging rollout operation failed safely")
-    except Exception:
+    except Exception as exc:
+        if _preflight_exception(diagnostic, deps, exc):
+            return 1
         if deps is None:
             sys.stderr.write("error: staging rollout operation failed safely\n")
             return 1

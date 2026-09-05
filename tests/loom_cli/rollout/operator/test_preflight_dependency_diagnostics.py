@@ -108,7 +108,10 @@ def test_untyped_preflight_error_does_not_expose_exception_text(tmp_path: Path) 
         bundle.dependencies, assess_preflight=assess, read_mutation_epoch=lambda: 7
     )
     assert broker_main(["preflight"], dependencies=dependencies) == 1
-    assert bundle.stderr.getvalue() == "error: request authorization or validation failed\n"
+    result = json.loads(bundle.stderr.getvalue())
+    assert result["failure_code"] == "preflight-internal-error"
+    assert result["stage"] == "assessment"
+    assert "known-secret" not in bundle.stderr.getvalue()
 
 
 @pytest.mark.parametrize(
