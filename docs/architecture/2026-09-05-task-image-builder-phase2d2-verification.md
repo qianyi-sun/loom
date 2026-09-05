@@ -106,6 +106,62 @@ Test signers use generated keys only. Key records distinguish active,
 verify-only and revoked. The future signed keyset and execution-start increment
 must consume these exact envelopes and serialize against this durable epoch.
 
+### Canonical wire and signer boundary
+
+The statement's unsigned input binds these authority-derived fields:
+materialization ID and key, task ID and checksum, component, platform, purpose,
+optional shadow campaign ID, attempt ID and number, lease epoch, grant ID,
+original claim session ID and generation, frozen plan digest, environment/pool,
+Slurm cluster and job, build-policy digest, composite builder-release digest,
+native supervisor executable digest, containment-attestation digest, registry
+origin and repository, verified root/runnable-manifest/config descriptors,
+ordered layer descriptors, and observed base digests. Original session fields
+are provenance only. None replaces the final current-authority check.
+
+Publication timestamps use whole-second UTC `YYYY-MM-DDTHH:MM:SSZ` strings.
+UUIDs are nonzero canonical lowercase strings. Integer fields are strict
+non-boolean RFC 8785-safe integers. Optional campaign and key-retirement fields
+are omitted when absent; JSON null is not in the signed schema. A production
+statement has no campaign, and a shadow statement requires one. Origin and
+repository must match purpose, campaign, native architecture, attempt and
+component; the current production-only credential flow does not acquire shadow
+authority by making the statement schema capable of representing it.
+
+Observed base digests are a bounded, sorted unique list of normalized SHA-256
+digests, not mutable image names. Their presence is mandatory even when empty;
+the metadata-capture boundary must prove scratch/no-image inputs rather than
+default missing metadata to an empty list. The ordered output layers remain a
+list because repetitions and ordering have execution meaning.
+
+The dedicated signer accepts a bounded validated unsigned input, chooses its
+eligible active publication key, and adds `issued_at` using its own clock.
+Active status alone is insufficient: a current signed keyset containing that
+key must have been distributed before publication use. Signing eligibility
+binds the durable distributed keyset version and revocation epoch; the final
+transaction rechecks both. Until the later keyset-distribution composition is
+available, production signing eligibility remains closed. Its only
+operation signs this schema/domain; it does not expose arbitrary-byte signing.
+The authority receives the complete canonical statement and signature envelope,
+checks the canonical bytes, exact unchanged unsigned input, statement digest,
+algorithm, pinned public key, activation interval and bounded clock skew, and
+only then considers the result for the final fenced transaction. The final
+transaction rechecks mutable key state and epoch independently of this earlier
+cryptographic verification. A retired verify-only key can validate historical
+statements but cannot sign a new publication; a revoked key cannot confer new
+readiness. A stale response from an earlier signing request cannot substitute a
+different attempt or component.
+
+Public-key records retain immutable key identity/public bytes and activation
+time, with monotonic retirement/revocation transitions. A singleton durable
+publication-state row owns the revocation epoch and future keyset version.
+It is locked before any individual key, grant, projection, session,
+materialization, attempt, verification-job or trial-start row. Immutable envelope
+rows bind their candidate, exact attempt/component and key through restrictive
+foreign keys; they are not upgrades of legacy unsigned publication evidence.
+The runtime authority never loads the production Ed25519 private key. A
+service/KMS implementation and its authenticated transport must be available
+and verified before composing the publication worker in production.
+
 ## Failure, retention and compatibility
 
 Invalid/missing/inconsistent registry bytes do not consume deterministic task
