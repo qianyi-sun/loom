@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -295,6 +295,25 @@ async def projection_session(
         yield factory
     finally:
         async with factory() as session:
+            # Break the current-generation FK cycle for committed session fixtures.
+            await session.execute(
+                update(TaskImageBuildProjection)
+                .where(TaskImageBuildProjection.state == "exchanged")
+                .values(
+                    state="projected",
+                    exchange_id=None,
+                    exchange_json=null(),
+                    exchange_sha256=None,
+                    session_id=None,
+                    session_generation=None,
+                    session_token_hash=None,
+                    session_secret_ref=None,
+                    session_json=null(),
+                    session_sha256=None,
+                    session_issued_at=None,
+                    session_expires_at=None,
+                )
+            )
             await session.execute(delete(TaskImageBuildSessionGeneration))
             await session.execute(delete(TaskImageBuildContainmentAttestation))
             await session.execute(delete(TaskImageBuildProjectionEvent))

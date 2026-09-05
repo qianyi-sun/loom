@@ -400,21 +400,20 @@ class TaskImageProjectionRevocationV1(StrictTaskImageAuthorityModel):
     observed_at: datetime
 
 
-class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
+class _TaskImageBuildSessionFields(StrictTaskImageAuthorityModel):
     grant_id: NonzeroUUID
     session_id: NonzeroUUID
     purpose: BuildPurpose
     shadow_campaign_id: NonzeroUUID | None
     pool_id: Identifier
     cpu_arch: CpuArchitecture
-    session_token: Annotated[str, Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$")]
     attestation_generation: PositiveSignedBigint
     attestation_sha256: Digest
     issued_at: datetime
     expires_at: datetime
 
     @model_validator(mode="after")
-    def _session_is_bounded(self) -> TaskImageBuildSessionV1:
+    def _session_is_bounded(self) -> _TaskImageBuildSessionFields:
         if (self.purpose == "production") != (self.shadow_campaign_id is None):
             raise ValueError("authority session purpose and shadow campaign disagree")
         _validate_interval(
@@ -424,6 +423,21 @@ class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
             label="session",
         )
         return self
+
+
+class TaskImageBuildSessionPublicBindingV1(_TaskImageBuildSessionFields):
+    """Strict persisted session facts; never proof of a caller's possession."""
+
+    session_token_sha256: Digest
+
+
+class TaskImageBuildSessionPublicBindingV2(TaskImageBuildSessionPublicBindingV1):
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    generation: PositiveSignedBigint
+
+
+class TaskImageBuildSessionV1(_TaskImageBuildSessionFields, _SecretBearingAuthorityModel):
+    session_token: Annotated[str, Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$")]
 
     def public_binding(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"session_token"})
@@ -546,9 +560,7 @@ class TaskImageRegistryCredentialRequestV1(_TaskImageCurrentSessionRequestV1):
 
     @model_validator(mode="after")
     def _predecessor_pair_is_complete(self) -> TaskImageRegistryCredentialRequestV1:
-        if (self.predecessor_credential_id is None) != (
-            self.predecessor_generation is None
-        ):
+        if (self.predecessor_credential_id is None) != (self.predecessor_generation is None):
             raise ValueError("registry credential predecessor pair is incomplete")
         return self
 
@@ -734,6 +746,8 @@ __all__ = [
     "TaskImageBootstrapExchangeV1",
     "TaskImageBuildGrantAuthorityV1",
     "TaskImageBuildGrantAuthorityV2",
+    "TaskImageBuildSessionPublicBindingV1",
+    "TaskImageBuildSessionPublicBindingV2",
     "TaskImageBuildSessionV1",
     "TaskImageBuildSessionV2",
     "TaskImageComponent",
