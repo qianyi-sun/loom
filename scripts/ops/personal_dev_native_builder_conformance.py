@@ -891,8 +891,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 break
             if attempt == 59:
                 raise ConformanceError("conformance failed")
-            if isinstance(runner, SubprocessRunner):
-                time.sleep(1)
+            time.sleep(1)
         buildkit_ip = _run(
             runner,
             _docker(
@@ -1024,8 +1023,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 break
             if attempt == 59:
                 raise ConformanceError("conformance failed")
-            if isinstance(runner, SubprocessRunner):
-                time.sleep(1)
+            time.sleep(1)
 
         client_id = _create_owned(
             runner,
