@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout import preflight_contract
 from loom_cli.rollout.final_attestation_admission import (
     PostApplyDriftTransientError,
     validate_final_attestation,
@@ -588,6 +589,26 @@ def test_final_admission_accepts_current_protected_attestation_schemas(
     )
 
     assert admission.attestation is attestation
+
+
+def test_final_admission_rejects_readable_historical_schema_two() -> None:
+    plan = _plan(_checks())
+    payload = _attestation(plan).to_dict()
+    payload["schema_version"] = 2
+    payload.pop("identity_evidence_hashes")
+    payload.pop("attestation_digest")
+    payload["attestation_digest"] = preflight_contract._hash_json(payload)
+    attestation = PreflightAttestation.from_dict(payload)
+
+    assert attestation.schema_version == 2
+    with pytest.raises(ValueError, match="attestation identity drifted"):
+        validate_final_attestation(
+            attestation=attestation,
+            candidate=_candidate(),
+            plan=plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
 
 
 def test_final_admission_compares_identity_for_phase_dependency_closure() -> None:
