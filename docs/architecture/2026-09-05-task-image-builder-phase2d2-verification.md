@@ -32,6 +32,16 @@ endpoint behavior. TLS, headers, response sizes, chunk sizes, idle time, total
 time and concurrent jobs have explicit limits. Stream closure is mandatory on
 success, rejection, cancellation and connection failure.
 
+The fixed GET transport uses verified asyncio TLS streams and the public h11
+HTTP/1.1 state machine, with one connection per admitted object. Informational
+responses and upgrades are rejected; no response head may be silently discarded
+before Loom enforces its limits. h11 owns HTTP framing, while Loom bounds reads,
+headers/trailers and deadlines and closes the connection on every exit. This
+incurs additional TLS handshakes but avoids depending on private HTTP-client
+internals to observe interim headers. Shutdown marks admission closed before
+closing active sockets; queued reads cannot mint credentials after that point.
+No timeout context remains active across a yielded chunk into caller code.
+
 The byte verifier is independent of HTTP and persistence. Its input reader is
 already bound to the repository; the verifier can request only manifests and
 blobs by digest. It hashes every manifest, config and compressed layer byte,
