@@ -733,6 +733,161 @@ func TestProtocolClaimAndBundleAcceptRealGuardSecretResponses(t *testing.T) {
 	}
 }
 
+// Break caught: registry credential requests drift from the local guard's fixed
+// component/predecessor packet or skip the one sealed response descriptor ACK.
+func TestGuardClientRegistryCredentialSendsCanonicalPacketAndReturnsSecret(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	secretPayload := []byte(`{"schema_version":"loom.task-image-registry-credential.v1","bearer_token":"header.payload.signature"}`)
+	sum := sha256.Sum256(secretPayload)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		payload, rights, creds, flags := receiveSeqpacket(t, connFD, 4096)
+		if flags&^syscall.MSG_CMSG_CLOEXEC != 0 {
+			t.Fatalf("recv flags = %d, want only MSG_CMSG_CLOEXEC", flags)
+		}
+		if creds == nil || creds.Pid <= 0 {
+			t.Fatalf("credentials = %#v, want populated SCM_CREDENTIALS", creds)
+		}
+		if len(rights) != 1 {
+			t.Fatalf("received %d rights, want one current-session memfd", len(rights))
+		}
+		current, err := NewSecretBuffer(rights[0], maxSecretBytes)
+		if err != nil {
+			t.Fatalf("current session descriptor invalid: %v", err)
+		}
+		if !strings.Contains(string(current.data), "sentinel-current") {
+			t.Fatalf("current session descriptor = %q, want cloned current session", string(current.data))
+		}
+		current.Close()
+		assertExactJSON(t, payload, `{"attempt_id":"55555555-5555-4555-8555-555555555555","component":"task","grant_id":"11111111-1111-4111-8111-111111111111","lease_epoch":7,"materialization_id":"44444444-4444-4444-8444-444444444444","operation":"registry-credential","operation_id":"22222222-2222-4222-8222-222222222222","predecessor_credential_id":null,"predecessor_generation":null,"schema":"`+localSchema+`"}`)
+
+		secretFD := createMemfdFixture(t, "registry-credential", secretPayload, requiredMemfdSeals, true)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"registry-credential","response_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","lease_epoch":7,"component":"task","payload_sha256":"`+fmt.Sprintf("%x", sum[:])+`"}`), []int{secretFD})
+		syscall.Close(secretFD)
+		ackPayload, ackRights, _, _ := receiveSeqpacket(t, connFD, 4096)
+		if len(ackRights) != 0 {
+			t.Fatalf("ack rights = %d, want none", len(ackRights))
+		}
+		assertExactJSON(t, ackPayload, `{"operation":"ack","response_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","schema":"`+localSchema+`"}`)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	current := mustSessionEnvelope(t, 1, "sentinel-current")
+	defer current.Secret.Close()
+	secret, err := client.RegistryCredential(context.Background(), RegistryCredentialRequest{
+		GrantID:           "11111111-1111-4111-8111-111111111111",
+		OperationID:       "22222222-2222-4222-8222-222222222222",
+		MaterializationID: "44444444-4444-4444-8444-444444444444",
+		AttemptID:         "55555555-5555-4555-8555-555555555555",
+		LeaseEpoch:        7,
+		Component:         "task",
+	}, current.Secret)
+	if err != nil {
+		t.Fatalf("RegistryCredential() error = %v", err)
+	}
+	defer secret.Close()
+	if string(secret.data) != string(secretPayload) {
+		t.Fatalf("secret payload = %q, want %q", string(secret.data), string(secretPayload))
+	}
+}
+
+// Break caught: publication candidate acknowledgements accept rights or omit
+// one of the authority-confirmed bindings before ACKing the guard.
+func TestGuardClientPublicationCandidateValidatesBindingAndRejectsRights(t *testing.T) {
+	useTestProtocolPolicy(t)
+	tests := []struct {
+		name      string
+		response  string
+		rights    func(*testing.T) []int
+		wantError bool
+	}{
+		{
+			name:     "valid acknowledgement",
+			response: `{"schema":"` + localSchema + `","operation":"publication-candidate","response_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","grant_id":"11111111-1111-4111-8111-111111111111","candidate_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","operation_id":"22222222-2222-4222-8222-222222222222","credential_id":"66666666-6666-4666-8666-666666666666","credential_generation":3,"session_id":"33333333-3333-4333-8333-333333333333","session_generation":2,"materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","attempt_number":11,"lease_epoch":7,"builder_id":"rootless:33333333333343338333333333333333","component":"task","manifest_digest":"sha256:` + strings.Repeat("a", 64) + `","manifest_size":1234,"oci_file_sha256":"` + strings.Repeat("b", 64) + `","oci_file_size":5678,"platform":"linux/arm64","recorded_at":"2026-09-03T12:00:01Z","authority_response_sha256":"` + strings.Repeat("c", 64) + `"}`,
+		},
+		{
+			name:     "extra rights rejected",
+			response: `{"schema":"` + localSchema + `","operation":"publication-candidate","response_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","grant_id":"11111111-1111-4111-8111-111111111111","candidate_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","operation_id":"22222222-2222-4222-8222-222222222222","credential_id":"66666666-6666-4666-8666-666666666666","credential_generation":3,"session_id":"33333333-3333-4333-8333-333333333333","session_generation":2,"materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","attempt_number":11,"lease_epoch":7,"builder_id":"rootless:33333333333343338333333333333333","component":"task","manifest_digest":"sha256:` + strings.Repeat("a", 64) + `","manifest_size":1234,"oci_file_sha256":"` + strings.Repeat("b", 64) + `","oci_file_size":5678,"platform":"linux/arm64","recorded_at":"2026-09-03T12:00:01Z","authority_response_sha256":"` + strings.Repeat("c", 64) + `"}`,
+			rights: func(t *testing.T) []int {
+				return []int{createMemfdFixture(t, "unexpected-candidate-right", []byte(`{"right":"unexpected"}`), requiredMemfdSeals, true)}
+			},
+			wantError: true,
+		},
+		{
+			name:      "binding drift rejected",
+			response:  `{"schema":"` + localSchema + `","operation":"publication-candidate","response_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","grant_id":"11111111-1111-4111-8111-111111111111","candidate_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","operation_id":"22222222-2222-4222-8222-222222222222","credential_id":"66666666-6666-4666-8666-666666666666","credential_generation":3,"session_id":"33333333-3333-4333-8333-333333333333","session_generation":2,"materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","attempt_number":11,"lease_epoch":7,"builder_id":"rootless:33333333333343338333333333333333","component":"sidecar:cache","manifest_digest":"sha256:` + strings.Repeat("a", 64) + `","manifest_size":1234,"oci_file_sha256":"` + strings.Repeat("b", 64) + `","oci_file_size":5678,"platform":"linux/arm64","recorded_at":"2026-09-03T12:00:01Z","authority_response_sha256":"` + strings.Repeat("c", 64) + `"}`,
+			wantError: true,
+		},
+		{
+			name:      "unknown response field rejected",
+			response:  `{"schema":"` + localSchema + `","operation":"publication-candidate","response_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","grant_id":"11111111-1111-4111-8111-111111111111","candidate_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","operation_id":"22222222-2222-4222-8222-222222222222","credential_id":"66666666-6666-4666-8666-666666666666","credential_generation":3,"session_id":"33333333-3333-4333-8333-333333333333","session_generation":2,"materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","attempt_number":11,"lease_epoch":7,"builder_id":"rootless:33333333333343338333333333333333","component":"task","manifest_digest":"sha256:` + strings.Repeat("a", 64) + `","manifest_size":1234,"oci_file_sha256":"` + strings.Repeat("b", 64) + `","oci_file_size":5678,"platform":"linux/arm64","recorded_at":"2026-09-03T12:00:01Z","authority_response_sha256":"` + strings.Repeat("c", 64) + `","unexpected":true}`,
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			socketPath := testSocketPath(t)
+			server := startSeqpacketServer(t, socketPath, func(connFD int) {
+				payload, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+				if len(rights) != 1 {
+					t.Fatalf("received %d rights, want one current-session memfd", len(rights))
+				}
+				closeRights(rights)
+				assertExactJSON(t, payload, `{"attempt_id":"55555555-5555-4555-8555-555555555555","component":"task","credential_generation":3,"credential_id":"66666666-6666-4666-8666-666666666666","grant_id":"11111111-1111-4111-8111-111111111111","lease_epoch":7,"manifest_digest":"sha256:`+strings.Repeat("a", 64)+`","manifest_size":1234,"materialization_id":"44444444-4444-4444-8444-444444444444","oci_file_sha256":"`+strings.Repeat("b", 64)+`","oci_file_size":5678,"operation":"publication-candidate","operation_id":"22222222-2222-4222-8222-222222222222","platform":"linux/arm64","schema":"`+localSchema+`"}`)
+				rightsToSend := []int(nil)
+				if tt.rights != nil {
+					rightsToSend = tt.rights(t)
+					defer closeRights(rightsToSend)
+				}
+				sendSeqpacket(t, connFD, []byte(tt.response), rightsToSend)
+				if !tt.wantError {
+					ackPayload, _, _, _ := receiveSeqpacket(t, connFD, 4096)
+					assertExactJSON(t, ackPayload, `{"operation":"ack","response_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","schema":"`+localSchema+`"}`)
+				}
+			})
+
+			client := NewGuardClient(socketPath, 4096, 2*time.Second)
+			current := mustSessionEnvelope(t, 1, "sentinel-current")
+			defer current.Secret.Close()
+			ack, err := client.PublicationCandidate(context.Background(), PublicationCandidateRequest{
+				GrantID:                 "11111111-1111-4111-8111-111111111111",
+				OperationID:             "22222222-2222-4222-8222-222222222222",
+				CredentialID:            "66666666-6666-4666-8666-666666666666",
+				CredentialGeneration:    3,
+				SessionID:               "33333333-3333-4333-8333-333333333333",
+				SessionGeneration:       2,
+				MaterializationID:       "44444444-4444-4444-8444-444444444444",
+				AttemptID:               "55555555-5555-4555-8555-555555555555",
+				AttemptNumber:           11,
+				LeaseEpoch:              7,
+				BuilderID:               "rootless:33333333333343338333333333333333",
+				Component:               "task",
+				ManifestDigest:          "sha256:" + strings.Repeat("a", 64),
+				ManifestSize:            1234,
+				OCIFileSHA256:           strings.Repeat("b", 64),
+				OCIFileSize:             5678,
+				Platform:                "linux/arm64",
+				AuthorityResponseSHA256: strings.Repeat("c", 64),
+			}, current.Secret)
+			server.Close()
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("PublicationCandidate() succeeded, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PublicationCandidate() error = %v", err)
+			}
+			if ack == nil || ack.CandidateID != "cccccccc-cccc-4ccc-8ccc-cccccccccccc" || ack.AttemptNumber != 11 || ack.AuthorityResponseSHA256 != strings.Repeat("c", 64) {
+				t.Fatalf("ack = %#v, want strict candidate binding", ack)
+			}
+		})
+	}
+}
+
 func TestProtocolSecretResponsesRejectPayloadDigestMismatch(t *testing.T) {
 	useTestProtocolPolicy(t)
 	socketPath := testSocketPath(t)

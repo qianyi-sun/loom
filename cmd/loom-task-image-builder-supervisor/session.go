@@ -57,6 +57,15 @@ func (m *SessionManager) WithCurrent(fn func(*SecretBuffer) error) error {
 	return fn(m.current.Secret)
 }
 
+func (m *SessionManager) WithCurrentEnvelope(fn func(*SessionEnvelope, *SecretBuffer) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == nil || m.current.Secret == nil || m.current.Secret.closed {
+		return errors.New("current session unavailable")
+	}
+	return fn(m.current, m.current.Secret)
+}
+
 func (m *SessionManager) Renew(ctx context.Context) (*SessionEnvelope, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -529,6 +529,27 @@ func TestParseBuildClaimAllowsLeasePastSessionWhenPlanAuthorizationIsSessionBoun
 	}
 }
 
+// Break caught: publication credential renewal derives builder_id from a renewed
+// session instead of preserving the original frozen claim builder binding.
+func TestParseBuildClaimPreservesFrozenBuilderIDInBuildPlan(t *testing.T) {
+	mutation := defaultClaimMutation()
+	claim, err := parseBuildClaim(&SecretBuffer{data: []byte(testClaimJSON(mutation))}, claimBinding{
+		GrantID:           testGrantID,
+		ClaimID:           mutation.ClaimID,
+		SessionID:         testSessionID,
+		SessionGeneration: 1,
+		ConfigCPUArch:     "arm64",
+		Now:               testNow,
+		SessionExpiresAt:  testNow.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("parseBuildClaim() error = %v", err)
+	}
+	if claim.Plan.BuilderID != mutation.BuilderID {
+		t.Fatalf("Plan.BuilderID = %q, want frozen claim builder_id %q", claim.Plan.BuilderID, mutation.BuilderID)
+	}
+}
+
 // Break caught: BuildOutcome carries raw logs, URLs, tokens, Dockerfile text, or environment.
 func TestBuildOutcomeWireRedactsForbiddenMaterialAndBoundsStatus(t *testing.T) {
 	outcome := BuildOutcome{
@@ -795,6 +816,14 @@ func (g *fakeOrchestratorGuard) recordIdleWait() {
 func (g *fakeOrchestratorGuard) Bundle(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*SecretBuffer, error) {
 	g.h.events = append(g.h.events, "bundle")
 	return &SecretBuffer{data: []byte(`{"schema":"loom.task-image-bundle-capability/v1","redacted":true}`)}, nil
+}
+
+func (g *fakeOrchestratorGuard) RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error) {
+	return nil, errors.New("registry credential not configured")
+}
+
+func (g *fakeOrchestratorGuard) PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	return nil, errors.New("publication candidate not configured")
 }
 
 func (g *fakeOrchestratorGuard) Start(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {

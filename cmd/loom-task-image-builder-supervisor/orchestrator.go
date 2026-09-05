@@ -23,6 +23,8 @@ type TaskImageGuard interface {
 	Renew(context.Context, string, string, *SecretBuffer) (*SessionEnvelope, error)
 	Claim(context.Context, string, string, *SecretBuffer) (*SecretBuffer, bool, error)
 	Bundle(context.Context, string, string, string, string, int, *SecretBuffer) (*SecretBuffer, error)
+	RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error)
+	PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error)
 	Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Release(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
@@ -844,6 +846,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 	}
 	return BuildPlan{
 		Architecture: architecture,
+		BuilderID:    w.BuilderID,
 		Frontend:     "dockerfile.v0",
 		NetworkMode:  "sandbox",
 		BuildTimeout: time.Duration(w.BuildTimeoutSeconds * float64(time.Second)),

@@ -144,6 +144,14 @@ func (fn supervisorProjectClientFunc) Bundle(context.Context, string, string, st
 	return nil, nil
 }
 
+func (fn supervisorProjectClientFunc) RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	return nil, nil
+}
+
 func (fn supervisorProjectClientFunc) Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error) {
 	return nil, nil
 }
