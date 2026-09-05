@@ -306,6 +306,12 @@ validate_native_authority_failure_receipt() {
       )) and
       (.failure_phase | IN(
         "archive_cleanup","archive_copy","cleanup","conformance",
+        "conformance_buildkit_create","conformance_buildkit_readiness",
+        "conformance_cleanup","conformance_client_create",
+        "conformance_client_execution","conformance_denial_create",
+        "conformance_denial_readiness","conformance_foreign_isolation",
+        "conformance_host_isolation","conformance_networks",
+        "conformance_postconditions","conformance_preconditions",
         "dockerd_start","dockerd_stop","inert_check","installer_install",
         "installer_preflight","installer_verify","network_load","network_remove",
         "precondition","release_apply","release_plan","release_verify","state_publish"

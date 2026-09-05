@@ -24,6 +24,7 @@ from scripts.ops.converge_personal_dev_native_builder_release import (
 )
 from scripts.ops.personal_dev_native_builder_conformance import (
     CommandResult,
+    ConformanceError,
     ConformanceInputs,
 )
 from scripts.ops.personal_dev_native_builder_runtime_authority import (
@@ -2778,6 +2779,32 @@ def test_prepare_failure_carries_only_bounded_phase_and_cleanup_diagnostics() ->
     assert getattr(raised.value, "failure_phase", None) == "release_apply"
     assert getattr(raised.value, "cleanup_status", None) == "inert"
     assert str(raised.value) == "transition_failed"
+    assert not host.dockerd_active and not host.agent_active and not host.nft_present
+    assert states.snapshot is None
+    assert archives.present is False
+
+
+def test_prepare_maps_fixed_conformance_stage_without_private_diagnostic() -> None:
+    runtime, _, host, states, archives, _, _ = _prepare_runtime()
+
+    class FailingConformance:
+        @staticmethod
+        def run(_inputs: ConformanceInputs) -> dict[str, object]:
+            raise ConformanceError(
+                "private registry token must not escape",
+                stage="buildkit_readiness",
+            )
+
+    runtime.conformance = FailingConformance()
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "transition_failed"
+    assert raised.value.failure_phase == "conformance_buildkit_readiness"
+    assert raised.value.cleanup_status == "inert"
+    assert str(raised.value) == "transition_failed"
+    assert "private registry token" not in str(raised.value)
     assert not host.dockerd_active and not host.agent_active and not host.nft_present
     assert states.snapshot is None
     assert archives.present is False

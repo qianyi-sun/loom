@@ -716,6 +716,41 @@ def test_rejects_any_non_arm64_image_before_container_creation(platform: str) ->
     assert all("create" not in call for call in runner.calls)
 
 
+def test_failure_exposes_only_fixed_conformance_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Makes a live failure actionable without exposing command output."""
+
+    class NeverReady(RecordingDockerRunner):
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            result = super().run(argv, check=check, env=env)
+            call = tuple(argv)
+            if "logs" in call or (
+                call[3:5] == ("exec", BUILDKIT_ID) and call[-2:] == ("debug", "workers")
+            ):
+                return CommandResult(1, stderr="private registry token must not escape")
+            return result
+
+    monkeypatch.setattr(conformance.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+        run_conformance(_inputs(), NeverReady())
+
+    assert raised.value.stage == "buildkit_readiness"
+    assert "private registry token" not in str(raised.value)
+
+
+def test_conformance_error_rejects_unallowlisted_stage() -> None:
+    with pytest.raises(ValueError, match="conformance stage is invalid"):
+        ConformanceError("conformance failed", stage="private-registry-token")
+
+
 @pytest.mark.parametrize("field", ["managed_containers_after", "managed_networks_after"])
 def test_refuses_nonempty_post_cleanup_managed_counts(field: str) -> None:
     """Catches a passing receipt when labelled conformance objects survive cleanup."""

@@ -38,7 +38,9 @@ if TYPE_CHECKING:
         PersonalDevNativeBuilderRuntimeInstaller,
     )
     from scripts.ops.personal_dev_native_builder_conformance import (
+        CONFORMANCE_FAILURE_STAGES,
         CommandResult,
+        ConformanceError,
         ConformanceInputs,
         Runner,
         run_conformance,
@@ -81,7 +83,13 @@ def _load_application_modules() -> None:
         PersonalDevNativeBuilderRuntimeInstaller as _RuntimeInstaller,
     )
     from scripts.ops.personal_dev_native_builder_conformance import (
+        CONFORMANCE_FAILURE_STAGES as _CONFORMANCE_FAILURE_STAGES,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
         CommandResult as _CommandResult,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
+        ConformanceError as _ConformanceError,
     )
     from scripts.ops.personal_dev_native_builder_conformance import (
         ConformanceInputs as _ConformanceInputs,
@@ -111,7 +119,9 @@ def _load_application_modules() -> None:
     globals().update(
         {
             "AuthorityRequest": _AuthorityRequest,
+            "CONFORMANCE_FAILURE_STAGES": _CONFORMANCE_FAILURE_STAGES,
             "CommandResult": _CommandResult,
+            "ConformanceError": _ConformanceError,
             "ConformanceInputs": _ConformanceInputs,
             "NativeBuilderCommandResult": _InstallerResult,
             "NativeBuilderInstallContext": _InstallContext,
@@ -257,7 +267,7 @@ _FAILURE_PHASES = frozenset(
         "release_verify",
         "state_publish",
     }
-)
+) | frozenset(f"conformance_{stage}" for stage in CONFORMANCE_FAILURE_STAGES)
 _CLEANUP_STATUSES = frozenset({"inert", "unchanged", "unproven"})
 _FAILURE_RECEIPT_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-failure.v1"
 
@@ -2264,6 +2274,10 @@ class RuntimeAuthority:
             if not isinstance(snapshot, StateSnapshot):
                 raise AuthorityError("state_invalid")
         except BaseException as primary_failure:
+            if failure_phase == "conformance" and isinstance(primary_failure, ConformanceError):
+                conformance_stage = primary_failure.stage
+                if conformance_stage is not None:
+                    failure_phase = f"conformance_{conformance_stage}"
             failure_code = _safe_failure_code(primary_failure)
             if failure_code == "archive_cleanup_failed":
                 failure_phase = "archive_cleanup"
@@ -2859,6 +2873,7 @@ def serve_validated(policy_value: Mapping[str, object]) -> int | None:
             operator_uid=operator.pw_uid,
             operator_gid=operator.pw_gid,
         )
+        status: int | None
         try:
             receipt = runtime.dispatch(request)
         except AuthorityError as failure:
