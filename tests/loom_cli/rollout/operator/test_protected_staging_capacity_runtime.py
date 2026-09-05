@@ -82,6 +82,7 @@ class _DatabaseRunner:
         self.disappear_before_patch_kind: str | None = None
         self.fail_patch_after_mutation_kind: str | None = None
         self.patch_churn_counts: dict[str, int] = {}
+        self.delete_wait_counts: dict[str, int] = {}
         self.api_default_jobs = False
         self.create_failure_leaves_all = False
         self.fail_database_verification_after_wait = False
@@ -371,10 +372,17 @@ class _DatabaseRunner:
         command = tuple(argv)
         self.calls.append(command)
         if "wait" in command and "--for=delete" in command:
-            assert timeout_seconds == 60.0
+            assert timeout_seconds in {30.0, 60.0}
             assert input_payload is None
             kind = "Job" if any("job/" in item for item in command) else "Secret"
             self.events.append(f"wait-delete-{kind.lower()}")
+            remaining_waits = self.delete_wait_counts.get(kind, 0)
+            if remaining_waits > 0:
+                self.delete_wait_counts[kind] = remaining_waits - 1
+                if remaining_waits == 1:
+                    self.objects.pop(kind, None)
+                    return 0
+                return 1
             return 0 if kind not in self.objects else 1
         if "wait" in command:
             self.events.append("wait")
@@ -541,7 +549,11 @@ class _DatabaseRunner:
                 "uid": observed_metadata["uid"],
             }:
                 raise RuntimeError("injected protected cleanup delete precondition failure")
-            self.objects.pop(kind)
+            if self.delete_wait_counts.get(kind, 0) > 0:
+                observed_metadata["deletionTimestamp"] = "2026-09-05T12:00:00Z"
+                observed_metadata["finalizers"] = ["foregroundDeletion"]
+            else:
+                self.objects.pop(kind)
             if self.fail_checked == "delete" and not self.failed_checked:
                 self.failed_checked = True
                 raise RuntimeError("injected protected database mutation failure")
@@ -1952,6 +1964,33 @@ def test_database_component_recovers_from_ambiguous_successful_resource_delete(
     assert component.classify(plan).state is ComponentState.EXACT
 
 
+def test_database_component_waits_after_ambiguous_accepted_job_delete(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a lost DELETE response hiding the same terminating Job UID."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"failed": 1}
+    runner.database_state = "exact"
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+    runner.events.clear()
+    runner.fail_checked = "delete"
+    runner.failed_checked = False
+    runner.delete_wait_counts["Job"] = 2
+
+    component.apply(plan)
+
+    assert runner.failed_checked is True
+    assert runner.objects == {}
+    assert runner.events.count("delete-job") == 1
+    assert runner.events.count("wait-delete-job") == 2
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
 @pytest.mark.parametrize("kind", ["Secret", "Job"])
 def test_database_component_does_not_delete_replacement_after_cleanup_label_race(
     tmp_path: Path,
@@ -2018,6 +2057,29 @@ def test_database_component_recovers_from_ambiguous_successful_job_cleanup_patch
 
     assert runner.objects == {}
     assert runner.events.count("patch-job") == 1
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_waits_for_same_uid_foreground_job_deletion(
+    tmp_path: Path,
+) -> None:
+    """Break caught: deletion metadata on the same terminating Job reported as drift."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.events.clear()
+    runner.delete_inputs.clear()
+    runner.delete_wait_counts["Job"] = 2
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count("delete-job") == 1
+    assert runner.events.count("wait-delete-job") == 2
+    assert len(runner.delete_inputs) == 2
     assert component.classify(plan).state is ComponentState.EXACT
 
 

@@ -52,7 +52,8 @@ _WAIT_TIMEOUT_SECONDS = 660.0
 _WAIT_SLICE_SECONDS = 5
 _CLEANUP_PATCH_ATTEMPTS = 3
 _CLEANUP_DELETE_ATTEMPTS = 3
-_CLEANUP_DELETE_WAIT_SECONDS = 55
+_CLEANUP_DELETE_WAIT_ATTEMPTS = 3
+_CLEANUP_DELETE_WAIT_SECONDS = 20
 _PEER_PSQL_COMMAND = (
     "kubectl",
     "--namespace",
@@ -772,42 +773,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         observed: dict[str, dict[str, object]] = {}
         direct_digests: dict[str, str] = {}
         for kind in ("Secret", "Job"):
-            payload = self.runner.capture_stdout(
-                (
-                    "kubectl",
-                    "--namespace",
-                    _NAMESPACE,
-                    "get",
-                    f"{kind.lower()}/{_NAME}",
-                    "--ignore-not-found=true",
-                    "--output=json",
-                    f"--request-timeout={_REQUEST_TIMEOUT}",
-                ),
-                env=self.runner.environment,
-                timeout_seconds=_QUERY_TIMEOUT_SECONDS,
-            )
+            item, payload = self._capture_bootstrap_resource(kind)
             direct_digests[kind] = hashlib.sha256(payload).hexdigest()
-            if not payload:
+            if item is None:
                 continue
-            try:
-                item = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
-            except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
-                raise ValueError("protected staging capacity database resource is invalid") from exc
-            if not isinstance(item, dict) or not isinstance(item.get("metadata"), dict):
-                raise ValueError("protected staging capacity database resource is invalid")
-            metadata = item["metadata"]
-            labels = metadata.get("labels")
-            if (
-                item.get("apiVersion") != ("v1" if kind == "Secret" else "batch/v1")
-                or item.get("kind") != kind
-                or metadata.get("namespace") != _NAMESPACE
-                or metadata.get("name") != _NAME
-                or not isinstance(labels, dict)
-                or labels.get(_COMPONENT_LABEL) != _COMPONENT_LABEL_VALUE
-                or not isinstance(metadata.get("uid"), str)
-                or not isinstance(metadata.get("resourceVersion"), str)
-            ):
-                raise RuntimeError("protected staging capacity database bootstrap drifted")
             observed[kind] = item
         if set(observed) != set(listed):
             raise RuntimeError("protected staging capacity database bootstrap drifted")
@@ -847,6 +816,49 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
         return observed, evidence_digest, status == 0
+
+    def _capture_bootstrap_resource(
+        self,
+        kind: str,
+    ) -> tuple[dict[str, object] | None, bytes]:
+        if kind not in {"Secret", "Job"}:
+            raise ValueError("protected staging capacity database resource kind is invalid")
+        payload = self.runner.capture_stdout(
+            (
+                "kubectl",
+                "--namespace",
+                _NAMESPACE,
+                "get",
+                f"{kind.lower()}/{_NAME}",
+                "--ignore-not-found=true",
+                "--output=json",
+                f"--request-timeout={_REQUEST_TIMEOUT}",
+            ),
+            env=self.runner.environment,
+            timeout_seconds=_QUERY_TIMEOUT_SECONDS,
+        )
+        if not payload:
+            return None, payload
+        try:
+            item = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+            raise ValueError("protected staging capacity database resource is invalid") from exc
+        if not isinstance(item, dict) or not isinstance(item.get("metadata"), dict):
+            raise ValueError("protected staging capacity database resource is invalid")
+        metadata = item["metadata"]
+        labels = metadata.get("labels")
+        if (
+            item.get("apiVersion") != ("v1" if kind == "Secret" else "batch/v1")
+            or item.get("kind") != kind
+            or metadata.get("namespace") != _NAMESPACE
+            or metadata.get("name") != _NAME
+            or not isinstance(labels, dict)
+            or labels.get(_COMPONENT_LABEL) != _COMPONENT_LABEL_VALUE
+            or not isinstance(metadata.get("uid"), str)
+            or not isinstance(metadata.get("resourceVersion"), str)
+        ):
+            raise RuntimeError("protected staging capacity database bootstrap drifted")
+        return item, payload
 
     def _delete_bootstrap_resources(
         self,
@@ -1002,7 +1014,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
                 )
             except Exception:
-                refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+                refreshed, _payload = self._capture_bootstrap_resource(kind)
                 if refreshed is None:
                     return
                 refreshed_metadata = refreshed["metadata"]
@@ -1012,10 +1024,28 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                         "protected staging capacity database bootstrap identity changed "
                         "during cleanup"
                     ) from None
-                metadata = refreshed_metadata
+                if isinstance(refreshed_metadata.get("deletionTimestamp"), str):
+                    break
+                exact_refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+                if exact_refreshed is None:
+                    return
+                exact_metadata = exact_refreshed["metadata"]
+                assert isinstance(exact_metadata, dict)
+                if exact_metadata["uid"] != original_uid:
+                    raise RuntimeError(
+                        "protected staging capacity database bootstrap identity changed "
+                        "during cleanup"
+                    ) from None
+                metadata = exact_metadata
                 continue
+            break
+        else:
+            raise RuntimeError(
+                "protected staging capacity database bootstrap cleanup delete did not stabilize"
+            ) from None
 
-            self.runner.run_status(
+        for _wait_attempt in range(_CLEANUP_DELETE_WAIT_ATTEMPTS):
+            wait_status = self.runner.run_status(
                 (
                     "kubectl",
                     "--namespace",
@@ -1028,9 +1058,9 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 ),
                 env=self.runner.environment,
                 input_payload=None,
-                timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
+                timeout_seconds=_QUERY_TIMEOUT_SECONDS,
             )
-            refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+            refreshed, _payload = self._capture_bootstrap_resource(kind)
             if refreshed is None:
                 return
             refreshed_metadata = refreshed["metadata"]
@@ -1039,11 +1069,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 raise RuntimeError(
                     "protected staging capacity database bootstrap identity changed during cleanup"
                 ) from None
-            raise RuntimeError(
-                "protected staging capacity database bootstrap cleanup was not exact"
-            ) from None
+            if wait_status == 0 or not isinstance(refreshed_metadata.get("deletionTimestamp"), str):
+                raise RuntimeError(
+                    "protected staging capacity database bootstrap cleanup was not exact"
+                ) from None
         raise RuntimeError(
-            "protected staging capacity database bootstrap cleanup delete did not stabilize"
+            "protected staging capacity database bootstrap foreground deletion did not finish"
         ) from None
 
     def _observed_bootstrap_resources(
