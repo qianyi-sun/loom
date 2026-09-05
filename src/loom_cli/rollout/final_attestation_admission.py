@@ -202,7 +202,7 @@ def validate_final_attestation(
         )
     bindings = attestation.bindings
     if (
-        attestation.schema_version != 3
+        attestation.schema_version not in {3, 4, 5}
         or now >= attestation.expires_at
         or plan.candidate != candidate
         or bindings.candidate_sha != candidate.resolved_sha
