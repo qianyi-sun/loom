@@ -24,6 +24,9 @@ from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
 )
+from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+    KubernetesProtectedStagingCapacityDatabaseComponent,
+)
 from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
     KubernetesProtectedStagingCapacityRuntime,
 )
@@ -61,8 +64,11 @@ class _DatabaseRunner:
         self.created_objects: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, ...]] = []
         self.checked_inputs: list[tuple[tuple[str, ...], bytes]] = []
+        self.patch_inputs: list[tuple[tuple[str, ...], bytes]] = []
         self.fail_checked = fail_checked
         self.failed_checked = False
+        self._sequence = 0
+        self.replace_after_patch_kind: str | None = None
 
     def _registration(self) -> dict[str, object]:
         return {
@@ -132,6 +138,30 @@ class _DatabaseRunner:
             "runtime_role": "loom_cap_staging_runtime",
         }
 
+    def _stored(self, document: dict[str, object]) -> dict[str, object]:
+        stored = deepcopy(document)
+        metadata = stored["metadata"]
+        assert isinstance(metadata, dict)
+        self._sequence += 1
+        metadata["resourceVersion"] = str(self._sequence)
+        metadata["uid"] = f"11111111-1111-4111-8111-{self._sequence:012d}"
+        return stored
+
+    @staticmethod
+    def _projection(document: dict[str, object]) -> dict[str, object]:
+        value = deepcopy(document)
+        value.pop("status", None)
+        metadata = value["metadata"]
+        assert isinstance(metadata, dict)
+        for field in ("creationTimestamp", "generation", "managedFields"):
+            metadata.pop(field, None)
+        metadata.pop("resourceVersion", None)
+        metadata.pop("uid", None)
+        labels = metadata.get("labels")
+        if isinstance(labels, dict):
+            labels.pop("loom.carin.dev/protected-cleanup", None)
+        return value
+
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
         assert timeout_seconds == 30.0
@@ -179,10 +209,16 @@ class _DatabaseRunner:
             for document in yaml.safe_load_all(input_payload)
             if document is not None
         }
-        observed = deepcopy(self.objects)
-        for document in observed.values():
-            document.pop("status", None)
-        return 0 if expected == observed else 1
+        if set(expected) != set(self.objects):
+            return 1
+        return (
+            0
+            if all(
+                self._projection(expected[kind]) == self._projection(observed)
+                for kind, observed in self.objects.items()
+            )
+            else 1
+        )
 
     def run_checked(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
@@ -199,23 +235,79 @@ class _DatabaseRunner:
         if "create" in command:
             assert timeout_seconds == 60.0
             assert input_payload is not None
+            documents = [
+                document for document in yaml.safe_load_all(input_payload) if document is not None
+            ]
             if self.fail_checked == "create" and not self.failed_checked:
                 self.failed_checked = True
+                first = documents[0]
+                self.objects = {first["kind"]: self._stored(first)}
                 raise RuntimeError("injected protected database mutation failure")
-            self.objects = {
-                document["kind"]: document
-                for document in yaml.safe_load_all(input_payload)
-                if document is not None
-            }
+            self.objects = {document["kind"]: self._stored(document) for document in documents}
             self.created_objects = deepcopy(self.objects)
             return
         if "wait" in command:
             raise AssertionError("protected database used an unbounded Job wait")
+        if "patch" in command:
+            assert timeout_seconds == 60.0
+            assert input_payload is not None
+            kind = "Job" if "job/" in " ".join(command) else "Secret"
+            observed = self.objects[kind]
+            observed_metadata = observed["metadata"]
+            assert isinstance(observed_metadata, dict)
+            operations = json.loads(input_payload)
+            tests = {
+                (operation["path"], json.dumps(operation["value"], sort_keys=True))
+                for operation in operations
+                if operation["op"] == "test"
+            }
+            assert ("/metadata/uid", json.dumps(observed_metadata["uid"])) in tests
+            assert (
+                "/metadata/resourceVersion",
+                json.dumps(observed_metadata["resourceVersion"], sort_keys=True),
+            ) in tests
+            cleanup_label = None
+            for operation in operations:
+                if operation["op"] == "add" and operation["path"].startswith("/metadata/labels/"):
+                    cleanup_label = (
+                        operation["path"].removeprefix("/metadata/labels/").replace("~1", "/")
+                    )
+                    labels = observed_metadata.setdefault("labels", {})
+                    assert isinstance(labels, dict)
+                    labels[cleanup_label] = operation["value"]
+            assert cleanup_label == "loom.carin.dev/protected-cleanup"
+            self.patch_inputs.append((command, input_payload))
+            if self.replace_after_patch_kind == kind:
+                replacement = self._projection(observed)
+                replacement_metadata = replacement["metadata"]
+                assert isinstance(replacement_metadata, dict)
+                labels = replacement_metadata["labels"]
+                assert isinstance(labels, dict)
+                labels.pop(cleanup_label, None)
+                self.objects[kind] = self._stored(replacement)
+            return
         if "delete" in command:
             assert timeout_seconds == 60.0
             assert input_payload is None
             kind = "Job" if "job" in command else "Secret"
+            observed = self.objects.get(kind)
+            if observed is None:
+                return
+            observed_metadata = observed["metadata"]
+            assert isinstance(observed_metadata, dict)
+            labels = observed_metadata.get("labels")
+            assert isinstance(labels, dict)
+            selector = next(item for item in command if item.startswith("--selector="))
+            key, value = selector.removeprefix("--selector=").split("=", 1)
+            if labels.get(key) != value:
+                return
+            if kind == "Job":
+                assert "--cascade=foreground" in command
+                assert "--wait=true" in command
             self.objects.pop(kind)
+            if self.fail_checked == "delete" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
             return
         raise AssertionError(f"unexpected mutation: {command}")
 
@@ -1000,7 +1092,13 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     password = str(runner.seed["migrator_database_password"])
     assert all(password not in " ".join(call) for call in runner.calls)
     assert password.encode() in runner.checked_inputs[0][1]
-    assert b"CREATEROLE" in runner.checked_inputs[0][1]
+    assert b" NOCREATEROLE " in runner.checked_inputs[0][1]
+    assert b" CREATEROLE " not in runner.checked_inputs[0][1]
+    assert b"WITH ADMIN TRUE" not in runner.checked_inputs[0][1]
+    assert b"SET FALSE" not in runner.checked_inputs[0][1]
+    assert str(runner.seed["agent_database_password"]).encode() in runner.checked_inputs[0][1]
+    assert str(runner.seed["observer_database_password"]).encode() in runner.checked_inputs[0][1]
+    assert str(runner.seed["runtime_database_password"]).encode() in runner.checked_inputs[0][1]
     assert password.encode() not in runner.checked_inputs[1][1]
     assert b"NOLOGIN" in runner.checked_inputs[1][1]
     mutations = [call for call in runner.calls if {"create", "wait", "delete"} & set(call)]
@@ -1097,6 +1195,53 @@ def test_database_component_recovers_exact_completed_residue_by_cleanup_only(
     assert component.classify(plan).state is ComponentState.EXACT
 
 
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_recovers_exact_partial_bootstrap_resource_set(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    expected = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects = {kind: expected[kind]}
+
+    assert component.classify(plan).state is ComponentState.READY
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_treats_failure_target_condition_as_failed(tmp_path: Path) -> None:
+    plan, runner, _component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"conditions": [{"type": "FailureTarget", "status": "True"}]}
+
+    state, _evidence = direct._resource_state(plan, manifest)
+
+    assert state.value == "failed"
+
+
 @pytest.mark.parametrize("fail_checked", ["exec", "create", "wait"])
 def test_database_component_always_seals_transient_authority_after_failure(
     tmp_path: Path,
@@ -1124,8 +1269,78 @@ def test_database_component_always_seals_transient_authority_after_failure(
     assert password.encode() not in runner.checked_inputs[1][1]
     assert b"NOLOGIN" in runner.checked_inputs[1][1]
     assert b"NOCREATEROLE" in runner.checked_inputs[1][1]
+    assert b"loom_cap_staging_agent NOLOGIN" in runner.checked_inputs[1][1]
+    assert b"loom_cap_staging_observer NOLOGIN" in runner.checked_inputs[1][1]
+    assert b"loom_cap_staging_runtime NOLOGIN" in runner.checked_inputs[1][1]
     if fail_checked == "wait":
         assert sum("wait" in call for call in runner.calls) == 1
+
+
+@pytest.mark.parametrize("fail_checked", ["create", "delete"])
+def test_database_component_recovers_from_non_atomic_resource_mutation_failure(
+    tmp_path: Path,
+    fail_checked: str,
+) -> None:
+    plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked=None if fail_checked == "delete" else fail_checked,
+    )
+    if fail_checked == "delete":
+        component.apply(plan)
+        runner.objects = deepcopy(runner.created_objects)
+        runner.objects["Job"]["status"] = {"failed": 1}
+        runner.database_state = "absent"
+        runner.calls.clear()
+        runner.checked_inputs.clear()
+        runner.patch_inputs.clear()
+        runner.fail_checked = "delete"
+        runner.failed_checked = False
+
+    with pytest.raises(RuntimeError, match="injected protected database mutation failure"):
+        component.apply(plan)
+
+    assert component.classify(plan).state is ComponentState.READY
+    runner.fail_checked = None
+    runner.failed_checked = False
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_does_not_delete_replacement_after_cleanup_label_race(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.replace_after_patch_kind = kind
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+
+    with pytest.raises(
+        RuntimeError,
+        match="protected staging capacity database bootstrap cleanup was not exact",
+    ):
+        component.apply(plan)
+
+    replacement = runner.objects[kind]
+    replacement_metadata = replacement["metadata"]
+    assert isinstance(replacement_metadata, dict)
+    labels = replacement_metadata["labels"]
+    assert isinstance(labels, dict)
+    assert "loom.carin.dev/protected-cleanup" not in labels
+    assert runner.patch_inputs
 
 
 def test_database_component_retries_exact_failed_component_owned_residue(
@@ -1160,7 +1375,9 @@ def test_database_component_retries_exact_failed_component_owned_residue(
     assert component.classify(plan).state is ComponentState.EXACT
 
 
-def test_database_component_rejects_partial_bootstrap_resource_set(tmp_path: Path) -> None:
+def test_database_component_rejects_mismatched_partial_bootstrap_resource_set(
+    tmp_path: Path,
+) -> None:
     plan, runner, component = _database_component(tmp_path, database_state="absent")
     runner.objects = {
         "Secret": {
@@ -1170,6 +1387,7 @@ def test_database_component_rejects_partial_bootstrap_resource_set(tmp_path: Pat
                 "name": "loom-staging-capacity-database-bootstrap",
                 "namespace": "loom-staging",
             },
+            "data": {"unexpected": "dmFsdWU="},
         }
     }
 
