@@ -23,6 +23,50 @@ The legacy protected-driver failure map is validated in the reverse direction:
 every mapped step must also appear as a consumer of its declared check. Merely
 naming an existing check ID cannot hide an uncovered late predicate.
 
+## Requestless failure diagnostics
+
+`loom-staging-rollout --env staging preflight` and the pre-request phase of
+`start` (including `--dry-run`) return bounded JSON on failure. The result
+distinguishes authorization rejection, candidate/install identity drift,
+registered-check failure, artifact publication failure, and unexpected internal
+error. `stage` identifies the failing broker phase; structured check failures
+also retain their existing check/blocker report. Dependency-expiry failures
+retain the consumer and dependency identities. An exception during assessment
+is not classified as caller rejection merely because its type is `PolicyError`.
+
+After trusted configuration, caller authentication, and command authorization,
+failures publish a
+separate immutable record under the service-owned private
+`state_root/preflight-diagnostics/<sha256>.json`. The public result reports
+`diagnostic_recorded=true` and `diagnostic_sha256`. Retrieve it without building
+images or constructing live rollout dependencies:
+
+```sh
+loom-staging-rollout --env staging preflight-diagnostics <sha256>
+```
+
+Retrieval requires the same authenticated environment operator boundary. The
+record contains only fixed classifications, bounded check identities, candidate
+SHA when known, authenticated initiator UID, and observation time. It never
+contains exception messages, stack traces, raw check evidence, remediation
+strings, credential values, or subprocess output. It is **not** an assessment,
+attestation, request, or launch authority and cannot be resumed. Failed
+preflight does not acquire the staging mutation guard, start backup, or create
+a rollout attempt.
+
+The store validates ownership, private modes, no-follow path components,
+single-link regular files, canonical JSON, and content digests. Publication is
+no-replace and file/directory-fsynced. Records are limited to 16 KiB each and
+the store to 1024 entries; it never automatically deletes historical evidence.
+If the store is unavailable, unsafe, or full, the original failure code remains
+visible with `diagnostic_recorded=false` and
+`diagnostic_failure_code=preflight-diagnostic-publication-failed`. No digest is
+advertised as successfully recorded. Configuration or authorization rejection
+does not write diagnostic files before trust is established. In sealed mode,
+`preflight` and both `start` forms reject non-coordinators before constructing
+the diagnostic store or live rollout dependencies. A root-installed
+private state directory is required; the broker does not repair its ownership.
+
 ## Check contract
 
 `loom_cli.rollout.preflight_contract.CheckSpec` binds:
@@ -52,6 +96,19 @@ discovered stage, start/finish time, and expiry. The public blocker report
 includes that same typed evidence rather than only its digest; it therefore
 remains actionable without exposing a credential value or unbounded child
 output.
+
+If a dependency expires before a consumer starts, the DAG refuses the consumer.
+Broker `preflight`, `start`, and `start --dry-run` report
+`preflight-dependency-expired` with the validated consumer `check_id`, expired
+`dependency_ids`, declared `stage`, candidate SHA and mutation epoch. Their JSON
+failed-check report has `assessment_complete=false`:
+it is an incomplete diagnostic, not a full assessment or admission authority.
+The formal installer's existing failed-check normalizer accepts this report and
+returns `status=blocked`; its normalized digest identifies the diagnostic only.
+No request or backup is created. This includes a cold image build outlasting an
+earlier credential or candidate check's TTL. The diagnostic does not extend TTLs,
+refresh evidence automatically, or expose arbitrary exception messages; those
+remain separate concerns.
 
 Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
 digest-addressed `PreflightAssessment`; no preliminary request or backup job may

@@ -56,6 +56,32 @@ _EXTERNAL_SUPERVISOR_UNIT_DIRECTORIES = frozenset(
 )
 
 
+class DependencyExpiredError(ValueError):
+    """Bounded check identities for a refused stale-dependency execution."""
+
+    def __init__(
+        self, check_id: str, dependency_ids: tuple[str, ...], stage: StageCapability
+    ) -> None:
+        if (
+            not isinstance(check_id, str)
+            or _ID_RE.fullmatch(check_id) is None
+            or not isinstance(dependency_ids, tuple)
+            or not 1 <= len(dependency_ids) <= 64
+            or any(
+                not isinstance(item, str) or _ID_RE.fullmatch(item) is None
+                for item in dependency_ids
+            )
+            or len(set(dependency_ids)) != len(dependency_ids)
+            or not isinstance(stage, StageCapability)
+            or any(redact_rollout_text(item) != item for item in (check_id, *dependency_ids))
+        ):
+            raise ValueError("expired dependency identities are invalid")
+        self.check_id = check_id
+        self.dependency_ids = tuple(sorted(dependency_ids))
+        self.stage = stage
+        super().__init__("dependency execution expired before dependent execution")
+
+
 def external_supervisor_transition_digest(
     *,
     unit_directory: str,
@@ -877,9 +903,8 @@ class PreflightDag:
                     and results[dependency].expires_at <= dependency_time
                 )
                 if expired_dependencies:
-                    raise ValueError(
-                        "dependency execution expired before dependent execution: "
-                        + ",".join(expired_dependencies)
+                    raise DependencyExpiredError(
+                        check.spec.check_id, expired_dependencies, check.spec.stage
                     )
                 blocked_by = tuple(
                     dependency
@@ -964,9 +989,8 @@ class PreflightDag:
                 and results[dependency].expires_at <= dependency_time
             )
             if expired_dependencies:
-                raise ValueError(
-                    "dependency execution expired before dependent execution: "
-                    + ",".join(expired_dependencies)
+                raise DependencyExpiredError(
+                    check.spec.check_id, expired_dependencies, check.spec.stage
                 )
 
         worker_count = min(self._max_concurrency, len(pending))
@@ -1359,9 +1383,8 @@ class PreflightDag:
                 and dependency_executions[dependency].expires_at <= started_at
             )
             if expired_dependencies:
-                raise ValueError(
-                    "dependency execution expired before dependent execution: "
-                    + ",".join(expired_dependencies)
+                raise DependencyExpiredError(
+                    check.spec.check_id, expired_dependencies, check.spec.stage
                 )
             result = self._run_one(check, cancellable_context, operation, clock)
         except BaseException as exc:
@@ -2251,6 +2274,7 @@ __all__ = [
     "CheckOutcome",
     "CheckProbe",
     "CheckSpec",
+    "DependencyExpiredError",
     "EvidenceClass",
     "EvidenceField",
     "MutationClass",

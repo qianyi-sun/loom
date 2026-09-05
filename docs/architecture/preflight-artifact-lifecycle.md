@@ -110,6 +110,18 @@ regular files are removed without following links, and a digest-bound
 retirement receipt is published. Restart reconciliation either completes an
 approved quarantine or refuses an unreceipted disappearance.
 
+Maintenance reference discovery also compares directory member names and
+no-follow entry identities before and after reading each manifest-ownership
+request, its journal parent, and the lifecycle-capacity journal (#1810).
+Directory timestamps alone are insufficient: adding, removing, or replacing an
+entry can leave the directory's size and timestamps unchanged within the
+filesystem's timestamp granularity. Membership drift aborts inventory even
+when those metadata values collide. Private owner/mode checks and bounded,
+repeated trusted-file reads remain mandatory. These checks detect observed
+snapshot drift; they are not an atomic filesystem transaction or protection
+against an actor with full service write authority performing arbitrary ABA
+changes between observations.
+
 Retention is bounded to at most 32 candidate bundles per plan, so one run
 cannot monopolize the service or turn an unexpectedly large store into an
 unreviewable deletion request. Additional candidates require another inventory

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -25,6 +27,11 @@ from loom.db.schema import SlurmWorkerJob, Trial
 from loom.worker_token import (
     WORKER_AUTH_FINGERPRINT_ENV_KEY,
     worker_token_fingerprint_from_env_file,
+)
+from loom_control_plane.slurm_memory_probe import (
+    MemoryObservation,
+    observation_is_fresh,
+    probe_node_memory,
 )
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
@@ -85,9 +92,11 @@ class ElasticSlurmWorkerControllerConfig:
     slurm_qos: str = ""
     slurm_reservation: str = ""
     sinfo_path: str = "sinfo"
+    scontrol_path: str = "scontrol"
     srun_path: str = "srun"
     resource_aware: bool = False
     probe_mem_available: bool = False
+    slurm_cluster_name: str = ""
     cpu_per_slot: int = 2
     memory_mib_per_slot: int = 8192
     reserved_cpus: int = 4
@@ -121,6 +130,7 @@ class SlurmNodeResource:
     available_memory_mib: int | None = None
     total_memory_mib: int | None = None
     schedulable_memory_mib: int | None = None
+    memory_observed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -269,9 +279,11 @@ def build_controller_config(
     slurm_qos: str = "",
     slurm_reservation: str = "",
     sinfo_path: str = "sinfo",
+    scontrol_path: str = "scontrol",
     srun_path: str = "srun",
     resource_aware: bool = False,
     probe_mem_available: bool = False,
+    slurm_cluster_name: str = "",
     cpu_per_slot: int = 2,
     memory_mib_per_slot: int = 8192,
     reserved_cpus: int = 4,
@@ -299,6 +311,13 @@ def build_controller_config(
 
     environment = _require_nonempty(environment, "environment")
     pool_name = _require_nonempty(pool_name, "pool_name")
+    partition = partition.strip()
+    slurm_cluster_name = slurm_cluster_name.strip()
+    if probe_mem_available:
+        partition = _require_nonempty(partition, "partition for memory probe")
+        slurm_cluster_name = _require_nonempty(
+            slurm_cluster_name, "slurm_cluster_name for memory probe"
+        )
     env_file = _require_nonempty(env_file, "env_file")
     repo_dir = _require_nonempty(repo_dir, "repo_dir")
     time_limit = _require_nonempty(time_limit, "time_limit")
@@ -317,10 +336,14 @@ def build_controller_config(
     _require_positive(min_queued_trials, "min_queued_trials")
     _require_positive(stale_after_seconds, "stale_after_seconds")
     _require_positive(command_timeout_seconds, "command_timeout_seconds")
+    if not math.isfinite(command_timeout_seconds):
+        raise ValueError("command_timeout_seconds must be finite and positive")
     _require_positive(cpu_per_slot, "cpu_per_slot")
     _require_positive(memory_mib_per_slot, "memory_mib_per_slot")
     _require_positive(max_concurrency_per_node, "max_concurrency_per_node")
     _require_positive(max_cpu_load_ratio, "max_cpu_load_ratio")
+    if not math.isfinite(max_cpu_load_ratio):
+        raise ValueError("max_cpu_load_ratio must be finite and positive")
     if reserved_cpus < 0:
         raise ValueError("reserved_cpus must be non-negative")
     if reserved_memory_mib < 0:
@@ -373,6 +396,11 @@ def build_controller_config(
         raise ValueError("max_jobs cannot exceed the number of allowed nodes")
     if pending_job_cap > max_jobs:
         raise ValueError("pending_job_cap cannot exceed max_jobs")
+    if resource_aware and slurm_reservation.strip():
+        raise ValueError(
+            "resource-aware reserved-node admission requires proven reservation ownership; "
+            "reservation authority is unsupported"
+        )
 
     return ElasticSlurmWorkerControllerConfig(
         environment=environment,
@@ -399,9 +427,11 @@ def build_controller_config(
         slurm_qos=slurm_qos.strip(),
         slurm_reservation=slurm_reservation.strip(),
         sinfo_path=sinfo_path,
+        scontrol_path=scontrol_path,
         srun_path=srun_path,
         resource_aware=resource_aware,
         probe_mem_available=probe_mem_available,
+        slurm_cluster_name=slurm_cluster_name,
         cpu_per_slot=cpu_per_slot,
         memory_mib_per_slot=memory_mib_per_slot,
         reserved_cpus=reserved_cpus,
@@ -421,18 +451,11 @@ def build_controller_config(
 
 def _normalize_node_state(state: str) -> str:
     normalized = state.strip().lower()
-    normalized = normalized.rstrip("*~#")
-    if normalized in {"mix", "mixed"}:
-        return "mixed"
-    if normalized.startswith("idle"):
-        return "idle"
-    if normalized.startswith("mix"):
-        return "mixed"
-    if normalized.startswith("alloc"):
-        return "allocated"
-    if normalized.startswith("drain"):
-        return "drain"
-    return normalized
+    # Slurm state modifiers carry scheduling restrictions. Neither compound
+    # flags (MIXED+RESERVED) nor display suffixes (idle*, idle~) may be erased
+    # before worker placement or the allocation-backed memory probe. Admit
+    # only reviewed base-state aliases; unknown modifiers remain fail-closed.
+    return {"mix": "mixed", "alloc": "allocated"}.get(normalized, normalized)
 
 
 def _is_safe_node_state(state: str) -> bool:
@@ -464,7 +487,13 @@ def compute_node_capacity_plan(
             safe_slots=0,
             reason="unsafe_state",
         )
-    if resource.cpu_load is None:
+    if (
+        resource.cpu_load is None
+        or not math.isfinite(resource.cpu_load)
+        or resource.cpu_load < 0
+        or not math.isfinite(config.max_cpu_load_ratio)
+        or config.max_cpu_load_ratio <= 0
+    ):
         return SlurmNodeCapacityPlan(
             hostname=node,
             safe_slots=0,
@@ -490,6 +519,16 @@ def compute_node_capacity_plan(
         if resource.available_memory_mib is not None
         else resource.free_memory_mib
     )
+    if config.probe_mem_available and (
+        resource.available_memory_mib is None
+        or resource.memory_observed_at is None
+        or not observation_is_fresh(
+            MemoryObservation(resource.available_memory_mib, resource.memory_observed_at)
+        )
+    ):
+        return SlurmNodeCapacityPlan(
+            hostname=node, safe_slots=0, reason="missing_fresh_memory_probe"
+        )
     usable_memory_mib = (
         physically_available_memory_mib
         if resource.schedulable_memory_mib is None
@@ -529,6 +568,24 @@ def _compute_node_capacity_plans(
         )
         for node in config.allowed_nodes
     }
+
+
+def _memory_probe_eligible(
+    config: ElasticSlurmWorkerControllerConfig, resource: SlurmNodeResource
+) -> bool:
+    if resource.schedulable_memory_mib is None or resource.idle_cpus is None:
+        return False
+    # Physical availability is what the probe measures. All other admission
+    # checks, especially scheduler memory ownership, must already pass.
+    return (
+        compute_node_capacity_plan(
+            replace(config, probe_mem_available=False),
+            node=resource.hostname,
+            resource=replace(resource, free_memory_mib=resource.schedulable_memory_mib),
+            active_nodes=set(),
+        ).safe_slots
+        > 0
+    )
 
 
 def compute_controller_decision(
@@ -896,6 +953,28 @@ class SubprocessSlurmCommandRunner:
         node: str,
         config: ElasticSlurmWorkerControllerConfig,
     ) -> str:
+        if config.probe_mem_available:
+            resource = (self._memory_snapshot or {}).get(node)
+            plan = compute_node_capacity_plan(
+                config, node=node, resource=resource, active_nodes=set()
+            )
+            if (
+                self._memory_snapshot_authority != self._probe_authority(config)
+                or node not in config.allowed_nodes
+                or config.slurm_reservation
+                or config.exclusive
+                or not config.resource_aware
+                or plan.safe_slots < config.requested_concurrency
+                or config.requested_cpus > plan.safe_slots * config.cpu_per_slot
+                or config.requested_memory_mib > plan.safe_slots * config.memory_mib_per_slot
+            ):
+                raise RuntimeError(
+                    "Slurm worker admission requires a fresh candidate-bound memory snapshot"
+                )
+            # One observation can authorize at most one submission attempt.
+            self._memory_snapshot = {
+                key: value for key, value in (self._memory_snapshot or {}).items() if key != node
+            }
         self._config = config
         request = build_sbatch_request(config, node=node)
         result = await _run_command(
@@ -922,16 +1001,18 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
 
-    async def query_node_resources(
+    async def _query_node_resource_snapshot(
         self,
         nodes: tuple[str, ...],
     ) -> dict[str, SlurmNodeResource]:
         if not nodes:
             return {}
         config = self._config
+        partition_args = ("-p", config.partition) if config.partition else ()
         sinfo = await _run_command(
             (
                 config.sinfo_path,
+                *partition_args,
                 "-h",
                 "-N",
                 "-n",
@@ -942,9 +1023,26 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
         resources = parse_sinfo_node_resources(sinfo.stdout)
+        # sinfo %T can report only MIXED even when the controller records
+        # MIXED+RESERVED. Read the full controller flags before any srun probe
+        # or capacity decision; resource counts alone cannot establish access.
+        node_details = await _run_command(
+            (config.scontrol_path, "--json", "show", "nodes", ",".join(nodes)),
+            timeout=config.command_timeout_seconds,
+        )
+        node_states = _parse_scontrol_node_states(node_details.stdout, nodes=nodes)
+        if set(resources) != set(nodes):
+            raise RuntimeError("Slurm node resource snapshot is incomplete")
+        for node, observed_resource in tuple(resources.items()):
+            # Either observation may carry a restriction, including a state
+            # transition between reads. Never replace an unsafe sinfo state
+            # with a permissive controller observation.
+            if not _is_safe_node_state(node_states[node]):
+                resources[node] = replace(observed_resource, state=node_states[node])
         allocated = await _run_command(
             (
                 config.sinfo_path,
+                *partition_args,
                 "-h",
                 "-N",
                 "-n",
@@ -967,78 +1065,97 @@ class SubprocessSlurmCommandRunner:
                     node_resource.total_memory_mib - allocated_memory[node],
                 ),
             )
-        if config.probe_mem_available:
-            for node in nodes:
-                resource = resources.get(node)
-                if resource is None or not _is_safe_node_state(resource.state):
-                    continue
-                if resource.cpu_load is None or (
-                    resource.cpu_load > resource.cpus_total * config.max_cpu_load_ratio
-                ):
-                    continue
-                available_cpus = (
-                    resource.idle_cpus if resource.idle_cpus is not None else resource.cpus_total
-                )
-                if available_cpus - config.reserved_cpus < config.cpu_per_slot:
-                    continue
-                try:
-                    available_memory_mib = await self._query_node_available_memory(node)
-                except (OSError, RuntimeError) as exc:
-                    logger.warning(
-                        "elastic_slurm_worker_node_memory_probe_failed",
-                        extra={
-                            "environment": config.environment,
-                            "pool_name": config.pool_name,
-                            "node": node,
-                            "err": str(exc),
-                        },
-                    )
-                    continue
-                resources[node] = replace(
-                    resource,
-                    available_memory_mib=available_memory_mib,
-                )
         return {node: resources[node] for node in nodes if node in resources}
 
-    async def _query_node_available_memory(self, node: str) -> int:
+    async def query_node_resources(self, nodes: tuple[str, ...]) -> dict[str, SlurmNodeResource]:
         config = self._config
-        args = [
-            config.srun_path,
-            "--immediate=3",
-            "--nodes=1",
-            "--ntasks=1",
-            f"--nodelist={node}",
-            "--cpus-per-task=1",
-            "--mem=16M",
-            "--time=00:00:10",
-            "--job-name=loom-memory-probe",
-            "--kill-on-bad-exit=1",
-            "--chdir=/tmp",
-            "--export=NIL",
-        ]
-        if config.partition:
-            args.append(f"--partition={config.partition}")
-        if config.slurm_account:
-            args.append(f"--account={config.slurm_account}")
-        if config.slurm_qos:
-            args.append(f"--qos={config.slurm_qos}")
-        if config.slurm_reservation:
-            args.append(f"--reservation={config.slurm_reservation}")
-        args.extend(
-            (
-                "/usr/bin/awk",
-                '$1 == "MemAvailable:" { print int($2 / 1024); exit }',
-                "/proc/meminfo",
-            ),
+        self._memory_snapshot = None
+        self._memory_snapshot_authority = None
+        if not nodes:
+            return {}
+        if len(set(nodes)) != len(nodes) or not set(nodes).issubset(config.allowed_nodes):
+            raise RuntimeError("Slurm memory observation requested nodes outside policy")
+        resources = await self._query_node_resource_snapshot(nodes)
+        if not config.probe_mem_available:
+            return resources
+        # A bounded whole sweep prevents a busy fleet from consuming an
+        # unbounded controller tick. Unprobed/failed nodes have no admission.
+        deadline = time.monotonic() + 20.0
+        for node in nodes:
+            if not _memory_probe_eligible(config, resources[node]):
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Earlier probes may have taken seconds. Re-read this node before
+            # asking Slurm to allocate the diagnostic job as well as after it.
+            try:
+                async with asyncio.timeout(remaining):
+                    resource = (await self._query_node_resource_snapshot((node,)))[node]
+            except (OSError, RuntimeError, TimeoutError):
+                continue
+            resources[node] = resource
+            if not _memory_probe_eligible(config, resource):
+                continue
+            assert resource.idle_cpus is not None and resource.schedulable_memory_mib is not None
+            assert resource.cpu_load is not None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    observation = await self._query_node_available_memory(node)
+                    # Preserve a restriction or smaller bound from either side
+                    # of the probe; a read cannot erase a concurrent allocation.
+                    fresh = (await self._query_node_resource_snapshot((node,)))[node]
+                resources[node] = replace(
+                    fresh,
+                    idle_cpus=min(resource.idle_cpus, fresh.idle_cpus or 0),
+                    schedulable_memory_mib=min(
+                        resource.schedulable_memory_mib, fresh.schedulable_memory_mib or 0
+                    ),
+                    cpu_load=max(resource.cpu_load, fresh.cpu_load)
+                    if fresh.cpu_load is not None
+                    else None,
+                    available_memory_mib=observation.available_memory_mib,
+                    memory_observed_at=observation.observed_at,
+                )
+            except (OSError, RuntimeError, TimeoutError):
+                logger.warning(
+                    "elastic_slurm_worker_node_memory_probe_failed",
+                    extra={
+                        "environment": config.environment,
+                        "pool_name": config.pool_name,
+                        "node": node,
+                    },
+                )
+        self._memory_snapshot = dict(resources)
+        self._memory_snapshot_authority = self._probe_authority(config)
+        return resources
+
+    async def _query_node_available_memory(self, node: str) -> MemoryObservation:
+        config = self._config
+        if (
+            not config.resource_aware
+            or config.exclusive
+            or config.slurm_reservation
+            or node not in config.allowed_nodes
+        ):
+            raise RuntimeError(
+                "Slurm memory probe requires non-exclusive unreserved policy authority"
+            )
+        return await probe_node_memory(
+            node=node,
+            partition=config.partition,
+            candidate_sha=config.candidate_sha,
+            environment=config.environment,
+            pool_name=config.pool_name,
+            cluster_name=config.slurm_cluster_name,
+            srun_path=config.srun_path,
+            command_timeout_seconds=config.command_timeout_seconds,
+            account=config.slurm_account,
+            qos=config.slurm_qos,
         )
-        result = await _run_command(
-            tuple(args),
-            timeout=config.command_timeout_seconds,
-        )
-        available_memory_mib = _parse_optional_int(result.stdout)
-        if available_memory_mib is None or available_memory_mib < 0:
-            raise RuntimeError("Slurm node memory probe returned no valid MemAvailable value")
-        return available_memory_mib
 
     async def resolve_node_names(self, nodes: tuple[str, ...]) -> dict[str, str]:
         """Map each requested node to its canonical Slurm NodeName.
@@ -1073,6 +1190,16 @@ class SubprocessSlurmCommandRunner:
         return self
 
     _config: ElasticSlurmWorkerControllerConfig
+    _memory_snapshot: Mapping[str, SlurmNodeResource] | None = None
+    _memory_snapshot_authority: ElasticSlurmWorkerControllerConfig | None = None
+
+    @staticmethod
+    def _probe_authority(
+        config: ElasticSlurmWorkerControllerConfig,
+    ) -> ElasticSlurmWorkerControllerConfig:
+        # Resource-aware sizing changes these three requested values. Every
+        # other policy/command/identity field, including QoS, must remain bound.
+        return replace(config, requested_cpus=0, requested_memory_mib=0, requested_concurrency=0)
 
 
 @dataclass(frozen=True)
@@ -1103,6 +1230,13 @@ async def _run_command(
         with contextlib.suppress(ProcessLookupError):
             await proc.wait()
         raise RuntimeError(f"Slurm command timed out: {args[0]}") from None
+    except asyncio.CancelledError:
+        # The bounded memory sweep can cancel a read-only snapshot command.
+        # Reap that local child before propagating cancellation.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(
@@ -1144,7 +1278,8 @@ def _parse_optional_float(value: str) -> float | None:
     if not cleaned or cleaned in {"*", "N/A", "n/a"}:
         return None
     try:
-        return float(cleaned)
+        parsed = float(cleaned)
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     except ValueError:
         return None
 
@@ -1159,11 +1294,64 @@ def _parse_optional_int(value: str) -> int | None:
         return None
 
 
-def _parse_idle_cpus(cpu_state: str) -> int | None:
+def _parse_idle_cpus(cpu_state: str, cpus_total: int | None) -> int | None:
     parts = [part.strip() for part in cpu_state.split("/")]
     if len(parts) != 4:
         return None
-    return _parse_optional_int(parts[1])
+    try:
+        allocated, idle, other, total = (int(part) for part in parts)
+    except ValueError:
+        return None
+    if (
+        min(allocated, idle, other, total) < 0
+        or allocated + idle + other != total
+        or total != cpus_total
+    ):
+        return None
+    return idle
+
+
+def _parse_scontrol_node_states(output: str, *, nodes: tuple[str, ...]) -> dict[str, str]:
+    def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("duplicate Slurm node state JSON field")
+            fields[key] = value
+        return fields
+
+    try:
+        payload = json.loads(output, object_pairs_hook=unique_fields)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Slurm node state snapshot is invalid") from exc
+    if not isinstance(payload, dict) or any(
+        not isinstance(payload.get(field), list) or payload[field]
+        for field in ("errors", "warnings")
+    ):
+        raise RuntimeError("Slurm node state snapshot failed")
+    records = payload.get("nodes")
+    if not isinstance(records, list):
+        raise RuntimeError("Slurm node state snapshot is invalid")
+    states: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError("Slurm node state record is invalid")
+        name, flags = record.get("name"), record.get("state")
+        if (
+            not isinstance(name, str)
+            or name not in nodes
+            or name in states
+            or not isinstance(flags, list)
+            or not flags
+            or any(not isinstance(flag, str) or not flag.strip() for flag in flags)
+        ):
+            raise RuntimeError("Slurm node state identity or flags are invalid")
+        if len(set(flags)) != len(flags):
+            raise RuntimeError("Slurm node state flags are ambiguous")
+        states[name] = "+".join(flags)
+    if set(states) != set(nodes):
+        raise RuntimeError("Slurm node state snapshot is incomplete")
+    return states
 
 
 def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
@@ -1173,29 +1361,31 @@ def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
         if not line:
             continue
         parts = line.split("|")
-        if len(parts) < 6:
-            continue
+        if len(parts) not in {7, 8}:
+            raise RuntimeError("Slurm node resource snapshot is invalid")
         hostname = parts[0].strip()
         state = parts[1].strip()
         cpus_total = _parse_optional_int(parts[2])
         total_memory_mib = _parse_optional_int(parts[3])
         free_memory_mib = _parse_optional_int(parts[4])
         cpu_load = _parse_optional_float(parts[5])
+        idle_cpus = _parse_idle_cpus(parts[6], cpus_total)
         allocated_memory_mib = _parse_optional_int(parts[7]) if len(parts) > 7 else None
         if (
             not hostname
             or cpus_total is None
             or total_memory_mib is None
             or free_memory_mib is None
+            or idle_cpus is None
         ):
-            continue
-        resources[hostname] = SlurmNodeResource(
+            raise RuntimeError("Slurm node resource snapshot is invalid")
+        resource = SlurmNodeResource(
             hostname=hostname,
             state=state,
             cpus_total=cpus_total,
             free_memory_mib=free_memory_mib,
             cpu_load=cpu_load,
-            idle_cpus=_parse_idle_cpus(parts[6]) if len(parts) > 6 else None,
+            idle_cpus=idle_cpus,
             total_memory_mib=total_memory_mib,
             schedulable_memory_mib=(
                 None
@@ -1203,19 +1393,25 @@ def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
                 else max(0, total_memory_mib - allocated_memory_mib)
             ),
         )
+        previous = resources.get(hostname)
+        if previous is not None and previous != resource:
+            raise RuntimeError("Slurm node resource snapshot is ambiguous")
+        resources[hostname] = resource
     return resources
 
 
 def _parse_sinfo_allocated_memory(output: str) -> dict[str, int]:
     allocated: dict[str, int] = {}
     for raw_line in output.splitlines():
+        if not raw_line.strip():
+            continue
         parts = raw_line.split()
         if len(parts) != 2:
-            continue
+            raise RuntimeError("Slurm allocated memory snapshot is invalid")
         hostname = parts[0]
         allocated_memory_mib = _parse_optional_int(parts[1])
         if not hostname or allocated_memory_mib is None or allocated_memory_mib < 0:
-            continue
+            raise RuntimeError("Slurm allocated memory snapshot is invalid")
         previous = allocated.get(hostname)
         if previous is not None and previous != allocated_memory_mib:
             raise RuntimeError("Slurm allocated memory snapshot is ambiguous")
@@ -1367,6 +1563,11 @@ async def run_elastic_slurm_worker_controller_once(
     runner: SlurmWorkerCommandRunner,
 ) -> SlurmWorkerControllerTickResult:
     config = await _resolve_allowed_node_case(config, runner)
+    # Canonicalization can change spelling and remove unknown nodes. Bind the
+    # exact resolved policy before collecting admission evidence for this tick.
+    bind_config = getattr(runner, "bind_config", None)
+    if callable(bind_config):
+        bind_config(config)
     snapshot = await load_capacity_snapshot(session, config)
     if snapshot.active_job_ids:
         try:
