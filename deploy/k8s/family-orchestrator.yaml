@@ -92,8 +92,20 @@ spec:
           value: '7200'
         - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID
           value: nebius-cpu
+        - name: LOOM_CP_SERVICE_EXECUTION_SOURCE_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: service-execution-source-access-key
+              optional: true
         - name: LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC
           value: '86400'
+        - name: LOOM_CP_SERVICE_EXECUTION_SOURCE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: service-execution-source-secret-key
+              optional: true
         - name: LOOM_CP_SIGNED_URL_EXPIRY_SEC
           value: '3600'
         - name: LOOM_CP_SKILL_EVOLVER_DEFAULT_MODEL

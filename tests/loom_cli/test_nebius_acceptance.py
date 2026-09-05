@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import tarfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,17 @@ import httpx
 import pytest
 
 from loom.models.batch import Combination
+from loom_cli import nebius_acceptance
 from loom_cli.nebius_acceptance import (
+    _ACCEPTANCE_REQUIRED_OUTPUTS,
     NebiusAcceptanceError,
     _batch_shape,
+    _capacity_sample,
+    _pool_is_idle,
     acceptance_stages,
+    configure_parser,
     load_capacity_policy,
+    resume_cleanup,
     run_acceptance,
     run_cli,
     validate_trial_bundle,
@@ -40,11 +47,11 @@ def _bundle(
     omit: str | None = None,
 ) -> bytes:
     outputs = {
-        "artifacts/answer.txt": answer,
-        "artifacts/reasoning.md": b"reasoning\n",
-        "trajectory/events.jsonl": b'{"seq":1}\n',
-        "accounting/usage.json": b'{"call_count":1}\n',
-        "verifier/output.json": b'{"rewards":{"artifact_complete":1.0}}\n',
+        "files/artifacts/answer.txt": answer,
+        "files/artifacts/reasoning.md": b"reasoning\n",
+        "files/trajectory/events.jsonl": b'{"seq":1}\n',
+        "files/accounting/usage.json": b'{"call_count":1}\n',
+        "files/verifier/output.json": b'{"rewards":{"artifact_complete":1.0}}\n',
     }
     if omit is not None:
         del outputs[omit]
@@ -113,22 +120,9 @@ def _policy(tmp_path: Path, *, accepted: int = 56) -> dict[str, Any]:
 
 def _monitor(*, nodes: int, slots: int, occupied: int = 0) -> dict[str, Any]:
     return {
-        "resources": {
-            "pools": [
-                {
-                    "pool_name": "nebius-cpu",
-                    "backend": "nebius",
-                    "current_active_slots": slots,
-                    "pending_slots": 0,
-                    "desired_slots": slots,
-                    "occupied_slots": occupied,
-                    "running_tasks": occupied,
-                    "starting_tasks": 0,
-                    "queued_tasks": 0,
-                }
-            ]
-        },
+        "resources": {"pools": []},
         "service_execution": {
+            "activity": {"execution_states": {"running": occupied}},
             "targets": [
                 {
                     "provider": "nebius",
@@ -136,9 +130,13 @@ def _monitor(*, nodes: int, slots: int, occupied: int = 0) -> dict[str, Any]:
                     "environment": "development",
                     "health_status": "healthy",
                     "command_backlog": 0,
+                    "blockers": [],
+                    "resource_profile": {"observed_fit_slots": slots},
                     "observation": {
                         "is_fresh": True,
                         "active_nodes": nodes,
+                        "requested_cpu_millis": occupied * 2000,
+                        "pending_jobs": 0,
                         "node_states": {
                             "desired": nodes,
                             "creating": 0,
@@ -150,7 +148,7 @@ def _monitor(*, nodes: int, slots: int, occupied: int = 0) -> dict[str, Any]:
                         "autoscaler_state": "ready",
                     },
                 }
-            ]
+            ],
         },
     }
 
@@ -158,6 +156,7 @@ def _monitor(*, nodes: int, slots: int, occupied: int = 0) -> dict[str, Any]:
 def test_acceptance_stages_follow_current_and_target_envelopes() -> None:
     assert acceptance_stages(56, []) == [1, 20, 40, 56]
     assert acceptance_stages(200, []) == [1, 20, 50, 100, 150, 200]
+    assert acceptance_stages(250, [])[-1] == 250
     with pytest.raises(NebiusAcceptanceError, match="exceeds persisted"):
         acceptance_stages(56, [57])
 
@@ -180,6 +179,54 @@ def test_batch_shape_supports_200_trials_without_exceeding_api_sample_limit() ->
     assert [Combination.model_validate(row).n_per_task for row in combinations] == [100, 100]
 
 
+def test_large_gateway_model_batch_needs_no_provider_connection() -> None:
+    _, _, combinations = _batch_shape(
+        trials_per_task=250,
+        agent_name="litellm",
+        agent_model={"provider": "openai", "name": "local/model", "source": "api"},
+        provider_connection_id=None,
+        provider_model_id="local/model",
+    )
+    assert [Combination.model_validate(row).n_per_task for row in combinations] == [100, 100, 50]
+    assert all(
+        "provider_connection_id" not in row and "provider_model_id" not in row
+        for row in combinations
+    )
+
+
+def test_required_outputs_match_real_canonical_export_layout() -> None:
+    validate_trial_bundle(
+        _bundle(), trial_id=_TRIAL_ID, required_outputs=_ACCEPTANCE_REQUIRED_OUTPUTS
+    )
+    with pytest.raises(NebiusAcceptanceError, match="missing required outputs"):
+        validate_trial_bundle(
+            _bundle(omit="files/trajectory/events.jsonl"),
+            trial_id=_TRIAL_ID,
+            required_outputs=_ACCEPTANCE_REQUIRED_OUTPUTS,
+        )
+
+
+def test_capacity_uses_fresh_service_target_without_inventing_pool_slots() -> None:
+    monitor = _monitor(nodes=1, slots=7, occupied=2)
+    sample = _capacity_sample(monitor, pool_id="nebius-cpu", environment="development")
+    assert sample["running_tasks"] == 2
+    assert "current_active_slots" not in sample
+    monitor["service_execution"]["targets"][0]["observation"]["is_fresh"] = False
+    with pytest.raises(NebiusAcceptanceError, match="stale"):
+        _capacity_sample(monitor, pool_id="nebius-cpu", environment="development")
+
+
+@pytest.mark.parametrize("missing", ["node_states", "requested_cpu_millis", "pending_jobs"])
+def test_absent_capacity_fields_cannot_prove_zero(missing: str) -> None:
+    monitor = _monitor(nodes=0, slots=0)
+    del monitor["service_execution"]["targets"][0]["observation"][missing]
+    try:
+        sample = _capacity_sample(monitor, pool_id="nebius-cpu", environment="development")
+    except NebiusAcceptanceError:
+        return
+    assert not _pool_is_idle(sample)
+
+
 def test_capacity_policy_requires_matching_admission_limits(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
     assert policy["accepted_concurrency"] == 56
@@ -195,7 +242,7 @@ def test_capacity_policy_requires_matching_admission_limits(tmp_path: Path) -> N
 def test_validate_trial_bundle_checks_manifest_and_every_member() -> None:
     payload = _bundle()
     manifest, manifest_sha256 = validate_trial_bundle(payload, trial_id=_TRIAL_ID)
-    assert manifest["files"][0]["relative_path"] == "artifacts/answer.txt"
+    assert manifest["files"][0]["relative_path"] == "files/artifacts/answer.txt"
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         manifest_stream = archive.extractfile("bundle.json")
         assert manifest_stream is not None
@@ -204,13 +251,22 @@ def test_validate_trial_bundle_checks_manifest_and_every_member() -> None:
         validate_trial_bundle(payload, trial_id="different")
     with pytest.raises(NebiusAcceptanceError, match="missing required outputs"):
         validate_trial_bundle(
-            _bundle(omit="trajectory/events.jsonl"),
+            _bundle(omit="files/trajectory/events.jsonl"),
             trial_id=_TRIAL_ID,
-            required_outputs={"trajectory/events.jsonl"},
+            required_outputs={"files/trajectory/events.jsonl"},
         )
 
 
-def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cleanup_state", ["complete", "retained", "running"])
+@pytest.mark.parametrize("connection", [{"id": _CONNECTION_ID}, None])
+@pytest.mark.parametrize("observed_running", [0, 1, 2])
+def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
+    tmp_path: Path,
+    cleanup_state: str,
+    connection: dict[str, Any] | None,
+    observed_running: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = _bundle()
     calls: list[tuple[str, str]] = []
     batch_reads = 0
@@ -218,9 +274,13 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal batch_reads
         calls.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/api/v1/tasksets/ts/test":
+            return httpx.Response(200, json={"evaluation_ready": True, "task_count": 1})
         if request.method == "GET" and request.url.path == "/api/v1/monitor/summary":
             if request.url.params.get("batch_id"):
-                return httpx.Response(200, json=_monitor(nodes=1, slots=1, occupied=1))
+                return httpx.Response(
+                    200, json=_monitor(nodes=1, slots=1, occupied=observed_running)
+                )
             if any(path.endswith("/bundle/download") for _, path in calls):
                 return httpx.Response(200, json=_monitor(nodes=0, slots=0))
             return httpx.Response(200, json=_monitor(nodes=0, slots=0))
@@ -228,6 +288,9 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
             submitted = json.loads(request.content)
             assert submitted["backend"] == "nebius"
             assert submitted["n_per_task"] == 1
+            if connection is None:
+                assert "provider_connection_id" not in submitted
+                assert "provider_model_id" not in submitted
             return httpx.Response(
                 201,
                 json={
@@ -248,8 +311,8 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
                     "result_status": "succeeded" if terminal else None,
                     "trial_summary": {
                         "queued": 0,
-                        "claimed": 0,
-                        "running": 0 if terminal else 1,
+                        "claimed": 0 if terminal else 1,
+                        "running": 0,
                         "materializing": 0,
                         "succeeded": 1 if terminal else 0,
                         "failed": 0,
@@ -277,7 +340,8 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
                     "state": "succeeded",
                     "materialization": {
                         "canonical_ready": True,
-                        "source_cleanup_state": "complete",
+                        "source_cleanup_state": cleanup_state,
+                        "source_retain_until": "2026-09-06T00:08:29Z",
                         "bundle": {"file_count": 1},
                     },
                 },
@@ -293,16 +357,25 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
             )
         return httpx.Response(404, json={"detail": "unhandled test route"})
 
-    with httpx.Client(
-        base_url="https://loom.test", transport=httpx.MockTransport(handler)
-    ) as client:
+    with (
+        httpx.Client(
+            base_url="https://loom.test", transport=httpx.MockTransport(handler)
+        ) as client,
+        (
+            nullcontext()
+            if observed_running == 1
+            else pytest.raises(
+                NebiusAcceptanceError, match=r"simultaneously running|exceed the stage"
+            )
+        ),
+    ):
         evidence = run_acceptance(
             client=client,
             output_dir=tmp_path / "evidence",
             capacity_policy=_policy(tmp_path),
             task_set_id="ts/test",
             task_count=1,
-            provider_connection={"id": _CONNECTION_ID},
+            provider_connection=connection,
             provider_model_id="model",
             agent_name="litellm",
             agent_provider="openai",
@@ -316,8 +389,17 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
             sleeper=lambda _: None,
         )
 
+    if observed_running != 1:
+        assert (tmp_path / "evidence" / "progress.json").is_file()
+        assert not (tmp_path / "evidence" / "acceptance.json").exists()
+        return
+
     output = tmp_path / "evidence"
     assert evidence["accepted"] is True
+    assert evidence["source_gc_complete"] is (cleanup_state == "complete")
+    assert evidence["maximum_proven_concurrency"] == 1
+    assert evidence["policy_ceiling_reached"] is False
+    assert evidence["quota_maximum_acceptance"] == "not_evaluated"
     assert evidence["stages"][0]["max_overlapping_execution_units"] == 1
     assert evidence["stages"][0]["max_node_backed_overlapping_execution_units"] == 1
     assert (output / "stage-1" / "trials" / f"{_TRIAL_ID}.tar.gz").read_bytes() == payload
@@ -325,6 +407,103 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(tmp_path:
     sidecar = (output / "acceptance.json.sha256").read_text()
     assert sidecar == f"{hashlib.sha256(evidence_bytes).hexdigest()}  acceptance.json\n"
     assert not any(path.startswith("/admin/") for _, path in calls)
+
+    calls.clear()
+    with httpx.Client(
+        base_url="https://loom.test", transport=httpx.MockTransport(handler)
+    ) as client:
+        cleanup = resume_cleanup(
+            client=client, evidence_dir=output, output_dir=tmp_path / "cleanup"
+        )
+    assert cleanup["source_gc_complete"] is (cleanup_state == "complete")
+    assert cleanup["accepted"] is (cleanup_state == "complete")
+    assert all(method == "GET" for method, _ in calls)
+    assert (output / "acceptance.json").read_bytes() == evidence_bytes
+
+    # The original immutable record supports repeated read-only continuation after retention expires.
+    cleanup_state = "complete"
+    with httpx.Client(
+        base_url="https://loom.test", transport=httpx.MockTransport(handler)
+    ) as client:
+        cleanup = resume_cleanup(
+            client=client, evidence_dir=output, output_dir=tmp_path / "cleanup-complete"
+        )
+    assert cleanup["accepted"] is True
+
+    for corruption in ("stale", "candidate", "canonical", "not_ready", "failed", "archive"):
+
+        def invalid_handler(request: httpx.Request, corruption: str = corruption) -> httpx.Response:
+            response = handler(request)
+            if corruption == "archive" and request.url.path.endswith("/bundle/download"):
+                return httpx.Response(200, content=b"bad", headers=response.headers)
+            if request.url.path.endswith("/bundle/download"):
+                return response
+            body = response.json()
+            if corruption == "stale" and request.url.path.endswith("/monitor/summary"):
+                body["service_execution"]["targets"][0]["observation"]["is_fresh"] = False
+            if corruption == "candidate" and request.url.path == f"/api/v1/batches/{_BATCH_ID}":
+                body["service_execution_runtime_profile"]["candidate_sha"] = "f" * 40
+            if request.url.path == f"/api/v1/trials/{_TRIAL_ID}":
+                if corruption == "canonical":
+                    body["materialization"]["canonical_ready"] = False
+                elif corruption in {"not_ready", "failed"}:
+                    body["materialization"]["source_cleanup_state"] = corruption
+            return httpx.Response(response.status_code, json=body)
+
+        with httpx.Client(
+            base_url="https://loom.test", transport=httpx.MockTransport(invalid_handler)
+        ) as client:
+            with pytest.raises(NebiusAcceptanceError):
+                resume_cleanup(
+                    client=client,
+                    evidence_dir=output,
+                    output_dir=tmp_path / f"rejected-{corruption}",
+                )
+    assert all(method == "GET" for method, _ in calls)
+
+    if connection is None:
+        # Exercise the real parser + command handler with the normal-user gateway path.
+        parser = argparse.ArgumentParser()
+        configure_parser(parser.add_subparsers())
+        args = parser.parse_args(
+            [
+                "nebius-acceptance",
+                "--task-set",
+                "ts/test",
+                "--model",
+                "local/model",
+                "--candidate-sha",
+                _CANDIDATE,
+                "--capacity-policy",
+                str(tmp_path / "policy.json"),
+                "--stage",
+                "1",
+                "--poll-seconds",
+                "0",
+                "--output",
+                str(tmp_path / "cli-evidence"),
+            ]
+        )
+        monkeypatch.setattr(nebius_acceptance, "require_logged_in", lambda: object())
+        monkeypatch.setattr(
+            nebius_acceptance,
+            "authed_client",
+            lambda *args, **kwargs: httpx.Client(
+                base_url="https://loom.test", transport=httpx.MockTransport(handler)
+            ),
+        )
+        batch_reads = 0
+        calls.clear()
+        assert run_cli(args) == 0
+        assert not any("provider" in path for _, path in calls)
+        assert (tmp_path / "cli-evidence" / "acceptance.json").is_file()
+
+    (output / "acceptance.json").write_bytes(evidence_bytes + b" ")
+    with httpx.Client(
+        base_url="https://loom.test", transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(NebiusAcceptanceError, match="checksum mismatch"):
+            resume_cleanup(client=client, evidence_dir=output, output_dir=tmp_path / "tampered")
 
 
 def test_run_acceptance_refuses_non_idle_shared_baseline(tmp_path: Path) -> None:
@@ -444,6 +623,34 @@ def test_run_acceptance_cancels_nonterminal_batch_on_timeout(tmp_path: Path) -> 
                 sleeper=lambda _: None,
             )
     assert cancelled is True
+    progress = json.loads((tmp_path / "evidence" / "progress.json").read_bytes())
+    assert progress["accepted"] is False
+    assert progress["candidate_sha"] == _CANDIDATE
+    assert progress["current_stage"]["batch_id"] == _BATCH_ID
+    assert len(progress["current_stage"]["capacity_samples"]) == 1
+
+
+def test_parser_supports_gateway_model_and_read_only_cleanup_resume() -> None:
+    parser = argparse.ArgumentParser()
+    configure_parser(parser.add_subparsers())
+    fresh = parser.parse_args(
+        [
+            "nebius-acceptance",
+            "--task-set",
+            "ts/test",
+            "--model",
+            "local/model",
+            "--candidate-sha",
+            _CANDIDATE,
+            "--output",
+            "new-evidence",
+        ]
+    )
+    assert fresh.provider is None
+    resume = parser.parse_args(
+        ["nebius-acceptance", "--resume-cleanup", "old-evidence", "--output", "cleanup-evidence"]
+    )
+    assert resume.provider is None and resume.model is None and resume.candidate_sha is None
 
 
 def test_cli_reports_local_taskset_error_before_login(

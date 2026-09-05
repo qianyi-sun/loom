@@ -98,6 +98,43 @@ python_type = "int"
 default     = 86400
 description = "Recovery window after canonical acknowledgement before the immutable service-execution source spool is deleted."
 
+[service_config.service_execution_source_endpoint]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "str"
+description = "Optional independent S3 source spool endpoint. Configure endpoint, region, bucket, and both source credentials together; all unset reuses canonical storage."
+
+[service_config.service_execution_source_access_key]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "service-execution-source-access-key" }
+description = "Independent source spool access key; never defaults to canonical store credentials."
+
+[service_config.service_execution_source_secret_key]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "service-execution-source-secret-key" }
+description = "Independent source spool secret key; never defaults to canonical store credentials."
+
+[service_config.service_execution_source_access_key_file]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "Path"
+description = "Mounted source spool access-key file, as an alternative to the source access key."
+
+[service_config.service_execution_source_secret_key_file]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "Path"
+description = "Mounted source spool secret-key file, as an alternative to the source secret key."
+
+[service_config.service_execution_source_region]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "str"
+description = "Explicit region of the independent source spool. Required when any source spool configuration is set."
+
+[service_config.service_execution_source_bucket]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "str"
+description = "Independent bucket for service-execution commits and acknowledged retention GC; canonical artifacts_bucket remains unchanged."
+
 [service_config.service_execution_scheduler_environment]
 used_by     = ["control-plane"]
 python_type = "str"
@@ -1976,6 +2013,11 @@ fields      = { enabled = false }
 python_type = "table"
 description = "Explicitly mount the protected Stage 1 operator public key into loom-service. Disabled profiles keep every live-smoke mutation fail-closed."
 fields      = { enabled = false, public_key_secret_name = "loom-stage1-smoke-authority" }
+
+[render_config.nebius_execution]
+python_type = "table"
+description = "Optional canonical staging attachment for the separate Nebius execution cluster. Requires pre-existing source-spool/runtime/admission Secrets, an explicit configuration revision and scoped persistent network routes. Disabled profiles retain Docker behavior; rendering never provisions or migrates databases."
+fields = { enabled = false, source_secret_name = "", runtime_profile_secret_name = "", image_admission_secret_name = "", configuration_revision = "", source_egress_allowlist = [], execution_ingress_cidrs = [] }
 
 [render_config.pgbouncer]
 python_type = "table"
