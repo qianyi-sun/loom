@@ -107,6 +107,13 @@ builder-name prefix or failure-budget counter. 52 materialization/session/route
 integration tests passed, including ordinary Phase 1 completion. Durable jobs,
 the verifier worker and signed atomic readiness are still pending.
 
+The internal current-session prerequisite is independently reviewed and complete.
+It shares strict validation with bearer authentication, accepts valid successors,
+and refreshes cached authority even with deferred/expired ownership attributes.
+The review's stale-cache finding was reproduced and fixed in `47e933ac5`;
+128 focused session/projection tests and a final 420-test combined verification
+passed. No durable publication worker or readiness transition is implied.
+
 - [ ] Test snapshot creation/replay, unique complete candidate sets and leased
   worker generation claims under real concurrent transactions.
 - [ ] Implement snapshot/read/commit using existing session/lease lock helpers.
@@ -133,6 +140,13 @@ supervisor protocol, BuildKit metadata capture, publication and orchestration.
   must bind the same attempt and full component set.
 - [ ] Run real Go/Python handoff integration plus Go race tests. Keep activation
   controlled by the later protected composition rather than enabling defaults.
+
+Runtime integration exposed two upstream shapes: empty scratch exports use
+explicit null layer lists (now narrowly accepted with independent review), and
+buildctl invokes the Dockerfile frontend through a gateway whose outer frontend
+field is empty. The runtime metadata producer must validate the recorded inner
+request. Its actual-export regression and dual-architecture release work remain
+in progress; no supervisor metadata consumer is implemented yet.
 
 ## Task 6: Retention and release integration
 
