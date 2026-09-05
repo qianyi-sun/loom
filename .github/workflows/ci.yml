@@ -278,11 +278,16 @@ jobs:
 
           gate = os.environ["GATE_MODE"]
           keys = []
+          # The broker allocates the whole request in order and freezes it.
+          # Reserve scarce normal slots for the critical test paths before
+          # short checks consume the five-slot pool (#1793).
+          if gate == "full" and os.environ["INTEGRATION"] == "true":
+              keys.extend(["integration-1-of-2", "integration-2-of-2"])
           if gate == "full" and os.environ["DOCS_ONLY"] != "true":
               keys.extend([
-                  "lint-and-static",
                   "tests-root-1-of-2",
                   "tests-root-2-of-2",
+                  "lint-and-static",
                   "tests-packages",
                   "go-checks",
               ])
@@ -290,8 +295,6 @@ jobs:
               keys.append("runtime-payload")
           if gate in {"full", "preflight"} and os.environ["WEB_CHECKS"] == "true":
               keys.append("web-checks")
-          if gate == "full" and os.environ["INTEGRATION"] == "true":
-              keys.extend(["integration-1-of-2", "integration-2-of-2"])
           if gate == "full" and os.environ["INTEGRATION_DOCKER"] == "true":
               keys.append("integration-docker")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

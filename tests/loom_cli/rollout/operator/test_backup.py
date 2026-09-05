@@ -54,9 +54,13 @@ MINIO_SECRET_KEY = "minio-secret-sensitive"
 TEST_MINIO_PORT = 39123
 
 
-def database_authority(*, writer_epoch: int = 0) -> DatabaseAuthorityEvidence:
+def database_authority(
+    *,
+    public_schema_revision: str = "0067_global_capacity",
+    writer_epoch: int = 0,
+) -> DatabaseAuthorityEvidence:
     return DatabaseAuthorityEvidence(
-        public_schema_revision="0067_global_capacity",
+        public_schema_revision=public_schema_revision,
         capacity_guard_schema_revision="guard_0027",
         configuration_epoch=9,
         configuration_digest="9" * 64,
@@ -428,10 +432,22 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
     assert runner.timeouts == [600.0, *([30.0] * 15)]
 
 
+@pytest.mark.parametrize(
+    "observations",
+    [
+        (
+            database_authority(public_schema_revision="0067_global_capacity"),
+            database_authority(public_schema_revision="0068_global_capacity"),
+        ),
+        (database_authority(writer_epoch=4), database_authority(writer_epoch=5)),
+    ],
+    ids=["application-database", "manager-database"],
+)
 def test_critical_checkpoint_rejects_database_authority_change_across_dump(
     tmp_path: Path,
+    observations: tuple[DatabaseAuthorityEvidence, DatabaseAuthorityEvidence],
 ) -> None:
-    observations = iter((database_authority(writer_epoch=4), database_authority(writer_epoch=5)))
+    authority_source = iter(observations)
 
     def inventory(created_at: datetime) -> ImmutableObjectInventory:
         return build_immutable_inventory(
@@ -451,7 +467,7 @@ def test_critical_checkpoint_rejects_database_authority_change_across_dump(
             minio=FailingMinioMirror(),
             now=lambda: FIXED_NOW,
             object_inventory_provider=inventory,
-            database_authority_provider=lambda: next(observations),
+            database_authority_provider=lambda: next(authority_source),
         ).create(make_request())
 
     assert caught.value.code == "database_authority_changed"
@@ -2525,6 +2541,44 @@ def test_subprocess_runner_applies_explicit_command_timeouts(
     assert popen_calls[0][1]["stderr"] == subprocess.DEVNULL
     assert run_calls[0][1]["timeout"] == 30.0
     assert run_calls[0][1]["stderr"] == subprocess.DEVNULL
+
+
+def test_subprocess_runner_supplies_explicit_binary_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, dict(kwargs)))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"captured")
+
+    monkeypatch.setattr(backup_module.subprocess, "run", fake_run)
+    runner = SubprocessBackupCommandRunner()
+    capture_with_input = getattr(runner, "capture_stdout_with_input", None)
+
+    assert callable(capture_with_input)
+    assert (
+        capture_with_input(
+            ["psql", "--file=-"],
+            env={"PATH": "/usr/bin"},
+            input_payload=b"SELECT 1;\n",
+            timeout_seconds=30.0,
+        )
+        == b"captured"
+    )
+    assert calls == [
+        (
+            ["psql", "--file=-"],
+            {
+                "check": False,
+                "env": {"PATH": "/usr/bin"},
+                "input": b"SELECT 1;\n",
+                "stderr": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "timeout": 30.0,
+            },
+        )
+    ]
 
 
 def test_subprocess_stream_timeout_kills_and_reaps_child() -> None:

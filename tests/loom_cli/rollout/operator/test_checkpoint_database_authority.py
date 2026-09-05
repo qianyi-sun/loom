@@ -99,6 +99,24 @@ def _payload(value: dict[str, object]) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _application_observation() -> dict[str, object]:
+    value = _observation()
+    return {
+        "guard_revisions": value["guard_revisions"],
+        "guard_table_present": value["guard_table_present"],
+        "public_revisions": value["public_revisions"],
+    }
+
+
+def _manager_observation() -> dict[str, object]:
+    value = _observation()
+    return {
+        "authority": value["authority"],
+        "configuration": value["configuration"],
+        "generations": value["generations"],
+    }
+
+
 def _rebind_subject_payload(value: dict[str, object], **changes: object) -> None:
     configuration = value["configuration"][0]
     generation = value["generations"][1]
@@ -217,26 +235,112 @@ def test_authority_parser_rejects_missing_duplicate_contradictory_or_noncanonica
         parse_database_authority_observation(_payload(value))
 
 
-def test_authority_capture_uses_one_read_only_transaction_and_secret_safe_failures() -> None:
+def test_authority_capture_uses_distinct_read_only_application_and_manager_transactions() -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple[str, ...], bytes]] = []
+
+        def capture_stdout_with_input(
+            self,
+            argv,
+            *,
+            env,
+            input_payload,
+            timeout_seconds,
+        ):
+            command = tuple(argv)
+            self.calls.append((command, input_payload))
+            if "loom-staging" in command:
+                return _payload(_application_observation())
+            if "loom-dev" in command:
+                return _payload(_manager_observation())
+            raise AssertionError(command)
+
+    runner = Runner()
+
+    evidence = capture_database_authority(
+        runner,
+        env={"PATH": "/bin"},
+        namespace="loom-staging",
+    )
+
+    assert evidence.public_schema_revision == "0067_global_capacity"
+    assert evidence.configuration_epoch == 9
+    assert len(runner.calls) == 2
+    application_argv, application_sql = runner.calls[0]
+    manager_argv, manager_sql = runner.calls[1]
+    assert application_argv == (
+        "kubectl",
+        "--namespace",
+        "loom-staging",
+        "exec",
+        "--stdin=true",
+        "service/loom-postgres-rw",
+        "--",
+        "psql",
+        "--no-psqlrc",
+        "--quiet",
+        "--tuples-only",
+        "--no-align",
+        "--set=ON_ERROR_STOP=1",
+        "--username=postgres",
+        "--dbname=loom",
+        "--file=-",
+    )
+    assert manager_argv == (
+        "kubectl",
+        "--namespace",
+        "loom-dev",
+        "exec",
+        "--stdin=true",
+        "service/loom-capacity-postgres",
+        "--",
+        "sh",
+        "-ceu",
+        "exec psql --no-psqlrc --quiet --tuples-only --no-align "
+        '--set=ON_ERROR_STOP=1 --username="$POSTGRES_USER" '
+        '--dbname="$POSTGRES_DB" --file=-',
+    )
+    rendered_application = application_sql.decode()
+    rendered_manager = manager_sql.decode()
+    assert "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in (rendered_application)
+    assert "FROM public.alembic_version" in rendered_application
+    assert "FROM loom_capacity_guard.capacity_guard_alembic_version" in (rendered_application)
+    assert "capacity_configuration_epochs" not in rendered_application
+    assert "capacity_authority_state" not in rendered_application
+    assert "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in rendered_manager
+    assert rendered_manager.count("FROM public.capacity_configuration_epochs") == 2
+    assert "FROM public.capacity_config_generations" in rendered_manager
+    assert "FROM public.capacity_authority_state" in rendered_manager
+    assert "loom_capacity_guard" not in rendered_manager
+
+
+def test_authority_capture_keeps_manager_transport_failures_secret_safe() -> None:
     marker = "postgresql://user:password@database/private-key"
 
     class Runner:
         def __init__(self) -> None:
-            self.argv: list[str] = []
+            self.calls: list[tuple[tuple[str, ...], bytes]] = []
 
-        def capture_stdout(self, argv, *, env, timeout_seconds):
-            self.argv = list(argv)
+        def capture_stdout_with_input(
+            self,
+            argv,
+            *,
+            env,
+            input_payload,
+            timeout_seconds,
+        ):
+            command = tuple(argv)
+            self.calls.append((command, input_payload))
+            if "loom-staging" in command:
+                return _payload(_application_observation())
             raise RuntimeError(marker)
 
     runner = Runner()
     with pytest.raises(DatabaseAuthorityError) as caught:
         capture_database_authority(runner, env={"PATH": "/bin"}, namespace="loom-staging")
 
-    rendered = " ".join(runner.argv)
-    assert "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in rendered
-    assert "FROM public.alembic_version" in rendered
-    assert rendered.count("FROM public.capacity_configuration_epochs") == 2
-    assert "FROM public.capacity_config_generations" in rendered
-    assert "FROM public.capacity_authority_state" in rendered
+    assert len(runner.calls) == 2
+    assert "loom-dev" in runner.calls[1][0]
     assert marker not in str(caught.value)
     assert marker not in repr(caught.value)

@@ -497,7 +497,7 @@ def launch(
     library_root: Path = LIBRARY_ROOT,
     expected_uid: int = 0,
     expected_gid: int = 0,
-) -> None:
+) -> int | None:
     """Validate every installed byte before loading the large broker runtime."""
     policy = load_policy(
         policy_path=policy_path,
@@ -524,7 +524,10 @@ def launch(
         serve = getattr(module, "serve_validated", None)
         if not callable(serve):
             raise LauncherError("broker_invalid")
-        serve(policy)
+        status = serve(policy)
+        if status is not None and (type(status) is not int or status != 1):
+            raise LauncherError("broker_invalid")
+        return status
     except LauncherError:
         raise
     except BaseException as exc:
@@ -543,10 +546,14 @@ def main() -> None:
             operator_gid=operator.pw_gid,
         )
         sanitize_environment(os.environ)
-        launch()
+        status = launch()
+        if status is not None and (type(status) is not int or status != 1):
+            raise LauncherError("broker_invalid")
     except BaseException:
         sys.stderr.write("error:authority_failed\n")
         raise SystemExit(1) from None
+    if status == 1:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

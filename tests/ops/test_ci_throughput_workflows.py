@@ -186,26 +186,20 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
 def test_ci_wires_phase2c_supervisor_go_checks_explicitly() -> None:
     steps = {
         step.get("name"): str(step.get("run", ""))
-        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"][
-            "steps"
-        ]
+        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
     }
 
     assert steps["gofmt supervisor"] == (
         "out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)\n"
         'if [ -n "$out" ]; then\n'
         '  echo "$out"\n'
-        "  echo \"gofmt found supervisor issues; run "
-        "\\`gofmt -w ./cmd/loom-task-image-builder-supervisor\\` to fix\"\n"
+        '  echo "gofmt found supervisor issues; run '
+        '\\`gofmt -w ./cmd/loom-task-image-builder-supervisor\\` to fix"\n'
         "  exit 1\n"
         "fi\n"
     )
-    assert steps["go vet supervisor"] == (
-        "go vet ./cmd/loom-task-image-builder-supervisor"
-    )
-    assert steps["go test supervisor"] == (
-        "go test -race ./cmd/loom-task-image-builder-supervisor"
-    )
+    assert steps["go vet supervisor"] == ("go vet ./cmd/loom-task-image-builder-supervisor")
+    assert steps["go test supervisor"] == ("go test -race ./cmd/loom-task-image-builder-supervisor")
 
 
 def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> None:
@@ -493,7 +487,6 @@ def test_images_builds_use_planner_selection() -> None:
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     }
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
@@ -564,10 +557,9 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     }
     assert build["strategy"]["matrix"]["include"] == (
-        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
+        "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
     )
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
@@ -880,7 +872,6 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
     assert publish["needs"] == [
         "plan",
@@ -1337,6 +1328,7 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
             {
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
+                "SCANNER_BUILD_RESULT": "skipped",
                 "PUBLISH_RESULT": "skipped",
             },
         ),
@@ -1453,6 +1445,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
         },
@@ -1501,6 +1494,9 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "SCANNER_BUILD_RESULT": "skipped"
+            if protected_publish or required == "false"
+            else "success",
             "PUBLISH_RESULT": "success" if protected_publish else "skipped",
             "MANIFEST_RESULT": "success" if protected_publish else "skipped",
             "PERSONAL_DEV_RELEASE_RESULT": release_result,
@@ -1539,6 +1535,7 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
         },
         check=False,
@@ -1729,6 +1726,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             "images-gate",
             {
                 "build": "BUILD_RESULT",
+                "scanner-cache-build": "SCANNER_BUILD_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
                 "personal-dev-trusted-release": "PERSONAL_DEV_RELEASE_RESULT",
@@ -1902,9 +1900,7 @@ def test_nebius_iac_validates_aliased_provider_through_module_tests() -> None:
         if step.get("name") == "Validate pinned Nebius module and stack"
     )
 
-    module_command = (
-        "terraform -chdir=deploy/terraform/nebius/modules/execution-target"
-    )
+    module_command = "terraform -chdir=deploy/terraform/nebius/modules/execution-target"
     assert f"{module_command} test" in script
     assert f"{module_command} validate" not in script
     assert "terraform -chdir=deploy/terraform/nebius/stack validate" in script

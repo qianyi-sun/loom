@@ -140,6 +140,16 @@ if TYPE_CHECKING:
         public_key_secret_name: str = "loom-stage1-smoke-authority"
 
     @dataclass(frozen=True)
+    class _NebiusExecutionConfig:
+        enabled: bool = False
+        source_secret_name: str = ""
+        runtime_profile_secret_name: str = ""
+        image_admission_secret_name: str = ""
+        configuration_revision: str = ""
+        source_egress_allowlist: list[str] = field(default_factory=list)
+        execution_ingress_cidrs: list[str] = field(default_factory=list)
+
+    @dataclass(frozen=True)
     class _TopologyConfig:
         multi_node: bool = False
         storage_backend: str = "host_path"
@@ -187,6 +197,7 @@ if TYPE_CHECKING:
         pipeline_stage1_smoke_authority: _PipelineStage1SmokeAuthorityConfig = field(
             default_factory=_PipelineStage1SmokeAuthorityConfig
         )
+        nebius_execution: _NebiusExecutionConfig = field(default_factory=_NebiusExecutionConfig)
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"

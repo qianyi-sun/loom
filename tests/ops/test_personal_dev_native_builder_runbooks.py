@@ -105,11 +105,37 @@ def _shell_array(document: str, name: str) -> str:
 
 
 def _native_authority_request(document: str) -> str:
-    return (
-        _shell_function(document, "validate_native_authority_receipt")
-        + "\n"
-        + _shell_function(document, "native_authority_request")
+    functions = [_shell_function(document, "validate_native_authority_receipt")]
+    if "validate_native_authority_failure_receipt() {" in _shell(document):
+        functions.append(_shell_function(document, "validate_native_authority_failure_receipt"))
+    functions.append(_shell_function(document, "native_authority_request"))
+    return "\n".join(functions)
+
+
+def _fake_native_authority_transport(
+    tmp_path: Path,
+    *,
+    remote_script: str,
+) -> tuple[Path, Path, Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/ssh; then shift; exec "$AUTHORITY_FAKE_SSH" "$@"; fi\n'
+        'exec "$@"\n',
+        encoding="utf-8",
     )
+    fake_sudo.chmod(0o700)
+    fake_client = fake_bin / "client"
+    fake_client.write_text("#!/bin/sh\nprintf frame\n", encoding="utf-8")
+    fake_client.chmod(0o700)
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text("#!/bin/sh\n" + remote_script, encoding="utf-8")
+    fake_ssh.chmod(0o700)
+    return fake_bin, fake_client, fake_ssh
 
 
 @pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
@@ -251,6 +277,8 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
     assert receipt.read_text(encoding="utf-8") == json.dumps(
         expected_receipt, sort_keys=True, separators=(",", ":")
     )
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+    assert receipt.stat().st_nlink == 1
 
 
 @pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
@@ -1327,27 +1355,10 @@ def test_native_authority_transport_rejects_nonpublic_receipts(
 ) -> None:
     """Catches preserving an extra or unconstrained broker field as evidence."""
     request = _native_authority_request(_read(runbook))
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_sudo = fake_bin / "sudo"
-    fake_sudo.write_text(
-        "#!/bin/sh\n"
-        'test "$1" = -n && shift\n'
-        'test "$1" = -- && shift\n'
-        'if test "$1" = /usr/bin/ssh; then shift; exec "$AUTHORITY_FAKE_SSH" "$@"; fi\n'
-        'exec "$@"\n',
-        encoding="utf-8",
+    fake_bin, fake_client, fake_ssh = _fake_native_authority_transport(
+        tmp_path,
+        remote_script="cat >/dev/null\nprintf '%s\\n' \"$AUTHORITY_RECEIPT\"\n",
     )
-    fake_sudo.chmod(0o700)
-    fake_client = fake_bin / "client"
-    fake_client.write_text("#!/bin/sh\nprintf frame\n", encoding="utf-8")
-    fake_client.chmod(0o700)
-    fake_ssh = fake_bin / "ssh"
-    fake_ssh.write_text(
-        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$AUTHORITY_RECEIPT\"\n",
-        encoding="utf-8",
-    )
-    fake_ssh.chmod(0o700)
     source_sha = "a" * 40
     source_tree = "b" * 40
     profile_sha = "c" * 64
@@ -1415,6 +1426,295 @@ def test_native_authority_transport_rejects_nonpublic_receipts(
             )
         )
     assert all(item[0] for item in rejected), rejected
+
+
+def test_native_authority_transport_preserves_bounded_failure_receipt(
+    tmp_path: Path,
+) -> None:
+    """Catches a compensated remote failure being collapsed into empty evidence."""
+    request = _native_authority_request(_read(RUNTIME))
+    fake_bin, fake_client, fake_ssh = _fake_native_authority_transport(
+        tmp_path,
+        remote_script=("cat >/dev/null\nprintf '%s\\n' \"$AUTHORITY_RECEIPT\"\nexit 1\n"),
+    )
+    source_sha = "a" * 40
+    source_tree = "b" * 40
+    profile_sha = "c" * 64
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    receipt = {
+        "authority_source_sha": source_sha,
+        "authority_source_tree": source_tree,
+        "cleanup_status": "inert",
+        "error_code": "command_timeout",
+        "failure_phase": "release_apply",
+        "operation": "prepare",
+        "request_id": request_id,
+        "runtime_profile_sha256": profile_sha,
+        "schema": "loom.personal-dev-native-builder-runtime-authority-failure.v1",
+        "status": "failed",
+    }
+    output = tmp_path / "prepare.json"
+    failure = tmp_path / "prepare.json.failure"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(fake_client), str(output), request_id],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'AUTHORITY_FAKE_SSH="{fake_ssh}"\n'
+            f"AUTHORITY_RECEIPT='{json.dumps(receipt)}'\n"
+            "export AUTHORITY_FAKE_SSH AUTHORITY_RECEIPT\n"
+            'native_authority_client=("$1")\n'
+            f'authority_source_sha="{source_sha}"\n'
+            f'authority_source_tree="{source_tree}"\n'
+            f'runtime_profile_sha256="{profile_sha}"\n'
+            + request
+            + '\nnative_authority_request prepare "$3" "$2"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert not output.exists()
+    assert failure.read_text(encoding="utf-8") == json.dumps(
+        receipt, sort_keys=True, separators=(",", ":")
+    )
+    assert stat.S_IMODE(failure.stat().st_mode) == 0o600
+    assert failure.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"unexpected_private_material": "must-not-be-retained"},
+        {"authority_source_sha": "d" * 40},
+        {"operation": "status"},
+        {"failure_phase": "private_dependency_response"},
+        {"error_code": "a9f4c13e71d64bd6a836f0fd721bb05d"},
+        {"request_id": "123e4567-e89b-42d3-a456-426614174001"},
+    ),
+    ids=(
+        "extra-field",
+        "wrong-identity",
+        "wrong-operation",
+        "invalid-phase",
+        "unallowlisted-code",
+        "wrong-request-id",
+    ),
+)
+def test_native_authority_transport_discards_malformed_failure_receipt(
+    tmp_path: Path,
+    override: dict[str, object],
+) -> None:
+    """Catches malformed or privately extensible failure evidence being retained."""
+    request = _native_authority_request(_read(RUNTIME))
+    fake_bin, fake_client, fake_ssh = _fake_native_authority_transport(
+        tmp_path,
+        remote_script=("cat >/dev/null\nprintf '%s\\n' \"$AUTHORITY_RECEIPT\"\nexit 1\n"),
+    )
+    source_sha = "a" * 40
+    source_tree = "b" * 40
+    profile_sha = "c" * 64
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    receipt = {
+        "authority_source_sha": source_sha,
+        "authority_source_tree": source_tree,
+        "cleanup_status": "inert",
+        "error_code": "command_timeout",
+        "failure_phase": "release_apply",
+        "operation": "prepare",
+        "request_id": request_id,
+        "runtime_profile_sha256": profile_sha,
+        "schema": "loom.personal-dev-native-builder-runtime-authority-failure.v1",
+        "status": "failed",
+        **override,
+    }
+    output = tmp_path / "prepare.json"
+    failure = Path(f"{output}.failure")
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(fake_client), str(output), request_id],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'AUTHORITY_FAKE_SSH="{fake_ssh}"\n'
+            f"AUTHORITY_RECEIPT='{json.dumps(receipt)}'\n"
+            "export AUTHORITY_FAKE_SSH AUTHORITY_RECEIPT\n"
+            'native_authority_client=("$1")\n'
+            f'authority_source_sha="{source_sha}"\n'
+            f'authority_source_tree="{source_tree}"\n'
+            f'runtime_profile_sha256="{profile_sha}"\n'
+            + request
+            + '\nnative_authority_request prepare "$3" "$2"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert not output.exists()
+    assert not failure.exists()
+    assert list(tmp_path.glob(f"{output.name}.part.*")) == []
+
+
+def test_native_authority_failure_receipt_allowlists_match_producer(
+    tmp_path: Path,
+) -> None:
+    """Catches either side accepting a diagnostic the other side rejects."""
+    validator = _shell_function(_read(RUNTIME), "validate_native_authority_failure_receipt")
+
+    def jq_in_values(field: str) -> frozenset[str]:
+        match = re.search(
+            rf"\(\.{re.escape(field)} \| IN\((.*?)\)\)",
+            validator,
+            flags=re.DOTALL,
+        )
+        assert match is not None
+        return frozenset(re.findall(r'"([a-z][a-z0-9_]*)"', match.group(1)))
+
+    assert jq_in_values("error_code") == authority_module._PUBLIC_FAILURE_CODES
+    assert jq_in_values("failure_phase") == authority_module._FAILURE_PHASES
+    assert jq_in_values("cleanup_status") == authority_module._CLEANUP_STATUSES
+    source_sha = "a" * 40
+    source_tree = "b" * 40
+    profile_sha = "c" * 64
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    receipts = tmp_path / "receipts.jsonl"
+    receipts.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "authority_source_sha": source_sha,
+                    "authority_source_tree": source_tree,
+                    "cleanup_status": "inert",
+                    "error_code": code,
+                    "failure_phase": "release_apply",
+                    "operation": "prepare",
+                    "request_id": request_id,
+                    "runtime_profile_sha256": profile_sha,
+                    "schema": ("loom.personal-dev-native-builder-runtime-authority-failure.v1"),
+                    "status": "failed",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for code in sorted(authority_module._PUBLIC_FAILURE_CODES)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(receipts)],
+        input=(
+            f'authority_source_sha="{source_sha}"\n'
+            f'authority_source_tree="{source_tree}"\n'
+            f'runtime_profile_sha256="{profile_sha}"\n'
+            + validator
+            + "\nwhile IFS= read -r receipt; do\n"
+            + f"  validate_native_authority_failure_receipt prepare {request_id} "
+            + '<<<"$receipt" >/dev/null\n'
+            + 'done < "$1"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+
+
+@pytest.mark.parametrize(
+    ("runbook", "operation", "remote_status", "collision_suffix"),
+    (
+        (RUNTIME, "status", 0, ""),
+        (RUNTIME, "prepare", 1, ".failure"),
+        (ACCEPTANCE, "status", 0, ""),
+    ),
+)
+def test_native_authority_transport_never_clobbers_late_destination(
+    tmp_path: Path,
+    runbook: Path,
+    operation: str,
+    remote_status: int,
+    collision_suffix: str,
+) -> None:
+    """Catches a receipt destination appearing after the initial precheck."""
+    request = _native_authority_request(_read(runbook))
+    fake_bin, fake_client, fake_ssh = _fake_native_authority_transport(
+        tmp_path,
+        remote_script=(
+            "cat >/dev/null\n"
+            "printf 'preexisting\\n' > \"$AUTHORITY_COLLISION\"\n"
+            "printf '%s\\n' \"$AUTHORITY_RECEIPT\"\n"
+            'exit "$AUTHORITY_REMOTE_STATUS"\n'
+        ),
+    )
+    source_sha = "a" * 40
+    source_tree = "b" * 40
+    profile_sha = "c" * 64
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    if operation == "status":
+        receipt = {
+            "agent_service": "inactive",
+            "architecture": "aarch64",
+            "authority_source_sha": source_sha,
+            "authority_source_tree": source_tree,
+            "dockerd_service": "inactive",
+            "executable_new_capacity": 0,
+            "host_name": "gx10-01c7",
+            "managed_containers": 0,
+            "managed_networks": None,
+            "nft_table": "absent",
+            "operation": "status",
+            "phase": "inert",
+            "request_id": request_id,
+            "runtime_profile_sha256": profile_sha,
+            "schema": authority_module._RECEIPT_SCHEMA,
+            "state": None,
+            "state_sha256": "",
+        }
+    else:
+        receipt = {
+            "authority_source_sha": source_sha,
+            "authority_source_tree": source_tree,
+            "cleanup_status": "inert",
+            "error_code": "command_timeout",
+            "failure_phase": "release_apply",
+            "operation": "prepare",
+            "request_id": request_id,
+            "runtime_profile_sha256": profile_sha,
+            "schema": "loom.personal-dev-native-builder-runtime-authority-failure.v1",
+            "status": "failed",
+        }
+    output = tmp_path / f"{operation}.json"
+    collision = Path(f"{output}{collision_suffix}")
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(fake_client), str(output), request_id],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'AUTHORITY_FAKE_SSH="{fake_ssh}"\n'
+            f'AUTHORITY_COLLISION="{collision}"\n'
+            f"AUTHORITY_REMOTE_STATUS={remote_status}\n"
+            f"AUTHORITY_RECEIPT='{json.dumps(receipt)}'\n"
+            "export AUTHORITY_FAKE_SSH AUTHORITY_COLLISION AUTHORITY_REMOTE_STATUS "
+            "AUTHORITY_RECEIPT\n"
+            'native_authority_client=("$1")\n'
+            f'authority_source_sha="{source_sha}"\n'
+            f'authority_source_tree="{source_tree}"\n'
+            f'runtime_profile_sha256="{profile_sha}"\n'
+            + request
+            + f'\nnative_authority_request {operation} "$3" "$2"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert collision.read_text(encoding="utf-8") == "preexisting\n"
+    assert list(tmp_path.glob(f"{output.name}.part.*")) == []
+    if collision != output:
+        assert not output.exists()
 
 
 def test_native_builder_runbooks_leave_no_direct_gb10_privilege_or_scp_path() -> None:

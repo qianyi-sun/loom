@@ -74,6 +74,16 @@ enabled = false
 
 [llm_gateway_sandbox]
 enabled = false
+# Optional canonical staging attachment for the separate Nebius execution cluster. Requires pre-existing source-spool/runtime/admission Secrets, an explicit configuration revision and scoped persistent network routes. Disabled profiles retain Docker behavior; rendering never provisions or migrates databases.
+
+[nebius_execution]
+enabled = false
+source_secret_name = ""
+runtime_profile_secret_name = ""
+image_admission_secret_name = ""
+configuration_revision = ""
+source_egress_allowlist = []
+execution_ingress_cidrs = []
 # PgBouncer transaction-mode connection multiplexer. When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Disable it, re-render, and redeploy to make services fall back to db_url (direct). See docs/architecture/pgbouncer.md.
 
 [pgbouncer]

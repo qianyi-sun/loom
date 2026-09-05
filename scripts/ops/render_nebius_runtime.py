@@ -19,6 +19,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--capacity-policy", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--staging-attachment",
+        type=Path,
+        help="Explicit Nebius-side binding to existing staging authority; render only, no deployment.",
+    )
+    parser.add_argument(
         "--topology",
         type=Path,
         default=None,
@@ -49,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
             physical_binding_path=physical_binding_path,
             capacity_policy_path=args.capacity_policy.resolve(),
             output_dir=args.output.resolve(),
+            staging_attachment_path=(
+                args.staging_attachment.resolve() if args.staging_attachment is not None else None
+            ),
         )
     except NebiusRuntimeRenderError as exc:
         sys.stderr.write(f"error: {exc}\n")

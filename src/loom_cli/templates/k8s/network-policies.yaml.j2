@@ -184,6 +184,7 @@ spec:
     # reach shards on other pods. Without it, list serves from local
     # metadata but GetObject fails with NoSuchKey — see #668.
     - from:
+        - podSelector: { matchLabels: { app: loom-control-plane } }
         - podSelector: { matchLabels: { app: loom-service } }
         - podSelector: { matchLabels: { app: loom-worker } }
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
@@ -286,6 +287,11 @@ spec:
       ports:
         - { port: 8080, protocol: TCP }
   egress:
+    # The canonical materializer reads committed outputs and writes bundles.
+    - to:
+        - podSelector: { matchLabels: { app: loom-minio } }
+      ports:
+        - { port: 9000, protocol: TCP }
     # Postgres for state + DNS.
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }

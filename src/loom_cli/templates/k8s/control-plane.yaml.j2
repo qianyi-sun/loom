@@ -10,6 +10,10 @@ spec:
   template:
     metadata:
       labels: { app: loom-control-plane }
+{% if nebius_execution.enabled %}
+      annotations:
+        loom.ca/nebius-configuration-revision: {{ nebius_execution.configuration_revision | tojson }}
+{% endif %}
     spec:
 {% if runtime_environment == "staging" %}
       automountServiceAccountToken: false
@@ -52,7 +56,21 @@ spec:
       containers:
         - name: control-plane
           image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
-          {{ env_macros.env_block("control-plane", schema, override_values={"slurm_worker_controller_environment": runtime_environment, "artifacts_bucket": artifacts_bucket, "trajectories_bucket": trajectories_bucket}) | indent(10) }}
+          {{ env_macros.env_block("control-plane", schema, skip_names=nebius_control_plane_skip_names, override_values=nebius_control_plane_overrides) | indent(10) }}
+{% if nebius_execution.enabled %}
+{% for suffix, key in nebius_source_secret_fields.items() %}
+            - name: LOOM_CP_SERVICE_EXECUTION_SOURCE_{{ suffix }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ nebius_execution.source_secret_name }}
+                  key: {{ key }}
+{% endfor %}
+            - name: LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ nebius_execution.image_admission_secret_name }}
+                  key: public-keys-json
+{% endif %}
             - name: LOOM_CP_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"
 {% if runtime_environment == "staging" %}

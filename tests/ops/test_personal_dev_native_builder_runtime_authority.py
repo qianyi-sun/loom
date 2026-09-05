@@ -560,6 +560,90 @@ def test_launcher_registers_itself_before_loading_the_validated_broker(
     )
 
 
+@pytest.mark.parametrize(
+    ("broker_status", "expected"),
+    (
+        ("None", "None\n"),
+        ("1", "1\n"),
+        ("0", "error:broker_invalid\n"),
+        ("2", "error:broker_invalid\n"),
+        ("True", "error:broker_invalid\n"),
+        ("'1'", "error:broker_invalid\n"),
+    ),
+)
+def test_launcher_accepts_only_success_or_exact_delivered_failure_status(
+    tmp_path: Path,
+    broker_status: str,
+    expected: str,
+) -> None:
+    """Catches launch swallowing or broadening the broker status contract."""
+    installed_launcher = tmp_path / "authority"
+    broker = tmp_path / "broker.py"
+    policy_path = tmp_path / "policy.json"
+    installed_launcher.write_bytes(Path(launcher_module.__file__).read_bytes())
+    installed_launcher.chmod(0o555)
+    broker.write_text(
+        "def serve_validated(_policy):\n"
+        f"    return {broker_status}\n",
+        encoding="ascii",
+    )
+    broker.chmod(0o444)
+    assets = {
+        "broker": hashlib.sha256(broker.read_bytes()).hexdigest(),
+        "launcher": hashlib.sha256(installed_launcher.read_bytes()).hexdigest(),
+    }
+    policy_path.write_bytes(
+        (
+            json.dumps(
+                {
+                    "asset_sha256": assets,
+                    "authority_source_sha": SOURCE_SHA,
+                    "authority_source_tree": SOURCE_TREE,
+                    "runtime_profile_sha256": PROFILE_SHA256,
+                    "schema": "loom.personal-dev-native-builder-runtime-authority-policy.v1",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("ascii")
+    )
+    policy_path.chmod(0o444)
+    child = (
+        "import importlib.machinery,importlib.util,os,pathlib,sys\n"
+        f"path=pathlib.Path({str(installed_launcher)!r})\n"
+        "loader=importlib.machinery.SourceFileLoader('installed_launcher',str(path))\n"
+        "spec=importlib.util.spec_from_loader('installed_launcher',loader)\n"
+        "module=importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name]=module\n"
+        "spec.loader.exec_module(module)\n"
+        "assets={\n"
+        f"'launcher':module.AssetSpec(path,0o555),\n"
+        f"'broker':module.AssetSpec(pathlib.Path({str(broker)!r}),0o444),\n"
+        "}\n"
+        "try:\n"
+        f" status=module.launch(policy_path=pathlib.Path({str(policy_path)!r}),"
+        f"asset_specs=assets,broker_path=pathlib.Path({str(broker)!r}),"
+        f"library_root=pathlib.Path({str(tmp_path)!r}),"
+        "expected_uid=os.getuid(),expected_gid=os.getgid())\n"
+        "except module.LauncherError as error:\n"
+        " print('error:' + str(error))\n"
+        "else:\n"
+        " print(repr(status))\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == expected
+    assert completed.stderr == ""
+
+
 def test_policy_loader_requires_canonical_root_owned_single_link_assets(
     tmp_path: Path,
 ) -> None:
@@ -877,6 +961,48 @@ def test_launcher_main_failure_is_stable_and_never_echoes_exception(
     assert captured.err == "error:authority_failed\n"
 
 
+def test_launcher_propagates_delivered_failure_status_without_second_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        launcher_module.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002),
+    )
+    monkeypatch.setattr(launcher_module, "verify_invocation", lambda **_values: None)
+    monkeypatch.setattr(launcher_module, "sanitize_environment", lambda _env: None)
+    monkeypatch.setattr(launcher_module, "launch", lambda: 1)
+
+    with pytest.raises(SystemExit, match="1"):
+        launcher_module.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_launcher_rejects_invalid_broker_status(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        launcher_module.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002),
+    )
+    monkeypatch.setattr(launcher_module, "verify_invocation", lambda **_values: None)
+    monkeypatch.setattr(launcher_module, "sanitize_environment", lambda _env: None)
+    monkeypatch.setattr(launcher_module, "launch", lambda: 2)
+
+    with pytest.raises(SystemExit, match="1"):
+        launcher_module.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error:authority_failed\n"
+
+
 def test_validated_broker_dispatches_only_after_launcher_policy_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -928,8 +1054,9 @@ def test_validated_broker_dispatches_only_after_launcher_policy_handoff(
     monkeypatch.setattr(authority_module.sys, "stdin", Input())
     monkeypatch.setattr(authority_module.sys, "stdout", output)
 
-    authority_module.serve_validated(policy.public())
+    status = authority_module.serve_validated(policy.public())
 
+    assert status is None
     assert events == [
         "parse",
         "lock.enter",
@@ -2640,6 +2767,239 @@ def _prepare_runtime(
     return runtime, events, host, states, archives, conformance, configs
 
 
+def test_prepare_failure_carries_only_bounded_phase_and_cleanup_diagnostics() -> None:
+    runtime, _, host, states, archives, _, _ = _prepare_runtime(converger_fail="apply")
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "transition_failed"
+    assert getattr(raised.value, "operation", None) == "prepare"
+    assert getattr(raised.value, "failure_phase", None) == "release_apply"
+    assert getattr(raised.value, "cleanup_status", None) == "inert"
+    assert str(raised.value) == "transition_failed"
+    assert not host.dockerd_active and not host.agent_active and not host.nft_present
+    assert states.snapshot is None
+    assert archives.present is False
+
+
+def test_prepare_archive_cleanup_failure_never_claims_complete_cleanup() -> None:
+    runtime, _, host, states, _, _, _ = _prepare_runtime(archive_unlink_fail=True)
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "transition_failed"
+    assert getattr(raised.value, "operation", None) == "prepare"
+    assert getattr(raised.value, "failure_phase", None) == "archive_cleanup"
+    assert getattr(raised.value, "cleanup_status", None) == "unproven"
+    assert not host.dockerd_active and not host.agent_active and not host.nft_present
+    assert states.snapshot is None
+
+
+def test_prepare_archive_cleanup_overrides_an_earlier_failure_phase() -> None:
+    runtime, _, host, states, _, _, _ = _prepare_runtime(
+        installer_fail="installer.preflight:/private/archive-copy"
+    )
+
+    class CleanupFailingArchives:
+        @contextmanager
+        def copy(
+            self,
+            _source: Path,
+            *,
+            expected_sha512: str,
+            request_id: str,
+        ) -> Iterator[Path]:
+            try:
+                yield Path("/private/archive-copy")
+            finally:
+                raise AuthorityError("archive_cleanup_failed")
+
+    runtime.archives = CleanupFailingArchives()
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "archive_cleanup_failed"
+    assert getattr(raised.value, "failure_phase", None) == "archive_cleanup"
+    assert getattr(raised.value, "cleanup_status", None) == "unproven"
+    assert not host.dockerd_active and not host.agent_active and not host.nft_present
+    assert states.snapshot is None
+
+
+def test_prepare_preserves_only_a_validated_dependency_error_code() -> None:
+    runtime, _, _, _, _, _, _ = _prepare_runtime()
+
+    class CodedError(RuntimeError):
+        code = "docker_command_failed"
+
+    class CodedFailureConverger:
+        @staticmethod
+        def plan() -> dict[str, object]:
+            return {"operation": "plan", "pull": [CURRENT_AGENT, CURRENT_BUILDER]}
+
+        @staticmethod
+        def apply() -> dict[str, object]:
+            raise CodedError("registry response included private transport details")
+
+        @staticmethod
+        def verify() -> dict[str, object]:
+            raise AssertionError("verify must not run after apply fails")
+
+    runtime.converger_factory = lambda _config: CodedFailureConverger()
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "docker_command_failed"
+    assert getattr(raised.value, "failure_phase", None) == "release_apply"
+    assert str(raised.value) == "docker_command_failed"
+    assert "private transport details" not in str(raised.value)
+
+
+def test_prepare_rejects_unallowlisted_dependency_error_code() -> None:
+    """Catches a token-shaped dependency code crossing the public boundary."""
+    runtime, _, _, _, _, _, _ = _prepare_runtime()
+
+    class TokenLikeError(RuntimeError):
+        code = "a9f4c13e71d64bd6a836f0fd721bb05d"
+
+    class TokenFailureConverger:
+        @staticmethod
+        def plan() -> dict[str, object]:
+            return {"operation": "plan", "pull": [CURRENT_AGENT, CURRENT_BUILDER]}
+
+        @staticmethod
+        def apply() -> dict[str, object]:
+            raise TokenLikeError("private dependency response")
+
+        @staticmethod
+        def verify() -> dict[str, object]:
+            raise AssertionError("verify must not run after apply fails")
+
+    runtime.converger_factory = lambda _config: TokenFailureConverger()
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "transition_failed"
+    assert getattr(raised.value, "failure_phase", None) == "release_apply"
+    assert "a9f4c13e71d64bd6a836f0fd721bb05d" not in str(raised.value)
+    assert "private dependency response" not in str(raised.value)
+
+
+def test_authority_error_rejects_unallowlisted_public_diagnostic_code() -> None:
+    """Catches a future diagnostic caller bypassing the public-code allowlist."""
+    with pytest.raises(ValueError, match="invalid authority failure diagnostic"):
+        AuthorityError(
+            "a9f4c13e71d64bd6a836f0fd721bb05d",
+            operation="prepare",
+            failure_phase="release_apply",
+            cleanup_status="inert",
+        )
+
+
+def test_prepare_attributes_converger_construction_failure_to_release_plan() -> None:
+    runtime, _, _, _, _, _, _ = _prepare_runtime()
+
+    def fail_converger(_config: NativeBuilderReleaseConfig) -> RecordingConverger:
+        raise AuthorityError("release_config_invalid")
+
+    runtime.converger_factory = fail_converger
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.code == "release_config_invalid"
+    assert getattr(raised.value, "failure_phase", None) == "release_plan"
+    assert getattr(raised.value, "cleanup_status", None) == "inert"
+
+
+def test_validated_broker_returns_canonical_failure_receipt_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pwd
+
+    runtime, _, _, _, _, _, _ = _prepare_runtime(converger_fail="apply")
+    events: list[str] = []
+
+    class Input:
+        buffer = io.BytesIO(b"request frame")
+
+    class Buffer(io.BytesIO):
+        def write(self, value: bytes) -> int:
+            events.append("receipt.write")
+            return super().write(value)
+
+        def flush(self) -> None:
+            events.append("receipt.flush")
+            super().flush()
+
+    class Output:
+        buffer = Buffer()
+
+    @contextmanager
+    def locked() -> Iterator[None]:
+        events.append("lock.enter")
+        try:
+            yield
+        finally:
+            events.append("lock.exit")
+
+    output = Output()
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002),
+    )
+    monkeypatch.setattr(authority_module, "parse_request", lambda _stream: _prepare_request())
+    monkeypatch.setattr(authority_module, "authority_lock", locked)
+    monkeypatch.setattr(
+        authority_module,
+        "_build_runtime",
+        lambda _policy, *, operator_uid, operator_gid: runtime,
+        raising=False,
+    )
+    monkeypatch.setattr(authority_module.sys, "stdin", Input())
+    monkeypatch.setattr(authority_module.sys, "stdout", output)
+
+    status = authority_module.serve_validated(_policy().public())
+
+    assert status == 1
+    assert output.buffer.getvalue() == (
+        b'{"authority_source_sha":"1111111111111111111111111111111111111111",'
+        b'"authority_source_tree":"2222222222222222222222222222222222222222",'
+        b'"cleanup_status":"inert","error_code":"transition_failed",'
+        b'"failure_phase":"release_apply","operation":"prepare",'
+        b'"request_id":"00000000-0000-0000-0000-000000000001",'
+        b'"runtime_profile_sha256":"3333333333333333333333333333333333333333333333333333333333333333",'
+        b'"schema":"loom.personal-dev-native-builder-runtime-authority-failure.v1",'
+        b'"status":"failed"}\n'
+    )
+    assert b"private" not in output.buffer.getvalue()
+    assert events == [
+        "lock.enter",
+        "receipt.write",
+        "receipt.flush",
+        "lock.exit",
+    ]
+
+
+def test_failure_receipt_revalidates_public_code_at_serialization_boundary() -> None:
+    """Catches mutation of an approved diagnostic before public serialization."""
+    failure = AuthorityError(
+        "transition_failed",
+        operation="prepare",
+        failure_phase="release_apply",
+        cleanup_status="inert",
+    )
+    failure.code = "a9f4c13e71d64bd6a836f0fd721bb05d"
+
+    with pytest.raises(AuthorityError, match="failure_receipt_invalid"):
+        authority_module._failure_receipt(_policy(), _prepare_request(), failure)
+
+
 def test_prepare_runs_exact_transition_and_publishes_only_after_inert_exit() -> None:
     runtime, events, host, states, archives, conformance, configs = _prepare_runtime()
 
@@ -2709,12 +3069,61 @@ def test_prepare_rejects_noninert_state_before_any_mutation() -> None:
         hashlib.sha256(payload).hexdigest(),
     )
 
-    with pytest.raises(AuthorityError, match="phase_invalid"):
+    with pytest.raises(AuthorityError, match="phase_invalid") as raised:
         runtime.dispatch(_prepare_request())
 
+    assert raised.value.operation == "prepare"
+    assert raised.value.failure_phase == "precondition"
+    assert raised.value.cleanup_status == "unchanged"
     assert events == ["state.read"]
     assert not host.dockerd_active
     assert not archives.present
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_phase", "cleanup_status"),
+    (
+        ("initial-inert-check", "inert_check", "unproven"),
+        ("archive-copy", "archive_copy", "inert"),
+        ("installer-preflight", "installer_preflight", "inert"),
+    ),
+)
+def test_prepare_failure_before_mutation_has_exact_diagnostics(
+    failure_kind: str,
+    expected_phase: str,
+    cleanup_status: str,
+) -> None:
+    runtime, _, _, _, _, _, _ = _prepare_runtime(
+        host_fail="host.verify_inert" if failure_kind == "initial-inert-check" else None,
+        installer_fail=(
+            "installer.preflight:/private/archive-copy"
+            if failure_kind == "installer-preflight"
+            else None
+        ),
+    )
+
+    if failure_kind == "archive-copy":
+
+        class FailingArchives:
+            @contextmanager
+            def copy(
+                self,
+                _source: Path,
+                *,
+                expected_sha512: str,
+                request_id: str,
+            ) -> Iterator[Path]:
+                raise AuthorityError("archive_invalid")
+                yield Path("/unreachable")
+
+        runtime.archives = FailingArchives()
+
+    with pytest.raises(AuthorityError) as raised:
+        runtime.dispatch(_prepare_request())
+
+    assert raised.value.operation == "prepare"
+    assert raised.value.failure_phase == expected_phase
+    assert raised.value.cleanup_status == cleanup_status
 
 
 def test_prepare_rejects_nondeterministic_plans_and_compensates() -> None:
@@ -2736,26 +3145,28 @@ def test_prepare_rejects_nondeterministic_plans_and_compensates() -> None:
 
 
 @pytest.mark.parametrize(
-    ("failure_kind", "failure_value"),
+    ("failure_kind", "failure_value", "expected_phase", "cleanup_status"),
     [
-        ("installer", "installer.install:/private/archive-copy"),
-        ("installer", "installer.verify_staged"),
-        ("host", "host.load_nft"),
-        ("host", "host.start_dockerd"),
-        ("converger", "plan"),
-        ("converger", "apply"),
-        ("converger", "verify"),
-        ("conformance", True),
-        ("host", "host.stop_dockerd"),
-        ("host", "host.delete_nft"),
-        ("host", "host.verify_inert:2"),
-        ("archive", True),
-        ("state", True),
+        ("installer", "installer.install:/private/archive-copy", "installer_install", "inert"),
+        ("installer", "installer.verify_staged", "installer_verify", "inert"),
+        ("host", "host.load_nft", "network_load", "inert"),
+        ("host", "host.start_dockerd", "dockerd_start", "inert"),
+        ("converger", "plan", "release_plan", "inert"),
+        ("converger", "apply", "release_apply", "inert"),
+        ("converger", "verify", "release_verify", "inert"),
+        ("conformance", True, "conformance", "inert"),
+        ("host", "host.stop_dockerd", "dockerd_stop", "inert"),
+        ("host", "host.delete_nft", "network_remove", "inert"),
+        ("host", "host.verify_inert:2", "inert_check", "inert"),
+        ("archive", True, "archive_cleanup", "unproven"),
+        ("state", True, "state_publish", "inert"),
     ],
 )
 def test_prepare_failure_after_each_mutation_compensates_to_inert(
     failure_kind: str,
     failure_value: object,
+    expected_phase: str,
+    cleanup_status: str,
 ) -> None:
     arguments: dict[str, object] = {}
     if failure_kind == "installer":
@@ -2772,9 +3183,11 @@ def test_prepare_failure_after_each_mutation_compensates_to_inert(
         arguments["state_publish_fail"] = failure_value
     runtime, events, host, states, archives, _, _ = _prepare_runtime(**arguments)
 
-    with pytest.raises(AuthorityError):
+    with pytest.raises(AuthorityError) as raised:
         runtime.dispatch(_prepare_request())
 
+    assert raised.value.failure_phase == expected_phase
+    assert raised.value.cleanup_status == cleanup_status
     assert "host.stop_agent" in events
     assert "host.stop_dockerd" in events
     assert "host.delete_nft" in events

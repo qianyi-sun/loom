@@ -49,10 +49,11 @@ from loom_cli.rollout.gb10_rehearsal import (
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE, _inspect_registry_manifest
 from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.checkpoint_database_authority import (
-    _DATABASE_AUTHORITY_SQL,
+    _APPLICATION_DATABASE_AUTHORITY_SQL,
     DatabaseAuthorityError,
     DatabaseAuthorityEvidence,
-    parse_database_authority_observation,
+    parse_application_database_authority_observation,
+    rebind_application_database_authority,
 )
 from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
@@ -1425,6 +1426,7 @@ class IsolatedRehearsalExecutor:
                 "--namespace",
                 plan.resources.namespace,
                 "exec",
+                "-i",
                 "pod/loom-rehearsal-db",
                 "--container",
                 "postgres",
@@ -1437,16 +1439,35 @@ class IsolatedRehearsalExecutor:
                 "--set=ON_ERROR_STOP=1",
                 "--username=loom_rehearsal",
                 f"--dbname={plan.resources.database}",
-                f"--command={_DATABASE_AUTHORITY_SQL}",
+                "--file=-",
             ),
             timeout=30,
             max_bytes=_MAX_DATABASE_AUTHORITY_BYTES,
+            input_payload=_APPLICATION_DATABASE_AUTHORITY_SQL.encode("utf-8"),
         )
         if payload is None:
             return None
         try:
-            return parse_database_authority_observation(payload.strip().encode())
-        except DatabaseAuthorityError:
+            application = parse_application_database_authority_observation(payload.strip().encode())
+            checkpoint = DatabaseAuthorityEvidence(
+                public_schema_revision=plan.public_schema_revision,  # type: ignore[arg-type]
+                capacity_guard_schema_revision=plan.capacity_guard_schema_revision,
+                configuration_epoch=plan.manager_configuration_epoch,  # type: ignore[arg-type]
+                configuration_digest=plan.manager_configuration_digest,  # type: ignore[arg-type]
+                authority_incarnation=plan.manager_authority_incarnation,  # type: ignore[arg-type]
+                writer_epoch=plan.manager_writer_epoch,  # type: ignore[arg-type]
+                execution_state=plan.manager_execution_state,  # type: ignore[arg-type]
+                execution_epoch=plan.manager_execution_epoch,  # type: ignore[arg-type]
+                execution_manifest_sha256=plan.manager_execution_manifest_sha256,  # type: ignore[arg-type]
+                executable_new_capacity_ceiling=(
+                    plan.manager_executable_new_capacity_ceiling  # type: ignore[arg-type]
+                ),
+                increase_freeze=plan.manager_increase_freeze,  # type: ignore[arg-type]
+            )
+            if checkpoint.digest != plan.database_authority_digest:
+                raise DatabaseAuthorityError("checkpoint database authority drifted")
+            return rebind_application_database_authority(checkpoint, application)
+        except (DatabaseAuthorityError, TypeError, ValueError):
             return None
 
     def _migration(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
@@ -2641,9 +2662,10 @@ class IsolatedRehearsalExecutor:
         *,
         timeout: int,
         max_bytes: int,
+        input_payload: bytes | None = None,
     ) -> str | None:
         try:
-            result = self.run(argv, None, timeout)
+            result = self.run(argv, input_payload, timeout)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             return None
         if (
