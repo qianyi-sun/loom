@@ -661,6 +661,50 @@ def test_verifies_both_platforms_labels_every_container_and_readies_denial_serve
     ) in runner.calls
 
 
+def test_injected_runner_waits_for_asynchronous_readiness_before_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches production busy-polling startup because its injected runner has a different type."""
+
+    class DelayedReadinessRunner(RecordingDockerRunner):
+        elapsed = 0.0
+
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            result = super().run(argv, check=check, env=env)
+            call = tuple(argv)
+            is_buildkit_readiness = call[3:5] == ("exec", BUILDKIT_ID) and call[-2:] == (
+                "debug",
+                "workers",
+            )
+            is_denial_readiness = call[3:5] == ("exec", DENIAL_ID) and call[-2:] == (
+                "-c",
+                conformance._DENIAL_READY_PROGRAM,
+            )
+            if is_buildkit_readiness and self.elapsed < 1:
+                return CommandResult(1, stderr="not ready")
+            if is_denial_readiness and self.elapsed < 2:
+                return CommandResult(1, stderr="not ready")
+            return result
+
+    runner = DelayedReadinessRunner()
+    waits: list[float] = []
+
+    def advance(seconds: float) -> None:
+        waits.append(seconds)
+        runner.elapsed += seconds
+
+    monkeypatch.setattr(conformance.time, "sleep", advance)
+
+    assert run_conformance(_inputs(), runner)["status"] == "passed"
+    assert waits == [1, 1]
+
+
 @pytest.mark.parametrize("platform", ["linux/amd64", "windows/arm64"])
 def test_rejects_any_non_arm64_image_before_container_creation(platform: str) -> None:
     """Catches QEMU/binfmt execution of an image that is not native linux/arm64."""
@@ -778,9 +822,11 @@ def test_refuses_existing_exact_name_before_first_create() -> None:
 @pytest.mark.parametrize("failure_number", range(1, 32))
 def test_each_primary_failure_cleans_only_recorded_ids_in_reverse_order(
     failure_number: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catches leaked sandboxes or broad cleanup when a create, start, or probe fails."""
     runner = RecordingDockerRunner(fail_at=failure_number)
+    monkeypatch.setattr(conformance.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(ConformanceError, match="conformance failed"):
         run_conformance(_inputs(), runner)
