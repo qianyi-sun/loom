@@ -552,6 +552,11 @@ func TestExecutorBuildUsesFreshCapturePathsAndCleansFailureAndCancellation(t *te
 		if err := os.WriteFile(outputPath, []byte("partial oci"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if errors.Is(buildError, context.Canceled) {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(refPath), ".metadata.json.tmp"), []byte("interrupted atomic write"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		return buildError
 	}
 	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
@@ -587,6 +592,19 @@ func TestExecutorBuildUsesFreshCapturePathsAndCleansFailureAndCancellation(t *te
 		if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("partial OCI output survived failure %v: %v", failure, err)
 		}
+	}
+
+	buildError = nil
+	executorValidateOCIOutput = func(string, string) (OCIOutput, error) {
+		return OCIOutput{}, errors.New("OCI validation failed")
+	}
+	before := len(captureDirs)
+	result, err := executor.Build(context.Background(), component)
+	if err == nil || result != (BuildResult{}) {
+		t.Fatalf("OCI validation failure returned result=%#v error=%v", result, err)
+	}
+	if _, err := os.Stat(captureDirs[before]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("capture directory survived OCI validation failure: %v", err)
 	}
 }
 
