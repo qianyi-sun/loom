@@ -431,6 +431,61 @@ def test_runs_fixed_two_sandbox_conformance_without_a_shell() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("observed_cap_add", "accepted"),
+    [
+        (["CAP_SETGID", "CAP_SETUID"], True),
+        (["CAP_SETGID"], False),
+        (["CAP_SETGID", "CAP_SETUID", "CAP_SYS_ADMIN"], False),
+        (["CAP_SETGID", "CAP_SETUID", "CAP_SETUID"], False),
+        (["CAP_SETGID", "setuid"], False),
+        (["SETUID", "CAP_SETUID", "SETGID"], False),
+        ("CAP_SETUID", False),
+        (["CAP_SETGID", 123], False),
+    ],
+)
+def test_create_reconciliation_requires_exact_docker_capability_set(
+    observed_cap_add: object,
+    accepted: bool,
+) -> None:
+    """Catches comparing Docker's canonical capability names as raw CLI spellings or a subset."""
+
+    class DockerCapabilityRunner(RecordingDockerRunner):
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            call = tuple(argv)
+            result = super().run(argv, check=check, env=env)
+            if (
+                result.returncode == 0
+                and "inspect" in call
+                and "--format" in call
+                and call[call.index("--format") + 1] == "{{json .}}"
+                and call[-1] == "loom-native-conformance-buildkit"
+            ):
+                identity = json.loads(result.stdout)
+                host = identity["HostConfig"]
+                assert isinstance(host, dict)
+                host["CapAdd"] = observed_cap_add
+                return CommandResult(
+                    0,
+                    json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n",
+                )
+            return result
+
+    runner = DockerCapabilityRunner()
+    if accepted:
+        assert run_conformance(_inputs(), runner)["status"] == "passed"
+    else:
+        with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+            run_conformance(_inputs(), runner)
+        assert raised.value.stage == "buildkit_create"
+
+
 def test_accepts_empty_json_list_stdout_for_an_exact_missing_inspect() -> None:
     """Catches rejecting the Docker CLI's exact absent-object response."""
     runner = RecordingDockerRunner(missing_inspect_stdout="[]\n")
