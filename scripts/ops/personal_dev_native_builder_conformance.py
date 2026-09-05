@@ -535,6 +535,22 @@ def _strings(value: object) -> list[str]:
     return cast(list[str], value)
 
 
+def _normalized_capability_set(value: object) -> frozenset[str] | None:
+    if not isinstance(value, list):
+        return None
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return None
+        name = item.removeprefix("CAP_")
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
+            return None
+        normalized.append(name)
+    if len(normalized) != len(set(normalized)):
+        return None
+    return frozenset(normalized)
+
+
 def _inspect_matches_create(
     value: dict[str, object],
     argv: tuple[str, ...],
@@ -571,10 +587,14 @@ def _inspect_matches_create(
         }
         expected_entrypoint = options.get("--entrypoint", [])
         observed_entrypoint = configuration.get("Entrypoint")
+        expected_cap_add = _normalized_capability_set(options.get("--cap-add", []))
+        observed_cap_add = _normalized_capability_set(host.get("CapAdd", []))
         if isinstance(observed_entrypoint, str):
             observed_entrypoint = [observed_entrypoint]
         if (
-            value.get("Name") != f"/{options['--name'][0]}"
+            expected_cap_add is None
+            or observed_cap_add is None
+            or value.get("Name") != f"/{options['--name'][0]}"
             or configuration.get("Image") != image_or_name
             or observed_entrypoint != expected_entrypoint
             or configuration.get("Cmd") != list(command)
@@ -584,7 +604,7 @@ def _inspect_matches_create(
             or host.get("NetworkMode") != network_name
             or host.get("ReadonlyRootfs") is not True
             or host.get("CapDrop") != options.get("--cap-drop", [])
-            or host.get("CapAdd", []) != options.get("--cap-add", [])
+            or observed_cap_add != expected_cap_add
             or host.get("SecurityOpt") != options.get("--security-opt", [])
             or host.get("CgroupParent", "") != options.get("--cgroup-parent", [""])[0]
             or host.get("NanoCpus") != int(float(options["--cpus"][0]) * 1_000_000_000)
