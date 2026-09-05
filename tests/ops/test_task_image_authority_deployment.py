@@ -131,6 +131,8 @@ def test_manifest_references_only_uncreated_runtime_and_tls_secrets() -> None:
         "session_token",
         "BEGIN CERTIFICATE",
         "BEGIN PRIVATE KEY",
+        "registry_signing_key",
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY",
         "hostPath",
         "privileged: true",
     ):

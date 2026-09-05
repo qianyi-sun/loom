@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -91,9 +91,30 @@ async def registry_authority_session(
             await session.execute(delete(TaskImagePublicationEvidence))
             await session.execute(delete(TaskImageMaterializationAttempt))
             await session.execute(delete(TaskImageMaterialization))
+            await session.execute(delete(TaskImageBuildProjectionEvent))
+            await session.execute(
+                update(TaskImageBuildProjection)
+                .where(TaskImageBuildProjection.session_id.is_not(None))
+                .values(
+                    state="projected",
+                    exchange_id=None,
+                    exchange_json=null(),
+                    exchange_sha256=None,
+                    session_id=None,
+                    session_generation=None,
+                    session_token_hash=None,
+                    session_secret_ref=None,
+                    session_json=null(),
+                    session_sha256=None,
+                    session_issued_at=None,
+                    session_expires_at=None,
+                    revoked_at=None,
+                    revoke_reason=None,
+                    expired_at=None,
+                )
+            )
             await session.execute(delete(TaskImageBuildSessionGeneration))
             await session.execute(delete(TaskImageBuildContainmentAttestation))
-            await session.execute(delete(TaskImageBuildProjectionEvent))
             await session.execute(delete(TaskImageBuildProjection))
             await session.execute(delete(TaskImageBuildGrantEvent))
             await session.execute(delete(TaskImageBuildGrant))
@@ -551,39 +572,16 @@ async def test_concurrent_exact_credential_requests_create_one_generation(
             await session.commit()
             return response
 
-    try:
-        first, second = await asyncio.gather(
-            issue(CREDENTIAL_ID),
-            issue(NEXT_CREDENTIAL_ID),
-        )
-        assert first == second
-        assert first.credential_id in {CREDENTIAL_ID, NEXT_CREDENTIAL_ID}
-        async with registry_authority_session() as session:
-            assert await session.scalar(
-                select(func.count(TaskImageRegistryCredentialGeneration.credential_id))
-            ) == 1
-    finally:
-        # This test alone commits setup so independent connections can contend.
-        # Truncating the complete FK cycle restores the otherwise rollback-only fixture.
-        async with registry_authority_session() as cleanup_session:
-            await cleanup_session.execute(
-                text(
-                    "TRUNCATE TABLE "
-                    "task_image_publication_candidates, "
-                    "task_image_registry_credentials, "
-                    "task_image_materialization_operation_events, "
-                    "task_image_publication_evidence, "
-                    "task_image_materialization_attempts, "
-                    "task_image_materializations, "
-                    "task_image_build_session_generations, "
-                    "task_image_build_containment_attestations, "
-                    "task_image_build_projection_events, "
-                    "task_image_build_projections, "
-                    "task_image_build_grant_events, "
-                    "task_image_build_grants CASCADE"
-                )
-            )
-            await cleanup_session.commit()
+    first, second = await asyncio.gather(
+        issue(CREDENTIAL_ID),
+        issue(NEXT_CREDENTIAL_ID),
+    )
+    assert first == second
+    assert first.credential_id in {CREDENTIAL_ID, NEXT_CREDENTIAL_ID}
+    async with registry_authority_session() as session:
+        assert await session.scalar(
+            select(func.count(TaskImageRegistryCredentialGeneration.credential_id))
+        ) == 1
 
 
 async def test_credential_replay_rejects_persisted_public_scalar_drift(
