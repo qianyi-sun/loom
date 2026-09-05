@@ -163,15 +163,138 @@ _INSTALLED_PROFILE_PATH = (
     LIBRARY_ROOT / "deploy" / "personal-dev-native-builder" / "runtime-profile-v1.json"
 )
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_PUBLIC_FAILURE_CODES = frozenset(
+    {
+        "address_pool_conflict",
+        "agent_binding_invalid",
+        "agent_material_invalid",
+        "agent_stage_invalid",
+        "agent_template_invalid",
+        "archive_changed",
+        "archive_cleanup_failed",
+        "archive_destination_invalid",
+        "archive_invalid",
+        "archive_member_invalid",
+        "atomic_publish_failed",
+        "atomic_publish_unavailable",
+        "authority_invalid",
+        "cgroup_v2_invalid",
+        "cleanup_failed",
+        "command_boundary_invalid",
+        "command_cleanup_failed",
+        "command_failed",
+        "command_interrupted",
+        "command_invalid",
+        "command_output_invalid",
+        "command_timeout",
+        "context_invalid",
+        "convergence_plan_invalid",
+        "dedicated_daemon_busy",
+        "dedicated_daemon_invalid",
+        "dedicated_socket_invalid",
+        "destination_changed",
+        "docker_command_failed",
+        "docker_endpoint_invalid",
+        "docker_identity_invalid",
+        "docker_output_invalid",
+        "docker_timeout",
+        "generated_input_invalid",
+        "host_capacity_invalid",
+        "host_command_invalid",
+        "host_identity_invalid",
+        "host_mutation_failed",
+        "host_state_invalid",
+        "identity_conflict",
+        "identity_install_invalid",
+        "image_identity_invalid",
+        "image_in_use",
+        "image_inventory_invalid",
+        "image_race_detected",
+        "image_retention_invalid",
+        "image_revision_invalid",
+        "internal_error",
+        "kvm_device_invalid",
+        "managed_file_invalid",
+        "managed_objects_invalid",
+        "nftables_state_invalid",
+        "parent_directory_invalid",
+        "path_invalid",
+        "phase_invalid",
+        "previous_release_invalid",
+        "public_key_invalid",
+        "release_binding_invalid",
+        "release_config_invalid",
+        "release_revision_mismatch",
+        "required_image_missing",
+        "runsc_version_invalid",
+        "runtime_directory_invalid",
+        "service_state_invalid",
+        "staged_state_invalid",
+        "staging_cleanup_invalid",
+        "state_invalid",
+        "state_publish_failed",
+        "transition_failed",
+    }
+)
+_DIAGNOSTIC_OPERATIONS = frozenset({"prepare"})
+_FAILURE_PHASES = frozenset(
+    {
+        "archive_cleanup",
+        "archive_copy",
+        "cleanup",
+        "conformance",
+        "dockerd_start",
+        "dockerd_stop",
+        "inert_check",
+        "installer_install",
+        "installer_preflight",
+        "installer_verify",
+        "network_load",
+        "network_remove",
+        "precondition",
+        "release_apply",
+        "release_plan",
+        "release_verify",
+        "state_publish",
+    }
+)
+_CLEANUP_STATUSES = frozenset({"inert", "unchanged", "unproven"})
+_FAILURE_RECEIPT_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-failure.v1"
 
 
 class AuthorityError(RuntimeError):
     """The fixed authority contract could not be satisfied."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        operation: str | None = None,
+        failure_phase: str | None = None,
+        cleanup_status: str | None = None,
+    ) -> None:
         safe_code = code if _ERROR_CODE.fullmatch(code) is not None else "authority_failed"
+        diagnostic = (operation, failure_phase, cleanup_status)
+        if any(value is not None for value in diagnostic) and (
+            safe_code not in _PUBLIC_FAILURE_CODES
+            or operation not in _DIAGNOSTIC_OPERATIONS
+            or failure_phase not in _FAILURE_PHASES
+            or cleanup_status not in _CLEANUP_STATUSES
+        ):
+            raise ValueError("invalid authority failure diagnostic")
         self.code = safe_code
+        self.operation = operation
+        self.failure_phase = failure_phase
+        self.cleanup_status = cleanup_status
         super().__init__(safe_code)
+
+
+def _safe_failure_code(failure: BaseException) -> str:
+    try:
+        code = failure.code  # type: ignore[attr-defined]
+    except BaseException:
+        return "transition_failed"
+    return code if isinstance(code, str) and code in _PUBLIC_FAILURE_CODES else "transition_failed"
 
 
 class _CommandOutputLimitError(RuntimeError):
@@ -2074,23 +2197,38 @@ class RuntimeAuthority:
         current: StateSnapshot | None,
     ) -> dict[str, object]:
         if current is not None:
-            raise AuthorityError("phase_invalid")
+            raise AuthorityError(
+                "phase_invalid",
+                operation="prepare",
+                failure_phase="precondition",
+                cleanup_status="unchanged",
+            )
         header = request.header.as_mapping()
-        self._validated_host_status(self.host.verify_inert(require_empty=True))
+        failure_phase = "inert_check"
+        inert_verified = False
         mutating = False
         final_host: HostStatus | None = None
         try:
+            self._validated_host_status(self.host.verify_inert(require_empty=True))
+            inert_verified = True
+            failure_phase = "archive_copy"
             with self.archives.copy(
                 Path(cast(str, header["archive_path"])),
                 expected_sha512=cast(str, header["archive_sha512"]),
                 request_id=cast(str, header["request_id"]),
             ) as private_archive:
+                failure_phase = "installer_preflight"
                 self.installer.preflight(private_archive)
                 mutating = True
+                failure_phase = "installer_install"
                 self.installer.install(private_archive)
+                failure_phase = "installer_verify"
                 self.installer.verify_staged()
+                failure_phase = "network_load"
                 self.host.load_nft()
+                failure_phase = "dockerd_start"
                 self.host.start_dockerd()
+                failure_phase = "release_plan"
                 converger = self.converger_factory(self._release_config(header))
                 first_plan = dict(converger.plan())
                 second_plan = dict(converger.plan())
@@ -2098,8 +2236,11 @@ class RuntimeAuthority:
                 second_bytes = _canonical_json(second_plan)
                 if len(first_bytes) > _MAX_RECEIPT_BYTES or first_bytes != second_bytes:
                     raise AuthorityError("convergence_plan_invalid")
+                failure_phase = "release_apply"
                 converger.apply()
+                failure_phase = "release_verify"
                 converger.verify()
+                failure_phase = "conformance"
                 conformance = dict(
                     self.conformance.run(
                         ConformanceInputs(
@@ -2110,24 +2251,43 @@ class RuntimeAuthority:
                     )
                 )
                 _validate_conformance(conformance)
+                failure_phase = "dockerd_stop"
                 self.host.stop_dockerd()
+                failure_phase = "network_remove"
                 self.host.delete_nft()
+                failure_phase = "inert_check"
                 final_host = self._validated_host_status(self.host.verify_inert(require_empty=True))
+                failure_phase = "archive_cleanup"
+            failure_phase = "state_publish"
             state = self._prepared_state(header, conformance)
             snapshot = self.states.publish(state)
             if not isinstance(snapshot, StateSnapshot):
                 raise AuthorityError("state_invalid")
         except BaseException as primary_failure:
+            failure_code = _safe_failure_code(primary_failure)
+            if failure_code == "archive_cleanup_failed":
+                failure_phase = "archive_cleanup"
+            cleanup_status = (
+                "inert" if inert_verified and failure_phase != "archive_cleanup" else "unproven"
+            )
             if mutating:
                 try:
                     self._compensate_inert()
                 except BaseException as cleanup_failure:
-                    if isinstance(cleanup_failure, AuthorityError):
-                        raise
-                    raise AuthorityError("cleanup_failed") from cleanup_failure
-            if isinstance(primary_failure, AuthorityError):
-                raise
-            raise AuthorityError("transition_failed") from primary_failure
+                    raise AuthorityError(
+                        "cleanup_failed",
+                        operation="prepare",
+                        failure_phase="cleanup",
+                        cleanup_status="unproven",
+                    ) from cleanup_failure
+                if failure_phase != "archive_cleanup":
+                    cleanup_status = "inert"
+            raise AuthorityError(
+                failure_code,
+                operation="prepare",
+                failure_phase=failure_phase,
+                cleanup_status=cleanup_status,
+            ) from primary_failure
         if final_host is None:
             raise AuthorityError("transition_failed")
         return self._receipt(
@@ -2655,7 +2815,35 @@ def _build_runtime(
     )
 
 
-def serve_validated(policy_value: Mapping[str, object]) -> None:
+def _failure_receipt(
+    policy: AuthorityPolicy,
+    request: AuthorityRequest,
+    failure: AuthorityError,
+) -> dict[str, object]:
+    header = request.header.as_mapping()
+    if (
+        failure.code not in _PUBLIC_FAILURE_CODES
+        or failure.operation != header.get("operation")
+        or failure.operation not in _DIAGNOSTIC_OPERATIONS
+        or failure.failure_phase not in _FAILURE_PHASES
+        or failure.cleanup_status not in _CLEANUP_STATUSES
+    ):
+        raise AuthorityError("failure_receipt_invalid")
+    return {
+        "authority_source_sha": policy.authority_source_sha,
+        "authority_source_tree": policy.authority_source_tree,
+        "cleanup_status": failure.cleanup_status,
+        "error_code": failure.code,
+        "failure_phase": failure.failure_phase,
+        "operation": failure.operation,
+        "request_id": header.get("request_id"),
+        "runtime_profile_sha256": policy.runtime_profile_sha256,
+        "schema": _FAILURE_RECEIPT_SCHEMA,
+        "status": "failed",
+    }
+
+
+def serve_validated(policy_value: Mapping[str, object]) -> int | None:
     """Serve once after the minimal launcher validates every installed asset."""
     import pwd
 
@@ -2671,9 +2859,19 @@ def serve_validated(policy_value: Mapping[str, object]) -> None:
             operator_uid=operator.pw_uid,
             operator_gid=operator.pw_gid,
         )
-        receipt = runtime.dispatch(request)
-        sys.stdout.buffer.write(encode_receipt(receipt))
+        try:
+            receipt = runtime.dispatch(request)
+        except AuthorityError as failure:
+            if failure.operation is None:
+                raise
+            payload = encode_receipt(_failure_receipt(policy, request, failure))
+            status = 1
+        else:
+            payload = encode_receipt(receipt)
+            status = None
+        sys.stdout.buffer.write(payload)
         sys.stdout.buffer.flush()
+    return status
 
 
 __all__ = [
