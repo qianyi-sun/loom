@@ -41,7 +41,9 @@ def _timestamp(value: str) -> str:
     # datetime.fromisoformat alone accepts alternate separators and offsets.
     if not value.isascii() or len(value) != 20 or value[10] != "T" or not value.endswith("Z"):
         raise ValueError("publication time must be whole-second UTC")
-    datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    if parsed.isoformat(timespec="seconds") + "Z" != value:
+        raise ValueError("publication time must use canonical UTC digits")
     return value
 
 

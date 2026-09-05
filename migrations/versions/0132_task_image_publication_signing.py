@@ -163,6 +163,24 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Empty, inactive installations are reversible. Once publication authority
+    # exists, rollback must preserve its keys, epochs and immutable audit trail.
+    # Serialize the check with the same state-first order as publication writes.
+    op.execute("""
+        LOCK TABLE public.task_image_publication_state IN ACCESS EXCLUSIVE MODE;
+        LOCK TABLE public.task_image_publication_keys IN ACCESS EXCLUSIVE MODE;
+        LOCK TABLE public.task_image_publication_envelopes IN ACCESS EXCLUSIVE MODE;
+        DO $$ BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM public.task_image_publication_state
+            WHERE singleton_id = 1 AND revocation_epoch = 0 AND keyset_version = 0
+          ) OR EXISTS (SELECT 1 FROM public.task_image_publication_keys)
+            OR EXISTS (SELECT 1 FROM public.task_image_publication_envelopes) THEN
+            RAISE EXCEPTION 'publication authority cannot be discarded'
+              USING ERRCODE = '23514';
+          END IF;
+        END $$;
+    """)
     op.execute("""
         DROP TABLE task_image_publication_envelopes;
         ALTER TABLE task_image_publication_candidates DROP CONSTRAINT

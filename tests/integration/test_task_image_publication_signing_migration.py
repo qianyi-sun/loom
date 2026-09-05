@@ -99,6 +99,56 @@ def _reject(engine, sql, values=None):
             connection.execute(text(sql), values or {})
 
 
+@pytest.mark.parametrize("used_authority", ["key", "keyset_version", "revocation_epoch"])
+def test_0132_downgrade_refuses_used_publication_authority(
+    isolated_migration_postgres_url,
+    used_authority,
+):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            if used_authority == "key":
+                _insert_key(connection)
+            else:
+                connection.execute(
+                    text(f"UPDATE task_image_publication_state SET {used_authority} = 1")
+                )
+            before = connection.execute(
+                text(
+                    "SELECT singleton_id, revocation_epoch, keyset_version "
+                    "FROM task_image_publication_state"
+                )
+            ).one()
+            key_count = connection.execute(
+                text("SELECT count(*) FROM task_image_publication_keys")
+            ).scalar_one()
+        with pytest.raises(DBAPIError, match="publication authority cannot be discarded"):
+            command.downgrade(_config(isolated_migration_postgres_url), "0131")
+        assert set(TABLES) <= set(inspect(engine).get_table_names())
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT singleton_id, revocation_epoch, keyset_version "
+                        "FROM task_image_publication_state"
+                    )
+                ).one()
+                == before
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM task_image_publication_keys")
+                ).scalar_one()
+                == key_count
+            )
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0132"
+            )
+    finally:
+        engine.dispose()
+
+
 def test_key_and_epoch_lifecycle_are_monotonic_and_share_singleton_lock(
     isolated_migration_postgres_url,
 ):

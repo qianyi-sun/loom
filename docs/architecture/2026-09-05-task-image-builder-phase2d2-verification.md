@@ -187,6 +187,11 @@ The runtime authority never loads the production Ed25519 private key. A
 service/KMS implementation and its authenticated transport must be available
 and verified before composing the publication worker in production.
 
+The publication migration can downgrade only an empty, inactive installation:
+no keys or envelopes and zero keyset/revocation counters. A state-first locked
+check precedes any table removal. Used publication authority and its audit
+history are retained during rollback; operational rollback is not schema reset.
+
 ## Failure, retention and compatibility
 
 Invalid/missing/inconsistent registry bytes do not consume deterministic task

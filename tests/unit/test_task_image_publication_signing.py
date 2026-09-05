@@ -377,6 +377,7 @@ def test_validly_resigned_substitution_of_every_unsigned_field_is_rejected(field
         "2026-09-05T12:00:60Z",
         "2026-09-05T12:00:00z",
         "٢٠٢٦-09-05T12:00:00Z",
+        "2026-09- 5T12:00:00Z",
         None,
     ],
 )
