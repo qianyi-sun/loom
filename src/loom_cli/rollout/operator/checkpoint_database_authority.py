@@ -29,7 +29,7 @@ _GUARD_REVISION_RE = re.compile(r"^guard_[0-9]{4}$")
 _MAX_OBSERVATION_BYTES = 4 * 1024 * 1024
 _QUERY_TIMEOUT_SECONDS = 30.0
 
-_DATABASE_AUTHORITY_SQL = r"""
+_APPLICATION_DATABASE_AUTHORITY_SQL = r"""
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT CASE
   WHEN to_regclass('loom_capacity_guard.capacity_guard_alembic_version') IS NULL
@@ -42,6 +42,16 @@ FROM loom_capacity_guard.capacity_guard_alembic_version \gset
 \else
 \set guard_revisions '[]'
 \endif
+SELECT jsonb_build_object(
+  'public_revisions', (SELECT COALESCE(jsonb_agg(version_num ORDER BY version_num), '[]'::jsonb) FROM public.alembic_version),
+  'guard_table_present', :'guard_table_present'::boolean,
+  'guard_revisions', :'guard_revisions'::jsonb
+);
+COMMIT;
+"""
+
+_MANAGER_DATABASE_AUTHORITY_SQL = r"""
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 WITH latest AS (
   SELECT *
   FROM public.capacity_configuration_epochs
@@ -85,9 +95,6 @@ WITH latest AS (
   FROM public.capacity_authority_state
 )
 SELECT jsonb_build_object(
-  'public_revisions', (SELECT COALESCE(jsonb_agg(version_num ORDER BY version_num), '[]'::jsonb) FROM public.alembic_version),
-  'guard_table_present', :'guard_table_present'::boolean,
-  'guard_revisions', :'guard_revisions'::jsonb,
   'configuration', configuration.rows,
   'generations', generations.rows,
   'authority', authority.rows
@@ -110,6 +117,32 @@ class DatabaseAuthorityRunner(Protocol):
         input_payload: bytes,
         timeout_seconds: float,
     ) -> bytes: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationDatabaseAuthorityEvidence:
+    public_schema_revision: str
+    capacity_guard_schema_revision: str | None
+
+    def __post_init__(self) -> None:
+        if _REVISION_RE.fullmatch(self.public_schema_revision) is None or (
+            self.capacity_guard_schema_revision is not None
+            and _GUARD_REVISION_RE.fullmatch(self.capacity_guard_schema_revision) is None
+        ):
+            raise ValueError("application database authority evidence is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagerDatabaseAuthorityEvidence:
+    configuration_epoch: int
+    configuration_digest: str
+    authority_incarnation: UUID
+    writer_epoch: int
+    execution_state: str
+    execution_epoch: int
+    execution_manifest_sha256: None
+    executable_new_capacity_ceiling: int
+    increase_freeze: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,19 +367,12 @@ def _parse_generations(
     return fleet
 
 
-def parse_database_authority_observation(payload: bytes) -> DatabaseAuthorityEvidence:
-    """Validate one same-transaction database observation into typed evidence."""
-    value = _strict_json(payload)
-    expected_root = {
-        "authority",
-        "configuration",
-        "generations",
-        "guard_revisions",
-        "guard_table_present",
-        "public_revisions",
-    }
+def _parse_application_database_authority_value(
+    value: Mapping[str, object],
+) -> ApplicationDatabaseAuthorityEvidence:
+    expected_root = {"guard_revisions", "guard_table_present", "public_revisions"}
     if set(value) != expected_root:
-        raise DatabaseAuthorityError("database authority observation fields are invalid")
+        raise DatabaseAuthorityError("application database authority fields are invalid")
     public = value["public_revisions"]
     if (
         not isinstance(public, list)
@@ -371,6 +397,28 @@ def parse_database_authority_observation(payload: bytes) -> DatabaseAuthorityEvi
         if guard:
             raise DatabaseAuthorityError("absent capacity guard revision is contradictory")
         guard_revision = None
+    try:
+        return ApplicationDatabaseAuthorityEvidence(
+            public_schema_revision=public[0],
+            capacity_guard_schema_revision=guard_revision,
+        )
+    except ValueError as exc:
+        raise DatabaseAuthorityError("application database authority is invalid") from exc
+
+
+def parse_application_database_authority_observation(
+    payload: bytes,
+) -> ApplicationDatabaseAuthorityEvidence:
+    """Validate one application-database transaction into typed evidence."""
+    return _parse_application_database_authority_value(_strict_json(payload))
+
+
+def _parse_manager_database_authority_value(
+    value: Mapping[str, object],
+) -> _ManagerDatabaseAuthorityEvidence:
+    expected_root = {"authority", "configuration", "generations"}
+    if set(value) != expected_root:
+        raise DatabaseAuthorityError("manager database authority fields are invalid")
 
     configuration = _one_mapping(value["configuration"], label="configuration row")
     config_fields = {
@@ -433,24 +481,92 @@ def parse_database_authority_observation(payload: bytes) -> DatabaseAuthorityEvi
         or authority.get("recovery_state") != "shadow"
     ):
         raise DatabaseAuthorityError("database authority row is invalid")
-    evidence_record = {
-        "authority_incarnation": authority["authority_incarnation"],
-        "capacity_guard_schema_revision": guard_revision,
-        "configuration_digest": configuration["canonical_digest"],
-        "configuration_epoch": configuration["configuration_epoch"],
-        "executable_new_capacity_ceiling": authority["executable_new_capacity_ceiling"],
-        "execution_epoch": authority["execution_epoch"],
-        "execution_manifest_sha256": authority["execution_manifest_sha256"],
-        "execution_state": authority["execution_state"],
-        "increase_freeze": authority["increase_freeze"],
-        "public_schema_revision": public[0],
-        "schema_version": 1,
-        "writer_epoch": authority["writer_epoch"],
-    }
-    evidence = DatabaseAuthorityEvidence.from_dict(evidence_record)
+    try:
+        authority_incarnation = UUID(str(authority["authority_incarnation"]))
+    except (TypeError, ValueError) as exc:
+        raise DatabaseAuthorityError("database authority identity is invalid") from exc
+    evidence = _ManagerDatabaseAuthorityEvidence(
+        configuration_epoch=configuration["configuration_epoch"],
+        configuration_digest=configuration["canonical_digest"],
+        authority_incarnation=authority_incarnation,
+        writer_epoch=authority["writer_epoch"],  # type: ignore[arg-type]
+        execution_state=authority["execution_state"],  # type: ignore[arg-type]
+        execution_epoch=authority["execution_epoch"],  # type: ignore[arg-type]
+        execution_manifest_sha256=authority["execution_manifest_sha256"],  # type: ignore[arg-type]
+        executable_new_capacity_ceiling=authority["executable_new_capacity_ceiling"],  # type: ignore[arg-type]
+        increase_freeze=authority["increase_freeze"],  # type: ignore[arg-type]
+    )
     if evidence.authority_incarnation != fleet.authority_incarnation:
         raise DatabaseAuthorityError("database authority incarnation binding is inconsistent")
     return evidence
+
+
+def _compose_database_authority_evidence(
+    application: ApplicationDatabaseAuthorityEvidence,
+    manager: _ManagerDatabaseAuthorityEvidence,
+) -> DatabaseAuthorityEvidence:
+    try:
+        return DatabaseAuthorityEvidence(
+            public_schema_revision=application.public_schema_revision,
+            capacity_guard_schema_revision=application.capacity_guard_schema_revision,
+            configuration_epoch=manager.configuration_epoch,
+            configuration_digest=manager.configuration_digest,
+            authority_incarnation=manager.authority_incarnation,
+            writer_epoch=manager.writer_epoch,
+            execution_state=manager.execution_state,
+            execution_epoch=manager.execution_epoch,
+            execution_manifest_sha256=manager.execution_manifest_sha256,
+            executable_new_capacity_ceiling=manager.executable_new_capacity_ceiling,
+            increase_freeze=manager.increase_freeze,
+        )
+    except (TypeError, ValueError) as exc:
+        raise DatabaseAuthorityError("database authority evidence is invalid") from exc
+
+
+def rebind_application_database_authority(
+    authority: DatabaseAuthorityEvidence,
+    application: ApplicationDatabaseAuthorityEvidence,
+) -> DatabaseAuthorityEvidence:
+    """Bind restored application evidence to immutable manager checkpoint authority."""
+    if not isinstance(authority, DatabaseAuthorityEvidence) or not isinstance(
+        application, ApplicationDatabaseAuthorityEvidence
+    ):
+        raise DatabaseAuthorityError("database authority composition is invalid")
+    return DatabaseAuthorityEvidence(
+        public_schema_revision=application.public_schema_revision,
+        capacity_guard_schema_revision=application.capacity_guard_schema_revision,
+        configuration_epoch=authority.configuration_epoch,
+        configuration_digest=authority.configuration_digest,
+        authority_incarnation=authority.authority_incarnation,
+        writer_epoch=authority.writer_epoch,
+        execution_state=authority.execution_state,
+        execution_epoch=authority.execution_epoch,
+        execution_manifest_sha256=authority.execution_manifest_sha256,
+        executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+        increase_freeze=authority.increase_freeze,
+    )
+
+
+def parse_database_authority_observation(payload: bytes) -> DatabaseAuthorityEvidence:
+    """Validate a combined observation retained for immutable evidence parsing."""
+    value = _strict_json(payload)
+    expected_root = {
+        "authority",
+        "configuration",
+        "generations",
+        "guard_revisions",
+        "guard_table_present",
+        "public_revisions",
+    }
+    if set(value) != expected_root:
+        raise DatabaseAuthorityError("database authority observation fields are invalid")
+    application = _parse_application_database_authority_value(
+        {key: value[key] for key in ("guard_revisions", "guard_table_present", "public_revisions")}
+    )
+    manager = _parse_manager_database_authority_value(
+        {key: value[key] for key in ("authority", "configuration", "generations")}
+    )
+    return _compose_database_authority_evidence(application, manager)
 
 
 def capture_database_authority(
@@ -463,7 +579,7 @@ def capture_database_authority(
     if namespace != "loom-staging":
         raise DatabaseAuthorityError("database authority namespace is invalid")
     try:
-        payload = runner.capture_stdout_with_input(
+        application_payload = runner.capture_stdout_with_input(
             (
                 "kubectl",
                 "--namespace",
@@ -483,10 +599,32 @@ def capture_database_authority(
                 "--file=-",
             ),
             env=env,
-            input_payload=_DATABASE_AUTHORITY_SQL.encode("utf-8"),
+            input_payload=_APPLICATION_DATABASE_AUTHORITY_SQL.encode("utf-8"),
             timeout_seconds=_QUERY_TIMEOUT_SECONDS,
         )
-        return parse_database_authority_observation(payload.strip())
+        manager_payload = runner.capture_stdout_with_input(
+            (
+                "kubectl",
+                "--namespace",
+                "loom-dev",
+                "exec",
+                "--stdin=true",
+                "service/loom-capacity-postgres",
+                "--",
+                "sh",
+                "-ceu",
+                "exec psql --no-psqlrc --quiet --tuples-only --no-align "
+                '--set=ON_ERROR_STOP=1 --username="$POSTGRES_USER" '
+                '--dbname="$POSTGRES_DB" --file=-',
+            ),
+            env=env,
+            input_payload=_MANAGER_DATABASE_AUTHORITY_SQL.encode("utf-8"),
+            timeout_seconds=_QUERY_TIMEOUT_SECONDS,
+        )
+        return _compose_database_authority_evidence(
+            parse_application_database_authority_observation(application_payload.strip()),
+            _parse_manager_database_authority_value(_strict_json(manager_payload.strip())),
+        )
     except DatabaseAuthorityError:
         raise
     except Exception:
@@ -494,8 +632,11 @@ def capture_database_authority(
 
 
 __all__ = [
+    "ApplicationDatabaseAuthorityEvidence",
     "DatabaseAuthorityError",
     "DatabaseAuthorityEvidence",
     "capture_database_authority",
+    "parse_application_database_authority_observation",
     "parse_database_authority_observation",
+    "rebind_application_database_authority",
 ]
