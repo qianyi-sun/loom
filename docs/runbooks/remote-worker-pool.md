@@ -218,6 +218,10 @@ Immediately before `sbatch`, the runner checks age and the full original policy
 again (only the three resource-aware requested sizes may differ), including
 candidate and QoS. A defensive snapshot copy authorizes at most one submission
 attempt per node; delayed, replayed or policy-swapped decisions fail closed.
+Node-name canonicalization completes before binding the observation policy.
+The initial probe uses the QoS selected for the current committed-slot floor;
+when submissions cross that floor, remaining nodes require fresh evidence
+under their final QoS. Evidence from boost QoS cannot authorize a normal-QoS job.
 
 The synchronous `srun` request is one task/node, 1 CPU, 16 MiB, immediate within
 3 seconds, non-exclusive, with no reservation, GPU, overlap or priority boost.

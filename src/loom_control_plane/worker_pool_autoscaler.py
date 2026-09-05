@@ -1543,11 +1543,7 @@ async def _refresh_slurm_job_registry(
             )
         )
     ).all()
-    job_ids = tuple(
-        str(job_id)
-        for job_id, _slurm_state in registry_rows
-        if job_id is not None
-    )
+    job_ids = tuple(str(job_id) for job_id, _slurm_state in registry_rows if job_id is not None)
     known_unrecoverable_job_ids = tuple(
         sorted(
             str(job_id)
@@ -1895,7 +1891,27 @@ async def _apply_slurm_scale_up(
             blocked_reason=blocked_reason,
             blocked_details=blocked_details,
         )
+    actor_config = dict(row.actuator_config or {})
+    active_plus_pending = decision.actual_slots + decision.pending_slots
+    qos_boost_value = str(actor_config.get("qos_boost") or "").strip()
+    # Keep the policy's normal QoS distinct from the initial warm-floor QoS.
+    qos_normal_value = str(
+        actor_config.get("qos_normal") or actor_config.get("slurm_qos") or "",
+    ).strip()
+    config = replace(
+        config,
+        slurm_qos=select_slurm_qos(
+            active_plus_pending=active_plus_pending,
+            min_slots=row.min_slots,
+            qos_boost=qos_boost_value,
+            qos_normal=qos_normal_value,
+        ),
+    )
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    bind_config = getattr(runner, "bind_config", None)
+    if callable(bind_config):
+        bind_config(config)
+    probe_qos = config.slurm_qos
     recorded_active_jobs = (
         (
             await session.execute(
@@ -1982,15 +1998,6 @@ async def _apply_slurm_scale_up(
                 node_resources=node_resources,
             ),
         )
-    actor_config = dict(row.actuator_config or {})
-    active_plus_pending = decision.actual_slots + decision.pending_slots
-    # Strip like build_controller_config does, so operator-authored trailing
-    # whitespace never leaks into a submitted --qos=<value>.
-    qos_boost_value = str(actor_config.get("qos_boost") or "").strip()
-    # Contract: qos_normal is primary; legacy slurm_qos is only the fallback.
-    qos_normal_value = str(
-        actor_config.get("qos_normal") or actor_config.get("slurm_qos") or "",
-    ).strip()
     # Stateful budget clamp + PER-SUBMISSION QoS. Submissions must never push the
     # pool's committed slot sum past ``max_slots``. QoS is chosen per submission
     # from the committed slot sum at the moment each job enters the pool, so a
@@ -1999,7 +2006,7 @@ async def _apply_slurm_scale_up(
     committed_slots = active_plus_pending
     remaining_budget = (row.max_slots if max_slots is None else max_slots) - active_plus_pending
     actuator_error: str | None = None
-    for node in slurm_decision.submit_nodes:
+    for node_index, node in enumerate(slurm_decision.submit_nodes):
         if remaining_budget <= 0:
             break
         node_config = slurm_submission_config_for_node(
@@ -2044,6 +2051,15 @@ async def _apply_slurm_scale_up(
         remaining_budget -= per_worker
         committed_slots += per_worker
         try:
+            if config.probe_mem_available and submission_qos != probe_qos:
+                # Crossing the warm floor changes probe authority. Refresh all
+                # still-unsubmitted nodes under the final QoS, never reuse the
+                # earlier QoS evidence or probe an already-submitted node.
+                if not callable(bind_config):
+                    raise RuntimeError("Slurm memory probe runner cannot bind final QoS")
+                bind_config(node_config)
+                await runner.query_node_resources(slurm_decision.submit_nodes[node_index:])
+                probe_qos = submission_qos
             job_id = await runner.submit_worker(node=node, config=node_config)
             await record_slurm_worker_job(
                 session,
@@ -2358,9 +2374,7 @@ async def _apply_slurm_cancel_pending(
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
     freshly_pending_job_id_set = set(freshly_pending_job_ids)
     freshly_unrecoverable_job_id_set = set(freshly_unrecoverable_job_ids)
-    freshly_cancellable_job_id_set = (
-        freshly_pending_job_id_set | freshly_unrecoverable_job_id_set
-    )
+    freshly_cancellable_job_id_set = freshly_pending_job_id_set | freshly_unrecoverable_job_id_set
     cancellable_jobs = (
         (
             await session.execute(
@@ -2387,19 +2401,14 @@ async def _apply_slurm_cancel_pending(
         .scalars()
         .all()
     )
-    job_by_id = {
-        str(job.job_id): job for job in cancellable_jobs if job.job_id is not None
-    }
+    job_by_id = {str(job.job_id): job for job in cancellable_jobs if job.job_id is not None}
     unobserved_rows = [
         str(job.job_id or job.id)
         for job in cancellable_jobs
-        if job.job_id is None
-        or str(job.job_id) not in freshly_cancellable_job_id_set
+        if job.job_id is None or str(job.job_id) not in freshly_cancellable_job_id_set
     ]
     missing_registry_ids = [
-        job_id
-        for job_id in freshly_cancellable_job_id_set
-        if job_id not in job_by_id
+        job_id for job_id in freshly_cancellable_job_id_set if job_id not in job_by_id
     ]
     unobserved_target_ids = [
         job_id for job_id in job_ids if job_id not in freshly_cancellable_job_id_set
@@ -2986,12 +2995,8 @@ async def reconcile_worker_pool_autoscaler_once(
                     error_message=actuator_error,
                 )
             elif (
-                decision.reason == "unrecoverable_slurm_state"
-                and not freshly_unrecoverable_job_ids
-            ) or (
-                decision.reason != "unrecoverable_slurm_state"
-                and not freshly_pending_job_ids
-            ):
+                decision.reason == "unrecoverable_slurm_state" and not freshly_unrecoverable_job_ids
+            ) or (decision.reason != "unrecoverable_slurm_state" and not freshly_pending_job_ids):
                 actuator_error = "Slurm capacity has no matching fresh job observation"
                 actuator_blocked_reason = "slurm_pending_observation_missing"
                 actuator_blocked_details = {

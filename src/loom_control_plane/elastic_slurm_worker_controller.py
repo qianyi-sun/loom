@@ -1563,6 +1563,11 @@ async def run_elastic_slurm_worker_controller_once(
     runner: SlurmWorkerCommandRunner,
 ) -> SlurmWorkerControllerTickResult:
     config = await _resolve_allowed_node_case(config, runner)
+    # Canonicalization can change spelling and remove unknown nodes. Bind the
+    # exact resolved policy before collecting admission evidence for this tick.
+    bind_config = getattr(runner, "bind_config", None)
+    if callable(bind_config):
+        bind_config(config)
     snapshot = await load_capacity_snapshot(session, config)
     if snapshot.active_job_ids:
         try:
