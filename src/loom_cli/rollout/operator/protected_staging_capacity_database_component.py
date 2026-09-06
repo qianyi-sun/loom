@@ -2124,6 +2124,10 @@ COMMIT;
 
     def _manifest(self, plan: FinalGatePlan, seed: dict[str, object]) -> bytes:
         configuration = build_staging_reporter_configuration(plan, seed)
+        effective_seed = {
+            **seed,
+            "reporter_incarnation": str(configuration.reporter_incarnation),
+        }
         labels = {
             "app.kubernetes.io/managed-by": _MANAGED_BY,
             "app.kubernetes.io/name": _NAME,
@@ -2154,7 +2158,9 @@ COMMIT;
                     canonical_bytes(configuration)
                 ).decode("ascii"),
                 "seed.json": base64.b64encode(
-                    (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+                    (
+                        json.dumps(effective_seed, sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode("ascii")
                 ).decode("ascii"),
             },
         }

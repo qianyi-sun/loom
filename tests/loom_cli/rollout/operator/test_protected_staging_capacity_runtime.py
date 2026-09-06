@@ -19,6 +19,15 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from loom.personal_dev_capacity_runtime import (
+    CapacityDatabaseCredentials,
+    CapacityDatabaseInstallation,
+)
+from loom.staging_capacity_database_bootstrap import (
+    StagingCapacityDatabaseBootstrapSettings,
+    bootstrap_staging_capacity_database,
+)
+from loom_capacity_agent.contracts import ReporterConfigurationV1
 from loom_capacity_manager.contracts import FleetManifestV1, canonical_digest_excluding
 from loom_cli.rollout.operator import protected_staging_capacity_runtime as protected_runtime
 from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
@@ -1745,6 +1754,79 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     ]
     assert volumes["postgres-admin"]["secretName"] == ("loom-staging-capacity-database-bootstrap")
     assert volumes["postgres-ca"]["items"] == [{"key": "ca.crt", "path": "ca.crt"}]
+
+
+@pytest.mark.asyncio
+async def test_database_manifest_runs_real_bootstrap_with_generation_reporter(
+    tmp_path: Path,
+) -> None:
+    """Break caught: serializing the raw seed beside a generation-derived configuration."""
+
+    plan, runner, _component = _database_component(tmp_path, database_state="absent")
+    component = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    raw_reporter_incarnation = runner.seed["reporter_incarnation"]
+    documents = {
+        document["kind"]: document
+        for document in yaml.safe_load_all(component._manifest(plan, runner.seed))
+        if document is not None
+    }
+    secret_data = documents["Secret"]["data"]
+    bootstrap_root = tmp_path / "bootstrap-inputs"
+    bootstrap_root.mkdir()
+    for secret_name, file_name in (
+        ("seed.json", "seed.json"),
+        ("reporter-configuration.json", "reporter-configuration.json"),
+        ("admin-username", "username"),
+        ("admin-password", "password"),
+    ):
+        (bootstrap_root / file_name).write_bytes(
+            base64.b64decode(secret_data[secret_name], validate=True)
+        )
+    (bootstrap_root / "ca.crt").write_bytes(b"test-ca")
+    observed: dict[str, object] = {}
+
+    class Database:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
+            observed["admin_url"] = admin_url
+            observed["transient_role_admin"] = transient_role_admin
+
+        async def converge_protected(
+            self,
+            *,
+            identity: object,
+            credentials: CapacityDatabaseCredentials,
+            configuration: ReporterConfigurationV1,
+        ) -> CapacityDatabaseInstallation:
+            observed["credentials"] = credentials
+            observed["configuration"] = configuration
+            return CapacityDatabaseInstallation(
+                protected_admission_sha256="4" * 64,
+                agent_database_url="redacted-agent-url",
+                runtime_database_url="redacted-runtime-url",
+            )
+
+    await bootstrap_staging_capacity_database(
+        StagingCapacityDatabaseBootstrapSettings(
+            credential_seed_path=bootstrap_root / "seed.json",
+            reporter_configuration_path=bootstrap_root / "reporter-configuration.json",
+            admin_username_path=bootstrap_root / "username",
+            admin_password_path=bootstrap_root / "password",
+            database_ca_path=bootstrap_root / "ca.crt",
+        ),
+        database_factory=Database,
+    )
+
+    credentials = observed["credentials"]
+    configuration = observed["configuration"]
+    assert isinstance(credentials, CapacityDatabaseCredentials)
+    assert isinstance(configuration, ReporterConfigurationV1)
+    assert credentials.reporter_incarnation == configuration.reporter_incarnation
+    assert str(configuration.reporter_incarnation) != raw_reporter_incarnation
+    assert runner.seed["reporter_incarnation"] == raw_reporter_incarnation
 
 
 def test_database_component_accepts_api_defaulted_job_and_cleans_it_up(tmp_path: Path) -> None:

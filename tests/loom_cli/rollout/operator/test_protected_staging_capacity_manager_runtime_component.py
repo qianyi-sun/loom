@@ -495,6 +495,39 @@ def test_registry_mutation_rotates_only_the_bound_predecessor_reporter() -> None
 
 
 @pytest.mark.parametrize(
+    ("field", "collision"),
+    (
+        ("subject_id", "00000000-0000-4000-8000-000000000301"),
+        ("subject_incarnation", "00000000-0000-4000-8000-000000000302"),
+        ("demand_reporter_incarnation", "00000000-0000-4000-8000-000000000303"),
+    ),
+)
+def test_registry_rotation_rejects_foreign_staging_identity_collision(
+    field: str,
+    collision: str,
+) -> None:
+    """Break caught: rotating without checking foreign principal identity collisions."""
+
+    seed = _seed()
+    predecessor = json.loads(
+        _mutate_registry()(
+            json.dumps(_registry()).encode("ascii"),
+            seed=seed,
+        )
+    )
+    predecessor["principals"][-1]["demand_reporter_incarnation"] = (
+        "00000000-0000-4000-8000-000000000398"
+    )
+    predecessor["principals"][2][field] = collision
+
+    with pytest.raises(ValueError, match="staging demand reporter conflicts"):
+        _mutate_registry()(
+            json.dumps(predecessor).encode("ascii"),
+            seed=seed,
+        )
+
+
+@pytest.mark.parametrize(
     ("mutate_registry", "message"),
     (
         (
