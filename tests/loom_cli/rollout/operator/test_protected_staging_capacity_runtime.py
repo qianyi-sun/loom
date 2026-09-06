@@ -1799,13 +1799,18 @@ def test_database_component_recovers_exact_partial_bootstrap_resource_set(
     assert component.classify(plan).state is ComponentState.EXACT
 
 
-def test_database_component_recovers_certified_failed_previous_auth_manifest(
+@pytest.mark.parametrize("epoch_gap", [1, 2])
+def test_database_component_recovers_certified_failed_older_auth_manifest(
     tmp_path: Path,
+    epoch_gap: int,
 ) -> None:
     """Break caught: a reviewed auth upgrade stranding the prior failed bootstrap."""
 
     plan, runner, component = _database_component(tmp_path, database_state="absent")
-    prior_plan = _prior_database_plan(plan)
+    prior_plan = _prior_database_plan(
+        plan,
+        starting_mutation_epoch=plan.starting_mutation_epoch - epoch_gap,
+    )
     request_root = tmp_path / "state" / "requests" / prior_plan.request_id
     attempt_root = request_root / "attempts" / str(prior_plan.attempt_number)
     for directory in (request_root.parent, request_root, attempt_root.parent, attempt_root):
@@ -1845,6 +1850,35 @@ def test_database_component_recovers_certified_failed_previous_auth_manifest(
         ("Secret", retained_uids["Secret"]),
     ]
     assert component.classify(plan).state is ComponentState.EXACT
+
+
+@pytest.mark.parametrize("epoch_offset", [0, 1])
+def test_database_component_rejects_same_or_future_auth_manifest(
+    tmp_path: Path,
+    epoch_offset: int,
+) -> None:
+    """Break caught: cleanup authorized by a plan that is not strictly older."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(
+        plan,
+        starting_mutation_epoch=plan.starting_mutation_epoch + epoch_offset,
+    )
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
 
 
 def test_database_component_uses_supported_diff_for_previous_auth_manifest(
@@ -2342,7 +2376,11 @@ def test_database_component_rejects_previous_plan_with_manager_authority_drift(
     else:
         assert isinstance(current_value, int)
         drifted_value = current_value + 1
-    prior_plan = _prior_database_plan(plan, **{manager_field: drifted_value})
+    prior_plan = _prior_database_plan(
+        plan,
+        starting_mutation_epoch=plan.starting_mutation_epoch - 2,
+        **{manager_field: drifted_value},
+    )
     _write_database_plan_ledger_entry(tmp_path, prior_plan)
     direct = KubernetesProtectedStagingCapacityDatabaseComponent(
         runner=runner,  # type: ignore[arg-type]

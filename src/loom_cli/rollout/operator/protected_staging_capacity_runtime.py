@@ -602,7 +602,7 @@ class KubernetesProtectedStagingCapacityRuntime:
             current_plan.schema_version != 6
             or prior_plan.schema_version != 6
             or prior_plan.request_id == current_plan.request_id
-            or prior_plan.starting_mutation_epoch + 1 != current_plan.starting_mutation_epoch
+            or prior_plan.starting_mutation_epoch >= current_plan.starting_mutation_epoch
             or any(
                 getattr(prior_plan, field) != getattr(current_plan, field)
                 for field in frozen_authority
