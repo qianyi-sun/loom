@@ -1578,6 +1578,7 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     assert configuration["candidate_publication_sha256"] == plan.artifact_bundle_digest
     assert configuration["deployment_generation"] == plan.starting_mutation_epoch + 1
     assert configuration["configuration_generation"] == plan.starting_mutation_epoch + 1
+    assert job["spec"]["template"]["metadata"]["labels"]["app"] == "loom-migration"
     pod_spec = job["spec"]["template"]["spec"]
     assert pod_spec["automountServiceAccountToken"] is False
     assert pod_spec["securityContext"] == {

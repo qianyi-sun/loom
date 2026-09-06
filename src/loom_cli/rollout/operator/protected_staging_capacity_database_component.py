@@ -1976,7 +1976,7 @@ COMMIT;
                 "completions": 1,
                 "parallelism": 1,
                 "template": {
-                    "metadata": {"labels": labels},
+                    "metadata": {"labels": {**labels, "app": "loom-migration"}},
                     "spec": {
                         "automountServiceAccountToken": False,
                         "containers": [
