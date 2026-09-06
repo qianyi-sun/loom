@@ -1838,10 +1838,25 @@ def test_database_component_retries_sealed_predecessor_candidate_state(
     assert component.classify(plan).state is ComponentState.READY
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("environment_id", "other-environment"),
+        ("subject_id", "00000000-0000-4000-8000-000000000000"),
+        ("subject_incarnation", "00000000-0000-4000-8000-000000000001"),
+        ("authority_incarnation", "00000000-0000-4000-8000-000000000002"),
+        ("agent_incarnation", "00000000-0000-4000-8000-000000000003"),
+        ("reporter_incarnation", "00000000-0000-4000-8000-000000000004"),
+        ("authority_mode", "enabled"),
+        ("allocation_epoch", 1),
+    ],
+)
 def test_database_component_rejects_sealed_predecessor_with_changed_stable_identity(
     tmp_path: Path,
+    field: str,
+    value: object,
 ) -> None:
-    """Break caught: accepting a sealed predecessor owned by another subject incarnation."""
+    """Break caught: accepting a sealed predecessor with another stable identity."""
 
     plan, runner, component = _database_component(tmp_path, database_state="exact")
     runner.registration_overrides = {
@@ -1850,7 +1865,7 @@ def test_database_component_rejects_sealed_predecessor_with_changed_stable_ident
         "candidate_publication_sha256": "d" * 64,
         "configuration_generation": plan.starting_mutation_epoch,
         "deployment_generation": plan.starting_mutation_epoch,
-        "subject_incarnation": "00000000-0000-4000-8000-000000000000",
+        field: value,
     }
     runner.protected_roles_sealed = True
 

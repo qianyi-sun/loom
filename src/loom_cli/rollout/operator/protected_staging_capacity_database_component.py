@@ -953,6 +953,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     "subject_id",
                     "subject_incarnation",
                     "authority_incarnation",
+                    "reporter_incarnation",
                     "authority_mode",
                     "allocation_epoch",
                 )
@@ -965,6 +966,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     "subject_incarnation",
                     "authority_incarnation",
                     "agent_incarnation",
+                    "reporter_incarnation",
                     "authority_mode",
                     "allocation_epoch",
                 )
