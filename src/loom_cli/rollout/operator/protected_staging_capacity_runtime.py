@@ -7,7 +7,7 @@ import json
 import os
 import secrets
 import stat
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -138,6 +138,23 @@ _MAX_RECOVERY_ATTEMPTS_PER_REQUEST = 64
 _MAX_RECOVERY_ATTEMPT_PROBES = 4096
 _MAX_RECOVERY_PLAN_FILES = 4096
 _MAX_RECOVERY_PLAN_BYTES = 64 * 1024 * 1024
+
+
+def _bounded_directory_entries(
+    path: Path,
+    *,
+    limit: int,
+    too_large_message: str,
+    unavailable_message: str,
+) -> Iterator[os.DirEntry[str]]:
+    try:
+        with os.scandir(path) as entries:
+            for entry_number, entry in enumerate(entries, start=1):
+                if entry_number > limit:
+                    raise RuntimeError(too_large_message)
+                yield entry
+    except OSError as exc:
+        raise RuntimeError(unavailable_message) from exc
 
 
 class ProtectedStagingCapacityCommandRunner(Protocol):
@@ -487,16 +504,16 @@ class KubernetesProtectedStagingCapacityRuntime:
         self._validate_private_directory(self.state_root)
         requests_root = self.state_root / "requests"
         self._validate_private_directory(requests_root)
-        try:
-            request_entries = tuple(os.scandir(requests_root))
-        except OSError as exc:
-            raise RuntimeError("protected staging recovery ledger is unavailable") from exc
-        if len(request_entries) > _MAX_RECOVERY_REQUESTS:
-            raise RuntimeError("protected staging recovery ledger is too large")
         matches: list[FinalGatePlan] = []
         attempt_probes = 0
         plan_files_examined = 0
         plan_bytes_read = 0
+        request_entries = _bounded_directory_entries(
+            requests_root,
+            limit=_MAX_RECOVERY_REQUESTS,
+            too_large_message="protected staging recovery ledger is too large",
+            unavailable_message="protected staging recovery ledger is unavailable",
+        )
         for request_entry in request_entries:
             if not request_entry.is_dir(follow_symlinks=False):
                 raise RuntimeError("protected staging recovery request identity is unsafe")
@@ -509,13 +526,16 @@ class KubernetesProtectedStagingCapacityRuntime:
             attempts_root = request_root / "attempts"
             try:
                 self._validate_private_directory(attempts_root)
-                attempt_entries = tuple(os.scandir(attempts_root))
             except FileNotFoundError:
                 continue
             except OSError as exc:
                 raise RuntimeError("protected staging recovery attempts are unavailable") from exc
-            if len(attempt_entries) > _MAX_RECOVERY_ATTEMPTS_PER_REQUEST:
-                raise RuntimeError("protected staging recovery attempts are too large")
+            attempt_entries = _bounded_directory_entries(
+                attempts_root,
+                limit=_MAX_RECOVERY_ATTEMPTS_PER_REQUEST,
+                too_large_message="protected staging recovery attempts are too large",
+                unavailable_message="protected staging recovery attempts are unavailable",
+            )
             for attempt_entry in attempt_entries:
                 if (
                     not attempt_entry.name.isascii()

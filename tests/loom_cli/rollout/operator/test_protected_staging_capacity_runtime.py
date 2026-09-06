@@ -2231,6 +2231,69 @@ def test_database_component_rejects_recovery_ledger_over_global_attempt_probe_bu
     assert runner.delete_inputs == []
 
 
+@pytest.mark.parametrize("directory_kind", ["requests", "attempts"])
+def test_database_component_stops_recovery_directory_enumeration_at_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    directory_kind: str,
+) -> None:
+    """Break caught: materializing an unbounded directory before enforcing its limit."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    requests_root = tmp_path / "state" / "requests"
+    attempts_root = requests_root / prior_plan.request_id / "attempts"
+    if directory_kind == "requests":
+        for request_id in ("req-extra01", "req-extra02"):
+            (requests_root / request_id).mkdir(mode=0o700)
+        target = requests_root
+        monkeypatch.setattr(protected_runtime, "_MAX_RECOVERY_REQUESTS", 1)
+    else:
+        for attempt_number in (2, 3):
+            (attempts_root / str(attempt_number)).mkdir(mode=0o700)
+        target = attempts_root
+        monkeypatch.setattr(protected_runtime, "_MAX_RECOVERY_ATTEMPTS_PER_REQUEST", 1)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+
+    original_scandir = protected_runtime.os.scandir
+    yielded = 0
+
+    class CountingScandir:
+        def __init__(self, path: Path) -> None:
+            self.inner = original_scandir(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal yielded
+            entry = next(self.inner)
+            yielded += 1
+            return entry
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.inner.close()
+
+    def counted_scandir(path: Path):
+        if Path(path) == target:
+            return CountingScandir(path)
+        return original_scandir(path)
+
+    monkeypatch.setattr(protected_runtime.os, "scandir", counted_scandir)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    assert yielded == 2
+
+
 def test_database_component_rejects_recovery_ledger_over_global_byte_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
