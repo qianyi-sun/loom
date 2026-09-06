@@ -675,6 +675,8 @@ class PsycopgPersonalDevCapacityDatabase:
                         "ORDER BY nspname"
                     )
                     for schema_name, public_usage in await schemas_result.fetchall():
+                        if self._transient_role_admin and schema_name == "loom_capacity_guard":
+                            continue
                         for object_kind in (
                             "SCHEMA {}",
                             "ALL TABLES IN SCHEMA {}",
@@ -1207,6 +1209,9 @@ class PsycopgPersonalDevCapacityDatabase:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session, session.begin():
                 await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
+                await session.execute(
+                    text("REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard FROM PUBLIC")
+                )
                 await session.execute(
                     text(
                         "REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard "
