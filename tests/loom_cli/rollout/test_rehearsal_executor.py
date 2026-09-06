@@ -3342,6 +3342,24 @@ def test_stream_runner_reads_private_file_without_following_parent_symlinks(
         _default_stream_run(("consumer",), linked / "loom.dump", 30)
 
 
+def test_stream_runner_disables_kubectl_remote_command_websockets(tmp_path: Path) -> None:
+    source = tmp_path / "loom.dump"
+    source.write_bytes(b"exact-dump")
+    source.chmod(0o600)
+    consumer = tmp_path / "consumer"
+    consumer.write_text(
+        "#!/bin/sh\n"
+        'test "$KUBECTL_REMOTE_COMMAND_WEBSOCKETS" = false || exit 97\n'
+        'test "$(cat)" = exact-dump\n',
+        encoding="utf-8",
+    )
+    consumer.chmod(0o700)
+
+    result = _default_stream_run((str(consumer),), source, 30)
+
+    assert result.returncode == 0
+
+
 def test_stream_runner_rejects_mode_and_read_time_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
