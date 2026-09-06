@@ -685,7 +685,7 @@ class KubernetesProtectedStagingCapacityRuntime:
             raise RuntimeError("zero-ceiling bootstrap authority is unavailable")
         credential_state, credential_evidence = self._classify_credentials()
         if (
-            credential_state is not ComponentState.READY
+            credential_state not in {ComponentState.READY, ComponentState.EXACT}
             or lease.checkpoint_schema_version != 3
             or lease.manager_execution_state != "shadow"
             or lease.manager_execution_epoch != 0
@@ -702,9 +702,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 "manager_execution_epoch": lease.manager_execution_epoch,
                 "manager_execution_state": lease.manager_execution_state,
                 "manager_increase_freeze": lease.manager_increase_freeze,
-                "manager_new_capacity_ceiling": (
-                    lease.manager_executable_new_capacity_ceiling
-                ),
+                "manager_new_capacity_ceiling": (lease.manager_executable_new_capacity_ceiling),
                 "manager_writer_epoch": lease.manager_writer_epoch,
                 "mode": "zero-ceiling-bootstrap",
                 "restore_verified_lease_sha256": lease.evidence_digest,
