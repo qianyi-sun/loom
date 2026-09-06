@@ -917,17 +917,24 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         sealed_roles = _expected_roles(sealed=True)
         sealed_details["roles"] = sealed_roles
         if details.get("roles") == sealed_roles:
-            return (
-                _DatabaseState.NEEDS_CONVERGENCE
-                if details == sealed_details
-                else _DatabaseState.DRIFTED
-            )
-        try:
-            runtime = AgentRegistrationV1.model_validate_json(self._query(_RUNTIME_SQL))
-        except (json.JSONDecodeError, UnicodeError, ValueError):
-            return _DatabaseState.DRIFTED
-        if details == expected_details and runtime == expected_registration:
-            return _DatabaseState.EXACT
+            if any(
+                details.get(field) != sealed_details[field]
+                for field in (
+                    "active_protected_sessions",
+                    "agent_role",
+                    "database_privileges",
+                    "roles",
+                    "runtime_role",
+                )
+            ):
+                return _DatabaseState.DRIFTED
+        else:
+            try:
+                runtime = AgentRegistrationV1.model_validate_json(self._query(_RUNTIME_SQL))
+            except (json.JSONDecodeError, UnicodeError, ValueError):
+                return _DatabaseState.DRIFTED
+            if details == expected_details and runtime == expected_registration:
+                return _DatabaseState.EXACT
         authority = details.get("authority") if isinstance(details, dict) else None
         registration = details.get("registration") if isinstance(details, dict) else None
         expected_authority = expected_details["authority"]
@@ -942,10 +949,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             or any(
                 authority.get(field) != expected_authority[field]
                 for field in (
+                    "schema_version",
                     "environment_id",
                     "subject_id",
                     "subject_incarnation",
                     "authority_incarnation",
+                    "reporter_high_water",
                     "authority_mode",
                     "allocation_epoch",
                 )
@@ -953,6 +962,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             or any(
                 registration.get(field) != expected_registration_details[field]
                 for field in (
+                    "schema_version",
                     "environment_id",
                     "subject_id",
                     "subject_incarnation",

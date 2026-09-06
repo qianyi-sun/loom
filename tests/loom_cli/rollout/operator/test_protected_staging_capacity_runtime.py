@@ -145,9 +145,10 @@ class _DatabaseRunner:
         self.replace_job_after_diff_count: int | None = None
         self.disappear_secret_after_diff_count: int | None = None
         self.diff_count = 0
+        self.registration_overrides: dict[str, object] = {}
 
     def _registration(self) -> dict[str, object]:
-        return {
+        registration = {
             "agent_incarnation": self.seed["agent_incarnation"],
             "allocation_epoch": 0,
             "authority_incarnation": self.seed["authority_incarnation"],
@@ -165,6 +166,8 @@ class _DatabaseRunner:
             "subject_id": self.seed["subject_id"],
             "subject_incarnation": self.seed["subject_incarnation"],
         }
+        registration.update(self.registration_overrides)
+        return registration
 
     @staticmethod
     def _role(
@@ -1815,6 +1818,89 @@ def test_database_component_retries_exact_sealed_compensation_state(
     component.apply(plan)
 
     assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_retries_sealed_predecessor_candidate_state(
+    tmp_path: Path,
+) -> None:
+    """Break caught: rejecting a safely sealed predecessor after a new rollout starts."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "candidate_digest": "d" * 64,
+        "candidate_identity": "f" * 40,
+        "candidate_publication_sha256": "d" * 64,
+        "configuration_generation": plan.starting_mutation_epoch,
+        "deployment_generation": plan.starting_mutation_epoch,
+    }
+    runner.protected_roles_sealed = True
+
+    assert component.classify(plan).state is ComponentState.READY
+
+
+@pytest.mark.parametrize(
+    "registration_updates",
+    [
+        {"reporter_incarnation": "00000000-0000-4000-8000-000000000004"},
+        {
+            "candidate_identity_algorithm": "source-sha256",
+            "candidate_identity": "f" * 64,
+        },
+    ],
+)
+def test_database_component_retries_sealed_predecessor_reconfiguration_state(
+    tmp_path: Path,
+    registration_updates: dict[str, object],
+) -> None:
+    """Break caught: rejecting predecessor fields supported by guarded reconfiguration."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "candidate_digest": "d" * 64,
+        "candidate_identity": "f" * 40,
+        "candidate_publication_sha256": "d" * 64,
+        "configuration_generation": plan.starting_mutation_epoch,
+        "deployment_generation": plan.starting_mutation_epoch,
+        **registration_updates,
+    }
+    runner.protected_roles_sealed = True
+
+    assert component.classify(plan).state is ComponentState.READY
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("environment_id", "other-environment"),
+        ("subject_id", "00000000-0000-4000-8000-000000000000"),
+        ("subject_incarnation", "00000000-0000-4000-8000-000000000001"),
+        ("authority_incarnation", "00000000-0000-4000-8000-000000000002"),
+        ("agent_incarnation", "00000000-0000-4000-8000-000000000003"),
+        ("reporter_high_water", 1),
+        ("authority_mode", "enabled"),
+        ("allocation_epoch", 1),
+    ],
+)
+def test_database_component_rejects_sealed_predecessor_with_changed_stable_identity(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    """Break caught: accepting a sealed predecessor with another stable identity."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "candidate_digest": "d" * 64,
+        "candidate_identity": "f" * 40,
+        "candidate_publication_sha256": "d" * 64,
+        "configuration_generation": plan.starting_mutation_epoch,
+        "deployment_generation": plan.starting_mutation_epoch,
+        field: value,
+    }
+    runner.protected_roles_sealed = True
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
 
 
 @pytest.mark.parametrize(
