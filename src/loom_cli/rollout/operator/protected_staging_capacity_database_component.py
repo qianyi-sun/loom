@@ -80,6 +80,18 @@ _REVISION_SQL = single_line_sql(
 )
 _DETAIL_SQL = single_line_sql(
     """
+    WITH protected_roles AS (
+      SELECT role.*
+      FROM pg_catalog.pg_authid AS role
+      WHERE role.rolname = ANY(ARRAY[
+        'loom_cap_staging_owner',
+        'loom_cap_staging_migrator',
+        'loom_cap_staging_agent',
+        'loom_cap_staging_executor',
+        'loom_cap_staging_observer',
+        'loom_cap_staging_runtime'
+      ])
+    )
     SELECT jsonb_build_object(
       'authority', (
         SELECT jsonb_build_object(
@@ -159,46 +171,65 @@ _DETAIL_SQL = single_line_sql(
           ),
           '{}'::jsonb
         )
-        FROM pg_catalog.pg_authid AS role
-        WHERE role.rolname = ANY(ARRAY[
-          'loom_cap_staging_owner',
-          'loom_cap_staging_migrator',
-          'loom_cap_staging_agent',
-          'loom_cap_staging_executor',
-          'loom_cap_staging_observer',
-          'loom_cap_staging_runtime'
-        ])
+        FROM protected_roles AS role
       ),
       'database_privileges', (
-        SELECT jsonb_build_object(
-          'migrator_acl_count', (
-            SELECT count(*)
-            FROM pg_catalog.aclexplode(
-              COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))
-            ) AS privilege
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
-            WHERE grantee.rolname = 'loom_cap_staging_migrator'
+        SELECT COALESCE(
+          jsonb_object_agg(
+            role.rolname,
+            jsonb_build_object(
+              'acl', (
+                SELECT COALESCE(
+                  jsonb_agg(
+                    jsonb_build_object(
+                      'privilege', privilege.privilege_type,
+                      'grantable', privilege.is_grantable,
+                      'grantor', grantor.rolname
+                    )
+                    ORDER BY
+                      privilege.privilege_type,
+                      privilege.is_grantable,
+                      grantor.rolname
+                  ),
+                  '[]'::jsonb
+                )
+                FROM pg_catalog.aclexplode(
+                  COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))
+                ) AS privilege
+                JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE privilege.grantee = role.oid
+              ),
+              'connect', pg_catalog.has_database_privilege(
+                role.oid, database.oid, 'CONNECT'
+              ),
+              'create', pg_catalog.has_database_privilege(
+                role.oid, database.oid, 'CREATE'
+              ),
+              'temporary', pg_catalog.has_database_privilege(
+                role.oid, database.oid, 'TEMPORARY'
+              )
+            )
           ),
-          'migrator_connect', pg_catalog.has_database_privilege(
-            'loom_cap_staging_migrator', 'loom', 'CONNECT'
-          ),
-          'migrator_create', pg_catalog.has_database_privilege(
-            'loom_cap_staging_migrator', 'loom', 'CREATE'
-          ),
-          'migrator_temporary', pg_catalog.has_database_privilege(
-            'loom_cap_staging_migrator', 'loom', 'TEMPORARY'
-          ),
-          'owner_create', pg_catalog.has_database_privilege(
-            'loom_cap_staging_owner', 'loom', 'CREATE'
-          )
+          '{}'::jsonb
         )
-        FROM pg_catalog.pg_database AS database
+        FROM protected_roles AS role
+        CROSS JOIN pg_catalog.pg_database AS database
         WHERE database.datname = 'loom'
       ),
-      'active_migrator_sessions', (
-        SELECT count(*) FROM pg_catalog.pg_stat_activity
-        WHERE usename = 'loom_cap_staging_migrator'
-          AND pid <> pg_catalog.pg_backend_pid()
+      'active_protected_sessions', (
+        SELECT COALESCE(
+          jsonb_object_agg(
+            role.rolname,
+            (
+              SELECT count(*)
+              FROM pg_catalog.pg_stat_activity AS activity
+              WHERE activity.usename = role.rolname
+                AND activity.pid <> pg_catalog.pg_backend_pid()
+            )
+          ),
+          '{}'::jsonb
+        )
+        FROM protected_roles AS role
       )
     )
     """
@@ -788,9 +819,36 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 self._query(_DETAIL_SQL),
                 object_pairs_hook=_reject_duplicate_keys,
             )
-            runtime = AgentRegistrationV1.model_validate_json(self._query(_RUNTIME_SQL))
         except (json.JSONDecodeError, UnicodeError, ValueError):
             return _DatabaseState.DRIFTED
+        protected_role_names = (
+            "loom_cap_staging_agent",
+            "loom_cap_staging_executor",
+            "loom_cap_staging_migrator",
+            "loom_cap_staging_observer",
+            "loom_cap_staging_owner",
+            "loom_cap_staging_runtime",
+        )
+        active_protected_sessions = (
+            details.get("active_protected_sessions") if isinstance(details, dict) else None
+        )
+        if (
+            not isinstance(active_protected_sessions, dict)
+            or set(active_protected_sessions) != set(protected_role_names)
+            or any(
+                type(active_protected_sessions[name]) is not int
+                or active_protected_sessions[name] < 0
+                for name in protected_role_names
+            )
+        ):
+            return _DatabaseState.DRIFTED
+        expected_active_sessions = dict(active_protected_sessions)
+        for name in (
+            "loom_cap_staging_executor",
+            "loom_cap_staging_migrator",
+            "loom_cap_staging_owner",
+        ):
+            expected_active_sessions[name] = 0
         expected_registration = AgentRegistrationV1.model_validate(
             {field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields}
         )
@@ -805,15 +863,46 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             configuration_generation=configuration.configuration_generation,
         )
         expected_details: dict[str, object] = {
-            "active_migrator_sessions": 0,
+            "active_protected_sessions": expected_active_sessions,
             "agent_role": "loom_cap_staging_agent",
             "authority": expected_fence.model_dump(mode="json"),
             "database_privileges": {
-                "migrator_acl_count": 0,
-                "migrator_connect": False,
-                "migrator_create": False,
-                "migrator_temporary": False,
-                "owner_create": False,
+                "loom_cap_staging_agent": {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+                "loom_cap_staging_executor": {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                "loom_cap_staging_migrator": {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                "loom_cap_staging_observer": {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+                "loom_cap_staging_owner": {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                "loom_cap_staging_runtime": {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
             },
             "registration": expected_registration.model_dump(mode="json"),
             "roles": _expected_roles(
@@ -823,6 +912,20 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             ),
             "runtime_role": "loom_cap_staging_runtime",
         }
+        sealed_details = dict(expected_details)
+        sealed_details["active_protected_sessions"] = {name: 0 for name in protected_role_names}
+        sealed_roles = _expected_roles(sealed=True)
+        sealed_details["roles"] = sealed_roles
+        if details.get("roles") == sealed_roles:
+            return (
+                _DatabaseState.NEEDS_CONVERGENCE
+                if details == sealed_details
+                else _DatabaseState.DRIFTED
+            )
+        try:
+            runtime = AgentRegistrationV1.model_validate_json(self._query(_RUNTIME_SQL))
+        except (json.JSONDecodeError, UnicodeError, ValueError):
+            return _DatabaseState.DRIFTED
         if details == expected_details and runtime == expected_registration:
             return _DatabaseState.EXACT
         authority = details.get("authority") if isinstance(details, dict) else None
@@ -2272,6 +2375,7 @@ def staging_database_protected_admission_digest_for_candidate(
 def _expected_roles(
     *,
     runtime_credential_validity: str = "infinite",
+    sealed: bool = False,
 ) -> dict[str, dict[str, object]]:
     def role(
         *,
@@ -2296,6 +2400,11 @@ def _expected_roles(
     owner, migrator, agent, executor, observer, runtime = capacity_role_names(
         staging_capacity_identity()
     )
+    if sealed:
+        return {
+            name: role(login=False, inherit=name == migrator, password=False)
+            for name in (agent, executor, migrator, observer, owner, runtime)
+        }
     return {
         agent: role(
             login=True,

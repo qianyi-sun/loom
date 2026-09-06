@@ -526,13 +526,51 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             details_row = await details_result.fetchone()
             assert details_row is not None
             details = details_row[0]
-            assert details["active_migrator_sessions"] == 0
+            assert details["active_protected_sessions"] == {
+                agent: 0,
+                executor: 0,
+                migrator: 0,
+                observer: 0,
+                owner: 0,
+                runtime: 0,
+            }
             assert details["database_privileges"] == {
-                "migrator_acl_count": 0,
-                "migrator_connect": False,
-                "migrator_create": False,
-                "migrator_temporary": False,
-                "owner_create": False,
+                agent: {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+                executor: {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                migrator: {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                observer: {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+                owner: {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                runtime: {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
             }
             await connection.execute("GRANT CONNECT ON DATABASE loom TO PUBLIC")
             public_details_result = await connection.execute(
@@ -541,11 +579,23 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             public_details_row = await public_details_result.fetchone()
             assert public_details_row is not None
             assert public_details_row[0]["database_privileges"] == {
-                "migrator_acl_count": 0,
-                "migrator_connect": True,
-                "migrator_create": False,
-                "migrator_temporary": False,
-                "owner_create": False,
+                role: {
+                    "acl": (
+                        [
+                            {
+                                "grantable": False,
+                                "grantor": "loom",
+                                "privilege": "CONNECT",
+                            }
+                        ]
+                        if role in (agent, observer, runtime)
+                        else []
+                    ),
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                }
+                for role in protected
             }
             await connection.execute("REVOKE CONNECT ON DATABASE loom FROM PUBLIC")
             assert details["roles"][migrator]["credential_validity"] == "infinite"

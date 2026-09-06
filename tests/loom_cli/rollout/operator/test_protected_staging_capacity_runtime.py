@@ -64,12 +64,52 @@ class _DatabaseRunner:
         self.seed = seed
         self.database_state = database_state
         self.runtime_credentials_durable = database_state == "exact"
-        self.active_migrator_sessions = 0
-        self.migrator_acl_count = 0
-        self.migrator_connect = False
-        self.migrator_create = False
-        self.migrator_temporary = False
-        self.owner_create = False
+        self.active_protected_sessions = {
+            "loom_cap_staging_agent": 0,
+            "loom_cap_staging_executor": 0,
+            "loom_cap_staging_migrator": 0,
+            "loom_cap_staging_observer": 0,
+            "loom_cap_staging_owner": 0,
+            "loom_cap_staging_runtime": 0,
+        }
+        self.protected_database_privileges = {
+            "loom_cap_staging_agent": {
+                "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                "connect": True,
+                "create": False,
+                "temporary": False,
+            },
+            "loom_cap_staging_executor": {
+                "acl": [],
+                "connect": False,
+                "create": False,
+                "temporary": False,
+            },
+            "loom_cap_staging_migrator": {
+                "acl": [],
+                "connect": False,
+                "create": False,
+                "temporary": False,
+            },
+            "loom_cap_staging_observer": {
+                "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                "connect": True,
+                "create": False,
+                "temporary": False,
+            },
+            "loom_cap_staging_owner": {
+                "acl": [],
+                "connect": False,
+                "create": False,
+                "temporary": False,
+            },
+            "loom_cap_staging_runtime": {
+                "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                "connect": True,
+                "create": False,
+                "temporary": False,
+            },
+        }
         self.objects: dict[str, dict[str, object]] = {}
         self.created_objects: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, ...]] = []
@@ -95,6 +135,8 @@ class _DatabaseRunner:
         self.fail_peer_phase_after_mutation_counts: dict[str, int] = {}
         self.transient_credentials_disabled = False
         self.transient_sessions_terminated = False
+        self.protected_roles_sealed = False
+        self.allow_sealed_runtime_impersonation = False
         self.fail_delete_job_before_mutation = 0
         self.reject_diff_validate_flag = False
         self.require_supported_patch_stdin = False
@@ -164,47 +206,51 @@ class _DatabaseRunner:
                 "subject_incarnation",
             )
         }
+        roles = {
+            "loom_cap_staging_agent": self._role(
+                login=True,
+                inherit=False,
+                password=True,
+                credential_validity=(
+                    "infinite" if self.runtime_credentials_durable else "finite-valid"
+                ),
+            ),
+            "loom_cap_staging_executor": self._role(login=False, inherit=False, password=False),
+            "loom_cap_staging_migrator": self._role(login=False, inherit=True, password=False),
+            "loom_cap_staging_observer": self._role(
+                login=True,
+                inherit=False,
+                password=True,
+                credential_validity=(
+                    "infinite" if self.runtime_credentials_durable else "finite-valid"
+                ),
+            ),
+            "loom_cap_staging_owner": self._role(login=False, inherit=False, password=False),
+            "loom_cap_staging_runtime": self._role(
+                login=True,
+                inherit=False,
+                password=True,
+                credential_validity=(
+                    "infinite" if self.runtime_credentials_durable else "finite-valid"
+                ),
+            ),
+        }
+        if self.protected_roles_sealed:
+            roles = {
+                name: self._role(
+                    login=False,
+                    inherit=name == "loom_cap_staging_migrator",
+                    password=False,
+                )
+                for name in roles
+            }
         return {
-            "active_migrator_sessions": self.active_migrator_sessions,
+            "active_protected_sessions": self.active_protected_sessions,
             "agent_role": "loom_cap_staging_agent",
             "authority": authority,
-            "database_privileges": {
-                "migrator_acl_count": self.migrator_acl_count,
-                "migrator_connect": self.migrator_connect,
-                "migrator_create": self.migrator_create,
-                "migrator_temporary": self.migrator_temporary,
-                "owner_create": self.owner_create,
-            },
+            "database_privileges": self.protected_database_privileges,
             "registration": registration,
-            "roles": {
-                "loom_cap_staging_agent": self._role(
-                    login=True,
-                    inherit=False,
-                    password=True,
-                    credential_validity=(
-                        "infinite" if self.runtime_credentials_durable else "finite-valid"
-                    ),
-                ),
-                "loom_cap_staging_executor": self._role(login=False, inherit=False, password=False),
-                "loom_cap_staging_migrator": self._role(login=False, inherit=True, password=False),
-                "loom_cap_staging_observer": self._role(
-                    login=True,
-                    inherit=False,
-                    password=True,
-                    credential_validity=(
-                        "infinite" if self.runtime_credentials_durable else "finite-valid"
-                    ),
-                ),
-                "loom_cap_staging_owner": self._role(login=False, inherit=False, password=False),
-                "loom_cap_staging_runtime": self._role(
-                    login=True,
-                    inherit=False,
-                    password=True,
-                    credential_validity=(
-                        "infinite" if self.runtime_credentials_durable else "finite-valid"
-                    ),
-                ),
-            },
+            "roles": roles,
             "runtime_role": "loom_cap_staging_runtime",
         }
 
@@ -359,6 +405,8 @@ class _DatabaseRunner:
         if "version_num" in joined:
             return b"guard_0029\n"
         if "current_protected_runtime_registration" in joined:
+            if self.protected_roles_sealed and not self.allow_sealed_runtime_impersonation:
+                raise RuntimeError("injected sealed runtime role")
             return json.dumps(self._registration(), sort_keys=True).encode()
         if "agent_runtime_authority" in joined:
             details = self._details()
@@ -481,9 +529,11 @@ class _DatabaseRunner:
                 self.fail_peer_phase_counts[phase] = remaining_failures - 1
                 raise RuntimeError("injected protected compensation phase failure")
             if phase == "arm":
+                self.protected_roles_sealed = False
                 self.transient_credentials_disabled = False
                 self.transient_sessions_terminated = False
             elif phase == "disable-all":
+                self.protected_roles_sealed = True
                 self.transient_credentials_disabled = True
             elif phase == "terminate":
                 self.transient_sessions_terminated = True
@@ -1753,33 +1803,74 @@ def test_database_component_distinguishes_finite_from_durable_runtime_credential
     assert direct._database_state(plan, runner.seed).value == "exact"
 
 
+def test_database_component_retries_exact_sealed_compensation_state(
+    tmp_path: Path,
+) -> None:
+    """Break caught: treating the verified compensation state as foreign drift."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
 @pytest.mark.parametrize(
-    ("field", "value"),
+    "role",
     [
-        ("active_migrator_sessions", 1),
-        ("migrator_acl_count", 1),
-        ("migrator_connect", True),
-        ("migrator_create", True),
-        ("migrator_temporary", True),
-        ("owner_create", True),
+        "loom_cap_staging_agent",
+        "loom_cap_staging_observer",
+        "loom_cap_staging_runtime",
     ],
 )
-def test_database_component_rejects_unsealed_database_authority(
+def test_database_component_allows_active_login_role_session_in_exact_state(
     tmp_path: Path,
-    field: str,
-    value: object,
+    role: str,
 ) -> None:
-    """Break caught: exact-state evidence omitting sessions or database ACL authority."""
+    """Break caught: treating a normal protected login-role session as database drift."""
 
     plan, runner, _component = _database_component(tmp_path, database_state="exact")
-    setattr(runner, field, value)
+    runner.active_protected_sessions[role] = 1
     direct = KubernetesProtectedStagingCapacityDatabaseComponent(
         runner=runner,  # type: ignore[arg-type]
         container_registry="registry.example.test/loom",
         seed_reader=lambda: runner.seed,
     )
 
-    assert direct._database_state(plan, runner.seed).value == "needs-convergence"
+    assert direct._database_state(plan, runner.seed).value == "exact"
+
+
+def test_database_component_rejects_active_non_migrator_session_in_sealed_state(
+    tmp_path: Path,
+) -> None:
+    """Break caught: sealed retry ignoring a live protected non-migrator session."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+    runner.allow_sealed_runtime_impersonation = True
+    runner.active_protected_sessions["loom_cap_staging_agent"] = 1
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+
+
+def test_database_component_rejects_changed_database_grant_in_sealed_state(
+    tmp_path: Path,
+) -> None:
+    """Break caught: sealed retry ignoring changed protected-role database authority."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+    runner.allow_sealed_runtime_impersonation = True
+    runner.protected_database_privileges["loom_cap_staging_executor"] = {
+        "acl": [{"grantable": True, "grantor": "loom_cap_other", "privilege": "CONNECT"}],
+        "connect": True,
+        "create": False,
+        "temporary": False,
+    }
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
 
 
 def test_database_component_recovers_exact_completed_residue_by_cleanup_only(
