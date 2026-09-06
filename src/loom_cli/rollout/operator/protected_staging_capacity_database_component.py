@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import yaml  # type: ignore[import-untyped]
 from psycopg import sql
@@ -2305,7 +2305,10 @@ def build_staging_reporter_configuration_for_candidate(
         subject_incarnation=UUID(str(seed["subject_incarnation"])),
         authority_incarnation=UUID(str(seed["authority_incarnation"])),
         agent_incarnation=UUID(str(seed["agent_incarnation"])),
-        reporter_incarnation=UUID(str(seed["reporter_incarnation"])),
+        reporter_incarnation=derive_staging_reporter_incarnation(
+            seed["reporter_incarnation"],
+            target_generation=mutation_epoch + 1,
+        ),
         candidate_digest=artifact_bundle_digest,
         candidate_identity_algorithm="git-sha1",
         candidate_identity=candidate_sha,
@@ -2332,6 +2335,21 @@ def build_staging_reporter_configuration_for_candidate(
             ),
         ),
     )
+
+
+def derive_staging_reporter_incarnation(
+    seed_reporter_incarnation: object,
+    *,
+    target_generation: int,
+) -> UUID:
+    """Bind one retry-stable reporter incarnation to a deployment generation."""
+
+    seed = UUID(str(seed_reporter_incarnation))
+    if seed.int == 0 or str(seed) != seed_reporter_incarnation:
+        raise ValueError("protected staging reporter seed identity is invalid")
+    if type(target_generation) is not int or target_generation < 1:
+        raise ValueError("protected staging reporter generation is invalid")
+    return uuid5(seed, f"loom:staging:capacity-reporter:v1:{target_generation}")
 
 
 def staging_database_protected_admission_digest(
@@ -2459,6 +2477,7 @@ __all__ = [
     "KubernetesProtectedStagingCapacityDatabaseComponent",
     "build_staging_reporter_configuration",
     "build_staging_reporter_configuration_for_candidate",
+    "derive_staging_reporter_incarnation",
     "staging_database_protected_admission_digest",
     "staging_database_protected_admission_digest_for_candidate",
 ]

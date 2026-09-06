@@ -34,6 +34,9 @@ from loom_cli.rollout.operator.protected_capacity_manager_client import (
 from loom_cli.rollout.operator.protected_capacity_manager_configuration_compensation import (
     CapacityManagerConfigurationCompensationStore,
 )
+from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+    derive_staging_reporter_incarnation,
+)
 from loom_cli.rollout.operator.protected_staging_capacity_manager_configuration_component import (
     KubernetesProtectedStagingCapacityManagerConfigurationComponent,
 )
@@ -579,7 +582,8 @@ def test_component_preserves_live_state_and_converges_exact_staging_subject(
     fleet = _live_fleet()
     existing = subject_configuration(fleet)
     client = _Client(_active_document(fleet, (existing,)))
-    component = _component(client, _seed())
+    seed = _seed()
+    component = _component(client, seed)
     plan = _plan(tmp_path)
 
     state, _evidence = component.classify(plan)
@@ -655,8 +659,12 @@ def test_component_preserves_live_state_and_converges_exact_staging_subject(
         json.dumps(_find_subject(client.calls, _STAGING_SUBJECT))
     )
     target_generation = plan.starting_mutation_epoch + 1
+    expected_reporter = derive_staging_reporter_incarnation(
+        seed["reporter_incarnation"],
+        target_generation=target_generation,
+    )
     assert staging.subject_incarnation == _STAGING_INCARNATION
-    assert staging.demand_reporter_incarnation == _STAGING_REPORTER
+    assert staging.demand_reporter_incarnation == expected_reporter
     assert staging.display_name == "staging"
     assert staging.account_id == "shared-development"
     assert staging.tier_id == "staging"

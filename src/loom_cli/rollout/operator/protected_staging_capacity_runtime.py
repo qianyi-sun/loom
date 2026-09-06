@@ -49,6 +49,7 @@ from .protected_staging_capacity_agent_component import (
 )
 from .protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
+    derive_staging_reporter_incarnation,
 )
 from .protected_staging_capacity_execution_credential_component import (
     KubernetesProtectedStagingExecutionCredentialComponent,
@@ -410,7 +411,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 component_evidence=evidence,
             )
         if component_id == "capacity-manager-runtime":
-            state, evidence = self._manager_runtime_component().classify(plan)
+            state, evidence = self._manager_runtime_component(plan).classify(plan)
             return self._observation(
                 plan,
                 component_id=component_id,
@@ -471,7 +472,7 @@ class KubernetesProtectedStagingCapacityRuntime:
             self._execution_credential_component().apply(plan)
             return
         if component_id == "capacity-manager-runtime":
-            self._manager_runtime_component().apply(plan)
+            self._manager_runtime_component(plan).apply(plan)
             return
         if component_id == "capacity-manager-configuration":
             self._manager_configuration_component().apply(plan)
@@ -626,12 +627,13 @@ class KubernetesProtectedStagingCapacityRuntime:
 
     def _manager_runtime_component(
         self,
+        plan: FinalGatePlan,
     ) -> KubernetesProtectedStagingCapacityManagerRuntimeComponent:
         return KubernetesProtectedStagingCapacityManagerRuntimeComponent(
             runner=self.runner,
             candidate_root=self.candidate_root,
             container_registry=self.container_registry,
-            seed_reader=self.read_credential_seed,
+            seed_reader=lambda: self._effective_credential_seed(plan),
             prerequisite_reader=self._read_execution_prerequisite,
             manager_status_reader=self._read_manager_status,
         )
@@ -704,7 +706,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 self._controller_prerequisite_component("oldlab"),
             ),
             (_EXECUTION_CREDENTIAL_COMPONENT_ID, self._execution_credential_component()),
-            ("capacity-manager-runtime", self._manager_runtime_component()),
+            ("capacity-manager-runtime", self._manager_runtime_component(plan)),
             ("capacity-manager-configuration", self._manager_configuration_component()),
         )
         evidence: dict[str, str] = {}
@@ -813,6 +815,16 @@ class KubernetesProtectedStagingCapacityRuntime:
     def read_credential_seed(self) -> dict[str, object]:
         """Return one strictly validated private staging credential seed."""
         return self._parse_credential_seed(self._read_private_file(self.credential_seed_path))
+
+    def _effective_credential_seed(self, plan: FinalGatePlan) -> dict[str, object]:
+        seed = self.read_credential_seed()
+        seed["reporter_incarnation"] = str(
+            derive_staging_reporter_incarnation(
+                seed["reporter_incarnation"],
+                target_generation=plan.starting_mutation_epoch + 1,
+            )
+        )
+        return seed
 
     def read_execution_credential_bundle(self) -> ExecutionCredentialBundle:
         """Return the strictly validated execution-only bootstrap subset."""

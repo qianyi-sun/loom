@@ -917,8 +917,23 @@ def _principal_registry_with_staging_reporter(
         if isinstance(principal, dict) and principal.get("principal_id") == _PRINCIPAL_ID
     ]
     if matching:
-        if len(matching) != 1 or matching[0] != desired:
+        if len(matching) != 1:
             raise ValueError("staging demand reporter conflicts with the principal registry")
+        existing = matching[0]
+        if existing != desired:
+            predecessor = dict(desired)
+            try:
+                predecessor_incarnation = _canonical_uuid(
+                    existing.get("demand_reporter_incarnation")
+                )
+            except ValueError:
+                raise ValueError(
+                    "staging demand reporter conflicts with the principal registry"
+                ) from None
+            predecessor["demand_reporter_incarnation"] = predecessor_incarnation
+            if existing != predecessor:
+                raise ValueError("staging demand reporter conflicts with the principal registry")
+            principals[principals.index(existing)] = desired
     else:
         for principal in principals:
             if not isinstance(principal, dict):

@@ -29,6 +29,8 @@ from loom_cli.rollout.operator.protected_apply_journal import (
 )
 from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
+    build_staging_reporter_configuration_for_candidate,
+    derive_staging_reporter_incarnation,
 )
 from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
     KubernetesProtectedStagingCapacityRuntime,
@@ -161,7 +163,12 @@ class _DatabaseRunner:
             "deployment_generation": self.plan.starting_mutation_epoch + 1,
             "environment_id": "staging",
             "reporter_high_water": 0,
-            "reporter_incarnation": self.seed["reporter_incarnation"],
+            "reporter_incarnation": str(
+                derive_staging_reporter_incarnation(
+                    self.seed["reporter_incarnation"],
+                    target_generation=self.plan.starting_mutation_epoch + 1,
+                )
+            ),
             "schema_version": 1,
             "subject_id": self.seed["subject_id"],
             "subject_incarnation": self.seed["subject_incarnation"],
@@ -793,6 +800,37 @@ def _runtime(
     )
 
 
+def test_replacement_deployment_rotates_reporter_incarnation_stably() -> None:
+    seed = {
+        "agent_incarnation": "00000000-0000-4000-8000-000000000101",
+        "authority_incarnation": "00000000-0000-4000-8000-000000000102",
+        "reporter_incarnation": "00000000-0000-4000-8000-000000000103",
+        "subject_id": "00000000-0000-4000-8000-000000000104",
+        "subject_incarnation": "00000000-0000-4000-8000-000000000105",
+    }
+    predecessor = build_staging_reporter_configuration_for_candidate(
+        candidate_sha="a" * 40,
+        artifact_bundle_digest="b" * 64,
+        mutation_epoch=40,
+        seed=seed,
+    )
+    replacement = build_staging_reporter_configuration_for_candidate(
+        candidate_sha="c" * 40,
+        artifact_bundle_digest="d" * 64,
+        mutation_epoch=41,
+        seed=seed,
+    )
+    retry = build_staging_reporter_configuration_for_candidate(
+        candidate_sha="c" * 40,
+        artifact_bundle_digest="d" * 64,
+        mutation_epoch=41,
+        seed=seed,
+    )
+
+    assert replacement.reporter_incarnation != predecessor.reporter_incarnation
+    assert retry.reporter_incarnation == replacement.reporter_incarnation
+
+
 def test_runtime_builds_fixed_chain_and_epoch_drift_blocks_every_component(
     tmp_path: Path,
 ) -> None:
@@ -960,7 +998,7 @@ def test_preparation_dependency_rechecks_every_task_43_to_45_component(
     monkeypatch.setattr(
         KubernetesProtectedStagingCapacityRuntime,
         "_manager_runtime_component",
-        lambda _runtime: _ExactComponent("manager-runtime"),
+        lambda _runtime, _plan: _ExactComponent("manager-runtime"),
     )
     monkeypatch.setattr(
         KubernetesProtectedStagingCapacityRuntime,
@@ -1385,6 +1423,17 @@ def test_manager_runtime_component_is_reachable_through_protected_chain(
     component.apply(plan)
 
     assert component.classify(plan).state is ComponentState.EXACT
+    seed = json.loads(seed_runtime.credential_seed_path.read_text())
+    registry = json.loads(base64.b64decode(cluster.secret_data["principals.json"], validate=True))
+    principal = next(
+        item for item in registry["principals"] if item["principal_id"] == "staging-demand-reporter"
+    )
+    assert principal["demand_reporter_incarnation"] == str(
+        derive_staging_reporter_incarnation(
+            seed["reporter_incarnation"],
+            target_generation=plan.starting_mutation_epoch + 1,
+        )
+    )
 
 
 def test_manager_configuration_component_is_reachable_after_manager_runtime(

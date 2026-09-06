@@ -471,6 +471,29 @@ def test_registry_mutation_is_idempotent_and_rejects_conflicting_binding() -> No
         )
 
 
+def test_registry_mutation_rotates_only_the_bound_predecessor_reporter() -> None:
+    seed = _seed()
+    desired = json.loads(
+        _mutate_registry()(
+            json.dumps(_registry()).encode("ascii"),
+            seed=seed,
+        )
+    )
+    predecessor = deepcopy(desired)
+    predecessor["principals"][-1]["demand_reporter_incarnation"] = (
+        "00000000-0000-4000-8000-000000000398"
+    )
+
+    rotated = json.loads(
+        _mutate_registry()(
+            json.dumps(predecessor).encode("ascii"),
+            seed=seed,
+        )
+    )
+
+    assert rotated == desired
+
+
 @pytest.mark.parametrize(
     ("mutate_registry", "message"),
     (
