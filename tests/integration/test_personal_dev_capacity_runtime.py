@@ -333,7 +333,7 @@ async def test_full_compensation_covers_every_protected_role_session(
 
 
 @pytest.mark.asyncio
-async def test_staging_peer_arm_composes_with_converge_seal_and_retry(
+async def test_staging_peer_arm_composes_with_converge_seal_retry_and_replacement(
     postgres_url: str,
 ) -> None:
     """Catch retries sending application-role ACL mutations to the protected schema."""
@@ -480,6 +480,42 @@ async def test_staging_peer_arm_composes_with_converge_seal_and_retry(
 
         assert retry_installation == installation
 
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            await connection.execute(arm_payload.decode("utf-8"))
+
+        replacement_configuration = build_staging_reporter_configuration_for_candidate(
+            candidate_sha="c" * 40,
+            artifact_bundle_digest="d" * 64,
+            mutation_epoch=42,
+            seed=seed,
+        )
+        replacement_installation = await PsycopgPersonalDevCapacityDatabase(
+            migrator_url,
+            transient_role_admin=True,
+        ).converge_protected(
+            identity=identity,
+            credentials=credentials,
+            configuration=replacement_configuration,
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            for seal_payload in seal_payloads:
+                await connection.execute(seal_payload.decode("utf-8"))
+
+        assert replacement_configuration.reporter_incarnation != configuration.reporter_incarnation
+        assert (
+            replacement_installation.protected_admission_sha256
+            != installation.protected_admission_sha256
+        )
+
         runtime_url = (
             parsed.set(
                 database="loom",
@@ -495,7 +531,10 @@ async def test_staging_peer_arm_composes_with_converge_seal_and_retry(
             )
             row = await registration.fetchone()
             assert row is not None
-            assert row[0]["candidate_digest"] == "b" * 64
+            assert row[0]["candidate_digest"] == "d" * 64
+            assert row[0]["reporter_incarnation"] == str(
+                replacement_configuration.reporter_incarnation
+            )
 
         async with await psycopg.AsyncConnection.connect(loom_admin_url) as connection:
             revision = await connection.execute(

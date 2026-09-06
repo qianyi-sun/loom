@@ -19,6 +19,15 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from loom.personal_dev_capacity_runtime import (
+    CapacityDatabaseCredentials,
+    CapacityDatabaseInstallation,
+)
+from loom.staging_capacity_database_bootstrap import (
+    StagingCapacityDatabaseBootstrapSettings,
+    bootstrap_staging_capacity_database,
+)
+from loom_capacity_agent.contracts import ReporterConfigurationV1
 from loom_capacity_manager.contracts import FleetManifestV1, canonical_digest_excluding
 from loom_cli.rollout.operator import protected_staging_capacity_runtime as protected_runtime
 from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
@@ -29,6 +38,8 @@ from loom_cli.rollout.operator.protected_apply_journal import (
 )
 from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
+    build_staging_reporter_configuration_for_candidate,
+    derive_staging_reporter_incarnation,
 )
 from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
     KubernetesProtectedStagingCapacityRuntime,
@@ -161,7 +172,12 @@ class _DatabaseRunner:
             "deployment_generation": self.plan.starting_mutation_epoch + 1,
             "environment_id": "staging",
             "reporter_high_water": 0,
-            "reporter_incarnation": self.seed["reporter_incarnation"],
+            "reporter_incarnation": str(
+                derive_staging_reporter_incarnation(
+                    self.seed["reporter_incarnation"],
+                    target_generation=self.plan.starting_mutation_epoch + 1,
+                )
+            ),
             "schema_version": 1,
             "subject_id": self.seed["subject_id"],
             "subject_incarnation": self.seed["subject_incarnation"],
@@ -793,6 +809,37 @@ def _runtime(
     )
 
 
+def test_replacement_deployment_rotates_reporter_incarnation_stably() -> None:
+    seed = {
+        "agent_incarnation": "00000000-0000-4000-8000-000000000101",
+        "authority_incarnation": "00000000-0000-4000-8000-000000000102",
+        "reporter_incarnation": "00000000-0000-4000-8000-000000000103",
+        "subject_id": "00000000-0000-4000-8000-000000000104",
+        "subject_incarnation": "00000000-0000-4000-8000-000000000105",
+    }
+    predecessor = build_staging_reporter_configuration_for_candidate(
+        candidate_sha="a" * 40,
+        artifact_bundle_digest="b" * 64,
+        mutation_epoch=40,
+        seed=seed,
+    )
+    replacement = build_staging_reporter_configuration_for_candidate(
+        candidate_sha="c" * 40,
+        artifact_bundle_digest="d" * 64,
+        mutation_epoch=41,
+        seed=seed,
+    )
+    retry = build_staging_reporter_configuration_for_candidate(
+        candidate_sha="c" * 40,
+        artifact_bundle_digest="d" * 64,
+        mutation_epoch=41,
+        seed=seed,
+    )
+
+    assert replacement.reporter_incarnation != predecessor.reporter_incarnation
+    assert retry.reporter_incarnation == replacement.reporter_incarnation
+
+
 def test_runtime_builds_fixed_chain_and_epoch_drift_blocks_every_component(
     tmp_path: Path,
 ) -> None:
@@ -960,7 +1007,7 @@ def test_preparation_dependency_rechecks_every_task_43_to_45_component(
     monkeypatch.setattr(
         KubernetesProtectedStagingCapacityRuntime,
         "_manager_runtime_component",
-        lambda _runtime: _ExactComponent("manager-runtime"),
+        lambda _runtime, _plan: _ExactComponent("manager-runtime"),
     )
     monkeypatch.setattr(
         KubernetesProtectedStagingCapacityRuntime,
@@ -1385,6 +1432,17 @@ def test_manager_runtime_component_is_reachable_through_protected_chain(
     component.apply(plan)
 
     assert component.classify(plan).state is ComponentState.EXACT
+    seed = json.loads(seed_runtime.credential_seed_path.read_text())
+    registry = json.loads(base64.b64decode(cluster.secret_data["principals.json"], validate=True))
+    principal = next(
+        item for item in registry["principals"] if item["principal_id"] == "staging-demand-reporter"
+    )
+    assert principal["demand_reporter_incarnation"] == str(
+        derive_staging_reporter_incarnation(
+            seed["reporter_incarnation"],
+            target_generation=plan.starting_mutation_epoch + 1,
+        )
+    )
 
 
 def test_manager_configuration_component_is_reachable_after_manager_runtime(
@@ -1698,6 +1756,79 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     assert volumes["postgres-ca"]["items"] == [{"key": "ca.crt", "path": "ca.crt"}]
 
 
+@pytest.mark.asyncio
+async def test_database_manifest_runs_real_bootstrap_with_generation_reporter(
+    tmp_path: Path,
+) -> None:
+    """Break caught: serializing the raw seed beside a generation-derived configuration."""
+
+    plan, runner, _component = _database_component(tmp_path, database_state="absent")
+    component = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    raw_reporter_incarnation = runner.seed["reporter_incarnation"]
+    documents = {
+        document["kind"]: document
+        for document in yaml.safe_load_all(component._manifest(plan, runner.seed))
+        if document is not None
+    }
+    secret_data = documents["Secret"]["data"]
+    bootstrap_root = tmp_path / "bootstrap-inputs"
+    bootstrap_root.mkdir()
+    for secret_name, file_name in (
+        ("seed.json", "seed.json"),
+        ("reporter-configuration.json", "reporter-configuration.json"),
+        ("admin-username", "username"),
+        ("admin-password", "password"),
+    ):
+        (bootstrap_root / file_name).write_bytes(
+            base64.b64decode(secret_data[secret_name], validate=True)
+        )
+    (bootstrap_root / "ca.crt").write_bytes(b"test-ca")
+    observed: dict[str, object] = {}
+
+    class Database:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
+            observed["admin_url"] = admin_url
+            observed["transient_role_admin"] = transient_role_admin
+
+        async def converge_protected(
+            self,
+            *,
+            identity: object,
+            credentials: CapacityDatabaseCredentials,
+            configuration: ReporterConfigurationV1,
+        ) -> CapacityDatabaseInstallation:
+            observed["credentials"] = credentials
+            observed["configuration"] = configuration
+            return CapacityDatabaseInstallation(
+                protected_admission_sha256="4" * 64,
+                agent_database_url="redacted-agent-url",
+                runtime_database_url="redacted-runtime-url",
+            )
+
+    await bootstrap_staging_capacity_database(
+        StagingCapacityDatabaseBootstrapSettings(
+            credential_seed_path=bootstrap_root / "seed.json",
+            reporter_configuration_path=bootstrap_root / "reporter-configuration.json",
+            admin_username_path=bootstrap_root / "username",
+            admin_password_path=bootstrap_root / "password",
+            database_ca_path=bootstrap_root / "ca.crt",
+        ),
+        database_factory=Database,
+    )
+
+    credentials = observed["credentials"]
+    configuration = observed["configuration"]
+    assert isinstance(credentials, CapacityDatabaseCredentials)
+    assert isinstance(configuration, ReporterConfigurationV1)
+    assert credentials.reporter_incarnation == configuration.reporter_incarnation
+    assert str(configuration.reporter_incarnation) != raw_reporter_incarnation
+    assert runner.seed["reporter_incarnation"] == raw_reporter_incarnation
+
+
 def test_database_component_accepts_api_defaulted_job_and_cleans_it_up(tmp_path: Path) -> None:
     """Break caught: comparing a live defaulted Job directly with its raw manifest."""
 
@@ -2007,9 +2138,11 @@ def test_database_component_recovers_exact_partial_bootstrap_resource_set(
 
 
 @pytest.mark.parametrize("epoch_gap", [1, 2])
+@pytest.mark.parametrize("raw_reporter_payload", [False, True])
 def test_database_component_recovers_certified_failed_older_auth_manifest(
     tmp_path: Path,
     epoch_gap: int,
+    raw_reporter_payload: bool,
 ) -> None:
     """Break caught: a reviewed auth upgrade stranding the prior failed bootstrap."""
 
@@ -2034,6 +2167,24 @@ def test_database_component_recovers_certified_failed_older_auth_manifest(
         seed_reader=lambda: runner.seed,
     )
     runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    if raw_reporter_payload:
+        secret_data = runner.objects["Secret"]["data"]
+        assert isinstance(secret_data, dict)
+        raw_reporter_incarnation = runner.seed["reporter_incarnation"]
+        reporter_configuration = json.loads(
+            base64.b64decode(secret_data["reporter-configuration.json"], validate=True)
+        )
+        reporter_configuration["reporter_incarnation"] = raw_reporter_incarnation
+        secret_data["reporter-configuration.json"] = base64.b64encode(
+            json.dumps(
+                reporter_configuration,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).decode("ascii")
+        secret_data["seed.json"] = base64.b64encode(
+            (json.dumps(runner.seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        ).decode("ascii")
     retained_uids = {
         kind: str(resource["metadata"]["uid"]) for kind, resource in runner.objects.items()
     }

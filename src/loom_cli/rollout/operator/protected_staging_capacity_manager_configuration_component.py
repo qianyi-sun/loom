@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -45,6 +45,9 @@ from .protected_capacity_manager_configuration_compensation import (
     CapacityManagerConfigurationCompensationIntentRecord,
     CapacityManagerConfigurationCompensationRecord,
     CapacityManagerConfigurationCompensationStore,
+)
+from .protected_staging_capacity_database_component import (
+    derive_staging_reporter_incarnation,
 )
 
 _GB10_SOURCE_NODES = frozenset(f"trt-gb10-{index}" for index in range(1, 16))
@@ -549,9 +552,17 @@ def derive_protected_staging_capacity_configuration(
 ) -> _DesiredConfiguration:
     """Derive the one target shared by protected preflight and apply."""
 
+    seed = _parse_configuration_seed(dict(seed_values))
+    seed = replace(
+        seed,
+        reporter_incarnation=derive_staging_reporter_incarnation(
+            seed_values.get("reporter_incarnation"),
+            target_generation=target_generation,
+        ),
+    )
     return _derive_desired_configuration(
         _parse_active_configuration(active_document),
-        seed=_parse_configuration_seed(dict(seed_values)),
+        seed=seed,
         target_generation=target_generation,
     )
 

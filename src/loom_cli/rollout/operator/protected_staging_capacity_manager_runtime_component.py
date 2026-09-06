@@ -916,20 +916,38 @@ def _principal_registry_with_staging_reporter(
         for principal in principals
         if isinstance(principal, dict) and principal.get("principal_id") == _PRINCIPAL_ID
     ]
-    if matching:
-        if len(matching) != 1 or matching[0] != desired:
+    if len(matching) > 1:
+        raise ValueError("staging demand reporter conflicts with the principal registry")
+    existing = matching[0] if matching else None
+    for principal in principals:
+        if not isinstance(principal, dict):
+            raise ValueError("capacity principal registry is invalid")
+        if principal is existing:
+            continue
+        if (
+            principal.get("token_sha256") == desired["token_sha256"]
+            or principal.get("subject_id") == subject_id
+            or principal.get("subject_incarnation") == subject_incarnation
+            or principal.get("demand_reporter_incarnation") == reporter_incarnation
+        ):
             raise ValueError("staging demand reporter conflicts with the principal registry")
-    else:
-        for principal in principals:
-            if not isinstance(principal, dict):
-                raise ValueError("capacity principal registry is invalid")
-            if (
-                principal.get("token_sha256") == desired["token_sha256"]
-                or principal.get("subject_id") == subject_id
-                or principal.get("subject_incarnation") == subject_incarnation
-                or principal.get("demand_reporter_incarnation") == reporter_incarnation
-            ):
+    if matching:
+        assert existing is not None
+        if existing != desired:
+            predecessor = dict(desired)
+            try:
+                predecessor_incarnation = _canonical_uuid(
+                    existing.get("demand_reporter_incarnation")
+                )
+            except ValueError:
+                raise ValueError(
+                    "staging demand reporter conflicts with the principal registry"
+                ) from None
+            predecessor["demand_reporter_incarnation"] = predecessor_incarnation
+            if existing != predecessor:
                 raise ValueError("staging demand reporter conflicts with the principal registry")
+            principals[principals.index(existing)] = desired
+    else:
         principals.append(desired)
     canonical = (
         json.dumps(registry, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"

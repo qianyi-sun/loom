@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import yaml  # type: ignore[import-untyped]
 from psycopg import sql
@@ -1135,13 +1135,22 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         prior_plan = self.recovery_plan_reader(plan, *bindings)
         if prior_plan is None:
             return None
-        legacy_manifest = self._legacy_auth_manifest(prior_plan, self.seed_reader())
-        expected = _manifest_resources(legacy_manifest)
-        if any(
-            _resource_projection(observed[kind]) != _resource_projection(expected[kind])
-            for kind in ("Secret", "Job")
-        ):
+        seed = self.seed_reader()
+        legacy_manifests = (
+            self._legacy_auth_manifest(prior_plan, seed),
+            self._legacy_auth_manifest(prior_plan, seed, seed_reporter_incarnation=True),
+        )
+        matching_manifests: list[bytes] = []
+        for candidate_manifest in legacy_manifests:
+            expected = _manifest_resources(candidate_manifest)
+            if all(
+                _resource_projection(observed[kind]) == _resource_projection(expected[kind])
+                for kind in ("Secret", "Job")
+            ):
+                matching_manifests.append(candidate_manifest)
+        if len(matching_manifests) != 1:
             return None
+        legacy_manifest = matching_manifests[0]
         comparison_manifest = _manifest_with_observed_cleanup_labels(legacy_manifest, observed)
         status = self.runner.run_status(
             (
@@ -2082,7 +2091,13 @@ COMMIT;
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
 
-    def _legacy_auth_manifest(self, plan: FinalGatePlan, seed: dict[str, object]) -> bytes:
+    def _legacy_auth_manifest(
+        self,
+        plan: FinalGatePlan,
+        seed: dict[str, object],
+        *,
+        seed_reporter_incarnation: bool = False,
+    ) -> bytes:
         """Rebuild the exact pre-transient-role bootstrap resources for safe retirement."""
 
         documents = [document for document in yaml.safe_load_all(self._manifest(plan, seed))]
@@ -2097,6 +2112,17 @@ COMMIT;
             raise ValueError("protected staging capacity legacy manifest is invalid")
         secret_data.pop("admin-password", None)
         secret_data.pop("admin-username", None)
+        if seed_reporter_incarnation:
+            reporter_incarnation = UUID(str(seed["reporter_incarnation"]))
+            configuration = build_staging_reporter_configuration(plan, seed).model_copy(
+                update={"reporter_incarnation": reporter_incarnation}
+            )
+            secret_data["reporter-configuration.json"] = base64.b64encode(
+                canonical_bytes(configuration)
+            ).decode("ascii")
+            secret_data["seed.json"] = base64.b64encode(
+                (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            ).decode("ascii")
         template = job_spec.get("template")
         pod_spec = template.get("spec") if isinstance(template, dict) else None
         volumes = pod_spec.get("volumes") if isinstance(pod_spec, dict) else None
@@ -2124,6 +2150,10 @@ COMMIT;
 
     def _manifest(self, plan: FinalGatePlan, seed: dict[str, object]) -> bytes:
         configuration = build_staging_reporter_configuration(plan, seed)
+        effective_seed = {
+            **seed,
+            "reporter_incarnation": str(configuration.reporter_incarnation),
+        }
         labels = {
             "app.kubernetes.io/managed-by": _MANAGED_BY,
             "app.kubernetes.io/name": _NAME,
@@ -2154,7 +2184,9 @@ COMMIT;
                     canonical_bytes(configuration)
                 ).decode("ascii"),
                 "seed.json": base64.b64encode(
-                    (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+                    (
+                        json.dumps(effective_seed, sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode("ascii")
                 ).decode("ascii"),
             },
         }
@@ -2305,7 +2337,10 @@ def build_staging_reporter_configuration_for_candidate(
         subject_incarnation=UUID(str(seed["subject_incarnation"])),
         authority_incarnation=UUID(str(seed["authority_incarnation"])),
         agent_incarnation=UUID(str(seed["agent_incarnation"])),
-        reporter_incarnation=UUID(str(seed["reporter_incarnation"])),
+        reporter_incarnation=derive_staging_reporter_incarnation(
+            seed["reporter_incarnation"],
+            target_generation=mutation_epoch + 1,
+        ),
         candidate_digest=artifact_bundle_digest,
         candidate_identity_algorithm="git-sha1",
         candidate_identity=candidate_sha,
@@ -2332,6 +2367,21 @@ def build_staging_reporter_configuration_for_candidate(
             ),
         ),
     )
+
+
+def derive_staging_reporter_incarnation(
+    seed_reporter_incarnation: object,
+    *,
+    target_generation: int,
+) -> UUID:
+    """Bind one retry-stable reporter incarnation to a deployment generation."""
+
+    seed = UUID(str(seed_reporter_incarnation))
+    if seed.int == 0 or str(seed) != seed_reporter_incarnation:
+        raise ValueError("protected staging reporter seed identity is invalid")
+    if type(target_generation) is not int or target_generation < 1:
+        raise ValueError("protected staging reporter generation is invalid")
+    return uuid5(seed, f"loom:staging:capacity-reporter:v1:{target_generation}")
 
 
 def staging_database_protected_admission_digest(
@@ -2459,6 +2509,7 @@ __all__ = [
     "KubernetesProtectedStagingCapacityDatabaseComponent",
     "build_staging_reporter_configuration",
     "build_staging_reporter_configuration_for_candidate",
+    "derive_staging_reporter_incarnation",
     "staging_database_protected_admission_digest",
     "staging_database_protected_admission_digest_for_candidate",
 ]
