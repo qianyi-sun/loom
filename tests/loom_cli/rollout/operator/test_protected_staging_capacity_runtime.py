@@ -20,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from loom_capacity_manager.contracts import FleetManifestV1, canonical_digest_excluding
+from loom_cli.rollout.operator import protected_staging_capacity_runtime as protected_runtime
+from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
@@ -92,6 +94,10 @@ class _DatabaseRunner:
         self.fail_peer_phase_counts: dict[str, int] = {}
         self.fail_delete_job_before_mutation = 0
         self.reject_diff_validate_flag = False
+        self.activate_job_after_diff_count: int | None = None
+        self.churn_job_after_diff_count: int | None = None
+        self.replace_job_after_diff_count: int | None = None
+        self.diff_count = 0
 
     def _registration(self) -> dict[str, object]:
         return {
@@ -409,7 +415,7 @@ class _DatabaseRunner:
         }
         if set(expected) != set(self.objects):
             return 1
-        return (
+        status = (
             0
             if all(
                 self._ssa_contains(
@@ -420,6 +426,30 @@ class _DatabaseRunner:
             )
             else 1
         )
+        self.diff_count += 1
+        if self.churn_job_after_diff_count == self.diff_count:
+            job_metadata = self.objects["Job"]["metadata"]
+            assert isinstance(job_metadata, dict)
+            self._sequence += 1
+            job_metadata["resourceVersion"] = str(self._sequence)
+        if self.replace_job_after_diff_count == self.diff_count:
+            previous_job = self.objects["Job"]
+            previous_status = deepcopy(previous_job["status"])
+            replacement = self._stored(self._projection(previous_job))
+            replacement["status"] = previous_status
+            self.objects["Job"] = replacement
+        if self.activate_job_after_diff_count == self.diff_count:
+            job = self.objects["Job"]
+            metadata = job["metadata"]
+            assert isinstance(metadata, dict)
+            self._sequence += 1
+            metadata["resourceVersion"] = str(self._sequence)
+            job["status"] = {
+                "active": 1,
+                "failed": 1,
+                "conditions": [{"status": "True", "type": "Failed"}],
+            }
+        return status
 
     def run_checked(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
@@ -1355,7 +1385,7 @@ def _database_component(
     return plan, runner, runtime.components(plan, epoch_guard=lambda _plan: epoch)[1]
 
 
-def _prior_database_plan(plan: FinalGatePlan) -> FinalGatePlan:
+def _prior_database_plan(plan: FinalGatePlan, **updates: object) -> FinalGatePlan:
     payload = plan.to_dict()
     payload.update(
         {
@@ -1364,6 +1394,26 @@ def _prior_database_plan(plan: FinalGatePlan) -> FinalGatePlan:
             "starting_mutation_epoch": plan.starting_mutation_epoch - 1,
         }
     )
+    payload.update(updates)
+    authority = DatabaseAuthorityEvidence(
+        public_schema_revision=str(payload["public_schema_revision"]),
+        capacity_guard_schema_revision=payload["capacity_guard_schema_revision"],  # type: ignore[arg-type]
+        configuration_epoch=payload["manager_configuration_epoch"],  # type: ignore[arg-type]
+        configuration_digest=str(payload["manager_configuration_digest"]),
+        authority_incarnation=UUID(str(payload["manager_authority_incarnation"])),
+        writer_epoch=payload["manager_writer_epoch"],  # type: ignore[arg-type]
+        execution_state=payload["manager_execution_state"],  # type: ignore[arg-type]
+        execution_epoch=payload["manager_execution_epoch"],  # type: ignore[arg-type]
+        execution_manifest_sha256=payload["manager_execution_manifest_sha256"],  # type: ignore[arg-type]
+        executable_new_capacity_ceiling=payload[  # type: ignore[arg-type]
+            "manager_executable_new_capacity_ceiling"
+        ],
+        increase_freeze=payload["manager_increase_freeze"],  # type: ignore[arg-type]
+    )
+    payload["database_authority_digest"] = authority.digest
+    checkpoint_components = dict(payload["checkpoint_component_sha256"])  # type: ignore[arg-type]
+    checkpoint_components["database_authority"] = authority.digest
+    payload["checkpoint_component_sha256"] = checkpoint_components
     payload_without_digest = {key: value for key, value in payload.items() if key != "plan_digest"}
     payload["plan_digest"] = hashlib.sha256(
         json.dumps(payload_without_digest, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -1855,6 +1905,71 @@ def test_database_component_rejects_nonterminal_previous_auth_job(
     assert runner.delete_inputs == []
 
 
+def test_database_component_rejects_previous_job_activated_after_final_certification(
+    tmp_path: Path,
+) -> None:
+    """Break caught: cleanup adopting a newly active Job after certification."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    runner.activate_job_after_diff_count = 3
+
+    with pytest.raises(RuntimeError, match="changed during cleanup"):
+        component.apply(plan)
+
+    assert runner.objects["Job"]["status"] == {
+        "active": 1,
+        "failed": 1,
+        "conditions": [{"status": "True", "type": "Failed"}],
+    }
+    assert runner.patch_inputs == []
+    assert runner.delete_inputs == []
+
+
+@pytest.mark.parametrize("change", ["resource-version", "replacement"])
+def test_database_component_rejects_previous_job_identity_changed_after_final_certification(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    """Break caught: cleanup adopting a newer version or replacement after certification."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    original_uid = runner.objects["Job"]["metadata"]["uid"]
+    original_resource_version = runner.objects["Job"]["metadata"]["resourceVersion"]
+    if change == "resource-version":
+        runner.churn_job_after_diff_count = 3
+    else:
+        runner.replace_job_after_diff_count = 3
+
+    with pytest.raises(RuntimeError, match="changed during cleanup"):
+        component.apply(plan)
+
+    job_metadata = runner.objects["Job"]["metadata"]
+    assert isinstance(job_metadata, dict)
+    if change == "resource-version":
+        assert job_metadata["uid"] == original_uid
+        assert job_metadata["resourceVersion"] != original_resource_version
+    else:
+        assert job_metadata["uid"] != original_uid
+    assert runner.patch_inputs == []
+    assert runner.delete_inputs == []
+
+
 def test_database_component_rejects_previous_auth_manifest_without_plan(tmp_path: Path) -> None:
     """Break caught: treating annotations alone as cleanup authority."""
 
@@ -1919,6 +2034,190 @@ def test_database_component_rejects_duplicated_previous_plan(tmp_path: Path) -> 
 
     assert runner.objects == retained
     assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_noncanonical_previous_attempt_directory(
+    tmp_path: Path,
+) -> None:
+    """Break caught: treating attempts/01 as the canonical attempt 1 ledger path."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    attempts_root = (
+        tmp_path / "state" / "requests" / prior_plan.request_id / "attempts"
+    )
+    (attempts_root / "1").rename(attempts_root / "01")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_unexpected_previous_attempt_entry(tmp_path: Path) -> None:
+    """Break caught: silently skipping an unsafe entry in the protected attempts ledger."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    unexpected = (
+        tmp_path
+        / "state"
+        / "requests"
+        / prior_plan.request_id
+        / "attempts"
+        / "unexpected"
+    )
+    unexpected.write_text("unsafe\n", encoding="utf-8")
+    unexpected.chmod(0o600)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_recovery_ledger_over_global_plan_file_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: a bounded directory fanout still causing an excessive global scan."""
+
+    monkeypatch.setattr(protected_runtime, "_MAX_RECOVERY_PLAN_FILES", 1, raising=False)
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    unrelated_plan = _prior_database_plan(
+        plan,
+        request_id="req-unrelated01",
+        rollout_id="20260905t181433z-staging-unrelated01",
+    )
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    _write_database_plan_ledger_entry(tmp_path, unrelated_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_recovery_ledger_over_global_byte_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: aggregate recovery plan reads exceeding their byte budget."""
+
+    monkeypatch.setattr(protected_runtime, "_MAX_RECOVERY_PLAN_BYTES", 1, raising=False)
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+@pytest.mark.parametrize(
+    "manager_field",
+    [
+        "manager_configuration_epoch",
+        "manager_configuration_digest",
+        "manager_writer_epoch",
+    ],
+)
+def test_database_component_rejects_previous_plan_with_manager_authority_drift(
+    tmp_path: Path,
+    manager_field: str,
+) -> None:
+    """Break caught: cleanup authorized by a different manager authority tuple."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    current_value = getattr(plan, manager_field)
+    drifted_value: object
+    if manager_field == "manager_configuration_digest":
+        drifted_value = "f" * 64 if current_value != "f" * 64 else "e" * 64
+    else:
+        assert isinstance(current_value, int)
+        drifted_value = current_value + 1
+    prior_plan = _prior_database_plan(plan, **{manager_field: drifted_value})
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_accepts_previous_public_schema_revision(
+    tmp_path: Path,
+) -> None:
+    """Break caught: equating the full database digest with manager authority."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    prior_plan = _prior_database_plan(
+        plan,
+        public_schema_revision="prior_schema_revision",
+        schema_revision="prior_schema_revision",
+    )
+    assert prior_plan.database_authority_digest != plan.database_authority_digest
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+
+    assert runner.objects == {}
 
 
 @pytest.mark.parametrize("drift", ["additive-secret-data", "job-plan-annotation"])

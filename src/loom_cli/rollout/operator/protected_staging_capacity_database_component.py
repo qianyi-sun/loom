@@ -264,6 +264,26 @@ class _Snapshot:
     evidence_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class _CertifiedResourceIdentity:
+    uid: str
+    resource_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CertifiedPreviousFailedBootstrap:
+    manifest: bytes
+    secret: _CertifiedResourceIdentity
+    job: _CertifiedResourceIdentity
+
+    def identity(self, kind: str) -> _CertifiedResourceIdentity:
+        if kind == "Secret":
+            return self.secret
+        if kind == "Job":
+            return self.job
+        raise ValueError("protected staging capacity database resource kind is invalid")
+
+
 def _manifest_with_observed_cleanup_labels(
     manifest: bytes,
     observed: Mapping[str, Mapping[str, object]],
@@ -478,11 +498,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         if before.database is _DatabaseState.DRIFTED or before.resources is _ResourceState.DRIFTED:
             raise RuntimeError("protected staging capacity database state drifted")
         cleanup_manifest = payload
+        cleanup_certification: _CertifiedPreviousFailedBootstrap | None = None
         if before.resources is _ResourceState.PREVIOUS_FAILED:
-            previous_manifest = self._previous_failed_bootstrap_manifest(plan, payload)
-            if previous_manifest is None:
+            cleanup_certification = self._previous_failed_bootstrap_manifest(plan, payload)
+            if cleanup_certification is None:
                 raise RuntimeError("protected staging capacity database recovery identity changed")
-            cleanup_manifest = previous_manifest
+            cleanup_manifest = cleanup_certification.manifest
         if before.database is _DatabaseState.EXACT:
             if before.resources not in {
                 _ResourceState.EXACT,
@@ -493,9 +514,17 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 raise RuntimeError(
                     "protected staging capacity database state changed before cleanup"
                 )
-            self._delete_bootstrap_resources(plan, cleanup_manifest)
+            self._delete_bootstrap_resources(
+                plan,
+                cleanup_manifest,
+                certification=cleanup_certification,
+            )
         else:
-            self._compensate_bootstrap(plan, cleanup_manifest)
+            self._compensate_bootstrap(
+                plan,
+                cleanup_manifest,
+                certification=cleanup_certification,
+            )
             arm_attempted = False
             try:
                 arm_attempted = True
@@ -555,7 +584,13 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         ):
             raise RuntimeError("protected staging capacity database did not converge")
 
-    def _compensate_bootstrap(self, plan: FinalGatePlan, manifest: bytes) -> None:
+    def _compensate_bootstrap(
+        self,
+        plan: FinalGatePlan,
+        manifest: bytes,
+        *,
+        certification: _CertifiedPreviousFailedBootstrap | None = None,
+    ) -> None:
         credentials_disabled = self._attempt_compensation_phase(
             lambda: self._disable_transient_credentials(preserve_runtime_credentials=False)
         )
@@ -563,7 +598,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             lambda: self._terminate_transient_sessions(preserve_runtime_credentials=False)
         )
         self._attempt_compensation_phase(
-            lambda: self._delete_bootstrap_resources(plan, manifest, kinds=("Job",))
+            lambda: self._delete_bootstrap_resources(
+                plan,
+                manifest,
+                kinds=("Job",),
+                certification=certification,
+            )
         )
 
         credentials_disabled = (
@@ -576,7 +616,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             lambda: self._terminate_transient_sessions(preserve_runtime_credentials=False)
         )
         job_stopped = self._attempt_compensation_phase(
-            lambda: self._delete_bootstrap_resources(plan, manifest, kinds=("Job",))
+            lambda: self._delete_bootstrap_resources(
+                plan,
+                manifest,
+                kinds=("Job",),
+                certification=certification,
+            )
         )
         unresolved = [
             phase
@@ -597,7 +642,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             preserve_runtime_credentials=False,
             durable_runtime_credentials=True,
         )
-        self._delete_bootstrap_resources(plan, manifest, kinds=("Secret",))
+        self._delete_bootstrap_resources(
+            plan,
+            manifest,
+            kinds=("Secret",),
+            certification=certification,
+        )
 
     @staticmethod
     def _attempt_compensation_phase(operation: Callable[[], None]) -> bool:
@@ -851,7 +901,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         self,
         plan: FinalGatePlan,
         current_manifest: bytes,
-    ) -> bytes | None:
+    ) -> _CertifiedPreviousFailedBootstrap | None:
         observed, _evidence_digest, exact = self._inventory_bootstrap_resources(current_manifest)
         if exact:
             return None
@@ -861,7 +911,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         self,
         plan: FinalGatePlan,
         observed: Mapping[str, Mapping[str, object]],
-    ) -> bytes | None:
+    ) -> _CertifiedPreviousFailedBootstrap | None:
         if self.recovery_plan_reader is None or set(observed) != {"Secret", "Job"}:
             return None
         job_status = observed["Job"].get("status")
@@ -911,7 +961,24 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             input_payload=comparison_manifest,
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
-        return legacy_manifest if status == 0 else None
+        if status != 0:
+            return None
+        identities: dict[str, _CertifiedResourceIdentity] = {}
+        for kind in ("Secret", "Job"):
+            metadata = observed[kind]["metadata"]
+            assert isinstance(metadata, Mapping)
+            uid = metadata["uid"]
+            resource_version = metadata["resourceVersion"]
+            assert isinstance(uid, str) and isinstance(resource_version, str)
+            identities[kind] = _CertifiedResourceIdentity(
+                uid=uid,
+                resource_version=resource_version,
+            )
+        return _CertifiedPreviousFailedBootstrap(
+            manifest=legacy_manifest,
+            secret=identities["Secret"],
+            job=identities["Job"],
+        )
 
     def _capture_bootstrap_resource(
         self,
@@ -962,12 +1029,17 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         manifest: bytes,
         *,
         kinds: tuple[str, ...] = ("Job", "Secret"),
+        certification: _CertifiedPreviousFailedBootstrap | None = None,
     ) -> None:
         del plan
         target_kinds = set(kinds)
         if not target_kinds <= {"Secret", "Job"}:
             raise ValueError("protected staging capacity database cleanup target is invalid")
-        observed = self._observed_bootstrap_resources(manifest)
+        observed = self._observed_bootstrap_resources(
+            manifest,
+            certification=certification,
+            require_certified_resource_versions=certification is not None,
+        )
         cleanup_token = secrets.token_urlsafe(32)
         labelled: dict[str, dict[str, object]] = {}
         for kind in kinds:
@@ -979,6 +1051,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 item=item,
                 cleanup_token=cleanup_token,
                 manifest=manifest,
+                certification=certification,
             )
             if labelled_item is not None:
                 labelled[kind] = labelled_item
@@ -990,8 +1063,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 kind=kind,
                 item=item,
                 manifest=manifest,
+                certification=certification,
             )
-        remaining = self._observed_bootstrap_resources(manifest)
+        remaining = self._observed_bootstrap_resources(
+            manifest,
+            certification=certification,
+        )
         if any(kind in remaining for kind in target_kinds):
             raise RuntimeError(
                 "protected staging capacity database bootstrap cleanup was not exact"
@@ -1004,6 +1081,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         item: dict[str, object],
         cleanup_token: str,
         manifest: bytes,
+        certification: _CertifiedPreviousFailedBootstrap | None,
     ) -> dict[str, object] | None:
         metadata = item["metadata"]
         assert isinstance(metadata, dict)
@@ -1035,7 +1113,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
                 )
             except Exception:
-                refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+                refreshed = self._observed_bootstrap_resources(
+                    manifest,
+                    certification=certification,
+                ).get(kind)
                 if refreshed is None:
                     return None
                 refreshed_metadata = refreshed["metadata"]
@@ -1053,7 +1134,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 ):
                     return refreshed
                 continue
-            refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+            refreshed = self._observed_bootstrap_resources(
+                manifest,
+                certification=certification,
+            ).get(kind)
             if refreshed is None:
                 return None
             refreshed_metadata = refreshed["metadata"]
@@ -1073,6 +1157,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         kind: str,
         item: dict[str, object],
         manifest: bytes,
+        certification: _CertifiedPreviousFailedBootstrap | None,
     ) -> None:
         metadata = item["metadata"]
         assert isinstance(metadata, dict)
@@ -1113,6 +1198,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 refreshed, _payload = self._capture_bootstrap_resource(kind)
                 if refreshed is None:
                     return
+                self._validate_certified_previous_failed_resources(
+                    certification,
+                    {kind: refreshed},
+                )
                 refreshed_metadata = refreshed["metadata"]
                 assert isinstance(refreshed_metadata, dict)
                 if refreshed_metadata["uid"] != original_uid:
@@ -1122,7 +1211,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     ) from None
                 if isinstance(refreshed_metadata.get("deletionTimestamp"), str):
                     break
-                exact_refreshed = self._observed_bootstrap_resources(manifest).get(kind)
+                exact_refreshed = self._observed_bootstrap_resources(
+                    manifest,
+                    certification=certification,
+                ).get(kind)
                 if exact_refreshed is None:
                     return
                 exact_metadata = exact_refreshed["metadata"]
@@ -1159,6 +1251,10 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             refreshed, _payload = self._capture_bootstrap_resource(kind)
             if refreshed is None:
                 return
+            self._validate_certified_previous_failed_resources(
+                certification,
+                {kind: refreshed},
+            )
             refreshed_metadata = refreshed["metadata"]
             assert isinstance(refreshed_metadata, dict)
             if refreshed_metadata["uid"] != original_uid:
@@ -1176,11 +1272,49 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
     def _observed_bootstrap_resources(
         self,
         manifest: bytes,
+        *,
+        certification: _CertifiedPreviousFailedBootstrap | None = None,
+        require_certified_resource_versions: bool = False,
     ) -> dict[str, dict[str, object]]:
         observed, _evidence_digest, exact = self._inventory_bootstrap_resources(manifest)
         if not exact:
             raise RuntimeError("protected staging capacity database bootstrap drifted")
+        self._validate_certified_previous_failed_resources(
+            certification,
+            observed,
+            require_resource_versions=require_certified_resource_versions,
+        )
         return observed
+
+    @staticmethod
+    def _validate_certified_previous_failed_resources(
+        certification: _CertifiedPreviousFailedBootstrap | None,
+        observed: Mapping[str, Mapping[str, object]],
+        *,
+        require_resource_versions: bool = False,
+    ) -> None:
+        if certification is None:
+            return
+        for kind, item in observed.items():
+            metadata = item.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise RuntimeError(
+                    "protected staging capacity database bootstrap changed during cleanup"
+                )
+            identity = certification.identity(kind)
+            if metadata.get("uid") != identity.uid or (
+                require_resource_versions
+                and metadata.get("resourceVersion") != identity.resource_version
+            ):
+                raise RuntimeError(
+                    "protected staging capacity database bootstrap changed during cleanup"
+                )
+            if kind == "Job":
+                status = item.get("status")
+                if not isinstance(status, Mapping) or not _job_terminally_failed(status):
+                    raise RuntimeError(
+                        "protected staging capacity database bootstrap changed during cleanup"
+                    )
 
     def _wait_for_bootstrap_job(self, plan: FinalGatePlan, manifest: bytes) -> None:
         deadline = time.monotonic() + _WAIT_TIMEOUT_SECONDS

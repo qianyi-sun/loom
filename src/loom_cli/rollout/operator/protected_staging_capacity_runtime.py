@@ -135,6 +135,8 @@ _AGENT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-agent:v1")
 _MAX_PRIVATE_FILE_BYTES = 1024 * 1024
 _MAX_RECOVERY_REQUESTS = 4096
 _MAX_RECOVERY_ATTEMPTS_PER_REQUEST = 64
+_MAX_RECOVERY_PLAN_FILES = 4096
+_MAX_RECOVERY_PLAN_BYTES = 64 * 1024 * 1024
 
 
 class ProtectedStagingCapacityCommandRunner(Protocol):
@@ -491,6 +493,8 @@ class KubernetesProtectedStagingCapacityRuntime:
         if len(request_entries) > _MAX_RECOVERY_REQUESTS:
             raise RuntimeError("protected staging recovery ledger is too large")
         matches: list[FinalGatePlan] = []
+        plan_files_examined = 0
+        plan_bytes_read = 0
         for request_entry in request_entries:
             if not request_entry.is_dir(follow_symlinks=False):
                 continue
@@ -511,10 +515,14 @@ class KubernetesProtectedStagingCapacityRuntime:
             if len(attempt_entries) > _MAX_RECOVERY_ATTEMPTS_PER_REQUEST:
                 raise RuntimeError("protected staging recovery attempts are too large")
             for attempt_entry in attempt_entries:
-                if not attempt_entry.name.isascii() or not attempt_entry.name.isdecimal():
-                    continue
+                if (
+                    not attempt_entry.name.isascii()
+                    or not attempt_entry.name.isdecimal()
+                    or not attempt_entry.is_dir(follow_symlinks=False)
+                ):
+                    raise RuntimeError("protected staging recovery attempt identity is unsafe")
                 attempt_number = int(attempt_entry.name)
-                if attempt_number < 1 or not attempt_entry.is_dir(follow_symlinks=False):
+                if attempt_number < 1 or attempt_entry.name != str(attempt_number):
                     raise RuntimeError("protected staging recovery attempt identity is unsafe")
                 attempt_root = Path(attempt_entry.path)
                 self._validate_private_directory(attempt_root)
@@ -522,6 +530,13 @@ class KubernetesProtectedStagingCapacityRuntime:
                     payload = self._read_private_file(attempt_root / "final-gate-plan.json")
                 except FileNotFoundError:
                     continue
+                plan_files_examined += 1
+                plan_bytes_read += len(payload)
+                if (
+                    plan_files_examined > _MAX_RECOVERY_PLAN_FILES
+                    or plan_bytes_read > _MAX_RECOVERY_PLAN_BYTES
+                ):
+                    raise RuntimeError("protected staging recovery plan scan is too large")
                 try:
                     value = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -548,7 +563,10 @@ class KubernetesProtectedStagingCapacityRuntime:
             return None
         prior_plan = matches[0]
         frozen_authority = (
+            "manager_configuration_epoch",
+            "manager_configuration_digest",
             "manager_authority_incarnation",
+            "manager_writer_epoch",
             "manager_execution_state",
             "manager_execution_epoch",
             "manager_execution_manifest_sha256",
