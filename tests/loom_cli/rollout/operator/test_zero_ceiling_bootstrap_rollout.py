@@ -56,10 +56,10 @@ def _evidence(
     return dict(next(item for item in executions if item.check_id == check_id).evidence)
 
 
-def test_legacy_manager_bootstrap_admits_only_frozen_foundation_components(
+def test_partial_legacy_manager_bootstrap_replay_admits_only_frozen_foundations(
     tmp_path: Path,
 ) -> None:
-    """Catch first-rollout bootstrap accidentally admitting executable capacity."""
+    """Catch a partial bootstrap replay accidentally admitting executable capacity."""
     source = _source_fixture(tmp_path / "source")
     candidate = _candidate(source.plan)
     images = _images(candidate_sha=candidate.resolved_sha)
@@ -77,7 +77,8 @@ def test_legacy_manager_bootstrap_admits_only_frozen_foundation_components(
     capacity_runtime_root.mkdir()
     capacity_runtime = _runtime(capacity_runtime_root)
     _write_bootstrap(capacity_runtime)
-    assert not capacity_runtime.credential_seed_path.exists()
+    capacity_runtime._create_credential_seed()
+    assert capacity_runtime.credential_seed_path.exists()
 
     manager_route_calls = 0
 
@@ -94,13 +95,9 @@ def test_legacy_manager_bootstrap_admits_only_frozen_foundation_components(
         staging_protected_admission_source=(
             lambda _candidate, _bundle, _epoch, _seed: source.protected_admission
         ),
-        authority_source_factory=(
-            lambda _candidate, _image: lambda _desired: source.authority
-        ),
+        authority_source_factory=(lambda _candidate, _image: lambda _desired: source.authority),
         now=source.source.now,
-        zero_ceiling_bootstrap_authority_source=(
-            capacity_runtime.zero_ceiling_bootstrap_authority
-        ),
+        zero_ceiling_bootstrap_authority_source=(capacity_runtime.zero_ceiling_bootstrap_authority),
     )
     publisher = publisher_factory(
         candidate,

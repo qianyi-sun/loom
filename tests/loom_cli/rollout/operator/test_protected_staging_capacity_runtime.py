@@ -1083,10 +1083,10 @@ def test_credentials_component_persists_one_candidate_independent_seed(
     assert runtime.credential_seed_path.read_bytes() == before
 
 
-def test_runtime_issues_bootstrap_authority_only_for_absent_seed_and_frozen_shadow(
+def test_runtime_issues_bootstrap_authority_for_replayable_credentials_and_frozen_shadow(
     tmp_path: Path,
 ) -> None:
-    """Catch using bootstrap mode after execution can increase capacity."""
+    """Catch partial credential convergence deadlocking a frozen bootstrap replay."""
     runtime = _runtime(tmp_path)
     _write_bootstrap(runtime)
     lease = _lease()
@@ -1099,6 +1099,12 @@ def test_runtime_issues_bootstrap_authority_only_for_absent_seed_and_frozen_shad
     with pytest.raises(RuntimeError, match="unavailable"):
         runtime.zero_ceiling_bootstrap_authority(object())  # type: ignore[arg-type]
     runtime._create_credential_seed()
+    replay_digest = runtime.zero_ceiling_bootstrap_authority(lease)
+
+    assert replay_digest != digest
+    assert replay_digest != "0" * 64
+    assert runtime.zero_ceiling_bootstrap_authority(lease) == replay_digest
+    runtime.credential_seed_path.write_text("{}")
     with pytest.raises(RuntimeError, match="unavailable"):
         runtime.zero_ceiling_bootstrap_authority(lease)
 
