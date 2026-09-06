@@ -25,6 +25,7 @@ from loom_cli.rollout.gb10_slurm_acceptance import GB10_SLURM_WORKER_HOSTS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.preflight_contract import DependencyExpiredError
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
 from .backup import (
@@ -496,17 +497,30 @@ def _preflight_only(
             dependencies,
             "sealed cumulative preflight requires coordinator authority",
         )
-    if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
+    assess_preflight = dependencies.assess_preflight
+    read_mutation_epoch = dependencies.read_mutation_epoch
+    if assess_preflight is None or read_mutation_epoch is None:
         return _safe_error(dependencies, "deep rollout preflight is not configured")
-    report = dependencies.preflight()
-    if not report.passed:
-        _write_json(dependencies.stderr, report.to_dict())
+
+    def assess_once() -> tuple[CandidateBinding, int, PreflightAssessment] | None:
+        report = dependencies.preflight()
+        if not report.passed:
+            _write_json(dependencies.stderr, report.to_dict())
+            return None
+        candidate = dependencies.bind_candidate()
+        mutation_epoch = read_mutation_epoch()
+        if type(mutation_epoch) is not int or mutation_epoch < 0:
+            raise ValueError("staging mutation epoch is invalid")
+        assessment = assess_preflight(candidate, mutation_epoch)
+        return candidate, mutation_epoch, assessment
+
+    try:
+        result = assess_once()
+    except DependencyExpiredError:
+        result = assess_once()
+    if result is None:
         return 1
-    candidate = dependencies.bind_candidate()
-    mutation_epoch = dependencies.read_mutation_epoch()
-    if type(mutation_epoch) is not int or mutation_epoch < 0:
-        raise ValueError("staging mutation epoch is invalid")
-    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    candidate, mutation_epoch, assessment = result
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1

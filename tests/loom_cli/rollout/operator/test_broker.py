@@ -44,6 +44,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckExecution,
     CheckOperation,
     CheckOutcome,
+    DependencyExpiredError,
     StageCapability,
 )
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
@@ -1370,6 +1371,111 @@ def test_devansh_can_preflight_sealed_cumulative_candidate_without_request(
         "registry_sha256": assessment.registry_digest,
         "status": "passed",
     }
+
+
+def test_requestless_preflight_retries_one_expired_assessment_from_fresh_authority(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a cold build expires evidence and install cannot finish."""
+    deps = fakes(tmp_path)
+    assessment = _published_assessment(tmp_path)
+    epochs = iter((7, 8))
+    assessment_epochs: list[int] = []
+
+    def read_mutation_epoch() -> int:
+        epoch = next(epochs)
+        deps.order.append(f"epoch-{epoch}")
+        return epoch
+
+    def assess(_candidate: CandidateBinding, epoch: int) -> PreflightAssessment:
+        assessment_epochs.append(epoch)
+        deps.order.append(f"assess-{epoch}")
+        if len(assessment_epochs) == 1:
+            raise DependencyExpiredError(
+                "manifests.render",
+                ("candidate.identity",),
+                StageCapability.STATIC,
+            )
+        return assessment
+
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=assess,
+        read_mutation_epoch=read_mutation_epoch,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 0
+    assert deps.order == [
+        "preflight",
+        "fetch",
+        "epoch-7",
+        "assess-7",
+        "preflight",
+        "fetch",
+        "epoch-8",
+        "assess-8",
+    ]
+    assert assessment_epochs == [7, 8]
+    assert _last_json(deps.stdout)["mutation_epoch"] == 8
+    assert deps.stderr.getvalue() == ""
+    assert deps.store.requests == {}
+    assert deps.store.preflight_requests == {}
+
+
+def test_requestless_preflight_fails_closed_after_second_dependency_expiry(
+    tmp_path: Path,
+) -> None:
+    """Break caught: an unbounded retry loops while authority stays stale."""
+    deps = fakes(tmp_path)
+    assessment_calls = 0
+
+    def assess(_candidate: CandidateBinding, _epoch: int) -> PreflightAssessment:
+        nonlocal assessment_calls
+        assessment_calls += 1
+        raise DependencyExpiredError(
+            "manifests.render",
+            ("candidate.identity",),
+            StageCapability.STATIC,
+        )
+
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=assess,
+        read_mutation_epoch=lambda: 7,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 1
+    assert assessment_calls == 2
+    assert deps.order == ["preflight", "fetch", "preflight", "fetch"]
+    assert deps.stdout.getvalue() == ""
+    assert deps.stderr.getvalue() == "error: request authorization or validation failed\n"
+    assert deps.store.requests == {}
+    assert deps.store.preflight_requests == {}
+
+
+def test_requestless_preflight_does_not_retry_unrelated_assessment_error(
+    tmp_path: Path,
+) -> None:
+    """Break caught: broad retry repeats arbitrary failed checks."""
+    deps = fakes(tmp_path)
+    assessment_calls = 0
+
+    def assess(_candidate: CandidateBinding, _epoch: int) -> PreflightAssessment:
+        nonlocal assessment_calls
+        assessment_calls += 1
+        raise ValueError("provider Authorization: Bearer known-secret")
+
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=assess,
+        read_mutation_epoch=lambda: 7,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 1
+    assert assessment_calls == 1
+    assert deps.order == ["preflight", "fetch"]
+    assert deps.stdout.getvalue() == ""
+    assert deps.stderr.getvalue() == "error: request authorization or validation failed\n"
 
 
 def test_preflight_reports_all_deep_blockers_without_publishing_request(

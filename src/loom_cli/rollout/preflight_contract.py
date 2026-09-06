@@ -217,6 +217,23 @@ class EvidenceClass(StrEnum):
     OBSERVATION = "observation"
 
 
+class DependencyExpiredError(ValueError):
+    """Identify a consumer refused because its passing evidence expired."""
+
+    def __init__(
+        self,
+        check_id: str,
+        dependency_ids: tuple[str, ...],
+        stage: StageCapability,
+    ) -> None:
+        self.check_id = check_id
+        self.dependency_ids = dependency_ids
+        self.stage = stage
+        super().__init__(
+            "dependency execution expired before dependent execution: " + ",".join(dependency_ids)
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceField:
     name: str
@@ -877,9 +894,10 @@ class PreflightDag:
                     and results[dependency].expires_at <= dependency_time
                 )
                 if expired_dependencies:
-                    raise ValueError(
-                        "dependency execution expired before dependent execution: "
-                        + ",".join(expired_dependencies)
+                    raise DependencyExpiredError(
+                        check.spec.check_id,
+                        expired_dependencies,
+                        check.spec.stage,
                     )
                 blocked_by = tuple(
                     dependency
@@ -964,9 +982,10 @@ class PreflightDag:
                 and results[dependency].expires_at <= dependency_time
             )
             if expired_dependencies:
-                raise ValueError(
-                    "dependency execution expired before dependent execution: "
-                    + ",".join(expired_dependencies)
+                raise DependencyExpiredError(
+                    check.spec.check_id,
+                    expired_dependencies,
+                    check.spec.stage,
                 )
 
         worker_count = min(self._max_concurrency, len(pending))
@@ -1359,9 +1378,10 @@ class PreflightDag:
                 and dependency_executions[dependency].expires_at <= started_at
             )
             if expired_dependencies:
-                raise ValueError(
-                    "dependency execution expired before dependent execution: "
-                    + ",".join(expired_dependencies)
+                raise DependencyExpiredError(
+                    check.spec.check_id,
+                    expired_dependencies,
+                    check.spec.stage,
                 )
             result = self._run_one(check, cancellable_context, operation, clock)
         except BaseException as exc:
@@ -2251,6 +2271,7 @@ __all__ = [
     "CheckOutcome",
     "CheckProbe",
     "CheckSpec",
+    "DependencyExpiredError",
     "EvidenceClass",
     "EvidenceField",
     "MutationClass",

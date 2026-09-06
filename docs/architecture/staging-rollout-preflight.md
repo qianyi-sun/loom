@@ -53,6 +53,15 @@ includes that same typed evidence rather than only its digest; it therefore
 remains actionable without exposing a credential value or unbounded child
 output.
 
+If a passing dependency expires before its consumer starts, the DAG raises a
+typed dependency-expiry failure. Requestless broker `preflight` discards that
+incomplete attempt and retries once from fresh authority: it reruns the host
+preflight, candidate binding, mutation-epoch read, runtime construction, and
+complete Tier 0–2 assessment. No other error is retried, and a second expiry
+fails closed. This bounded replay lets a cold image build outlive early
+evidence without treating arbitrary validation or infrastructure failures as
+transient.
+
 Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
 digest-addressed `PreflightAssessment`; no preliminary request or backup job may
 be published if it contains a blocker. The same registered check plan and
