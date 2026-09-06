@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from loom_capacity_guard.migration_resources import (
+    resolve_capacity_guard_migration_resources,
+)
 
 _VERSION_QUERY = "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
 
@@ -18,10 +20,9 @@ class CapacityGuardSchemaNotAtHeadError(RuntimeError):
 
 
 def _guard_head() -> str:
-    repo_root = Path(__file__).resolve().parents[2]
-    config_path = repo_root / "capacity_guard_migrations" / "alembic.ini"
-    config = AlembicConfig(str(config_path))
-    config.set_main_option("script_location", str(repo_root / "capacity_guard_migrations"))
+    resources = resolve_capacity_guard_migration_resources()
+    config = AlembicConfig(str(resources.config))
+    config.set_main_option("script_location", str(resources.scripts))
     head = ScriptDirectory.from_config(config).get_current_head()
     if head is None:  # pragma: no cover - packaging corruption
         raise CapacityGuardSchemaNotAtHeadError(

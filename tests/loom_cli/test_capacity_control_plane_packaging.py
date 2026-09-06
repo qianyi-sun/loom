@@ -41,6 +41,42 @@ _MIGRATION_RESOURCES = {
     "capacity_migrations/versions/capacity_0014_protected_admission_plan.py",
     "capacity_migrations/versions/capacity_0015_terminal_inventory_evidence.py",
 }
+_GUARD_MIGRATION_RESOURCES = {
+    "capacity_guard_migrations/__init__.py",
+    "capacity_guard_migrations/alembic.ini",
+    "capacity_guard_migrations/env.py",
+    "capacity_guard_migrations/script.py.mako",
+    "capacity_guard_migrations/versions/__init__.py",
+    "capacity_guard_migrations/versions/guard_0001_protected_admission_foundation.py",
+    "capacity_guard_migrations/versions/guard_0002_trusted_demand_agent.py",
+    "capacity_guard_migrations/versions/guard_0003_prepared_admission.py",
+    "capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py",
+    "capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py",
+    "capacity_guard_migrations/versions/guard_0006_lifecycle_demand_projection.py",
+    "capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py",
+    "capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py",
+    "capacity_guard_migrations/versions/guard_0009_agent_reconfiguration.py",
+    "capacity_guard_migrations/versions/guard_0010_protected_release_fence.py",
+    "capacity_guard_migrations/versions/guard_0011_atomic_trial_submission.py",
+    "capacity_guard_migrations/versions/guard_0012_protected_bootstrap_handshake.py",
+    "capacity_guard_migrations/versions/guard_0013_executable_admission.py",
+    "capacity_guard_migrations/versions/guard_0014_executable_intent_observation.py",
+    "capacity_guard_migrations/versions/guard_0015_status_observer.py",
+    "capacity_guard_migrations/versions/guard_0016_candidate_provenance.py",
+    "capacity_guard_migrations/versions/guard_0017_executable_unregistered_withdrawal.py",
+    "capacity_guard_migrations/versions/guard_0018_prepared_bootstrap_revocation.py",
+    "capacity_guard_migrations/versions/guard_0019_executable_release_outbox.py",
+    "capacity_guard_migrations/versions/guard_0020_exact_claim_assignment.py",
+    "capacity_guard_migrations/versions/guard_0021_current_assignment_assertion.py",
+    "capacity_guard_migrations/versions/guard_0022_staging_atomic_submission.py",
+    "capacity_guard_migrations/versions/guard_0023_staging_worker_session.py",
+    "capacity_guard_migrations/versions/guard_0024_protected_trial_terminal_closure.py",
+    "capacity_guard_migrations/versions/guard_0025_protected_trial_retry.py",
+    "capacity_guard_migrations/versions/guard_0026_protected_trial_requeue.py",
+    "capacity_guard_migrations/versions/guard_0027_runtime_self_validation.py",
+    "capacity_guard_migrations/versions/guard_0028_terminal_inventory_recovery.py",
+    "capacity_guard_migrations/versions/guard_0029_protected_pending_cancellation.py",
+}
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
 _AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
@@ -96,6 +132,15 @@ def test_wheel_contains_complete_capacity_migration_package(
 
     assert _MIGRATION_RESOURCES <= members
     assert not any(member.endswith((".pyc", ".pyo")) for member in members)
+
+
+def test_wheel_contains_complete_capacity_guard_migration_package(
+    built_loom_wheel: Path,
+) -> None:
+    with zipfile.ZipFile(built_loom_wheel) as wheel:
+        members = set(wheel.namelist())
+
+    assert _GUARD_MIGRATION_RESOURCES <= members
 
 
 def test_capacity_manager_image_installs_the_packaged_migration_tree() -> None:
@@ -199,11 +244,14 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
             str(python),
             "-c",
             (
-                "import json, capacity_migrations, loom_cli; "
+                "import json, capacity_guard_migrations, capacity_migrations, loom_cli; "
+                "from loom_capacity_guard.schema_startup import capacity_guard_schema_head; "
                 "from loom_capacity_manager.migration_resources import "
                 "resolve_capacity_migration_resources; "
                 "print(json.dumps({"
                 "'capacity_package': capacity_migrations.__file__, "
+                "'guard_package': capacity_guard_migrations.__file__, "
+                "'guard_head': capacity_guard_schema_head()[0], "
                 "'loom_cli': loom_cli.__file__, "
                 "'migration_config': str("
                 "resolve_capacity_migration_resources().config)}))"
@@ -216,7 +264,9 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
         text=True,
     )
     assert probe.returncode == 0, probe.stderr
-    loaded_paths = [Path(value).resolve() for value in json.loads(probe.stdout).values()]
+    probe_result = json.loads(probe.stdout)
+    assert probe_result.pop("guard_head") == "guard_0029"
+    loaded_paths = [Path(value).resolve() for value in probe_result.values()]
     assert all(path.is_relative_to(installed_purelib) for path in loaded_paths)
     assert not any(path.is_relative_to(_REPO_ROOT) for path in loaded_paths)
     completed = subprocess.run(

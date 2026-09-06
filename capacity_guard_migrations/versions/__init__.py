@@ -1,0 +1,1 @@
+"""Protected capacity schema revisions."""
