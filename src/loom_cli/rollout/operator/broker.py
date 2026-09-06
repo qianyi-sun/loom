@@ -83,7 +83,7 @@ from .protected_apply_journal import (
     ProtectedApplyJournalError,
     ReconciliationOutcomeStatus,
     read_component_failure,
-    read_component_failure_diagnostic,
+    read_latest_component_failure_diagnostic,
     read_latest_reconciliation_outcome,
 )
 from .protected_apply_recovery import find_advanced_epoch_attempt
@@ -130,6 +130,16 @@ _PROTECTED_APPLY_COMPONENTS = frozenset(
         "external-supervisors",
         "external-supervisors-gb10",
         "external-supervisors-oldlab",
+        "staging-capacity-credentials",
+        "staging-capacity-database",
+        "staging-protected-runtime-secret",
+        "oldlab-controller-prerequisite",
+        "gb10-controller-prerequisite",
+        "staging-capacity-execution-credentials",
+        "capacity-manager-runtime",
+        "capacity-manager-configuration",
+        "staging-capacity-agent",
+        "capacity-execution-preparation",
     }
 )
 
@@ -1494,32 +1504,18 @@ def _protected_apply_progress(
             diagnostic: str | None = None
             primary_failure_code: str | None = None
             compensation_failure_code: str | None = None
-            diagnostic_path = component_root / "failure-diagnostic.json"
             try:
-                has_diagnostic = _private_progress_file(
-                    diagnostic_path,
+                failure_diagnostic = read_latest_component_failure_diagnostic(
+                    component_root,
                     service_uid=service_uid,
                 )
-            except RequestStoreError:
-                has_diagnostic = False
-            if has_diagnostic:
-                try:
-                    failure_diagnostic = read_component_failure_diagnostic(
-                        diagnostic_path,
-                        service_uid=service_uid,
-                    )
-                except (OSError, ProtectedApplyJournalError):
-                    failure_diagnostic = None
-                if failure_diagnostic is not None and (
-                    failure_diagnostic.component_id != component_id
-                    or failure_diagnostic.ordinal != _ordinal
-                ):
-                    failure_diagnostic = None
-                if failure_diagnostic is not None:
-                    failure_code = failure_diagnostic.failure_code
-                    diagnostic = failure_diagnostic.diagnostic
-                    primary_failure_code = failure_diagnostic.primary_failure_code
-                    compensation_failure_code = failure_diagnostic.compensation_failure_code
+            except (OSError, ProtectedApplyJournalError):
+                failure_diagnostic = None
+            if failure_diagnostic is not None:
+                failure_code = failure_diagnostic.failure_code
+                diagnostic = failure_diagnostic.diagnostic
+                primary_failure_code = failure_diagnostic.primary_failure_code
+                compensation_failure_code = failure_diagnostic.compensation_failure_code
             return (
                 component_id,
                 "protected_component_incomplete",
@@ -1613,6 +1609,7 @@ def _request_status(
             )
         payload["updated_at"] = latest.occurred_at
     if latest is not None and latest.attempt_number is not None:
+        protected_progress_unsafe = False
         try:
             protected_progress = _protected_apply_progress(
                 dependencies,
@@ -1621,6 +1618,38 @@ def _request_status(
             )
         except RequestStoreError:
             protected_progress = None
+            protected_progress_unsafe = True
+        if (
+            protected_progress is None
+            and not protected_progress_unsafe
+            and latest.attempt_number > 1
+            and isinstance(request, RolloutRequest)
+        ):
+            try:
+                original = dependencies.store.read_preflight_request(request.request_id)
+                if (
+                    original.request_id != request.request_id
+                    or original.rollout_id != request.rollout_id
+                    or original.candidate != request.candidate
+                ):
+                    raise RequestStoreError("protected apply recovery identity drifted")
+                recovery_attempt = find_advanced_epoch_attempt(
+                    dependencies.config.state_root,
+                    request_id=request.request_id,
+                    through_attempt=latest.attempt_number,
+                    candidate_sha=request.candidate.resolved_sha,
+                    attestation_digest=request.preflight_attestation_sha256,
+                    starting_mutation_epoch=original.mutation_epoch,
+                    service_uid=os.geteuid(),
+                )
+                if recovery_attempt is not None:
+                    protected_progress = _protected_apply_progress(
+                        dependencies,
+                        request.request_id,
+                        recovery_attempt,
+                    )
+            except (OSError, RuntimeError, ValueError):
+                protected_progress = None
         if protected_progress is not None:
             (
                 component_id,

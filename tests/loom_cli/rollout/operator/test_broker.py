@@ -2595,6 +2595,98 @@ def test_status_reports_certified_protected_component_failure_diagnostic(
     assert payload["protected_failure_diagnostic"] == diagnostic
 
 
+def test_status_follows_advanced_epoch_journal_and_reports_its_latest_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: resumed attempt status hides the authoritative recovered journal."""
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:40:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=4,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-4.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    recovery_calls: list[dict[str, object]] = []
+
+    def find_recovery(state_root: Path, **bindings: object) -> int:
+        recovery_calls.append({"state_root": state_root, **bindings})
+        return 1
+
+    monkeypatch.setattr(broker_module, "find_advanced_epoch_attempt", find_recovery)
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    runtime_secret = root / "05-staging-protected-runtime-secret"
+    _private_directory(runtime_secret)
+    _private_file(runtime_secret / "intent.json")
+    legacy_diagnostic = (
+        "unclassified staging-protected-runtime-secret failure: RuntimeError "
+        "at stale_component.py:10 in classify"
+    )
+    _private_file(
+        runtime_secret / "failure-diagnostic.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "component_id": "staging-protected-runtime-secret",
+                "ordinal": 5,
+                "failure_code": "apply-failed",
+                "diagnostic": legacy_diagnostic,
+            }
+        ),
+    )
+    diagnostics = runtime_secret / "failure-diagnostics"
+    _private_directory(diagnostics)
+    current_diagnostic = "component classified drifted before apply"
+    _private_file(
+        diagnostics / "00000000.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "component_id": "staging-protected-runtime-secret",
+                "ordinal": 5,
+                "sequence": 0,
+                "failure_code": "pre-classify-failed",
+                "diagnostic": current_diagnostic,
+                "primary_failure_code": None,
+                "compensation_failure_code": None,
+            }
+        ),
+    )
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert recovery_calls == [
+        {
+            "state_root": deps.config.state_root,
+            "request_id": REQUEST_ID,
+            "through_attempt": 4,
+            "candidate_sha": SHA,
+            "attestation_digest": "3" * 64,
+            "starting_mutation_epoch": 7,
+            "service_uid": os.geteuid(),
+        }
+    ]
+    assert payload["attempt_number"] == 4
+    assert payload["protected_component"] == "staging-protected-runtime-secret"
+    assert payload["protected_component_status"] == "protected_component_incomplete"
+    assert payload["protected_failure_code"] == "pre-classify-failed"
+    assert payload["protected_failure_diagnostic"] == current_diagnostic
+    assert legacy_diagnostic not in deps.stdout.getvalue()
+
+
 def test_status_reports_certified_typed_protected_failure_codes(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
