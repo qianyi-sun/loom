@@ -333,10 +333,10 @@ async def test_full_compensation_covers_every_protected_role_session(
 
 
 @pytest.mark.asyncio
-async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal(
+async def test_staging_peer_arm_composes_with_converge_seal_and_retry(
     postgres_url: str,
 ) -> None:
-    """Catch the protected staging peer arm producing an unusable migrator envelope."""
+    """Catch retries sending application-role ACL mutations to the protected schema."""
 
     credentials = _new_credentials()
     seed = _staging_seed(credentials)
@@ -458,6 +458,28 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
             for seal_payload in seal_payloads:
                 await connection.execute(seal_payload.decode("utf-8"))
 
+            await connection.execute("GRANT USAGE ON SCHEMA loom_capacity_guard TO PUBLIC")
+            await connection.execute(arm_payload.decode("utf-8"))
+
+        retry_installation = await PsycopgPersonalDevCapacityDatabase(
+            migrator_url,
+            transient_role_admin=True,
+        ).converge_protected(
+            identity=identity,
+            credentials=credentials,
+            configuration=configuration,
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            for seal_payload in seal_payloads:
+                await connection.execute(seal_payload.decode("utf-8"))
+
+        assert retry_installation == installation
+
         runtime_url = (
             parsed.set(
                 database="loom",
@@ -520,6 +542,17 @@ async def test_staging_peer_arm_composes_with_least_privileged_converge_and_seal
                 (migrator,),
             )
             assert await sessions.fetchone() == (0,)
+            public_guard_usage = await connection.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_namespace AS namespace "
+                "CROSS JOIN LATERAL aclexplode(COALESCE("
+                "namespace.nspacl, acldefault('n', namespace.nspowner)"
+                ")) AS privilege "
+                "WHERE namespace.nspname = 'loom_capacity_guard' "
+                "AND privilege.grantee = 0 AND privilege.privilege_type = 'USAGE'"
+                ")"
+            )
+            assert await public_guard_usage.fetchone() == (False,)
             details_result = await connection.execute(
                 capacity_database_component_module._DETAIL_SQL
             )
