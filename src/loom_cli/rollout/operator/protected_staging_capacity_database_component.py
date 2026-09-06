@@ -203,6 +203,50 @@ _DETAIL_SQL = single_line_sql(
     )
     """
 )
+_COMPENSATION_SHUTDOWN_SQL = single_line_sql(
+    """
+    WITH protected_roles(role_name, expected_inherit) AS (
+      VALUES
+        ('loom_cap_staging_owner', false),
+        ('loom_cap_staging_migrator', true),
+        ('loom_cap_staging_agent', false),
+        ('loom_cap_staging_executor', false),
+        ('loom_cap_staging_observer', false),
+        ('loom_cap_staging_runtime', false)
+    )
+    SELECT jsonb_build_object(
+      'credentials_disabled', (
+        SELECT count(role.oid) IN (0, 6)
+          AND COALESCE(bool_and(
+            NOT role.rolcanlogin
+            AND role.rolinherit = expected.expected_inherit
+            AND NOT role.rolsuper
+            AND NOT role.rolcreatedb
+            AND NOT role.rolcreaterole
+            AND NOT role.rolreplication
+            AND NOT role.rolbypassrls
+            AND role.rolpassword IS NULL
+            AND role.rolvaliduntil IS NOT DISTINCT FROM 'infinity'::timestamptz
+          ), true)
+        FROM protected_roles AS expected
+        LEFT JOIN pg_catalog.pg_authid AS role ON role.rolname = expected.role_name
+      ),
+      'sessions_terminated', NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_stat_activity
+        WHERE usename = ANY(ARRAY[
+          'loom_cap_staging_owner',
+          'loom_cap_staging_migrator',
+          'loom_cap_staging_agent',
+          'loom_cap_staging_executor',
+          'loom_cap_staging_observer',
+          'loom_cap_staging_runtime'
+        ])
+          AND pid <> pg_catalog.pg_backend_pid()
+      )
+    )
+    """
+)
 _RUNTIME_SQL = single_line_sql(
     """
     SET SESSION AUTHORIZATION loom_cap_staging_runtime;
@@ -624,6 +668,23 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 certification=certification,
             )
         )
+        if not credentials_disabled or not sessions_terminated:
+            try:
+                observed_credentials, observed_sessions = (
+                    self._observe_compensation_database_shutdown()
+                )
+            except Exception:
+                observed_credentials = observed_sessions = False
+            credentials_disabled = credentials_disabled or observed_credentials
+            sessions_terminated = sessions_terminated or observed_sessions
+        if not job_stopped:
+            try:
+                job_stopped = "Job" not in self._observed_bootstrap_resources(
+                    manifest,
+                    certification=certification,
+                )
+            except Exception:
+                job_stopped = False
         unresolved = [
             phase
             for phase, confirmed in (
@@ -657,6 +718,27 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         except Exception:
             return False
         return True
+
+    def _observe_compensation_database_shutdown(self) -> tuple[bool, bool]:
+        try:
+            observation = json.loads(
+                self._query(_COMPENSATION_SHUTDOWN_SQL),
+                object_pairs_hook=_reject_duplicate_keys,
+            )
+        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+            raise ValueError(
+                "protected staging capacity database compensation observation is invalid"
+            ) from exc
+        if (
+            not isinstance(observation, dict)
+            or set(observation) != {"credentials_disabled", "sessions_terminated"}
+            or not isinstance(observation["credentials_disabled"], bool)
+            or not isinstance(observation["sessions_terminated"], bool)
+        ):
+            raise ValueError(
+                "protected staging capacity database compensation observation is invalid"
+            )
+        return observation["credentials_disabled"], observation["sessions_terminated"]
 
     def _snapshot(
         self,
@@ -1652,7 +1734,8 @@ COMMIT;
             "'loom_cap_staging_migrator'"
             if preserve_runtime_credentials
             else (
-                "'loom_cap_staging_migrator', 'loom_cap_staging_agent', "
+                "'loom_cap_staging_owner', 'loom_cap_staging_migrator', "
+                "'loom_cap_staging_agent', 'loom_cap_staging_executor', "
                 "'loom_cap_staging_observer', 'loom_cap_staging_runtime'"
             )
         )
@@ -1752,7 +1835,8 @@ COMMIT;
             "'loom_cap_staging_migrator'"
             if preserve_runtime_credentials
             else (
-                "'loom_cap_staging_migrator', 'loom_cap_staging_agent', "
+                "'loom_cap_staging_owner', 'loom_cap_staging_migrator', "
+                "'loom_cap_staging_agent', 'loom_cap_staging_executor', "
                 "'loom_cap_staging_observer', 'loom_cap_staging_runtime'"
             )
         )

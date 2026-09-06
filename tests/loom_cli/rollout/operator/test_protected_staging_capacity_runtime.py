@@ -92,6 +92,9 @@ class _DatabaseRunner:
         self.database_verification_failed = False
         self.events: list[str] = []
         self.fail_peer_phase_counts: dict[str, int] = {}
+        self.fail_peer_phase_after_mutation_counts: dict[str, int] = {}
+        self.transient_credentials_disabled = False
+        self.transient_sessions_terminated = False
         self.fail_delete_job_before_mutation = 0
         self.reject_diff_validate_flag = False
         self.require_supported_patch_stdin = False
@@ -333,6 +336,14 @@ class _DatabaseRunner:
         command = tuple(argv)
         self.calls.append(command)
         joined = " ".join(command)
+        if "'credentials_disabled'" in joined and "'sessions_terminated'" in joined:
+            return json.dumps(
+                {
+                    "credentials_disabled": self.transient_credentials_disabled,
+                    "sessions_terminated": self.transient_sessions_terminated,
+                },
+                sort_keys=True,
+            ).encode()
         if "to_regclass" in joined:
             self.events.append("database-verification")
             if (
@@ -469,6 +480,21 @@ class _DatabaseRunner:
             if remaining_failures > 0:
                 self.fail_peer_phase_counts[phase] = remaining_failures - 1
                 raise RuntimeError("injected protected compensation phase failure")
+            if phase == "arm":
+                self.transient_credentials_disabled = False
+                self.transient_sessions_terminated = False
+            elif phase == "disable-all":
+                self.transient_credentials_disabled = True
+            elif phase == "terminate":
+                self.transient_sessions_terminated = True
+            remaining_post_mutation_failures = self.fail_peer_phase_after_mutation_counts.get(
+                phase, 0
+            )
+            if remaining_post_mutation_failures > 0:
+                self.fail_peer_phase_after_mutation_counts[phase] = (
+                    remaining_post_mutation_failures - 1
+                )
+                raise RuntimeError("injected protected compensation response loss")
             if phase == "finalize":
                 self.runtime_credentials_durable = True
             if self.fail_checked == "exec" and phase == "arm" and not self.failed_checked:
@@ -495,10 +521,7 @@ class _DatabaseRunner:
         if "patch" in command:
             assert timeout_seconds == 60.0
             assert input_payload is not None
-            if (
-                self.require_supported_patch_stdin
-                and "--patch-file=/dev/stdin" not in command
-            ):
+            if self.require_supported_patch_stdin and "--patch-file=/dev/stdin" not in command:
                 raise RuntimeError("injected kubectl unsupported patch stdin path")
             kind = "Job" if "job/" in " ".join(command) else "Secret"
             observed = self.objects[kind]
@@ -2682,6 +2705,37 @@ def test_database_component_retries_transient_compensation_shutdown_failures(
     assert runner.objects == {}
     assert runner.events.count(phase) >= 2
     assert runner.events.index("cleanup") < runner.events.index("arm")
+
+
+def test_database_component_observes_shutdown_after_compensation_response_loss(
+    tmp_path: Path,
+) -> None:
+    """Break caught: committed safety mutations reported as unresolved transport failures."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"failed": 1}
+    runner.fail_peer_phase_after_mutation_counts = {
+        "disable-all": 2,
+        "terminate": 2,
+    }
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count("disable-all") >= 2
+    assert runner.events.count("terminate") >= 2
+    assert component.classify(plan).state is ComponentState.EXACT
 
 
 @pytest.mark.parametrize("phase", ["disable-all", "terminate"])
