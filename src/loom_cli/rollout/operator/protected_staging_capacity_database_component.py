@@ -1244,7 +1244,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             manifest,
             certification=certification,
         )
-        cleanup_token = secrets.token_urlsafe(32)
+        cleanup_token = f"cleanup-{secrets.token_urlsafe(32)}"
         labelled: dict[str, dict[str, object]] = {}
         for kind in kinds:
             item = observed.get(kind)
