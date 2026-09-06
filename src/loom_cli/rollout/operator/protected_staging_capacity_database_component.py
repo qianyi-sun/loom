@@ -949,11 +949,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             or any(
                 authority.get(field) != expected_authority[field]
                 for field in (
+                    "schema_version",
                     "environment_id",
                     "subject_id",
                     "subject_incarnation",
                     "authority_incarnation",
-                    "reporter_incarnation",
+                    "reporter_high_water",
                     "authority_mode",
                     "allocation_epoch",
                 )
@@ -961,12 +962,12 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             or any(
                 registration.get(field) != expected_registration_details[field]
                 for field in (
+                    "schema_version",
                     "environment_id",
                     "subject_id",
                     "subject_incarnation",
                     "authority_incarnation",
                     "agent_incarnation",
-                    "reporter_incarnation",
                     "authority_mode",
                     "allocation_epoch",
                 )

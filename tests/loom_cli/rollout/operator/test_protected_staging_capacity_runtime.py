@@ -1839,14 +1839,45 @@ def test_database_component_retries_sealed_predecessor_candidate_state(
 
 
 @pytest.mark.parametrize(
+    "registration_updates",
+    [
+        {"reporter_incarnation": "00000000-0000-4000-8000-000000000004"},
+        {
+            "candidate_identity_algorithm": "source-sha256",
+            "candidate_identity": "f" * 64,
+        },
+    ],
+)
+def test_database_component_retries_sealed_predecessor_reconfiguration_state(
+    tmp_path: Path,
+    registration_updates: dict[str, object],
+) -> None:
+    """Break caught: rejecting predecessor fields supported by guarded reconfiguration."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "candidate_digest": "d" * 64,
+        "candidate_identity": "f" * 40,
+        "candidate_publication_sha256": "d" * 64,
+        "configuration_generation": plan.starting_mutation_epoch,
+        "deployment_generation": plan.starting_mutation_epoch,
+        **registration_updates,
+    }
+    runner.protected_roles_sealed = True
+
+    assert component.classify(plan).state is ComponentState.READY
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("schema_version", 2),
         ("environment_id", "other-environment"),
         ("subject_id", "00000000-0000-4000-8000-000000000000"),
         ("subject_incarnation", "00000000-0000-4000-8000-000000000001"),
         ("authority_incarnation", "00000000-0000-4000-8000-000000000002"),
         ("agent_incarnation", "00000000-0000-4000-8000-000000000003"),
-        ("reporter_incarnation", "00000000-0000-4000-8000-000000000004"),
+        ("reporter_high_water", 1),
         ("authority_mode", "enabled"),
         ("allocation_epoch", 1),
     ],
