@@ -3178,6 +3178,40 @@ def test_database_component_recovers_from_ambiguous_successful_resource_delete(
     assert component.classify(plan).state is ComponentState.EXACT
 
 
+def test_database_component_cleanup_nonce_is_always_a_valid_kubernetes_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: an underscore-leading URL-safe nonce is not a valid label value."""
+
+    raw_nonce = "_" + "a" * 42
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_staging_capacity_database_component."
+        "secrets.token_urlsafe",
+        lambda _size: raw_nonce,
+    )
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+
+    component.apply(plan)
+
+    cleanup_values = [
+        operation["value"]
+        for _command, payload in runner.patch_inputs
+        for operation in json.loads(payload)
+        if operation["op"] == "add"
+        and operation["path"] == "/metadata/labels/loom.carin.dev~1protected-cleanup"
+    ]
+    assert cleanup_values
+    assert all(value.endswith(raw_nonce) for value in cleanup_values)
+    assert all(
+        len(value) <= 63
+        and value[0].isalnum()
+        and value[-1].isalnum()
+        and set(value) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        for value in cleanup_values
+    )
+
+
 def test_database_component_waits_after_ambiguous_accepted_job_delete(
     tmp_path: Path,
 ) -> None:
