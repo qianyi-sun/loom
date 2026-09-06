@@ -35,16 +35,23 @@ from .protected_external_supervisor_transport import (
     ExternalSupervisorCompensationError,
 )
 
-_COMPONENT_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+_COMPONENT_PATTERN = r"[a-z][a-z0-9-]{2,63}"
+_COMPONENT_RE = re.compile(rf"^{_COMPONENT_PATTERN}$")
+_COMPONENT_DIRECTORY_RE = re.compile(
+    rf"^(?P<ordinal>\d{{2}})-(?P<component_id>{_COMPONENT_PATTERN})$"
+)
 _GB10_HOST_RE = re.compile(r"^trt-gb10-(?:[1-9]|1[0-5])$")
 _RECONCILIATION_COMPONENT_DIRECTORY_RE = re.compile(r"^\d{2}-external-supervisor-reconciliation$")
 _RECONCILIATION_OUTCOME_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
+_FAILURE_DIAGNOSTIC_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _RENAME_NOREPLACE = 1
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_FAILURE_DIAGNOSTIC_CHARS = 512
+_MAX_FAILURE_DIAGNOSTICS = 1024
+_MAX_FAILURE_DIAGNOSTIC_BYTES = 4096
 _MAX_RECONCILIATION_OUTCOMES = 1024
 _MAX_RECONCILIATION_OUTCOME_BYTES = 4096
 _LEGACY_FAILURE_DIAGNOSTIC_CODES = frozenset(
@@ -70,6 +77,11 @@ _TYPED_APPLY_DIAGNOSTIC = "classified external-supervisor apply failure"
 _TYPED_COMPENSATION_DIAGNOSTIC = (
     "classified external-supervisor compensation reconciliation failure"
 )
+_CLASSIFICATION_DRIFT_DIAGNOSTICS = {
+    "pre-classify-failed": "component classified drifted before apply",
+    "post-classify-failed": "component classified drifted after apply",
+    "terminal-classify-failed": "terminal component classified drifted",
+}
 
 
 class ProtectedApplyJournalError(RuntimeError):
@@ -343,6 +355,64 @@ class ComponentFailureDiagnostic:
             diagnostic=_string(value, "diagnostic"),
             primary_failure_code=primary_failure_code,
             compensation_failure_code=compensation_failure_code,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ComponentFailureDiagnosticEntry:
+    schema_version: int
+    component_id: str
+    ordinal: int
+    sequence: int
+    failure_code: str
+    diagnostic: str
+    primary_failure_code: str | None
+    compensation_failure_code: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or type(self.sequence) is not int
+            or not 0 <= self.sequence < _MAX_FAILURE_DIAGNOSTICS
+        ):
+            raise ValueError("protected component failure diagnostic entry is invalid")
+        self.as_diagnostic()
+
+    def as_diagnostic(self) -> ComponentFailureDiagnostic:
+        return ComponentFailureDiagnostic(
+            schema_version=(
+                2
+                if self.primary_failure_code is not None
+                or self.compensation_failure_code is not None
+                else 1
+            ),
+            component_id=self.component_id,
+            ordinal=self.ordinal,
+            failure_code=self.failure_code,
+            diagnostic=self.diagnostic,
+            primary_failure_code=self.primary_failure_code,
+            compensation_failure_code=self.compensation_failure_code,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> _ComponentFailureDiagnosticEntry:
+        if set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("protected component failure diagnostic entry fields are invalid")
+        return cls(
+            schema_version=_integer(value, "schema_version"),
+            component_id=_string(value, "component_id"),
+            ordinal=_integer(value, "ordinal"),
+            sequence=_integer(value, "sequence"),
+            failure_code=_string(value, "failure_code"),
+            diagnostic=_string(value, "diagnostic"),
+            primary_failure_code=_optional_string(value, "primary_failure_code"),
+            compensation_failure_code=_optional_string(
+                value,
+                "compensation_failure_code",
+            ),
         )
 
 
@@ -1018,7 +1088,7 @@ class ProtectedApplyJournal:
         failure_code: str,
     ) -> ComponentObservation:
         try:
-            return component.classify(plan)
+            observation = component.classify(plan)
         except BaseException as exc:
             diagnostic = unclassified_failure_diagnostic(
                 exc,
@@ -1040,6 +1110,24 @@ class ProtectedApplyJournal:
                 compensation_failure_code=None,
             )
             raise
+        if observation.state is ComponentState.DRIFTED:
+            diagnostic = _CLASSIFICATION_DRIFT_DIAGNOSTICS[failure_code]
+            self._publish_failure_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                failure_code=failure_code,
+                diagnostic=diagnostic,
+            )
+            self._publish_reconciliation_outcome_best_effort(
+                component_root,
+                component,
+                status=ReconciliationOutcomeStatus.FAILED,
+                failure_code=failure_code,
+                diagnostic=diagnostic,
+                compensation_failure_code=None,
+            )
+        return observation
 
     def _publish_failure_diagnostic(
         self,
@@ -1058,13 +1146,15 @@ class ProtectedApplyJournal:
         written only after exact convergence), so its cause was previously
         unrecoverable — a masked dead-end (#1081, #1085 phase 1). This writes a
         coded reason plus a secret-safe diagnostic (exception type + raise-site
-        only; never the message — the #1077 lesson) beside the intent.
+        only; never the message — the #1077 lesson) beside the intent. The
+        legacy write-once record remains intact while a bounded append-only
+        stream makes later retry failures observable.
 
         Strictly best-effort: it must never mask the real failure. Any error
-        writing it — including a write-once mismatch on a differing retry — is
-        swallowed so the original exception still propagates unchanged.
+        writing either form is swallowed so the original exception still
+        propagates unchanged.
         """
-        record = ComponentFailureDiagnostic(
+        diagnostic_record = ComponentFailureDiagnostic(
             schema_version=(
                 2
                 if primary_failure_code is not None or compensation_failure_code is not None
@@ -1076,11 +1166,120 @@ class ProtectedApplyJournal:
             diagnostic=diagnostic,
             primary_failure_code=primary_failure_code,
             compensation_failure_code=compensation_failure_code,
-        ).to_dict()
+        )
         try:
-            self._publish_or_match(component_root / "failure-diagnostic.json", record)
+            self._publish_or_match(
+                component_root / "failure-diagnostic.json",
+                diagnostic_record.to_dict(),
+            )
         except Exception:
             pass
+        try:
+            self._append_failure_diagnostic(component_root, diagnostic_record)
+        except Exception:
+            pass
+
+    def _append_failure_diagnostic(
+        self,
+        component_root: Path,
+        diagnostic: ComponentFailureDiagnostic,
+    ) -> None:
+        diagnostics_root = component_root / "failure-diagnostics"
+        try:
+            diagnostics_root.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not create protected failure diagnostic journal"
+            ) from exc
+        _require_directory(diagnostics_root, uid=self.service_uid)
+        existing = _read_failure_diagnostics(
+            component_root,
+            service_uid=self.service_uid,
+        )
+        if len(existing) >= _MAX_FAILURE_DIAGNOSTICS:
+            raise ProtectedApplyJournalError("protected failure diagnostic journal is too large")
+        sequence = len(existing)
+        entry = _ComponentFailureDiagnosticEntry(
+            schema_version=1,
+            component_id=diagnostic.component_id,
+            ordinal=diagnostic.ordinal,
+            sequence=sequence,
+            failure_code=diagnostic.failure_code,
+            diagnostic=diagnostic.diagnostic,
+            primary_failure_code=diagnostic.primary_failure_code,
+            compensation_failure_code=diagnostic.compensation_failure_code,
+        )
+        self._publish_failure_diagnostic_entry(
+            diagnostics_root / f"{sequence:08d}.json",
+            entry.to_dict(),
+        )
+
+    def _publish_failure_diagnostic_entry(
+        self,
+        path: Path,
+        value: Mapping[str, object],
+    ) -> None:
+        payload = _json_bytes(value)
+        if (
+            len(payload) > _MAX_FAILURE_DIAGNOSTIC_BYTES
+            or path.parent.name != "failure-diagnostics"
+            or _COMPONENT_DIRECTORY_RE.fullmatch(path.parent.parent.name) is None
+        ):
+            raise ProtectedApplyJournalError("protected failure diagnostic publication is invalid")
+        source_directory_fd = _open_directory(path.parent.parent)
+        try:
+            destination_directory_fd = _open_directory(path.parent)
+        except BaseException:
+            os.close(source_directory_fd)
+            raise
+        temporary = f".{path.name}.{uuid4().hex}.tmp"
+        created = False
+        try:
+            fd = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                _PRIVATE_FILE_MODE,
+                dir_fd=source_directory_fd,
+            )
+            created = True
+            try:
+                os.fchmod(fd, _PRIVATE_FILE_MODE)
+                _write_all(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _rename_noreplace(
+                source_directory_fd,
+                temporary,
+                destination_directory_fd,
+                path.name,
+            )
+            created = False
+            os.fsync(destination_directory_fd)
+            os.fsync(source_directory_fd)
+        except FileExistsError:
+            if self._read(path) != dict(value):
+                raise ProtectedApplyJournalError(
+                    "protected failure diagnostic cannot be replaced"
+                ) from None
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not publish protected failure diagnostic"
+            ) from exc
+        finally:
+            if created:
+                try:
+                    os.unlink(temporary, dir_fd=source_directory_fd)
+                except OSError:
+                    pass
+            os.close(destination_directory_fd)
+            os.close(source_directory_fd)
 
     def _ensure(self) -> None:
         _require_directory(self.attempt_root, uid=self.service_uid)
@@ -1375,6 +1574,95 @@ def read_component_failure_diagnostic(
         ) from exc
 
 
+def _read_failure_diagnostics(
+    component_root: Path,
+    *,
+    service_uid: int,
+) -> tuple[_ComponentFailureDiagnosticEntry, ...]:
+    match = _COMPONENT_DIRECTORY_RE.fullmatch(component_root.name)
+    if (
+        not component_root.is_absolute()
+        or ".." in component_root.parts
+        or match is None
+        or service_uid < 0
+    ):
+        raise ProtectedApplyJournalError("protected failure diagnostic path is invalid")
+    _require_directory(component_root, uid=service_uid)
+    diagnostics_root = component_root / "failure-diagnostics"
+    try:
+        _require_directory(diagnostics_root, uid=service_uid)
+    except FileNotFoundError:
+        return ()
+    try:
+        entries = tuple(os.scandir(diagnostics_root))
+    except OSError as exc:
+        raise ProtectedApplyJournalError(
+            "protected failure diagnostic journal is unavailable"
+        ) from exc
+    if len(entries) > _MAX_FAILURE_DIAGNOSTICS:
+        raise ProtectedApplyJournalError("protected failure diagnostic journal is too large")
+    paths: list[tuple[int, Path]] = []
+    for entry in entries:
+        entry_match = _FAILURE_DIAGNOSTIC_FILE_RE.fullmatch(entry.name)
+        if entry_match is None or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            raise ProtectedApplyJournalError("protected failure diagnostic journal is unsafe")
+        paths.append((int(entry_match.group("sequence")), Path(entry.path)))
+    paths.sort()
+    if [sequence for sequence, _path in paths] != list(range(len(paths))):
+        raise ProtectedApplyJournalError("protected failure diagnostic sequence is invalid")
+    expected_component_id = match.group("component_id")
+    expected_ordinal = int(match.group("ordinal"))
+    diagnostics: list[_ComponentFailureDiagnosticEntry] = []
+    for sequence, path in paths:
+        try:
+            diagnostic = _ComponentFailureDiagnosticEntry.from_dict(
+                _read_service_component_record(
+                    path,
+                    service_uid=service_uid,
+                    filename=path.name,
+                    max_bytes=_MAX_FAILURE_DIAGNOSTIC_BYTES,
+                )
+            )
+        except ValueError as exc:
+            raise ProtectedApplyJournalError(
+                "protected failure diagnostic record is invalid"
+            ) from exc
+        if (
+            diagnostic.component_id != expected_component_id
+            or diagnostic.ordinal != expected_ordinal
+            or diagnostic.sequence != sequence
+        ):
+            raise ProtectedApplyJournalError("protected failure diagnostic identity drifted")
+        diagnostics.append(diagnostic)
+    return tuple(diagnostics)
+
+
+def read_latest_component_failure_diagnostic(
+    component_root: Path,
+    *,
+    service_uid: int,
+) -> ComponentFailureDiagnostic | None:
+    """Read the newest certified diagnostic, falling back to legacy evidence."""
+    diagnostics = _read_failure_diagnostics(component_root, service_uid=service_uid)
+    if diagnostics:
+        return diagnostics[-1].as_diagnostic()
+    match = _COMPONENT_DIRECTORY_RE.fullmatch(component_root.name)
+    if match is None:  # guarded by _read_failure_diagnostics
+        raise ProtectedApplyJournalError("protected failure diagnostic path is invalid")
+    try:
+        diagnostic = read_component_failure_diagnostic(
+            component_root / "failure-diagnostic.json",
+            service_uid=service_uid,
+        )
+    except FileNotFoundError:
+        return None
+    if diagnostic.component_id != match.group("component_id") or diagnostic.ordinal != int(
+        match.group("ordinal")
+    ):
+        raise ProtectedApplyJournalError("protected failure diagnostic identity drifted")
+    return diagnostic
+
+
 def _read_reconciliation_outcomes(
     component_root: Path,
     *,
@@ -1455,5 +1743,6 @@ __all__ = [
     "ReconciliationOutcomeStatus",
     "read_component_failure",
     "read_component_failure_diagnostic",
+    "read_latest_component_failure_diagnostic",
     "read_latest_reconciliation_outcome",
 ]

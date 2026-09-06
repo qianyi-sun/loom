@@ -249,7 +249,6 @@ class KubernetesProtectedStagingCapacityRuntimeSecretComponent:
                     "diff",
                     "--server-side=true",
                     f"--field-manager={_FIELD_MANAGER}",
-                    "--validate=strict",
                     f"--request-timeout={_REQUEST_TIMEOUT}",
                     "-f",
                     "-",

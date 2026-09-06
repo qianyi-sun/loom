@@ -160,6 +160,23 @@ def test_runtime_secret_converges_only_runtime_url_and_ca_certificate(tmp_path: 
     assert "--force-conflicts" not in apply_calls[0]
 
 
+def test_runtime_secret_diff_uses_installed_kubectl_flags(tmp_path: Path) -> None:
+    """Break caught: adding apply-only validation flags makes kubectl diff exit 2."""
+    runner = _Runner(_ca_certificate())
+    component = _component(runner)
+    plan = _plan(tmp_path)
+    component.apply(plan)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+    diff_calls = [call for call in runner.calls if "diff" in call]
+    assert diff_calls
+    assert all("--validate=strict" not in call for call in diff_calls)
+    apply_calls = [call for call in runner.calls if "apply" in call]
+    assert apply_calls
+    assert all("--validate=strict" in call for call in apply_calls)
+
+
 def test_runtime_secret_rejects_foreign_data_field_owner(tmp_path: Path) -> None:
     runner = _Runner(_ca_certificate())
     component = _component(runner)

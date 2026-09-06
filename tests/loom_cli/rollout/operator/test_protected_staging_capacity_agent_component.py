@@ -361,6 +361,25 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
         assert str(credential) not in evidence
 
 
+def test_agent_diff_uses_installed_kubectl_flags(tmp_path: Path) -> None:
+    """Break caught: adding apply-only validation flags makes kubectl diff exit 2."""
+    cluster = _Cluster()
+    component = _component(cluster)
+    plan = _plan(tmp_path)
+    component.apply(plan)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+    diff_calls = [argv for argv, payload in cluster.calls if payload is not None and "diff" in argv]
+    assert diff_calls
+    assert all("--validate=strict" not in argv for argv in diff_calls)
+    apply_calls = [
+        argv for argv, payload in cluster.calls if payload is not None and "apply" in argv
+    ]
+    assert apply_calls
+    assert all("--validate=strict" in argv for argv in apply_calls)
+
+
 def test_runtime_dispatches_agent_only_after_manager_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

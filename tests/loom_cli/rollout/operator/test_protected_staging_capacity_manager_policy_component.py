@@ -595,6 +595,12 @@ def test_policy_component_converges_foundations_before_private_router(
         and "--dry-run=server" in command
     )
 
+    diff_calls = [
+        command for command, payload in cluster.calls if payload is not None and "diff" in command
+    ]
+    assert diff_calls
+    assert all("--validate=strict" not in command for command in diff_calls)
+
 
 def test_policy_component_keeps_exact_artifact_bound_prepared_runtime_exact(
     tmp_path: Path,
