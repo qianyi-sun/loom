@@ -24,6 +24,9 @@ from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
 )
+from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+    KubernetesProtectedStagingCapacityDatabaseComponent,
+)
 from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
     KubernetesProtectedStagingCapacityRuntime,
 )
@@ -45,14 +48,48 @@ class _NoCommandRunner:
 
 
 class _DatabaseRunner:
-    def __init__(self, plan, seed: dict[str, object], *, database_state: str) -> None:
+    def __init__(
+        self,
+        plan,
+        seed: dict[str, object],
+        *,
+        database_state: str,
+        fail_checked: str | None = None,
+    ) -> None:
         self.environment = {"KUBECONFIG": "/fixed"}
         self.plan = plan
         self.seed = seed
         self.database_state = database_state
+        self.runtime_credentials_durable = database_state == "exact"
+        self.active_migrator_sessions = 0
+        self.migrator_acl_count = 0
+        self.migrator_connect = False
+        self.migrator_create = False
+        self.migrator_temporary = False
+        self.owner_create = False
         self.objects: dict[str, dict[str, object]] = {}
         self.created_objects: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, ...]] = []
+        self.checked_inputs: list[tuple[tuple[str, ...], bytes]] = []
+        self.patch_inputs: list[tuple[tuple[str, ...], bytes]] = []
+        self.delete_inputs: list[tuple[tuple[str, ...], bytes]] = []
+        self.fail_checked = fail_checked
+        self.failed_checked = False
+        self._sequence = 0
+        self.replace_after_patch_kind: str | None = None
+        self.replace_after_selector_match_kind: str | None = None
+        self.replace_before_patch_kind: str | None = None
+        self.disappear_before_patch_kind: str | None = None
+        self.fail_patch_after_mutation_kind: str | None = None
+        self.patch_churn_counts: dict[str, int] = {}
+        self.delete_wait_counts: dict[str, int] = {}
+        self.api_default_jobs = False
+        self.create_failure_leaves_all = False
+        self.fail_database_verification_after_wait = False
+        self.database_verification_failed = False
+        self.events: list[str] = []
+        self.fail_peer_phase_counts: dict[str, int] = {}
+        self.fail_delete_job_before_mutation = 0
 
     def _registration(self) -> dict[str, object]:
         return {
@@ -75,10 +112,17 @@ class _DatabaseRunner:
         }
 
     @staticmethod
-    def _role(*, login: bool, inherit: bool, password: bool) -> dict[str, object]:
+    def _role(
+        *,
+        login: bool,
+        inherit: bool,
+        password: bool,
+        credential_validity: str = "infinite",
+    ) -> dict[str, object]:
         return {
             "bypass_rls": False,
             "can_login": login,
+            "credential_validity": credential_validity,
             "create_db": False,
             "create_role": False,
             "has_password": password,
@@ -108,19 +152,170 @@ class _DatabaseRunner:
             )
         }
         return {
+            "active_migrator_sessions": self.active_migrator_sessions,
             "agent_role": "loom_cap_staging_agent",
             "authority": authority,
+            "database_privileges": {
+                "migrator_acl_count": self.migrator_acl_count,
+                "migrator_connect": self.migrator_connect,
+                "migrator_create": self.migrator_create,
+                "migrator_temporary": self.migrator_temporary,
+                "owner_create": self.owner_create,
+            },
             "registration": registration,
             "roles": {
-                "loom_cap_staging_agent": self._role(login=True, inherit=False, password=True),
+                "loom_cap_staging_agent": self._role(
+                    login=True,
+                    inherit=False,
+                    password=True,
+                    credential_validity=(
+                        "infinite" if self.runtime_credentials_durable else "finite-valid"
+                    ),
+                ),
                 "loom_cap_staging_executor": self._role(login=False, inherit=False, password=False),
                 "loom_cap_staging_migrator": self._role(login=False, inherit=True, password=False),
-                "loom_cap_staging_observer": self._role(login=True, inherit=False, password=True),
+                "loom_cap_staging_observer": self._role(
+                    login=True,
+                    inherit=False,
+                    password=True,
+                    credential_validity=(
+                        "infinite" if self.runtime_credentials_durable else "finite-valid"
+                    ),
+                ),
                 "loom_cap_staging_owner": self._role(login=False, inherit=False, password=False),
-                "loom_cap_staging_runtime": self._role(login=True, inherit=False, password=True),
+                "loom_cap_staging_runtime": self._role(
+                    login=True,
+                    inherit=False,
+                    password=True,
+                    credential_validity=(
+                        "infinite" if self.runtime_credentials_durable else "finite-valid"
+                    ),
+                ),
             },
             "runtime_role": "loom_cap_staging_runtime",
         }
+
+    def _stored(self, document: dict[str, object]) -> dict[str, object]:
+        stored = deepcopy(document)
+        metadata = stored["metadata"]
+        assert isinstance(metadata, dict)
+        self._sequence += 1
+        metadata["resourceVersion"] = str(self._sequence)
+        metadata["uid"] = f"11111111-1111-4111-8111-{self._sequence:012d}"
+        if stored.get("kind") == "Job":
+            spec = stored["spec"]
+            assert isinstance(spec, dict)
+            template = spec["template"]
+            assert isinstance(template, dict)
+            template_metadata = template["metadata"]
+            assert isinstance(template_metadata, dict)
+            labels = deepcopy(template_metadata["labels"])
+            assert isinstance(labels, dict)
+            template_metadata["labels"] = labels
+            if self.api_default_jobs:
+                controller_uid = metadata["uid"]
+                spec.update(
+                    {
+                        "completionMode": "NonIndexed",
+                        "completions": 1,
+                        "manualSelector": False,
+                        "parallelism": 1,
+                        "podReplacementPolicy": "TerminatingOrFailed",
+                        "selector": {
+                            "matchLabels": {
+                                "batch.kubernetes.io/controller-uid": controller_uid,
+                            }
+                        },
+                        "suspend": False,
+                    }
+                )
+                labels.update(
+                    {
+                        "batch.kubernetes.io/controller-uid": controller_uid,
+                        "batch.kubernetes.io/job-name": metadata["name"],
+                        "controller-uid": controller_uid,
+                        "job-name": metadata["name"],
+                    }
+                )
+        return stored
+
+    @staticmethod
+    def _projection(document: dict[str, object]) -> dict[str, object]:
+        value = json.loads(json.dumps(document))
+        value.pop("status", None)
+        metadata = value["metadata"]
+        assert isinstance(metadata, dict)
+        for field in ("creationTimestamp", "generation", "managedFields"):
+            metadata.pop(field, None)
+        metadata.pop("resourceVersion", None)
+        metadata.pop("uid", None)
+        labels = metadata.get("labels")
+        if isinstance(labels, dict):
+            labels.pop("loom.carin.dev/protected-cleanup", None)
+        if value.get("kind") == "Job":
+            spec = value.get("spec")
+            if isinstance(spec, dict):
+                for field in (
+                    "completionMode",
+                    "manualSelector",
+                    "podReplacementPolicy",
+                    "selector",
+                    "suspend",
+                ):
+                    spec.pop(field, None)
+                template = spec.get("template")
+                template_metadata = template.get("metadata") if isinstance(template, dict) else None
+                template_labels = (
+                    template_metadata.get("labels") if isinstance(template_metadata, dict) else None
+                )
+                if isinstance(template_labels, dict):
+                    for field in (
+                        "batch.kubernetes.io/controller-uid",
+                        "batch.kubernetes.io/job-name",
+                        "controller-uid",
+                        "job-name",
+                    ):
+                        template_labels.pop(field, None)
+        return value
+
+    @classmethod
+    def _ssa_contains(cls, desired: object, observed: object) -> bool:
+        if isinstance(desired, dict) and isinstance(observed, dict):
+            return all(
+                key in observed and cls._ssa_contains(value, observed[key])
+                for key, value in desired.items()
+            )
+        if isinstance(desired, list) and isinstance(observed, list):
+            return len(desired) == len(observed) and all(
+                cls._ssa_contains(expected, actual)
+                for expected, actual in zip(desired, observed, strict=True)
+            )
+        return desired == observed
+
+    @staticmethod
+    def _peer_phase(payload: bytes) -> str:
+        if b"GRANT loom TO loom_cap_staging_migrator" in payload:
+            return "arm"
+        disables_migrator = b"loom_cap_staging_migrator NOLOGIN" in payload
+        disables_runtime = b"loom_cap_staging_runtime NOLOGIN" in payload
+        terminates = b"pg_catalog.pg_terminate_backend" in payload
+        revokes = b"REVOKE ALL PRIVILEGES ON DATABASE loom" in payload
+        finalizes = (
+            b"loom_cap_staging_agent LOGIN" in payload and b"VALID UNTIL 'infinity'" in payload
+        )
+        verifies = b"transient authority is not sealed" in payload
+        phases = [
+            name
+            for name, present in (
+                ("disable-all" if disables_runtime else "disable-migrator", disables_migrator),
+                ("terminate", terminates),
+                ("cleanup", revokes),
+                ("finalize", finalizes),
+                ("verify", verifies),
+            )
+            if present
+        ]
+        return "+".join(phases) if phases else "peer"
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
@@ -129,6 +324,14 @@ class _DatabaseRunner:
         self.calls.append(command)
         joined = " ".join(command)
         if "to_regclass" in joined:
+            self.events.append("database-verification")
+            if (
+                self.fail_database_verification_after_wait
+                and self.database_state == "exact"
+                and not self.database_verification_failed
+            ):
+                self.database_verification_failed = True
+                raise RuntimeError("injected protected database verification failure")
             if self.database_state == "absent":
                 return b"absent\n"
             return b"loom_capacity_guard.capacity_guard_alembic_version\n"
@@ -142,54 +345,254 @@ class _DatabaseRunner:
                 details["runtime_role"] = "loom_cap_other_runtime"
             return json.dumps(details, sort_keys=True).encode()
         if "get secret,job" in joined:
+            items = []
+            for item in self.objects.values():
+                metadata = item.get("metadata")
+                labels = metadata.get("labels") if isinstance(metadata, dict) else None
+                if (
+                    isinstance(labels, dict)
+                    and labels.get("loom.carin.dev/protected-component")
+                    == "staging-capacity-database"
+                ):
+                    items.append(item)
             return json.dumps(
-                {"apiVersion": "v1", "kind": "List", "items": list(self.objects.values())},
+                {"apiVersion": "v1", "kind": "List", "items": items},
                 sort_keys=True,
             ).encode()
+        if "get secret/loom-staging-capacity-database-bootstrap" in joined:
+            item = self.objects.get("Secret")
+            return b"" if item is None else json.dumps(item, sort_keys=True).encode()
+        if "get job/loom-staging-capacity-database-bootstrap" in joined:
+            item = self.objects.get("Job")
+            return b"" if item is None else json.dumps(item, sort_keys=True).encode()
         raise AssertionError(f"unexpected capture: {command}")
 
     def run_status(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
-        assert timeout_seconds == 60.0
-        assert input_payload is not None
         command = tuple(argv)
         self.calls.append(command)
+        if "wait" in command and "--for=delete" in command:
+            assert timeout_seconds in {30.0, 60.0}
+            assert input_payload is None
+            kind = "Job" if any("job/" in item for item in command) else "Secret"
+            self.events.append(f"wait-delete-{kind.lower()}")
+            remaining_waits = self.delete_wait_counts.get(kind, 0)
+            if remaining_waits > 0:
+                self.delete_wait_counts[kind] = remaining_waits - 1
+                if remaining_waits == 1:
+                    self.objects.pop(kind, None)
+                    return 0
+                return 1
+            return 0 if kind not in self.objects else 1
+        if "wait" in command:
+            self.events.append("wait")
+            assert timeout_seconds == 30.0
+            assert input_payload is None
+            if self.fail_checked == "wait" and not self.failed_checked:
+                self.failed_checked = True
+                self.objects["Job"]["status"] = {"failed": 1}
+                return 1
+            self.database_state = "exact"
+            self.runtime_credentials_durable = False
+            self.objects["Job"]["status"] = {"succeeded": 1}
+            return 0
+        assert timeout_seconds == 60.0
+        assert input_payload is not None
         expected = {
             document["kind"]: document
             for document in yaml.safe_load_all(input_payload)
             if document is not None
         }
-        observed = deepcopy(self.objects)
-        for document in observed.values():
-            document.pop("status", None)
-        return 0 if expected == observed else 1
+        if set(expected) != set(self.objects):
+            return 1
+        return (
+            0
+            if all(
+                self._ssa_contains(
+                    self._projection(expected[kind]),
+                    self._projection(observed),
+                )
+                for kind, observed in self.objects.items()
+            )
+            else 1
+        )
 
     def run_checked(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
         command = tuple(argv)
         self.calls.append(command)
-        if "create" in command:
+        if "exec" in command:
             assert timeout_seconds == 60.0
             assert input_payload is not None
-            self.objects = {
-                document["kind"]: document
-                for document in yaml.safe_load_all(input_payload)
-                if document is not None
-            }
+            self.checked_inputs.append((command, input_payload))
+            phase = self._peer_phase(input_payload)
+            self.events.append(phase)
+            remaining_failures = self.fail_peer_phase_counts.get(phase, 0)
+            if remaining_failures > 0:
+                self.fail_peer_phase_counts[phase] = remaining_failures - 1
+                raise RuntimeError("injected protected compensation phase failure")
+            if phase == "finalize":
+                self.runtime_credentials_durable = True
+            if self.fail_checked == "exec" and phase == "arm" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
+            return
+        if "create" in command:
+            self.events.append("create")
+            assert timeout_seconds == 60.0
+            assert input_payload is not None
+            documents = [
+                document for document in yaml.safe_load_all(input_payload) if document is not None
+            ]
+            if self.fail_checked == "create" and not self.failed_checked:
+                self.failed_checked = True
+                selected = documents if self.create_failure_leaves_all else documents[:1]
+                self.objects = {document["kind"]: self._stored(document) for document in selected}
+                raise RuntimeError("injected protected database mutation failure")
+            self.objects = {document["kind"]: self._stored(document) for document in documents}
             self.created_objects = deepcopy(self.objects)
             return
         if "wait" in command:
-            assert timeout_seconds == 660.0
-            assert input_payload is None
-            self.database_state = "exact"
-            job = self.objects["Job"]
-            job["status"] = {"succeeded": 1}
+            raise AssertionError("protected database used an unbounded Job wait")
+        if "patch" in command:
+            assert timeout_seconds == 60.0
+            assert input_payload is not None
+            kind = "Job" if "job/" in " ".join(command) else "Secret"
+            observed = self.objects[kind]
+            observed_metadata = observed["metadata"]
+            assert isinstance(observed_metadata, dict)
+            self.events.append(f"patch-{kind.lower()}")
+            if self.disappear_before_patch_kind == kind:
+                self.disappear_before_patch_kind = None
+                self.objects.pop(kind)
+                raise RuntimeError("injected protected cleanup patch race")
+            if self.replace_before_patch_kind == kind:
+                self.replace_before_patch_kind = None
+                replacement = self._projection(observed)
+                self.objects[kind] = self._stored(replacement)
+                raise RuntimeError("injected protected cleanup patch race")
+            remaining_churn = self.patch_churn_counts.get(kind, 0)
+            if remaining_churn > 0:
+                self.patch_churn_counts[kind] = remaining_churn - 1
+                self._sequence += 1
+                observed_metadata["resourceVersion"] = str(self._sequence)
+                raise RuntimeError("injected protected cleanup patch race")
+            operations = json.loads(input_payload)
+            tests = {
+                (operation["path"], json.dumps(operation["value"], sort_keys=True))
+                for operation in operations
+                if operation["op"] == "test"
+            }
+            assert ("/metadata/uid", json.dumps(observed_metadata["uid"])) in tests
+            assert (
+                "/metadata/resourceVersion",
+                json.dumps(observed_metadata["resourceVersion"], sort_keys=True),
+            ) in tests
+            cleanup_label = None
+            for operation in operations:
+                if operation["op"] == "add" and operation["path"].startswith("/metadata/labels/"):
+                    cleanup_label = (
+                        operation["path"].removeprefix("/metadata/labels/").replace("~1", "/")
+                    )
+                    labels = deepcopy(observed_metadata.setdefault("labels", {}))
+                    assert isinstance(labels, dict)
+                    labels[cleanup_label] = operation["value"]
+                    observed_metadata["labels"] = labels
+            assert cleanup_label == "loom.carin.dev/protected-cleanup"
+            self.patch_inputs.append((command, input_payload))
+            if self.replace_after_patch_kind == kind:
+                replacement = self._projection(observed)
+                replacement_metadata = replacement["metadata"]
+                assert isinstance(replacement_metadata, dict)
+                labels = replacement_metadata["labels"]
+                assert isinstance(labels, dict)
+                labels.pop(cleanup_label, None)
+                self.objects[kind] = self._stored(replacement)
+            else:
+                self._sequence += 1
+                observed_metadata["resourceVersion"] = str(self._sequence)
+            if self.fail_patch_after_mutation_kind == kind:
+                self.fail_patch_after_mutation_kind = None
+                raise RuntimeError("injected protected cleanup patch response loss")
+            return
+        if "delete" in command and "--raw" in command:
+            assert timeout_seconds == 60.0
+            assert input_payload is not None
+            resource_path = next(item for item in command if item.startswith("/api"))
+            kind = "Job" if "/jobs/" in resource_path else "Secret"
+            self.events.append(f"delete-{kind.lower()}")
+            self.delete_inputs.append((command, input_payload))
+            if kind == "Job" and self.fail_delete_job_before_mutation > 0:
+                self.fail_delete_job_before_mutation -= 1
+                raise RuntimeError("injected protected compensation phase failure")
+            observed = self.objects.get(kind)
+            if observed is None:
+                raise RuntimeError("injected protected cleanup delete absence")
+            if self.replace_after_selector_match_kind == kind:
+                self.replace_after_selector_match_kind = None
+                replacement = self._projection(observed)
+                replacement_metadata = replacement["metadata"]
+                assert isinstance(replacement_metadata, dict)
+                replacement_labels = replacement_metadata["labels"]
+                assert isinstance(replacement_labels, dict)
+                replacement_labels.pop("loom.carin.dev/protected-cleanup", None)
+                self.objects[kind] = self._stored(replacement)
+                observed = self.objects[kind]
+            observed_metadata = observed["metadata"]
+            assert isinstance(observed_metadata, dict)
+            delete_options = json.loads(input_payload)
+            assert delete_options["apiVersion"] == "v1"
+            assert delete_options["kind"] == "DeleteOptions"
+            assert delete_options["propagationPolicy"] == "Foreground"
+            if delete_options["preconditions"] != {
+                "resourceVersion": observed_metadata["resourceVersion"],
+                "uid": observed_metadata["uid"],
+            }:
+                raise RuntimeError("injected protected cleanup delete precondition failure")
+            if self.delete_wait_counts.get(kind, 0) > 0:
+                observed_metadata["deletionTimestamp"] = "2026-09-05T12:00:00Z"
+                observed_metadata["finalizers"] = ["foregroundDeletion"]
+            else:
+                self.objects.pop(kind)
+            if self.fail_checked == "delete" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
             return
         if "delete" in command:
             assert timeout_seconds == 60.0
             assert input_payload is None
             kind = "Job" if "job" in command else "Secret"
+            self.events.append(f"delete-{kind.lower()}")
+            if kind == "Job" and self.fail_delete_job_before_mutation > 0:
+                self.fail_delete_job_before_mutation -= 1
+                raise RuntimeError("injected protected compensation phase failure")
+            observed = self.objects.get(kind)
+            if observed is None:
+                return
+            observed_metadata = observed["metadata"]
+            assert isinstance(observed_metadata, dict)
+            labels = observed_metadata.get("labels")
+            assert isinstance(labels, dict)
+            selector = next(item for item in command if item.startswith("--selector="))
+            key, value = selector.removeprefix("--selector=").split("=", 1)
+            if labels.get(key) != value:
+                return
+            if self.replace_after_selector_match_kind == kind:
+                self.replace_after_selector_match_kind = None
+                replacement = self._projection(observed)
+                replacement_metadata = replacement["metadata"]
+                assert isinstance(replacement_metadata, dict)
+                replacement_labels = replacement_metadata["labels"]
+                assert isinstance(replacement_labels, dict)
+                replacement_labels.pop("loom.carin.dev/protected-cleanup", None)
+                self.objects[kind] = self._stored(replacement)
+            if kind == "Job":
+                assert "--cascade=foreground" in command
+                assert "--wait=true" in command
             self.objects.pop(kind)
+            if self.fail_checked == "delete" and not self.failed_checked:
+                self.failed_checked = True
+                raise RuntimeError("injected protected database mutation failure")
             return
         raise AssertionError(f"unexpected mutation: {command}")
 
@@ -913,6 +1316,7 @@ def _database_component(
     tmp_path: Path,
     *,
     database_state: str,
+    fail_checked: str | None = None,
 ):
     seed_runtime = _runtime(tmp_path)
     _write_bootstrap(seed_runtime)
@@ -924,7 +1328,12 @@ def _database_component(
     )
     seed_runtime.components(plan, epoch_guard=lambda _plan: epoch)[0].apply(plan)
     seed = json.loads(seed_runtime.credential_seed_path.read_text())
-    runner = _DatabaseRunner(plan, seed, database_state=database_state)
+    runner = _DatabaseRunner(
+        plan,
+        seed,
+        database_state=database_state,
+        fail_checked=fail_checked,
+    )
     runtime = KubernetesProtectedStagingCapacityRuntime(
         runner=runner,  # type: ignore[arg-type]
         state_root=seed_runtime.state_root,
@@ -947,7 +1356,51 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
 
     assert component.classify(plan).state is ComponentState.EXACT
     assert runner.objects == {}
-    mutations = [call for call in runner.calls if {"create", "wait", "delete"} & set(call)]
+    peer_commands = [call for call, _payload in runner.checked_inputs]
+    assert all(
+        call
+        == (
+            "kubectl",
+            "--namespace",
+            "loom-staging",
+            "exec",
+            "-i",
+            "service/loom-postgres-rw",
+            "--",
+            "sh",
+            "-ceu",
+            "exec psql -U postgres -d loom -qAtX -v ON_ERROR_STOP=1",
+        )
+        for call in peer_commands
+    )
+    password = str(runner.seed["migrator_database_password"])
+    assert all(password not in " ".join(call) for call in runner.calls)
+    arm_payload = next(
+        payload
+        for _command, payload in runner.checked_inputs
+        if b"GRANT loom TO loom_cap_staging_migrator" in payload
+    )
+    assert password.encode() in arm_payload
+    assert b" NOCREATEROLE " in arm_payload
+    assert b" CREATEROLE " not in arm_payload
+    assert b"WITH ADMIN TRUE" not in arm_payload
+    assert b"SET FALSE" not in arm_payload
+    assert str(runner.seed["agent_database_password"]).encode() in arm_payload
+    assert str(runner.seed["observer_database_password"]).encode() in arm_payload
+    assert str(runner.seed["runtime_database_password"]).encode() in arm_payload
+    assert all(
+        password.encode() not in payload
+        for _command, payload in runner.checked_inputs
+        if payload is not arm_payload
+    )
+    assert runner.events.index("cleanup") < runner.events.index("arm")
+    mutations = [
+        call
+        for call in runner.calls
+        if "create" in call
+        or "delete" in call
+        or ("wait" in call and "--for=condition=complete" in call)
+    ]
     assert [
         next(item for item in ("create", "wait", "delete") if item in call) for call in mutations
     ] == [
@@ -959,6 +1412,16 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     secret = runner.created_objects["Secret"]
     job = runner.created_objects["Job"]
     assert secret["immutable"] is True
+    assert set(secret["data"]) == {
+        "admin-password",
+        "admin-username",
+        "reporter-configuration.json",
+        "seed.json",
+    }
+    assert base64.b64decode(secret["data"]["admin-username"], validate=True) == (
+        b"loom_cap_staging_migrator"
+    )
+    assert base64.b64decode(secret["data"]["admin-password"], validate=True) == (password.encode())
     configuration = json.loads(
         base64.b64decode(secret["data"]["reporter-configuration.json"], validate=True)
     )
@@ -999,7 +1462,6 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
     volumes = {volume["name"]: volume["secret"] for volume in pod_spec["volumes"]}
     assert {volume["secretName"] for volume in volumes.values()} == {
         "loom-staging-capacity-database-bootstrap",
-        "loom-postgres-cnpg-credentials",
         "loom-postgres-ca",
     }
     assert volumes["bootstrap"]["items"] == [
@@ -1007,10 +1469,148 @@ def test_database_component_bootstraps_with_candidate_image_then_removes_credent
         {"key": "seed.json", "path": "seed.json"},
     ]
     assert volumes["postgres-admin"]["items"] == [
-        {"key": "password", "path": "password"},
-        {"key": "username", "path": "username"},
+        {"key": "admin-password", "path": "password"},
+        {"key": "admin-username", "path": "username"},
     ]
+    assert volumes["postgres-admin"]["secretName"] == ("loom-staging-capacity-database-bootstrap")
     assert volumes["postgres-ca"]["items"] == [{"key": "ca.crt", "path": "ca.crt"}]
+
+
+def test_database_component_accepts_api_defaulted_job_and_cleans_it_up(tmp_path: Path) -> None:
+    """Break caught: comparing a live defaulted Job directly with its raw manifest."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    runner.api_default_jobs = True
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_rejects_unlabelled_resource_at_reserved_name(tmp_path: Path) -> None:
+    """Break caught: selector-only inventory hiding an occupied reserved name."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    runner.objects["Secret"] = runner._stored(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "loom-staging-capacity-database-bootstrap",
+                "namespace": "loom-staging",
+                "labels": {"app.kubernetes.io/managed-by": "foreign-controller"},
+            },
+            "type": "Opaque",
+            "data": {"foreign": "dmFsdWU="},
+        }
+    )
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+
+
+@pytest.mark.parametrize(
+    ("kind", "section", "key", "value"),
+    [
+        ("Secret", "data", "foreign", "dmFsdWU="),
+        ("Secret", "annotations", "foreign.example/owner", "other-manager"),
+        ("Secret", "labels", "foreign.example/managed", "true"),
+        ("Job", "spec", "ttlSecondsAfterFinished", 3600),
+    ],
+)
+def test_database_component_rejects_additive_unmanaged_resource_fields(
+    tmp_path: Path,
+    kind: str,
+    section: str,
+    key: str,
+    value: object,
+) -> None:
+    """Break caught: SSA retaining additive foreign fields while reporting no diff."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    resource = runner.objects[kind]
+    if section == "spec":
+        target = resource["spec"]
+    else:
+        metadata = resource["metadata"]
+        assert isinstance(metadata, dict)
+        target = metadata[section] if section != "data" else resource["data"]
+    assert isinstance(target, dict)
+    target[key] = value
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert set(runner.objects) == {"Job", "Secret"}
+
+
+def test_database_component_distinguishes_finite_from_durable_runtime_credentials(
+    tmp_path: Path,
+) -> None:
+    """Break caught: treating a half-finished finite lease as final exact state."""
+
+    plan, runner, _component = _database_component(tmp_path, database_state="exact")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.runtime_credentials_durable = False
+
+    assert direct._database_state(plan, runner.seed).value == "needs-convergence"
+    assert (
+        direct._database_state(
+            plan,
+            runner.seed,
+            durable_runtime_credentials=False,
+        ).value
+        == "exact"
+    )
+
+    runner.runtime_credentials_durable = True
+    assert direct._database_state(plan, runner.seed).value == "exact"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("active_migrator_sessions", 1),
+        ("migrator_acl_count", 1),
+        ("migrator_connect", True),
+        ("migrator_create", True),
+        ("migrator_temporary", True),
+        ("owner_create", True),
+    ],
+)
+def test_database_component_rejects_unsealed_database_authority(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    """Break caught: exact-state evidence omitting sessions or database ACL authority."""
+
+    plan, runner, _component = _database_component(tmp_path, database_state="exact")
+    setattr(runner, field, value)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+
+    assert direct._database_state(plan, runner.seed).value == "needs-convergence"
 
 
 def test_database_component_recovers_exact_completed_residue_by_cleanup_only(
@@ -1027,11 +1627,578 @@ def test_database_component_recovers_exact_completed_residue_by_cleanup_only(
     component.apply(plan)
 
     assert runner.objects == {}
-    assert all("create" not in call and "wait" not in call for call in runner.calls)
+    assert all(
+        "create" not in call and "--for=condition=complete" not in call for call in runner.calls
+    )
     assert component.classify(plan).state is ComponentState.EXACT
 
 
-def test_database_component_rejects_partial_bootstrap_resource_set(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_recovers_exact_partial_bootstrap_resource_set(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    expected = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects = {kind: expected[kind]}
+
+    assert component.classify(plan).state is ComponentState.READY
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_treats_failure_target_condition_as_failed(tmp_path: Path) -> None:
+    plan, runner, _component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"conditions": [{"type": "FailureTarget", "status": "True"}]}
+
+    state, _evidence = direct._resource_state(plan, manifest)
+
+    assert state.value == "failed"
+
+
+@pytest.mark.parametrize("fail_checked", ["exec", "create", "wait"])
+def test_database_component_always_seals_transient_authority_after_failure(
+    tmp_path: Path,
+    fail_checked: str,
+) -> None:
+    plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked=fail_checked,
+    )
+    password = str(runner.seed["migrator_database_password"])
+
+    failure_pattern = (
+        "protected staging capacity database bootstrap job failed"
+        if fail_checked == "wait"
+        else "injected protected database mutation failure"
+    )
+    with pytest.raises(RuntimeError, match=failure_pattern) as failure:
+        component.apply(plan)
+
+    assert password not in str(failure.value)
+    assert all(password not in " ".join(call) for call in runner.calls)
+    arm_payload = next(
+        payload
+        for _command, payload in runner.checked_inputs
+        if b"GRANT loom TO loom_cap_staging_migrator" in payload
+    )
+    disable_payload = next(
+        payload
+        for _command, payload in reversed(runner.checked_inputs)
+        if b"loom_cap_staging_agent NOLOGIN" in payload
+    )
+    assert password.encode() in arm_payload
+    assert password.encode() not in disable_payload
+    assert b"NOLOGIN" in disable_payload
+    assert b"NOCREATEROLE" in disable_payload
+    assert b"loom_cap_staging_agent NOLOGIN" in disable_payload
+    assert b"loom_cap_staging_observer NOLOGIN" in disable_payload
+    assert b"loom_cap_staging_runtime NOLOGIN" in disable_payload
+    if fail_checked == "wait":
+        assert sum("--for=condition=complete" in call for call in runner.calls) == 1
+
+
+@pytest.mark.parametrize("fail_checked", ["create", "wait"])
+def test_database_component_failure_compensation_uses_safe_phase_order(
+    tmp_path: Path,
+    fail_checked: str,
+) -> None:
+    """Break caught: sealing authority before stopping the exact bootstrap Job."""
+
+    _plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked=fail_checked,
+    )
+    runner.create_failure_leaves_all = fail_checked == "create"
+
+    with pytest.raises(RuntimeError):
+        component.apply(_plan)
+
+    failure = max(index for index, event in enumerate(runner.events) if event == fail_checked)
+    disable = next(
+        index
+        for index, event in enumerate(runner.events)
+        if index > failure and event == "disable-all"
+    )
+    terminate = next(
+        index
+        for index, event in enumerate(runner.events)
+        if index > disable and event == "terminate"
+    )
+    delete_job = next(
+        index
+        for index, event in enumerate(runner.events)
+        if index > terminate and event == "delete-job"
+    )
+    cleanup = next(
+        index
+        for index, event in enumerate(runner.events)
+        if index > delete_job and event == "cleanup"
+    )
+    verify = next(
+        index for index, event in enumerate(runner.events) if index > cleanup and event == "verify"
+    )
+    delete_secret = next(
+        index
+        for index, event in enumerate(runner.events)
+        if index > verify and event == "delete-secret"
+    )
+    assert disable < terminate < delete_job < cleanup < verify < delete_secret
+    assert all("+" not in event for event in runner.events if event.startswith("disable"))
+
+
+def test_database_component_verifies_database_before_finalizing_runtime_credentials(
+    tmp_path: Path,
+) -> None:
+    """Break caught: making runtime credentials permanent before exact DB verification."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    runner.fail_database_verification_after_wait = True
+
+    with pytest.raises(RuntimeError, match="injected protected database verification failure"):
+        component.apply(plan)
+
+    assert not any(event == "finalize" for event in runner.events)
+    assert any(event == "disable-all" for event in runner.events)
+    assert not any(
+        b"ALTER ROLE loom_cap_staging_agent LOGIN NOSUPERUSER NOCREATEDB "
+        b"NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS VALID UNTIL 'infinity';" in payload
+        for _command, payload in runner.checked_inputs
+    )
+
+
+def test_database_component_safely_seals_residue_before_retrying(tmp_path: Path) -> None:
+    """Break caught: deleting retry residue while its old credentials remain armed."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"failed": 1}
+
+    component.apply(plan)
+
+    first_arm = runner.events.index("arm")
+    first_disable = runner.events.index("disable-all")
+    first_terminate = runner.events.index("terminate")
+    first_delete_job = runner.events.index("delete-job")
+    first_cleanup = runner.events.index("cleanup")
+    assert first_disable < first_terminate < first_delete_job < first_cleanup < first_arm
+
+
+@pytest.mark.parametrize("phase", ["disable-all", "terminate", "delete-job"])
+def test_database_component_retries_transient_compensation_shutdown_failures(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    """Break caught: a transient shutdown failure abandoning an authenticated Job."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"failed": 1}
+    if phase == "delete-job":
+        runner.fail_delete_job_before_mutation = 1
+    else:
+        runner.fail_peer_phase_counts[phase] = 1
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count(phase) >= 2
+    assert runner.events.index("cleanup") < runner.events.index("arm")
+
+
+@pytest.mark.parametrize("phase", ["disable-all", "terminate"])
+def test_database_component_stops_job_before_reporting_unresolved_compensation(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    """Break caught: a database outage preventing independent Kubernetes shutdown."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"failed": 1}
+    runner.fail_peer_phase_counts[phase] = 2
+
+    with pytest.raises(RuntimeError, match="could not confirm safe shutdown"):
+        component.apply(plan)
+
+    assert "Job" not in runner.objects
+    assert "Secret" in runner.objects
+    assert runner.events.count(phase) == 2
+    assert "cleanup" not in runner.events
+
+
+def test_database_component_does_not_revoke_when_job_shutdown_is_unconfirmed(
+    tmp_path: Path,
+) -> None:
+    """Break caught: revoking authority while the bootstrap Job may still be running."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    manifest = direct._manifest(plan, runner.seed)
+    runner.objects = {
+        document["kind"]: runner._stored(document)
+        for document in yaml.safe_load_all(manifest)
+        if document is not None
+    }
+    runner.objects["Job"]["status"] = {"failed": 1}
+    runner.fail_delete_job_before_mutation = 100
+
+    with pytest.raises(RuntimeError, match="could not confirm safe shutdown: job"):
+        component.apply(plan)
+
+    assert set(runner.objects) == {"Job", "Secret"}
+    assert runner.events.count("disable-all") == 2
+    assert runner.events.count("terminate") == 2
+    assert runner.events.count("delete-job") == 6
+    assert "cleanup" not in runner.events
+
+
+def test_database_component_recovers_from_non_atomic_resource_create_failure(
+    tmp_path: Path,
+) -> None:
+    plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked="create",
+    )
+
+    with pytest.raises(RuntimeError, match="injected protected database mutation failure"):
+        component.apply(plan)
+
+    assert component.classify(plan).state is ComponentState.READY
+    runner.fail_checked = None
+    runner.failed_checked = False
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_recovers_from_ambiguous_successful_resource_delete(
+    tmp_path: Path,
+) -> None:
+    """Break caught: retrying a delete whose lost response hid confirmed disappearance."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"failed": 1}
+    runner.database_state = "absent"
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+    runner.events.clear()
+    runner.fail_checked = "delete"
+    runner.failed_checked = False
+
+    component.apply(plan)
+
+    assert runner.failed_checked is True
+    assert runner.objects == {}
+    assert runner.events.index("delete-job") < runner.events.index("cleanup")
+    assert runner.events.index("cleanup") < runner.events.index("arm")
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_waits_after_ambiguous_accepted_job_delete(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a lost DELETE response hiding the same terminating Job UID."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"failed": 1}
+    runner.database_state = "exact"
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+    runner.events.clear()
+    runner.fail_checked = "delete"
+    runner.failed_checked = False
+    runner.delete_wait_counts["Job"] = 2
+
+    component.apply(plan)
+
+    assert runner.failed_checked is True
+    assert runner.objects == {}
+    assert runner.events.count("delete-job") == 1
+    assert runner.events.count("wait-delete-job") == 2
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_does_not_delete_replacement_after_cleanup_label_race(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.replace_after_patch_kind = kind
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.patch_inputs.clear()
+
+    with pytest.raises(RuntimeError, match="identity changed during cleanup"):
+        component.apply(plan)
+
+    replacement = runner.objects[kind]
+    replacement_metadata = replacement["metadata"]
+    assert isinstance(replacement_metadata, dict)
+    labels = replacement_metadata["labels"]
+    assert isinstance(labels, dict)
+    assert "loom.carin.dev/protected-cleanup" not in labels
+    assert runner.patch_inputs
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_does_not_delete_replacement_after_cleanup_selection_race(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """Break caught: selector listing an original before deleting its name replacement."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    original_uid = runner.objects[kind]["metadata"]["uid"]
+    runner.replace_after_selector_match_kind = kind
+
+    with pytest.raises(RuntimeError, match="identity changed during cleanup"):
+        component.apply(plan)
+
+    assert runner.objects[kind]["metadata"]["uid"] != original_uid
+    assert "loom.carin.dev/protected-cleanup" not in runner.objects[kind]["metadata"]["labels"]
+
+
+def test_database_component_recovers_from_ambiguous_successful_job_cleanup_patch(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a YAML labels alias making a confirmed patch appear drifted."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.fail_patch_after_mutation_kind = "Job"
+    runner.events.clear()
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count("patch-job") == 1
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_waits_for_same_uid_foreground_job_deletion(
+    tmp_path: Path,
+) -> None:
+    """Break caught: deletion metadata on the same terminating Job reported as drift."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.events.clear()
+    runner.delete_inputs.clear()
+    runner.delete_wait_counts["Job"] = 2
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count("delete-job") == 1
+    assert runner.events.count("wait-delete-job") == 2
+    assert len(runner.delete_inputs) == 2
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_retries_same_uid_cleanup_patch_churn(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """Break caught: one status/resourceVersion update making exact cleanup unrecoverable."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.patch_churn_counts[kind] = 1
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.count(f"patch-{kind.lower()}") >= 2
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_accepts_disappearance_during_cleanup_patch(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """Break caught: a confirmed absent exact object being treated as unsafe drift."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.disappear_before_patch_kind = kind
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_database_component_preserves_replacement_during_cleanup_patch(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """Break caught: retrying a cleanup patch across a reserved-name UID replacement."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    original_uid = runner.objects[kind]["metadata"]["uid"]
+    runner.replace_before_patch_kind = kind
+
+    with pytest.raises(RuntimeError, match="identity changed during cleanup"):
+        component.apply(plan)
+
+    assert runner.objects[kind]["metadata"]["uid"] != original_uid
+    assert "loom.carin.dev/protected-cleanup" not in runner.objects[kind]["metadata"]["labels"]
+
+
+def test_database_component_bounds_same_uid_cleanup_patch_churn(tmp_path: Path) -> None:
+    """Break caught: unbounded retry while an active Job continually changes status."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    component.apply(plan)
+    runner.objects = deepcopy(runner.created_objects)
+    runner.objects["Job"]["status"] = {"succeeded": 1}
+    runner.database_state = "exact"
+    runner.patch_churn_counts["Job"] = 100
+
+    with pytest.raises(RuntimeError, match="cleanup patch did not stabilize"):
+        component.apply(plan)
+
+    assert runner.events.count("patch-job") < 100
+    assert set(runner.objects) == {"Job", "Secret"}
+
+
+def test_database_component_retries_after_failed_bootstrap_is_safely_compensated(
+    tmp_path: Path,
+) -> None:
+    plan, runner, component = _database_component(
+        tmp_path,
+        database_state="absent",
+        fail_checked="wait",
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="protected staging capacity database bootstrap job failed",
+    ):
+        component.apply(plan)
+
+    runner.fail_checked = None
+    runner.calls.clear()
+    runner.checked_inputs.clear()
+    runner.events.clear()
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+
+    mutations = [
+        next(item for item in ("delete", "create", "wait") if item in call)
+        for call in runner.calls
+        if "create" in call
+        or "delete" in call
+        or ("wait" in call and "--for=condition=complete" in call)
+    ]
+    assert mutations == ["create", "wait", "delete", "delete"]
+    assert runner.events.index("cleanup") < runner.events.index("arm")
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_rejects_mismatched_partial_bootstrap_resource_set(
+    tmp_path: Path,
+) -> None:
     plan, runner, component = _database_component(tmp_path, database_state="absent")
     runner.objects = {
         "Secret": {
@@ -1041,6 +2208,7 @@ def test_database_component_rejects_partial_bootstrap_resource_set(tmp_path: Pat
                 "name": "loom-staging-capacity-database-bootstrap",
                 "namespace": "loom-staging",
             },
+            "data": {"unexpected": "dmFsdWU="},
         }
     }
 

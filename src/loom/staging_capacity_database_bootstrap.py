@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -56,6 +55,15 @@ class ProtectedStagingDatabase(Protocol):
         credentials: CapacityDatabaseCredentials,
         configuration: ReporterConfigurationV1,
     ) -> CapacityDatabaseInstallation: ...
+
+
+class ProtectedStagingDatabaseFactory(Protocol):
+    def __call__(
+        self,
+        admin_url: str,
+        *,
+        transient_role_admin: bool,
+    ) -> ProtectedStagingDatabase: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,9 +229,7 @@ def staging_capacity_identity() -> DevInstanceIdentity:
 async def bootstrap_staging_capacity_database(
     settings: StagingCapacityDatabaseBootstrapSettings,
     *,
-    database_factory: Callable[[str], ProtectedStagingDatabase] = (
-        PsycopgPersonalDevCapacityDatabase
-    ),
+    database_factory: ProtectedStagingDatabaseFactory = (PsycopgPersonalDevCapacityDatabase),
 ) -> CapacityDatabaseInstallation:
     credentials = _parse_seed(
         _read_bounded(settings.credential_seed_path, max_bytes=_MAX_JSON_BYTES)
@@ -247,7 +253,7 @@ async def bootstrap_staging_capacity_database(
             "sslrootcert": str(settings.database_ca_path),
         },
     ).render_as_string(hide_password=False)
-    return await database_factory(admin_url).converge_protected(
+    return await database_factory(admin_url, transient_role_admin=True).converge_protected(
         identity=staging_capacity_identity(),
         credentials=credentials,
         configuration=configuration,

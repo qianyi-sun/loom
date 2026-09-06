@@ -105,8 +105,9 @@ async def test_bootstrap_uses_fixed_staging_identity_and_existing_database_insta
     observed: dict[str, Any] = {}
 
     class Database:
-        def __init__(self, admin_url: str) -> None:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
             observed["admin_url"] = admin_url
+            observed["transient_role_admin"] = transient_role_admin
 
         async def converge_protected(
             self,
@@ -142,6 +143,7 @@ async def test_bootstrap_uses_fixed_staging_identity_and_existing_database_insta
         "sslmode": "verify-full",
         "sslrootcert": str(tmp_path / "ca.crt"),
     }
+    assert observed["transient_role_admin"] is True
     identity = observed["identity"]
     assert identity.name == "staging"
     assert identity.runtime_environment == "staging"
