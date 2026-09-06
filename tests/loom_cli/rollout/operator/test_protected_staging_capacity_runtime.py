@@ -91,6 +91,7 @@ class _DatabaseRunner:
         self.events: list[str] = []
         self.fail_peer_phase_counts: dict[str, int] = {}
         self.fail_delete_job_before_mutation = 0
+        self.reject_diff_validate_flag = False
 
     def _registration(self) -> dict[str, object]:
         return {
@@ -372,6 +373,8 @@ class _DatabaseRunner:
         assert env == self.environment
         command = tuple(argv)
         self.calls.append(command)
+        if self.reject_diff_validate_flag and "diff" in command and "--validate=strict" in command:
+            raise RuntimeError("injected kubectl diff unsupported flag")
         if "wait" in command and "--for=delete" in command:
             assert timeout_seconds in {30.0, 60.0}
             assert input_payload is None
@@ -1358,6 +1361,7 @@ def _prior_database_plan(plan: FinalGatePlan) -> FinalGatePlan:
         {
             "request_id": "req-prior01",
             "rollout_id": "20260905t181433z-staging-prior01",
+            "starting_mutation_epoch": plan.starting_mutation_epoch - 1,
         }
     )
     payload_without_digest = {key: value for key, value in payload.items() if key != "plan_digest"}
@@ -1404,6 +1408,27 @@ def _legacy_database_bootstrap_objects(
         ],
     }
     return objects
+
+
+def _write_database_plan_ledger_entry(
+    tmp_path: Path,
+    plan: FinalGatePlan,
+    *,
+    request_id: str | None = None,
+    attempt_number: int | None = None,
+) -> None:
+    ledger_request_id = plan.request_id if request_id is None else request_id
+    ledger_attempt_number = plan.attempt_number if attempt_number is None else attempt_number
+    request_root = tmp_path / "state" / "requests" / ledger_request_id
+    attempt_root = request_root / "attempts" / str(ledger_attempt_number)
+    for directory in (request_root.parent, request_root, attempt_root.parent, attempt_root):
+        directory.mkdir(mode=0o700, exist_ok=True)
+    path = attempt_root / "final-gate-plan.json"
+    path.write_text(
+        json.dumps(plan.to_dict(), sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
 
 
 def test_database_component_bootstraps_with_candidate_image_then_removes_credentials(
@@ -1728,15 +1753,10 @@ def test_database_component_recovers_certified_failed_previous_auth_manifest(
 
     plan, runner, component = _database_component(tmp_path, database_state="absent")
     prior_plan = _prior_database_plan(plan)
-    attempt_root = (
-        tmp_path
-        / "state"
-        / "requests"
-        / prior_plan.request_id
-        / "attempts"
-        / str(prior_plan.attempt_number)
-    )
-    attempt_root.mkdir(mode=0o700, parents=True)
+    request_root = tmp_path / "state" / "requests" / prior_plan.request_id
+    attempt_root = request_root / "attempts" / str(prior_plan.attempt_number)
+    for directory in (request_root.parent, request_root, attempt_root.parent, attempt_root):
+        directory.mkdir(mode=0o700)
     FinalGatePlanStore(
         tmp_path / "state",
         request_id=prior_plan.request_id,
@@ -1760,14 +1780,181 @@ def test_database_component_recovers_certified_failed_previous_auth_manifest(
     assert runner.objects == {}
     assert runner.events.index("delete-job") < runner.events.index("arm")
     assert runner.events.index("delete-secret") < runner.events.index("arm")
-    deleted_uids = {
-        "Job" if "/jobs/" in command[-3] else "Secret": json.loads(payload)[
-            "preconditions"
-        ]["uid"]
+    deleted_identities = [
+        (
+            "Job" if any("/jobs/" in item for item in command) else "Secret",
+            json.loads(payload)["preconditions"]["uid"],
+        )
         for command, payload in runner.delete_inputs
-    }
-    assert retained_uids.items() <= deleted_uids.items()
+    ]
+    assert deleted_identities[:2] == [
+        ("Job", retained_uids["Job"]),
+        ("Secret", retained_uids["Secret"]),
+    ]
     assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_uses_supported_diff_for_previous_auth_manifest(
+    tmp_path: Path,
+) -> None:
+    """Break caught: passing the unsupported --validate flag to kubectl diff."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    runner.reject_diff_validate_flag = True
+
+    assert component.classify(plan).state is ComponentState.READY
+
+
+@pytest.mark.parametrize(
+    "job_status",
+    [
+        {"active": 1, "failed": 1},
+        {
+            "active": 1,
+            "failed": 1,
+            "conditions": [{"status": "True", "type": "FailureTarget"}],
+        },
+        {
+            "active": 1,
+            "failed": 1,
+            "conditions": [{"status": "True", "type": "Failed"}],
+        },
+    ],
+)
+def test_database_component_rejects_nonterminal_previous_auth_job(
+    tmp_path: Path,
+    job_status: dict[str, object],
+) -> None:
+    """Break caught: deleting a prior Job that has failed pods but is still retrying."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    runner.objects["Job"]["status"] = job_status
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_previous_auth_manifest_without_plan(tmp_path: Path) -> None:
+    """Break caught: treating annotations alone as cleanup authority."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_misfiled_previous_plan(tmp_path: Path) -> None:
+    """Break caught: accepting plan content that is not bound to its ledger identity."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan, request_id="req-misfiled01")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_duplicated_previous_plan(tmp_path: Path) -> None:
+    """Break caught: choosing cleanup authority from duplicate ledger entries."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan, request_id="req-duplicate01")
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+@pytest.mark.parametrize("drift", ["additive-secret-data", "job-plan-annotation"])
+def test_database_component_rejects_drifted_previous_auth_manifest(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    """Break caught: cleanup of prior resources with additive or identity drift."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    if drift == "additive-secret-data":
+        secret_data = runner.objects["Secret"]["data"]
+        assert isinstance(secret_data, dict)
+        secret_data["foreign"] = "dmFsdWU="
+    else:
+        metadata = runner.objects["Job"]["metadata"]
+        assert isinstance(metadata, dict)
+        annotations = metadata["annotations"]
+        assert isinstance(annotations, dict)
+        annotations["loom.carin.dev/plan-digest"] = "0" * 64
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
 
 
 def test_database_component_treats_failure_target_condition_as_failed(tmp_path: Path) -> None:

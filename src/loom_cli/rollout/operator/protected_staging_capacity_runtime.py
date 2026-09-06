@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import serialization
 
 from .backup_lease import BackupLease
 from .final_gate_plan import FinalGatePlan
+from .model import validate_safe_identifier
 from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -132,6 +133,8 @@ _SUBJECT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-subject:v1")
 _AUTHORITY_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-authority:v1")
 _AGENT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-agent:v1")
 _MAX_PRIVATE_FILE_BYTES = 1024 * 1024
+_MAX_RECOVERY_REQUESTS = 4096
+_MAX_RECOVERY_ATTEMPTS_PER_REQUEST = 64
 
 
 class ProtectedStagingCapacityCommandRunner(Protocol):
@@ -466,7 +469,109 @@ class KubernetesProtectedStagingCapacityRuntime:
             runner=self.runner,
             container_registry=self.container_registry,
             seed_reader=self.read_credential_seed,
+            recovery_plan_reader=self._read_previous_database_plan,
         )
+
+    def _read_previous_database_plan(
+        self,
+        current_plan: FinalGatePlan,
+        candidate_sha: str,
+        candidate_tree: str,
+        plan_digest: str,
+    ) -> FinalGatePlan | None:
+        """Resolve stale resources only through one immutable service-owned prior plan."""
+
+        self._validate_private_directory(self.state_root)
+        requests_root = self.state_root / "requests"
+        self._validate_private_directory(requests_root)
+        try:
+            request_entries = tuple(os.scandir(requests_root))
+        except OSError as exc:
+            raise RuntimeError("protected staging recovery ledger is unavailable") from exc
+        if len(request_entries) > _MAX_RECOVERY_REQUESTS:
+            raise RuntimeError("protected staging recovery ledger is too large")
+        matches: list[FinalGatePlan] = []
+        for request_entry in request_entries:
+            if not request_entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                validate_safe_identifier(request_entry.name, "request_id")
+            except ValueError as exc:
+                raise RuntimeError("protected staging recovery request identity is unsafe") from exc
+            request_root = Path(request_entry.path)
+            self._validate_private_directory(request_root)
+            attempts_root = request_root / "attempts"
+            try:
+                self._validate_private_directory(attempts_root)
+                attempt_entries = tuple(os.scandir(attempts_root))
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise RuntimeError("protected staging recovery attempts are unavailable") from exc
+            if len(attempt_entries) > _MAX_RECOVERY_ATTEMPTS_PER_REQUEST:
+                raise RuntimeError("protected staging recovery attempts are too large")
+            for attempt_entry in attempt_entries:
+                if not attempt_entry.name.isascii() or not attempt_entry.name.isdecimal():
+                    continue
+                attempt_number = int(attempt_entry.name)
+                if attempt_number < 1 or not attempt_entry.is_dir(follow_symlinks=False):
+                    raise RuntimeError("protected staging recovery attempt identity is unsafe")
+                attempt_root = Path(attempt_entry.path)
+                self._validate_private_directory(attempt_root)
+                try:
+                    payload = self._read_private_file(attempt_root / "final-gate-plan.json")
+                except FileNotFoundError:
+                    continue
+                try:
+                    value = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(value, dict) or (
+                    value.get("candidate_sha"),
+                    value.get("candidate_tree"),
+                    value.get("plan_digest"),
+                ) != (candidate_sha, candidate_tree, plan_digest):
+                    continue
+                try:
+                    prior_plan = FinalGatePlan.from_dict(value)
+                except ValueError as exc:
+                    raise RuntimeError("protected staging recovery plan is unsafe") from exc
+                if (
+                    prior_plan.request_id != request_entry.name
+                    or prior_plan.attempt_number != attempt_number
+                ):
+                    raise RuntimeError("protected staging recovery plan identity is unsafe")
+                matches.append(prior_plan)
+        if len(matches) > 1:
+            raise RuntimeError("protected staging recovery plan identity is ambiguous")
+        if not matches:
+            return None
+        prior_plan = matches[0]
+        frozen_authority = (
+            "manager_authority_incarnation",
+            "manager_execution_state",
+            "manager_execution_epoch",
+            "manager_execution_manifest_sha256",
+            "manager_executable_new_capacity_ceiling",
+            "manager_increase_freeze",
+        )
+        if (
+            current_plan.schema_version != 6
+            or prior_plan.schema_version != 6
+            or prior_plan.request_id == current_plan.request_id
+            or prior_plan.starting_mutation_epoch + 1 != current_plan.starting_mutation_epoch
+            or any(
+                getattr(prior_plan, field) != getattr(current_plan, field)
+                for field in frozen_authority
+            )
+            or current_plan.manager_execution_state != "shadow"
+            or current_plan.manager_execution_epoch != 0
+            or current_plan.manager_execution_manifest_sha256 is not None
+            or current_plan.manager_executable_new_capacity_ceiling != 0
+            or current_plan.manager_increase_freeze is not True
+        ):
+            return None
+        return prior_plan
 
     def _runtime_secret_component(
         self,
