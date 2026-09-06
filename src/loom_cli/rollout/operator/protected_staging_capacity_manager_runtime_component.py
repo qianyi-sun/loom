@@ -43,6 +43,7 @@ _COMMAND_TIMEOUT_SECONDS = 60.0
 _ROLLOUT_TIMEOUT_SECONDS = 660.0
 _MAX_REGISTRY_BYTES = 1024 * 1024
 _MAX_SECRET_FIELD_BYTES = 4 * 1024 * 1024
+_ACTIVATE_PRINCIPAL_ID = "capacity-config-activate"
 _ROLLBACK_SCOPE = "capacity:configure:rollback"
 _RESOURCE_VERSION_RE = re.compile(r"^[1-9][0-9]{0,31}$")
 _UID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
@@ -966,7 +967,7 @@ def _add_rollback_scope(principals: list[object]) -> None:
             raise ValueError("capacity principal registry is invalid")
         scopes = principal.get("scopes")
         exact_activate_principal = (
-            principal.get("principal_id") == "configuration-activate"
+            principal.get("principal_id") == _ACTIVATE_PRINCIPAL_ID
             and principal.get("subject_id") is None
             and principal.get("subject_incarnation") is None
             and principal.get("demand_reporter_incarnation") is None
@@ -979,7 +980,7 @@ def _add_rollback_scope(principals: list[object]) -> None:
             and "capacity:configure:activate" in scopes
         )
         if (
-            principal.get("principal_id") == "configuration-activate"
+            principal.get("principal_id") == _ACTIVATE_PRINCIPAL_ID
             and not exact_activate_principal
         ):
             raise ValueError("capacity principal registry is invalid")
