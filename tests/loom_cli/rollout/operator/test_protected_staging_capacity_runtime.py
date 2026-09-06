@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from contextlib import contextmanager
@@ -19,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from loom_capacity_manager.contracts import FleetManifestV1, canonical_digest_excluding
-from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
+from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -1351,6 +1352,60 @@ def _database_component(
     return plan, runner, runtime.components(plan, epoch_guard=lambda _plan: epoch)[1]
 
 
+def _prior_database_plan(plan: FinalGatePlan) -> FinalGatePlan:
+    payload = plan.to_dict()
+    payload.update(
+        {
+            "request_id": "req-prior01",
+            "rollout_id": "20260905t181433z-staging-prior01",
+        }
+    )
+    payload_without_digest = {key: value for key, value in payload.items() if key != "plan_digest"}
+    payload["plan_digest"] = hashlib.sha256(
+        json.dumps(payload_without_digest, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    return FinalGatePlan.from_dict(payload)
+
+
+def _legacy_database_bootstrap_objects(
+    component: KubernetesProtectedStagingCapacityDatabaseComponent,
+    runner: _DatabaseRunner,
+    plan: FinalGatePlan,
+) -> dict[str, dict[str, object]]:
+    documents = {
+        document["kind"]: document
+        for document in yaml.safe_load_all(component._manifest(plan, runner.seed))
+        if document is not None
+    }
+    secret = documents["Secret"]
+    secret_data = secret["data"]
+    assert isinstance(secret_data, dict)
+    secret_data.pop("admin-password")
+    secret_data.pop("admin-username")
+    job = documents["Job"]
+    pod_spec = job["spec"]["template"]["spec"]
+    postgres_admin = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == "postgres-admin"
+    )
+    postgres_admin["secret"] = {
+        "defaultMode": 0o440,
+        "items": [
+            {"key": "password", "path": "password"},
+            {"key": "username", "path": "username"},
+        ],
+        "secretName": "loom-postgres-cnpg-credentials",
+    }
+    objects = {kind: runner._stored(document) for kind, document in documents.items()}
+    objects["Job"]["status"] = {
+        "failed": 1,
+        "conditions": [
+            {"reason": "BackoffLimitExceeded", "status": "True", "type": "FailureTarget"},
+            {"reason": "BackoffLimitExceeded", "status": "True", "type": "Failed"},
+        ],
+    }
+    return objects
+
+
 def test_database_component_bootstraps_with_candidate_image_then_removes_credentials(
     tmp_path: Path,
 ) -> None:
@@ -1663,6 +1718,55 @@ def test_database_component_recovers_exact_partial_bootstrap_resource_set(
     component.apply(plan)
 
     assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_recovers_certified_failed_previous_auth_manifest(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a reviewed auth upgrade stranding the prior failed bootstrap."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    attempt_root = (
+        tmp_path
+        / "state"
+        / "requests"
+        / prior_plan.request_id
+        / "attempts"
+        / str(prior_plan.attempt_number)
+    )
+    attempt_root.mkdir(mode=0o700, parents=True)
+    FinalGatePlanStore(
+        tmp_path / "state",
+        request_id=prior_plan.request_id,
+        attempt_number=prior_plan.attempt_number,
+        service_uid=os.geteuid(),
+    ).publish(prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained_uids = {
+        kind: str(resource["metadata"]["uid"]) for kind, resource in runner.objects.items()
+    }
+
+    assert component.classify(plan).state is ComponentState.READY
+
+    component.apply(plan)
+
+    assert runner.objects == {}
+    assert runner.events.index("delete-job") < runner.events.index("arm")
+    assert runner.events.index("delete-secret") < runner.events.index("arm")
+    deleted_uids = {
+        "Job" if "/jobs/" in command[-3] else "Secret": json.loads(payload)[
+            "preconditions"
+        ]["uid"]
+        for command, payload in runner.delete_inputs
+    }
+    assert retained_uids.items() <= deleted_uids.items()
     assert component.classify(plan).state is ComponentState.EXACT
 
 
