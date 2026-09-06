@@ -94,6 +94,7 @@ class _DatabaseRunner:
         self.fail_peer_phase_counts: dict[str, int] = {}
         self.fail_delete_job_before_mutation = 0
         self.reject_diff_validate_flag = False
+        self.require_supported_patch_stdin = False
         self.activate_job_after_diff_count: int | None = None
         self.churn_job_after_diff_count: int | None = None
         self.replace_job_after_diff_count: int | None = None
@@ -494,6 +495,11 @@ class _DatabaseRunner:
         if "patch" in command:
             assert timeout_seconds == 60.0
             assert input_payload is not None
+            if (
+                self.require_supported_patch_stdin
+                and "--patch-file=/dev/stdin" not in command
+            ):
+                raise RuntimeError("injected kubectl unsupported patch stdin path")
             kind = "Job" if "job/" in " ".join(command) else "Secret"
             observed = self.objects[kind]
             observed_metadata = observed["metadata"]
@@ -1849,6 +1855,31 @@ def test_database_component_recovers_certified_failed_older_auth_manifest(
         ("Job", retained_uids["Job"]),
         ("Secret", retained_uids["Secret"]),
     ]
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_database_component_streams_cleanup_patch_through_supported_stdin_path(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a literal dash patch filename stranding a certified failed Job."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(
+        plan,
+        starting_mutation_epoch=plan.starting_mutation_epoch - 2,
+    )
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    runner.require_supported_patch_stdin = True
+
+    component.apply(plan)
+
+    assert runner.objects == {}
     assert component.classify(plan).state is ComponentState.EXACT
 
 

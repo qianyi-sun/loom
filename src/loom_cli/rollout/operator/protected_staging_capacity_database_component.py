@@ -1105,7 +1105,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                         "patch",
                         f"{kind.lower()}/{_NAME}",
                         "--type=json",
-                        "--patch-file=-",
+                        "--patch-file=/dev/stdin",
                         f"--request-timeout={_REQUEST_TIMEOUT}",
                     ),
                     env=self.runner.environment,
