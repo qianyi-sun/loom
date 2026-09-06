@@ -290,7 +290,12 @@ def _default_stream_run(
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=timeout,
-                env=_command_environment(),
+                env={
+                    **_command_environment(),
+                    # The WebSocket remote-command path can consume file stdin
+                    # without completing its EOF handshake against k3s.
+                    "KUBECTL_REMOTE_COMMAND_WEBSOCKETS": "false",
+                },
             )
         after = os.fstat(fd)
         stable_fields = (
