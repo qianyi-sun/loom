@@ -2138,9 +2138,11 @@ def test_database_component_recovers_exact_partial_bootstrap_resource_set(
 
 
 @pytest.mark.parametrize("epoch_gap", [1, 2])
+@pytest.mark.parametrize("raw_reporter_payload", [False, True])
 def test_database_component_recovers_certified_failed_older_auth_manifest(
     tmp_path: Path,
     epoch_gap: int,
+    raw_reporter_payload: bool,
 ) -> None:
     """Break caught: a reviewed auth upgrade stranding the prior failed bootstrap."""
 
@@ -2165,6 +2167,24 @@ def test_database_component_recovers_certified_failed_older_auth_manifest(
         seed_reader=lambda: runner.seed,
     )
     runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    if raw_reporter_payload:
+        secret_data = runner.objects["Secret"]["data"]
+        assert isinstance(secret_data, dict)
+        raw_reporter_incarnation = runner.seed["reporter_incarnation"]
+        reporter_configuration = json.loads(
+            base64.b64decode(secret_data["reporter-configuration.json"], validate=True)
+        )
+        reporter_configuration["reporter_incarnation"] = raw_reporter_incarnation
+        secret_data["reporter-configuration.json"] = base64.b64encode(
+            json.dumps(
+                reporter_configuration,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).decode("ascii")
+        secret_data["seed.json"] = base64.b64encode(
+            (json.dumps(runner.seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        ).decode("ascii")
     retained_uids = {
         kind: str(resource["metadata"]["uid"]) for kind, resource in runner.objects.items()
     }

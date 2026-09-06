@@ -1135,13 +1135,22 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         prior_plan = self.recovery_plan_reader(plan, *bindings)
         if prior_plan is None:
             return None
-        legacy_manifest = self._legacy_auth_manifest(prior_plan, self.seed_reader())
-        expected = _manifest_resources(legacy_manifest)
-        if any(
-            _resource_projection(observed[kind]) != _resource_projection(expected[kind])
-            for kind in ("Secret", "Job")
-        ):
+        seed = self.seed_reader()
+        legacy_manifests = (
+            self._legacy_auth_manifest(prior_plan, seed),
+            self._legacy_auth_manifest(prior_plan, seed, seed_reporter_incarnation=True),
+        )
+        matching_manifests: list[bytes] = []
+        for candidate_manifest in legacy_manifests:
+            expected = _manifest_resources(candidate_manifest)
+            if all(
+                _resource_projection(observed[kind]) == _resource_projection(expected[kind])
+                for kind in ("Secret", "Job")
+            ):
+                matching_manifests.append(candidate_manifest)
+        if len(matching_manifests) != 1:
             return None
+        legacy_manifest = matching_manifests[0]
         comparison_manifest = _manifest_with_observed_cleanup_labels(legacy_manifest, observed)
         status = self.runner.run_status(
             (
@@ -2082,7 +2091,13 @@ COMMIT;
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
 
-    def _legacy_auth_manifest(self, plan: FinalGatePlan, seed: dict[str, object]) -> bytes:
+    def _legacy_auth_manifest(
+        self,
+        plan: FinalGatePlan,
+        seed: dict[str, object],
+        *,
+        seed_reporter_incarnation: bool = False,
+    ) -> bytes:
         """Rebuild the exact pre-transient-role bootstrap resources for safe retirement."""
 
         documents = [document for document in yaml.safe_load_all(self._manifest(plan, seed))]
@@ -2097,6 +2112,17 @@ COMMIT;
             raise ValueError("protected staging capacity legacy manifest is invalid")
         secret_data.pop("admin-password", None)
         secret_data.pop("admin-username", None)
+        if seed_reporter_incarnation:
+            reporter_incarnation = UUID(str(seed["reporter_incarnation"]))
+            configuration = build_staging_reporter_configuration(plan, seed).model_copy(
+                update={"reporter_incarnation": reporter_incarnation}
+            )
+            secret_data["reporter-configuration.json"] = base64.b64encode(
+                canonical_bytes(configuration)
+            ).decode("ascii")
+            secret_data["seed.json"] = base64.b64encode(
+                (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            ).decode("ascii")
         template = job_spec.get("template")
         pod_spec = template.get("spec") if isinstance(template, dict) else None
         volumes = pod_spec.get("volumes") if isinstance(pod_spec, dict) else None
