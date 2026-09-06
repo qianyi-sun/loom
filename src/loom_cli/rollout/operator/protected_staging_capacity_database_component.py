@@ -270,11 +270,12 @@ class _CertifiedResourceIdentity:
     resource_version: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _CertifiedPreviousFailedBootstrap:
     manifest: bytes
     secret: _CertifiedResourceIdentity
     job: _CertifiedResourceIdentity
+    initial_pair_validated: bool = False
 
     def identity(self, kind: str) -> _CertifiedResourceIdentity:
         if kind == "Secret":
@@ -1038,7 +1039,6 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         observed = self._observed_bootstrap_resources(
             manifest,
             certification=certification,
-            require_certified_resource_versions=certification is not None,
         )
         cleanup_token = secrets.token_urlsafe(32)
         labelled: dict[str, dict[str, object]] = {}
@@ -1274,7 +1274,6 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         manifest: bytes,
         *,
         certification: _CertifiedPreviousFailedBootstrap | None = None,
-        require_certified_resource_versions: bool = False,
     ) -> dict[str, dict[str, object]]:
         observed, _evidence_digest, exact = self._inventory_bootstrap_resources(manifest)
         if not exact:
@@ -1282,7 +1281,6 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         self._validate_certified_previous_failed_resources(
             certification,
             observed,
-            require_resource_versions=require_certified_resource_versions,
         )
         return observed
 
@@ -1290,11 +1288,14 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
     def _validate_certified_previous_failed_resources(
         certification: _CertifiedPreviousFailedBootstrap | None,
         observed: Mapping[str, Mapping[str, object]],
-        *,
-        require_resource_versions: bool = False,
     ) -> None:
         if certification is None:
             return
+        require_initial_pair = not certification.initial_pair_validated
+        if require_initial_pair and set(observed) != {"Secret", "Job"}:
+            raise RuntimeError(
+                "protected staging capacity database bootstrap changed during cleanup"
+            )
         for kind, item in observed.items():
             metadata = item.get("metadata")
             if not isinstance(metadata, Mapping):
@@ -1303,7 +1304,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 )
             identity = certification.identity(kind)
             if metadata.get("uid") != identity.uid or (
-                require_resource_versions
+                require_initial_pair
                 and metadata.get("resourceVersion") != identity.resource_version
             ):
                 raise RuntimeError(
@@ -1315,6 +1316,8 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     raise RuntimeError(
                         "protected staging capacity database bootstrap changed during cleanup"
                     )
+        if require_initial_pair:
+            certification.initial_pair_validated = True
 
     def _wait_for_bootstrap_job(self, plan: FinalGatePlan, manifest: bytes) -> None:
         deadline = time.monotonic() + _WAIT_TIMEOUT_SECONDS

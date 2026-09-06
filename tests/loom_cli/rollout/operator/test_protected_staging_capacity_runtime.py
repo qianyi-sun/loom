@@ -97,6 +97,7 @@ class _DatabaseRunner:
         self.activate_job_after_diff_count: int | None = None
         self.churn_job_after_diff_count: int | None = None
         self.replace_job_after_diff_count: int | None = None
+        self.disappear_secret_after_diff_count: int | None = None
         self.diff_count = 0
 
     def _registration(self) -> dict[str, object]:
@@ -427,6 +428,8 @@ class _DatabaseRunner:
             else 1
         )
         self.diff_count += 1
+        if self.disappear_secret_after_diff_count == self.diff_count:
+            self.objects.pop("Secret")
         if self.churn_job_after_diff_count == self.diff_count:
             job_metadata = self.objects["Job"]["metadata"]
             assert isinstance(job_metadata, dict)
@@ -1970,6 +1973,54 @@ def test_database_component_rejects_previous_job_identity_changed_after_final_ce
     assert runner.delete_inputs == []
 
 
+def test_database_component_requires_complete_pair_after_final_certification(
+    tmp_path: Path,
+) -> None:
+    """Break caught: cleanup proceeding after one certified resource disappears."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    runner.disappear_secret_after_diff_count = 3
+
+    with pytest.raises(RuntimeError, match="changed during cleanup"):
+        component.apply(plan)
+
+    assert set(runner.objects) == {"Job"}
+    assert runner.patch_inputs == []
+    assert runner.delete_inputs == []
+
+
+def test_database_component_retries_certified_job_after_its_cleanup_patch(
+    tmp_path: Path,
+) -> None:
+    """Break caught: one-time certified versions blocking safe compensation retry."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    runner.fail_delete_job_before_mutation = 3
+
+    component.apply(plan)
+
+    assert runner.fail_delete_job_before_mutation == 0
+    assert runner.events.count("delete-job") >= 4
+    assert runner.objects == {}
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
 def test_database_component_rejects_previous_auth_manifest_without_plan(tmp_path: Path) -> None:
     """Break caught: treating annotations alone as cleanup authority."""
 
@@ -2044,9 +2095,7 @@ def test_database_component_rejects_noncanonical_previous_attempt_directory(
     plan, runner, component = _database_component(tmp_path, database_state="absent")
     prior_plan = _prior_database_plan(plan)
     _write_database_plan_ledger_entry(tmp_path, prior_plan)
-    attempts_root = (
-        tmp_path / "state" / "requests" / prior_plan.request_id / "attempts"
-    )
+    attempts_root = tmp_path / "state" / "requests" / prior_plan.request_id / "attempts"
     (attempts_root / "1").rename(attempts_root / "01")
     direct = KubernetesProtectedStagingCapacityDatabaseComponent(
         runner=runner,  # type: ignore[arg-type]
@@ -2070,16 +2119,42 @@ def test_database_component_rejects_unexpected_previous_attempt_entry(tmp_path: 
     plan, runner, component = _database_component(tmp_path, database_state="absent")
     prior_plan = _prior_database_plan(plan)
     _write_database_plan_ledger_entry(tmp_path, prior_plan)
-    unexpected = (
-        tmp_path
-        / "state"
-        / "requests"
-        / prior_plan.request_id
-        / "attempts"
-        / "unexpected"
-    )
+    unexpected = tmp_path / "state" / "requests" / prior_plan.request_id / "attempts" / "unexpected"
     unexpected.write_text("unsafe\n", encoding="utf-8")
     unexpected.chmod(0o600)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+@pytest.mark.parametrize("entry_kind", ["file", "symlink"])
+def test_database_component_rejects_unexpected_recovery_request_entry(
+    tmp_path: Path,
+    entry_kind: str,
+) -> None:
+    """Break caught: silently skipping an unsafe entry in the requests ledger."""
+
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    requests_root = tmp_path / "state" / "requests"
+    unexpected = requests_root / "unexpected"
+    if entry_kind == "file":
+        unexpected.write_text("unsafe\n", encoding="utf-8")
+        unexpected.chmod(0o600)
+    else:
+        unexpected.symlink_to(requests_root / prior_plan.request_id, target_is_directory=True)
     direct = KubernetesProtectedStagingCapacityDatabaseComponent(
         runner=runner,  # type: ignore[arg-type]
         container_registry="registry.example.test/loom",
@@ -2112,6 +2187,34 @@ def test_database_component_rejects_recovery_ledger_over_global_plan_file_budget
     )
     _write_database_plan_ledger_entry(tmp_path, prior_plan)
     _write_database_plan_ledger_entry(tmp_path, unrelated_plan)
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: runner.seed,
+    )
+    runner.objects = _legacy_database_bootstrap_objects(direct, runner, prior_plan)
+    retained = deepcopy(runner.objects)
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed before"):
+        component.apply(plan)
+
+    assert runner.objects == retained
+    assert runner.delete_inputs == []
+
+
+def test_database_component_rejects_recovery_ledger_over_global_attempt_probe_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: missing plan files bypassing the global ledger scan bound."""
+
+    monkeypatch.setattr(protected_runtime, "_MAX_RECOVERY_ATTEMPT_PROBES", 1, raising=False)
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    prior_plan = _prior_database_plan(plan)
+    _write_database_plan_ledger_entry(tmp_path, prior_plan)
+    empty_attempt = tmp_path / "state" / "requests" / prior_plan.request_id / "attempts" / "2"
+    empty_attempt.mkdir(mode=0o700)
     direct = KubernetesProtectedStagingCapacityDatabaseComponent(
         runner=runner,  # type: ignore[arg-type]
         container_registry="registry.example.test/loom",

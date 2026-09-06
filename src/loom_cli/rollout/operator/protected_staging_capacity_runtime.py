@@ -135,6 +135,7 @@ _AGENT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-agent:v1")
 _MAX_PRIVATE_FILE_BYTES = 1024 * 1024
 _MAX_RECOVERY_REQUESTS = 4096
 _MAX_RECOVERY_ATTEMPTS_PER_REQUEST = 64
+_MAX_RECOVERY_ATTEMPT_PROBES = 4096
 _MAX_RECOVERY_PLAN_FILES = 4096
 _MAX_RECOVERY_PLAN_BYTES = 64 * 1024 * 1024
 
@@ -493,11 +494,12 @@ class KubernetesProtectedStagingCapacityRuntime:
         if len(request_entries) > _MAX_RECOVERY_REQUESTS:
             raise RuntimeError("protected staging recovery ledger is too large")
         matches: list[FinalGatePlan] = []
+        attempt_probes = 0
         plan_files_examined = 0
         plan_bytes_read = 0
         for request_entry in request_entries:
             if not request_entry.is_dir(follow_symlinks=False):
-                continue
+                raise RuntimeError("protected staging recovery request identity is unsafe")
             try:
                 validate_safe_identifier(request_entry.name, "request_id")
             except ValueError as exc:
@@ -524,6 +526,9 @@ class KubernetesProtectedStagingCapacityRuntime:
                 attempt_number = int(attempt_entry.name)
                 if attempt_number < 1 or attempt_entry.name != str(attempt_number):
                     raise RuntimeError("protected staging recovery attempt identity is unsafe")
+                attempt_probes += 1
+                if attempt_probes > _MAX_RECOVERY_ATTEMPT_PROBES:
+                    raise RuntimeError("protected staging recovery attempt scan is too large")
                 attempt_root = Path(attempt_entry.path)
                 self._validate_private_directory(attempt_root)
                 try:
