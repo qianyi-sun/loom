@@ -568,6 +568,10 @@ def test_controller_status_and_ready_pod_failures_do_not_relax_spec_ownership(
     with pytest.raises(RuntimeError, match="did not converge"):
         _component(wrong_runtime_identity).apply(plan)
 
+    missing_runtime_image_id = _Cluster(runtime_status_image="sha256:" + "4" * 64)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(missing_runtime_image_id).apply(plan)
+
     class _MalformedStatusCluster(_Cluster):
         def capture_stdout(self, argv, *, env, timeout_seconds):
             payload = super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
