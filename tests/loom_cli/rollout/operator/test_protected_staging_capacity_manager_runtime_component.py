@@ -673,7 +673,10 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
         "loom.yylx.dev/principal-registry-sha256": hashlib.sha256(principal_payload).hexdigest()
     }
     pod_spec = template["spec"]
-    assert [container["image"] for container in pod_spec["initContainers"]] == [desired_image]
+    assert [container["image"] for container in pod_spec["initContainers"]] == [
+        desired_image,
+        desired_image,
+    ]
     assert [container["image"] for container in pod_spec["containers"]] == [
         desired_image,
         desired_image,
@@ -707,6 +710,56 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
         and "--field-manager=loom-staging-capacity-manager-runtime" in command
         for command in mutation_commands
     )
+
+
+def test_manager_runtime_migrates_capacity_schema_before_starting_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path)
+    plan = _plan_with_manager(tmp_path)
+    cluster = _ManagerCluster(candidate)
+    monkeypatch.setattr(
+        "loom_cli.capacity_control_plane._capacity_head",
+        lambda: (_ for _ in ()).throw(AssertionError("local migration head lookup is forbidden")),
+    )
+
+    _component(cluster, candidate).apply(plan)
+
+    pod_spec = cluster.deployment["spec"]["template"]["spec"]
+    init_containers = pod_spec["initContainers"]
+    assert [container["name"] for container in init_containers] == [
+        "prepare-credentials",
+        "migrate-capacity-schema",
+    ]
+    migration = init_containers[1]
+    assert migration["image"] == (
+        "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
+    )
+    assert migration["command"] == ["python", "-m", "loom_capacity_manager.migrate"]
+    assert migration["args"] == [
+        "--db-url-file",
+        "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+        "--expected-authority-incarnation",
+        "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+    ]
+    assert migration["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+    assert migration["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+    assert migration["volumeMounts"] == [
+        {
+            "name": "runtime",
+            "mountPath": "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        }
+    ]
 
 
 def test_manager_runtime_preserves_unrelated_secret_data_byte_for_byte(

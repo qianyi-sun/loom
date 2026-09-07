@@ -427,6 +427,7 @@ class _PolicyCluster:
 
 def test_policy_resource_builder_selects_only_bound_router_and_manager_resources(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert importlib.util.find_spec(MODULE) is not None, "manager policy component is missing"
     module = importlib.import_module(MODULE)
@@ -434,6 +435,10 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
     assert builder is not None, "manager policy resource builder is missing"
     plan, prerequisite = _plan_and_prerequisite(tmp_path)
     registry = b'{"principals":[],"schema_version":1}\n'
+    monkeypatch.setattr(
+        "loom_cli.capacity_control_plane._capacity_head",
+        lambda: (_ for _ in ()).throw(AssertionError("local migration head lookup is forbidden")),
+    )
 
     resources = builder(
         plan,
@@ -459,6 +464,43 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
         ("NetworkPolicy", "loom-capacity-router", "capacity-manager-router-ingress"),
         ("NetworkPolicy", "loom-capacity-router", "capacity-manager-router-egress"),
     }
+
+    manager = resources[("Deployment", "loom-dev", "loom-capacity-manager")]
+    pod_spec = manager["spec"]["template"]["spec"]
+    init_containers = pod_spec["initContainers"]
+    assert [container["name"] for container in init_containers] == [
+        "prepare-credentials",
+        "migrate-capacity-schema",
+        "execution-policy-init",
+    ]
+    migration = init_containers[1]
+    assert migration["image"] == (
+        "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
+    )
+    assert migration["command"] == ["python", "-m", "loom_capacity_manager.migrate"]
+    assert migration["args"] == [
+        "--db-url-file",
+        "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+        "--expected-authority-incarnation",
+        "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+    ]
+    assert migration["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+    assert migration["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+    assert migration["volumeMounts"] == [
+        {
+            "name": "runtime",
+            "mountPath": "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        }
+    ]
     assert all(
         resource["metadata"]["labels"][_COMPONENT_LABEL] == _COMPONENT_VALUE
         for resource in resources.values()
