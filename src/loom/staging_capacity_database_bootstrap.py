@@ -22,7 +22,6 @@ from loom_capacity_agent.contracts import ReporterConfigurationV1
 
 _SUBJECT_ID = uuid5(NAMESPACE_URL, "loom:staging:capacity-subject")
 _SUBJECT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-subject:v1")
-_AUTHORITY_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-authority:v1")
 _AGENT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-agent:v1")
 _SEED_FIELDS = frozenset(
     {
@@ -64,6 +63,12 @@ class ProtectedStagingDatabaseFactory(Protocol):
         *,
         transient_role_admin: bool,
     ) -> ProtectedStagingDatabase: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedSeed:
+    credentials: CapacityDatabaseCredentials
+    authority_incarnation: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,20 +118,41 @@ def _read_text_credential(path: Path) -> str:
     return value
 
 
-def _parse_seed(payload: bytes) -> CapacityDatabaseCredentials:
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate staging capacity bootstrap field")
+        value[key] = item
+    return value
+
+
+def _canonical_nonzero_uuid(value: object) -> UUID:
+    if not isinstance(value, str):
+        raise ValueError("staging capacity bootstrap identity is invalid")
     try:
-        raw = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        parsed = UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("staging capacity bootstrap identity is invalid") from None
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError("staging capacity bootstrap identity is invalid")
+    return parsed
+
+
+def _parse_seed(payload: bytes) -> _ParsedSeed:
+    try:
+        raw = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         raise ValueError("staging capacity credential seed is invalid") from None
     if not isinstance(raw, dict) or set(raw) != _SEED_FIELDS or raw["schema_version"] != 1:
         raise ValueError("staging capacity credential seed is invalid")
     try:
-        subject_id = UUID(raw["subject_id"])
-        subject_incarnation = UUID(raw["subject_incarnation"])
-        authority_incarnation = UUID(raw["authority_incarnation"])
-        agent_incarnation = UUID(raw["agent_incarnation"])
-        reporter_incarnation = UUID(raw["reporter_incarnation"])
-    except (AttributeError, TypeError, ValueError):
+        subject_id = _canonical_nonzero_uuid(raw["subject_id"])
+        subject_incarnation = _canonical_nonzero_uuid(raw["subject_incarnation"])
+        authority_incarnation = _canonical_nonzero_uuid(raw["authority_incarnation"])
+        agent_incarnation = _canonical_nonzero_uuid(raw["agent_incarnation"])
+        reporter_incarnation = _canonical_nonzero_uuid(raw["reporter_incarnation"])
+    except ValueError:
         raise ValueError("staging capacity credential seed identity is invalid") from None
     incarnations = {
         subject_incarnation,
@@ -137,7 +163,6 @@ def _parse_seed(payload: bytes) -> CapacityDatabaseCredentials:
     if (
         subject_id != _SUBJECT_ID
         or subject_incarnation != _SUBJECT_INCARNATION
-        or authority_incarnation != _AUTHORITY_INCARNATION
         or agent_incarnation != _AGENT_INCARNATION
         or len(incarnations) != 4
     ):
@@ -159,13 +184,16 @@ def _parse_seed(payload: bytes) -> CapacityDatabaseCredentials:
         if not 32 <= len(encoded) <= 1024 or any(not 0x21 <= byte <= 0x7E for byte in encoded):
             raise ValueError("staging capacity credential seed is invalid")
         values[field] = value
-    return CapacityDatabaseCredentials(
-        reporter_incarnation=reporter_incarnation,
-        reporter_token=values["reporter_token"],
-        migrator_password=values["migrator_database_password"],
-        agent_password=values["agent_database_password"],
-        observer_password=values["observer_database_password"],
-        runtime_password=values["runtime_database_password"],
+    return _ParsedSeed(
+        credentials=CapacityDatabaseCredentials(
+            reporter_incarnation=reporter_incarnation,
+            reporter_token=values["reporter_token"],
+            migrator_password=values["migrator_database_password"],
+            agent_password=values["agent_database_password"],
+            observer_password=values["observer_database_password"],
+            runtime_password=values["runtime_database_password"],
+        ),
+        authority_incarnation=authority_incarnation,
     )
 
 
@@ -173,10 +201,22 @@ def _parse_configuration(
     payload: bytes,
     *,
     credentials: CapacityDatabaseCredentials,
+    authority_incarnation: UUID,
 ) -> ReporterConfigurationV1:
     try:
-        configuration = ReporterConfigurationV1.model_validate_json(payload)
-    except ValidationError:
+        raw = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+        if not isinstance(raw, dict):
+            raise ValueError("staging capacity reporter configuration is invalid")
+        for field in (
+            "subject_id",
+            "subject_incarnation",
+            "authority_incarnation",
+            "agent_incarnation",
+            "reporter_incarnation",
+        ):
+            raw[field] = _canonical_nonzero_uuid(raw.get(field))
+        configuration = ReporterConfigurationV1.model_validate(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
         raise ValueError("staging capacity reporter configuration is invalid") from None
     capabilities = {
         (
@@ -193,7 +233,7 @@ def _parse_configuration(
         configuration.environment_id != "staging"
         or configuration.subject_id != _SUBJECT_ID
         or configuration.subject_incarnation != _SUBJECT_INCARNATION
-        or configuration.authority_incarnation != _AUTHORITY_INCARNATION
+        or configuration.authority_incarnation != authority_incarnation
         or configuration.agent_incarnation != _AGENT_INCARNATION
         or configuration.reporter_incarnation != credentials.reporter_incarnation
         or configuration.authority_mode != "disabled"
@@ -231,12 +271,11 @@ async def bootstrap_staging_capacity_database(
     *,
     database_factory: ProtectedStagingDatabaseFactory = (PsycopgPersonalDevCapacityDatabase),
 ) -> CapacityDatabaseInstallation:
-    credentials = _parse_seed(
-        _read_bounded(settings.credential_seed_path, max_bytes=_MAX_JSON_BYTES)
-    )
+    seed = _parse_seed(_read_bounded(settings.credential_seed_path, max_bytes=_MAX_JSON_BYTES))
     configuration = _parse_configuration(
         _read_bounded(settings.reporter_configuration_path, max_bytes=_MAX_JSON_BYTES),
-        credentials=credentials,
+        credentials=seed.credentials,
+        authority_incarnation=seed.authority_incarnation,
     )
     username = _read_text_credential(settings.admin_username_path)
     password = _read_text_credential(settings.admin_password_path)
@@ -255,7 +294,7 @@ async def bootstrap_staging_capacity_database(
     ).render_as_string(hide_password=False)
     return await database_factory(admin_url, transient_role_admin=True).converge_protected(
         identity=staging_capacity_identity(),
-        credentials=credentials,
+        credentials=seed.credentials,
         configuration=configuration,
     )
 

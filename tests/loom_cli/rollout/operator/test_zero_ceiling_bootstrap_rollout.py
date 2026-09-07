@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from uuid import UUID
 
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
@@ -77,7 +78,7 @@ def test_partial_legacy_manager_bootstrap_replay_admits_only_frozen_foundations(
     capacity_runtime_root.mkdir()
     capacity_runtime = _runtime(capacity_runtime_root)
     _write_bootstrap(capacity_runtime)
-    capacity_runtime._create_credential_seed()
+    capacity_runtime._create_credential_seed(UUID("558afea6-2a37-55a1-9f7c-3399695da966"))
     assert capacity_runtime.credential_seed_path.exists()
 
     manager_route_calls = 0

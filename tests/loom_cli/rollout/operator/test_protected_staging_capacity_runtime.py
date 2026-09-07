@@ -27,7 +27,8 @@ from loom.staging_capacity_database_bootstrap import (
     StagingCapacityDatabaseBootstrapSettings,
     bootstrap_staging_capacity_database,
 )
-from loom_capacity_agent.contracts import ReporterConfigurationV1
+from loom_capacity_agent.contracts import AgentRegistrationV1, ReporterConfigurationV1
+from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes
 from loom_capacity_manager.contracts import FleetManifestV1, canonical_digest_excluding
 from loom_cli.rollout.operator import protected_staging_capacity_runtime as protected_runtime
 from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
@@ -157,6 +158,16 @@ class _DatabaseRunner:
         self.disappear_secret_after_diff_count: int | None = None
         self.diff_count = 0
         self.registration_overrides: dict[str, object] = {}
+        self.authority_rebind_safe = True
+        self.authority_rebound = False
+        self.authority_rebind_audit_integrity = True
+        self.authority_rebind_extra_event = False
+        self.authority_rebind_incomplete = False
+        self.authority_rebind_audit_read_failure = False
+        self.authority_rebind_trigger_integrity = True
+        self.activity_before_authority_restore = False
+        self.fail_verification_after_authority_restore = False
+        self.authority_restore_verification_failed = False
 
     def _registration(self) -> dict[str, object]:
         registration = {
@@ -273,6 +284,104 @@ class _DatabaseRunner:
             "runtime_role": "loom_cap_staging_runtime",
         }
 
+    @staticmethod
+    def _audit_row(
+        event_id: int,
+        event_type: str,
+        payload: GuardFenceV1 | AgentRegistrationV1,
+    ) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "event_type": event_type,
+            "trial_id": None,
+            "protected_attempt_id": None,
+            "payload": payload.model_dump(mode="json", exclude_none=False),
+            "payload_digest": hashlib.sha256(canonical_bytes(payload)).hexdigest(),
+        }
+
+    def _audit_history(self) -> list[dict[str, object]]:
+        current_registration = AgentRegistrationV1.model_validate_json(
+            json.dumps(self._registration(), sort_keys=True)
+        )
+        current_fence = GuardFenceV1(
+            environment_id=current_registration.environment_id,
+            subject_id=current_registration.subject_id,
+            subject_incarnation=current_registration.subject_incarnation,
+            authority_incarnation=current_registration.authority_incarnation,
+            reporter_incarnation=current_registration.reporter_incarnation,
+            candidate_digest=current_registration.candidate_digest,
+            deployment_generation=current_registration.deployment_generation,
+            configuration_generation=current_registration.configuration_generation,
+        )
+        legacy_authority = UUID("558afea6-2a37-55a1-9f7c-3399695da966")
+        if current_registration.authority_incarnation == legacy_authority:
+            legacy_registration = current_registration
+            legacy_fence = current_fence
+        else:
+            legacy_registration = current_registration.model_copy(
+                update={"authority_incarnation": legacy_authority}
+            )
+            legacy_fence = current_fence.model_copy(
+                update={"authority_incarnation": legacy_authority}
+            )
+        initial_registration = legacy_registration.model_copy(
+            update={
+                "candidate_digest": "d" * 64,
+                "candidate_identity": "f" * 40,
+                "candidate_publication_sha256": "d" * 64,
+                "configuration_generation": legacy_registration.configuration_generation - 1,
+                "deployment_generation": legacy_registration.deployment_generation - 1,
+                "reporter_incarnation": UUID("00000000-0000-4000-8000-0000000000aa"),
+            }
+        )
+        initial_fence = GuardFenceV1(
+            environment_id=initial_registration.environment_id,
+            subject_id=initial_registration.subject_id,
+            subject_incarnation=initial_registration.subject_incarnation,
+            authority_incarnation=initial_registration.authority_incarnation,
+            reporter_incarnation=initial_registration.reporter_incarnation,
+            candidate_digest=initial_registration.candidate_digest,
+            deployment_generation=initial_registration.deployment_generation,
+            configuration_generation=initial_registration.configuration_generation,
+        )
+        if (
+            current_registration.authority_incarnation != legacy_authority
+            and not self.authority_rebound
+            and not self.authority_rebind_incomplete
+        ):
+            rows = [
+                self._audit_row(1, "authority_initialized.v1", current_fence),
+                self._audit_row(2, "agent_registered.v1", current_registration),
+            ]
+        else:
+            rows = [
+                self._audit_row(1, "authority_initialized.v1", initial_fence),
+                self._audit_row(2, "agent_registered.v1", initial_registration),
+                self._audit_row(3, "authority_reconfigured.v1", legacy_fence),
+                self._audit_row(4, "agent_reconfigured.v1", legacy_registration),
+            ]
+            if self.authority_rebound:
+                rows.extend(
+                    (
+                        self._audit_row(5, "authority_reconfigured.v1", current_fence),
+                        self._audit_row(6, "agent_reconfigured.v1", current_registration),
+                    )
+                )
+        if not self.authority_rebind_audit_integrity:
+            rows[0]["payload_digest"] = "0" * 64
+        if self.authority_rebind_extra_event:
+            rows.append(
+                {
+                    "event_id": len(rows) + 1,
+                    "event_type": "unexpected.v1",
+                    "trial_id": None,
+                    "protected_attempt_id": None,
+                    "payload": {},
+                    "payload_digest": "0" * 64,
+                }
+            )
+        return rows
+
     def _stored(self, document: dict[str, object]) -> dict[str, object]:
         stored = deepcopy(document)
         metadata = stored["metadata"]
@@ -372,6 +481,10 @@ class _DatabaseRunner:
 
     @staticmethod
     def _peer_phase(payload: bytes) -> str:
+        if b"protected staging capacity authority rebind" in payload:
+            return "authority-rebind"
+        if b"protected staging capacity authority runtime restore" in payload:
+            return "authority-runtime-restore"
         if b"GRANT loom TO loom_cap_staging_migrator" in payload:
             return "arm"
         disables_migrator = b"loom_cap_staging_migrator NOLOGIN" in payload
@@ -401,6 +514,22 @@ class _DatabaseRunner:
         command = tuple(argv)
         self.calls.append(command)
         joined = " ".join(command)
+        if "authority_rebind_foundation_state" in joined:
+            return b"exact\n" if self.authority_rebind_safe else b"drifted\n"
+        if "authority_rebind_trigger_state" in joined:
+            return b"exact\n" if self.authority_rebind_trigger_integrity else b"drifted\n"
+        if "authority_rebind_audit_history" in joined:
+            if self.authority_rebind_audit_read_failure:
+                raise RuntimeError("injected authority rebind audit read failure")
+            return json.dumps(self._audit_history(), sort_keys=True).encode()
+        if "authority_rebind_recovery_ready" in joined:
+            return (
+                b"ready\n"
+                if self.authority_rebind_safe and self.authority_rebound
+                else b"blocked\n"
+            )
+        if "authority_rebind_ready" in joined:
+            return b"ready\n" if self.authority_rebind_safe else b"blocked\n"
         if "'credentials_disabled'" in joined and "'sessions_terminated'" in joined:
             return json.dumps(
                 {
@@ -411,6 +540,13 @@ class _DatabaseRunner:
             ).encode()
         if "to_regclass" in joined:
             self.events.append("database-verification")
+            if (
+                self.fail_verification_after_authority_restore
+                and "authority-runtime-restore" in self.events
+                and not self.authority_restore_verification_failed
+            ):
+                self.authority_restore_verification_failed = True
+                raise RuntimeError("injected post-restore verification failure")
             if (
                 self.fail_database_verification_after_wait
                 and self.database_state == "exact"
@@ -556,6 +692,17 @@ class _DatabaseRunner:
                 self.transient_credentials_disabled = True
             elif phase == "terminate":
                 self.transient_sessions_terminated = True
+            elif phase == "authority-rebind":
+                self.registration_overrides.pop("authority_incarnation", None)
+                self.authority_rebound = True
+            elif phase == "authority-runtime-restore":
+                if (
+                    self.activity_before_authority_restore
+                    and b"authority restore committed-state precondition failed" in input_payload
+                ):
+                    raise RuntimeError("injected authority restore revalidation failure")
+                self.protected_roles_sealed = False
+                self.runtime_credentials_durable = True
             remaining_post_mutation_failures = self.fail_peer_phase_after_mutation_counts.get(
                 phase, 0
             )
@@ -1012,7 +1159,7 @@ def test_preparation_dependency_rechecks_every_task_43_to_45_component(
     monkeypatch.setattr(
         KubernetesProtectedStagingCapacityRuntime,
         "_manager_configuration_component",
-        lambda _runtime: _ExactComponent("manager-configuration"),
+        lambda _runtime, _plan: _ExactComponent("manager-configuration"),
     )
 
     digest = runtime._execution_preparation_dependency(
@@ -1242,8 +1389,64 @@ def test_credentials_component_persists_one_candidate_independent_seed(
         "subject_incarnation",
     }
     assert seed["schema_version"] == 1
+    assert seed["authority_incarnation"] == plan.manager_authority_incarnation
     assert plan.candidate_sha not in runtime.credential_seed_path.read_text()
     before = runtime.credential_seed_path.read_bytes()
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert runtime.credential_seed_path.read_bytes() == before
+
+
+def test_credentials_component_repairs_only_legacy_deterministic_authority(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a partial bootstrap retaining an authority foreign to its frozen plan."""
+    runtime = _runtime(tmp_path)
+    _write_bootstrap(runtime)
+    runtime._create_credential_seed(UUID("558afea6-2a37-55a1-9f7c-3399695da966"))
+    legacy = json.loads(runtime.credential_seed_path.read_text())
+    assert legacy["authority_incarnation"] == "558afea6-2a37-55a1-9f7c-3399695da966"
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+    component = runtime.components(plan, epoch_guard=lambda _plan: epoch)[0]
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+
+    repaired = json.loads(runtime.credential_seed_path.read_text())
+    assert repaired == {
+        **legacy,
+        "authority_incarnation": plan.manager_authority_incarnation,
+    }
+    assert runtime.credential_seed_path.stat().st_mode & 0o777 == 0o600
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_credentials_component_rejects_unrelated_authority_drift(tmp_path: Path) -> None:
+    """Break caught: treating an arbitrary valid UUID as the known partial-bootstrap seed."""
+    runtime = _runtime(tmp_path)
+    _write_bootstrap(runtime)
+    runtime._create_credential_seed(UUID("558afea6-2a37-55a1-9f7c-3399695da966"))
+    drifted = json.loads(runtime.credential_seed_path.read_text())
+    drifted["authority_incarnation"] = "00000000-0000-4000-8000-0000000000ff"
+    runtime.credential_seed_path.write_text(
+        json.dumps(drifted, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    runtime.credential_seed_path.chmod(0o600)
+    before = runtime.credential_seed_path.read_bytes()
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+    component = runtime.components(plan, epoch_guard=lambda _plan: epoch)[0]
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
     with pytest.raises(RuntimeError, match="state changed"):
         component.apply(plan)
     assert runtime.credential_seed_path.read_bytes() == before
@@ -1264,7 +1467,7 @@ def test_runtime_issues_bootstrap_authority_for_replayable_credentials_and_froze
     assert runtime.zero_ceiling_bootstrap_authority(lease) == digest
     with pytest.raises(RuntimeError, match="unavailable"):
         runtime.zero_ceiling_bootstrap_authority(object())  # type: ignore[arg-type]
-    runtime._create_credential_seed()
+    runtime._create_credential_seed(UUID("558afea6-2a37-55a1-9f7c-3399695da966"))
     replay_digest = runtime.zero_ceiling_bootstrap_authority(lease)
 
     assert replay_digest != digest
@@ -1526,6 +1729,38 @@ def _database_component(
         container_registry="registry.example.test/loom",
     )
     return plan, runner, runtime.components(plan, epoch_guard=lambda _plan: epoch)[1]
+
+
+def test_database_component_rejects_seed_authority_foreign_to_plan(tmp_path: Path) -> None:
+    """Break caught: a downstream component trusting a seed changed after credential apply."""
+    seed_runtime = _runtime(tmp_path)
+    _write_bootstrap(seed_runtime)
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+    seed_runtime.components(plan, epoch_guard=lambda _plan: epoch)[0].apply(plan)
+    drifted = json.loads(seed_runtime.credential_seed_path.read_text())
+    drifted["authority_incarnation"] = "00000000-0000-4000-8000-0000000000ff"
+    seed_runtime.credential_seed_path.write_text(
+        json.dumps(drifted, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    seed_runtime.credential_seed_path.chmod(0o600)
+    runner = _DatabaseRunner(plan, drifted, database_state="exact")
+    runtime = KubernetesProtectedStagingCapacityRuntime(
+        runner=runner,  # type: ignore[arg-type]
+        state_root=seed_runtime.state_root,
+        candidate_root=seed_runtime.candidate_root,
+        service_uid=os.geteuid(),
+        service_gid=os.getegid(),
+        container_registry="registry.example.test/loom",
+    )
+
+    component = runtime.components(plan, epoch_guard=lambda _plan: epoch)[1]
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
 
 
 def _prior_database_plan(plan: FinalGatePlan, **updates: object) -> FinalGatePlan:
@@ -1935,6 +2170,301 @@ def test_database_component_distinguishes_finite_from_durable_runtime_credential
 
     runner.runtime_credentials_durable = True
     assert direct._database_state(plan, runner.seed).value == "exact"
+
+
+def test_database_component_repairs_exact_unused_legacy_authority(
+    tmp_path: Path,
+) -> None:
+    """Break caught: leaving the disabled guard database bound to the retired seed UUID."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+
+    assert component.classify(plan).state is ComponentState.EXACT
+    assert runner.registration_overrides == {}
+    assert runner.events.index("authority-rebind") < runner.events.index(
+        "authority-runtime-restore"
+    )
+    assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+def test_database_component_rejects_legacy_authority_after_any_guard_work(
+    tmp_path: Path,
+) -> None:
+    """Break caught: rebinding an authority after the protected guard recorded workload state."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.authority_rebind_safe = False
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert "authority-rebind" not in runner.events
+
+
+def test_database_component_rejects_legacy_authority_with_corrupt_audit_history(
+    tmp_path: Path,
+) -> None:
+    """Break caught: preserving legacy audit payloads whose canonical digest is false."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.authority_rebind_audit_integrity = False
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert "authority-rebind" not in runner.events
+
+
+def test_database_component_rejects_legacy_authority_with_trigger_drift(
+    tmp_path: Path,
+) -> None:
+    """Break caught: silently adopting a disabled immutable-binding trigger."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.authority_rebind_trigger_integrity = False
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert "authority-rebind" not in runner.events
+
+
+def test_database_component_recovers_committed_authority_rebind_after_response_loss(
+    tmp_path: Path,
+) -> None:
+    """Break caught: retrying the obsolete candidate bootstrap after a committed UUID repair."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.fail_peer_phase_after_mutation_counts["authority-rebind"] = 1
+
+    with pytest.raises(RuntimeError, match="response loss"):
+        component.apply(plan)
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+    assert component.classify(plan).state is ComponentState.EXACT
+    assert runner.events.count("authority-rebind") == 1
+    assert runner.events.count("authority-runtime-restore") == 1
+    assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+def test_database_component_rejects_target_authority_with_only_legacy_audits(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a partial UUID update falling through to the obsolete bootstrap."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+    runner.authority_rebind_incomplete = True
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+def test_database_component_preserves_long_target_authority_sealed_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: treating normal target-authority reconfiguration history as a repair."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+    current_registration = AgentRegistrationV1.model_validate_json(
+        json.dumps(runner._registration(), sort_keys=True)
+    )
+    middle_registration = AgentRegistrationV1.model_validate(
+        {
+            **current_registration.model_dump(mode="python", exclude_none=False),
+            "candidate_digest": "e" * 64,
+            "candidate_identity": "e" * 40,
+            "candidate_publication_sha256": "e" * 64,
+            "configuration_generation": current_registration.configuration_generation - 1,
+            "deployment_generation": current_registration.deployment_generation - 1,
+            "reporter_incarnation": UUID("00000000-0000-4000-8000-000000000201"),
+        }
+    )
+    initial_registration = AgentRegistrationV1.model_validate(
+        {
+            **middle_registration.model_dump(mode="python", exclude_none=False),
+            "candidate_digest": "d" * 64,
+            "candidate_identity": "d" * 40,
+            "candidate_publication_sha256": "d" * 64,
+            "configuration_generation": middle_registration.configuration_generation - 1,
+            "deployment_generation": middle_registration.deployment_generation - 1,
+            "reporter_incarnation": UUID("00000000-0000-4000-8000-000000000202"),
+        }
+    )
+    histories = (initial_registration, middle_registration, current_registration)
+    audit_rows: list[dict[str, object]] = []
+    for index, registration in enumerate(histories):
+        event_base = index * 2 + 1
+        audit_rows.extend(
+            (
+                runner._audit_row(
+                    event_base,
+                    "authority_initialized.v1" if index == 0 else "authority_reconfigured.v1",
+                    KubernetesProtectedStagingCapacityDatabaseComponent._fence_for_registration(
+                        registration
+                    ),
+                ),
+                runner._audit_row(
+                    event_base + 1,
+                    "agent_registered.v1" if index == 0 else "agent_reconfigured.v1",
+                    registration,
+                ),
+            )
+        )
+    monkeypatch.setattr(runner, "_audit_history", lambda: audit_rows)
+
+    assert component.classify(plan).state is ComponentState.READY
+
+
+def test_database_component_rejects_corrupt_target_authority_audits(
+    tmp_path: Path,
+) -> None:
+    """Break caught: malformed target-authority history opening ordinary bootstrap recovery."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+    runner.authority_rebind_audit_integrity = False
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+def test_database_component_rejects_unreadable_target_authority_audits(
+    tmp_path: Path,
+) -> None:
+    """Break caught: audit observation failure opening ordinary bootstrap recovery."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.protected_roles_sealed = True
+    runner.authority_rebind_audit_read_failure = True
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+@pytest.mark.parametrize("corruption", ["audit", "extra-event"])
+def test_database_component_rejects_uncertified_committed_authority_rebind(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Break caught: restoring credentials over an unrecognized target-authority audit tail."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.fail_peer_phase_after_mutation_counts["authority-rebind"] = 1
+
+    with pytest.raises(RuntimeError, match="response loss"):
+        component.apply(plan)
+
+    if corruption == "audit":
+        runner.authority_rebind_audit_integrity = False
+    else:
+        runner.authority_rebind_extra_event = True
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="state changed"):
+        component.apply(plan)
+    assert runner.events.count("authority-rebind") == 1
+    assert "create" not in runner.events
+
+
+def test_database_component_retries_authority_rebind_after_precommit_failure(
+    tmp_path: Path,
+) -> None:
+    """Break caught: sealing runtime roles before a failed repair made retry unclassifiable."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.fail_peer_phase_counts["authority-rebind"] = 1
+
+    with pytest.raises(RuntimeError, match="compensation phase failure"):
+        component.apply(plan)
+
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
+    assert component.classify(plan).state is ComponentState.EXACT
+    assert runner.events.count("authority-rebind") == 2
+    assert runner.events.count("authority-runtime-restore") == 1
+    assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+def test_database_component_revalidates_committed_state_while_restoring_credentials(
+    tmp_path: Path,
+) -> None:
+    """Break caught: guard activity racing between UUID repair and credential restoration."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.activity_before_authority_restore = True
+
+    with pytest.raises(RuntimeError, match="restore revalidation failure"):
+        component.apply(plan)
+
+    assert runner.protected_roles_sealed is True
+    assert "create" not in runner.events
+
+
+def test_database_component_reseals_credentials_after_post_restore_failure(
+    tmp_path: Path,
+) -> None:
+    """Break caught: leaving runtime logins active after exact readback failed."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    runner.fail_verification_after_authority_restore = True
+
+    with pytest.raises(RuntimeError, match="post-restore verification failure"):
+        component.apply(plan)
+
+    assert runner.protected_roles_sealed is True
+    assert "create" not in runner.events
+
+
+def test_database_component_rebind_changes_only_authority_columns_and_audit_tail(
+    tmp_path: Path,
+) -> None:
+    """Break caught: overwriting the preserved authority update timestamp during repair."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+
+    component.apply(plan)
+
+    rebind_payloads = [
+        payload
+        for _command, payload in runner.checked_inputs
+        if runner._peer_phase(payload) == "authority-rebind"
+    ]
+    assert len(rebind_payloads) == 1
+    assert b"updated_at = statement_timestamp()" not in rebind_payloads[0]
 
 
 def test_database_component_retries_exact_sealed_compensation_state(

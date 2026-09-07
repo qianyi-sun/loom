@@ -131,7 +131,10 @@ _CREDENTIAL_SEED_KEYS = frozenset(
 )
 _SUBJECT_ID = uuid5(NAMESPACE_URL, "loom:staging:capacity-subject")
 _SUBJECT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-subject:v1")
-_AUTHORITY_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-authority:v1")
+_LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION = uuid5(
+    NAMESPACE_URL,
+    "loom:staging:capacity-authority:v1",
+)
 _AGENT_INCARNATION = uuid5(NAMESPACE_URL, "loom:staging:capacity-agent:v1")
 _MAX_PRIVATE_FILE_BYTES = 1024 * 1024
 _MAX_RECOVERY_REQUESTS = 4096
@@ -363,7 +366,7 @@ class KubernetesProtectedStagingCapacityRuntime:
         epoch: ComponentObservation,
     ) -> ComponentObservation:
         if component_id == "staging-capacity-credentials":
-            state, evidence = self._classify_credentials()
+            state, evidence = self._classify_credentials(plan)
             return self._observation(
                 plan,
                 component_id=component_id,
@@ -372,7 +375,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 component_evidence=evidence,
             )
         if component_id == "staging-capacity-database":
-            state, evidence = self._database_component().classify(plan)
+            state, evidence = self._database_component(plan).classify(plan)
             return self._observation(
                 plan,
                 component_id=component_id,
@@ -381,7 +384,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 component_evidence=evidence,
             )
         if component_id == "staging-protected-runtime-secret":
-            state, evidence = self._runtime_secret_component().classify(plan)
+            state, evidence = self._runtime_secret_component(plan).classify(plan)
             return self._observation(
                 plan,
                 component_id=component_id,
@@ -420,7 +423,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 component_evidence=evidence,
             )
         if component_id == "capacity-manager-configuration":
-            state, evidence = self._manager_configuration_component().classify(plan)
+            state, evidence = self._manager_configuration_component(plan).classify(plan)
             return self._observation(
                 plan,
                 component_id=component_id,
@@ -429,7 +432,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 component_evidence=evidence,
             )
         if component_id == "staging-capacity-agent":
-            state, evidence = self._agent_component().classify(plan)
+            state, evidence = self._agent_component(plan).classify(plan)
             return self._observation(
                 plan,
                 component_id=component_id,
@@ -456,13 +459,13 @@ class KubernetesProtectedStagingCapacityRuntime:
 
     def _apply(self, component_id: str, plan: FinalGatePlan) -> None:
         if component_id == "staging-capacity-credentials":
-            self._create_credential_seed()
+            self._converge_credential_seed(plan)
             return
         if component_id == "staging-capacity-database":
-            self._database_component().apply(plan)
+            self._database_component(plan).apply(plan)
             return
         if component_id == "staging-protected-runtime-secret":
-            self._runtime_secret_component().apply(plan)
+            self._runtime_secret_component(plan).apply(plan)
             return
         prerequisite_pool = _CONTROLLER_PREREQUISITE_COMPONENT_POOLS.get(component_id)
         if prerequisite_pool is not None:
@@ -475,21 +478,24 @@ class KubernetesProtectedStagingCapacityRuntime:
             self._manager_runtime_component(plan).apply(plan)
             return
         if component_id == "capacity-manager-configuration":
-            self._manager_configuration_component().apply(plan)
+            self._manager_configuration_component(plan).apply(plan)
             return
         if component_id == "staging-capacity-agent":
-            self._agent_component().apply(plan)
+            self._agent_component(plan).apply(plan)
             return
         if component_id == _EXECUTION_PREPARATION_COMPONENT_ID:
             self._execution_preparation_component().apply(plan)
             return
         raise RuntimeError(f"protected staging capacity mutation is unavailable for {component_id}")
 
-    def _database_component(self) -> KubernetesProtectedStagingCapacityDatabaseComponent:
+    def _database_component(
+        self,
+        plan: FinalGatePlan,
+    ) -> KubernetesProtectedStagingCapacityDatabaseComponent:
         return KubernetesProtectedStagingCapacityDatabaseComponent(
             runner=self.runner,
             container_registry=self.container_registry,
-            seed_reader=self.read_credential_seed,
+            seed_reader=lambda: self._credential_seed_for_plan(plan),
             recovery_plan_reader=self._read_previous_database_plan,
         )
 
@@ -619,10 +625,11 @@ class KubernetesProtectedStagingCapacityRuntime:
 
     def _runtime_secret_component(
         self,
+        plan: FinalGatePlan,
     ) -> KubernetesProtectedStagingCapacityRuntimeSecretComponent:
         return KubernetesProtectedStagingCapacityRuntimeSecretComponent(
             runner=self.runner,
-            seed_reader=self.read_credential_seed,
+            seed_reader=lambda: self._credential_seed_for_plan(plan),
         )
 
     def _manager_runtime_component(
@@ -707,7 +714,7 @@ class KubernetesProtectedStagingCapacityRuntime:
             ),
             (_EXECUTION_CREDENTIAL_COMPONENT_ID, self._execution_credential_component()),
             ("capacity-manager-runtime", self._manager_runtime_component(plan)),
-            ("capacity-manager-configuration", self._manager_configuration_component()),
+            ("capacity-manager-configuration", self._manager_configuration_component(plan)),
         )
         evidence: dict[str, str] = {}
         for component_id, component in components:
@@ -758,23 +765,27 @@ class KubernetesProtectedStagingCapacityRuntime:
 
     def _manager_configuration_component(
         self,
+        plan: FinalGatePlan,
     ) -> KubernetesProtectedStagingCapacityManagerConfigurationComponent:
         return KubernetesProtectedStagingCapacityManagerConfigurationComponent(
             runner=self.runner,
             credentials_root=self.credentials_root,
             service_uid=self.service_uid,
             service_gid=self.service_gid,
-            seed_reader=self.read_credential_seed,
+            seed_reader=lambda: self._credential_seed_for_plan(plan),
             client_context=self.manager_configuration_client_context,
         )
 
-    def _agent_component(self) -> KubernetesProtectedStagingCapacityAgentComponent:
+    def _agent_component(
+        self,
+        plan: FinalGatePlan,
+    ) -> KubernetesProtectedStagingCapacityAgentComponent:
         return KubernetesProtectedStagingCapacityAgentComponent(
             runner=self.runner,
             container_registry=self.container_registry,
-            seed_reader=self.read_credential_seed,
+            seed_reader=lambda: self._credential_seed_for_plan(plan),
             reporter_tls_reader=self._read_staging_reporter_tls,
-            postgres_ca_reader=self._read_postgres_ca,
+            postgres_ca_reader=lambda: self._read_postgres_ca(plan),
         )
 
     def _read_staging_reporter_tls(self) -> dict[str, bytes]:
@@ -785,10 +796,10 @@ class KubernetesProtectedStagingCapacityRuntime:
             for file_name in _STAGING_REPORTER_FILE_NAMES
         }
 
-    def _read_postgres_ca(self) -> bytes:
-        return self._runtime_secret_component()._read_ca_certificate()
+    def _read_postgres_ca(self, plan: FinalGatePlan) -> bytes:
+        return self._runtime_secret_component(plan)._read_ca_certificate()
 
-    def _classify_credentials(self) -> tuple[ComponentState, str]:
+    def _classify_credentials(self, plan: FinalGatePlan) -> tuple[ComponentState, str]:
         try:
             bootstrap = self._read_credential_bootstrap()
         except (OSError, RuntimeError, ValueError):
@@ -799,10 +810,24 @@ class KubernetesProtectedStagingCapacityRuntime:
             )
         try:
             payload = self._read_private_file(self.credential_seed_path)
-            self._parse_credential_seed(payload)
+            seed = self._parse_credential_seed(payload)
         except (OSError, RuntimeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
             return ComponentState.DRIFTED, _hash_json(
                 {"bootstrap": bootstrap, "status": "seed-drifted"}
+            )
+        authority = self._manager_authority(plan)
+        if seed["authority_incarnation"] != str(authority):
+            if self._legacy_authority_rebinding_allowed(plan, seed=seed):
+                return ComponentState.READY, _hash_json(
+                    {
+                        "bootstrap": bootstrap,
+                        "seed_sha256": hashlib.sha256(payload).hexdigest(),
+                        "status": "legacy-authority-rebind-required",
+                        "target_authority_incarnation": str(authority),
+                    }
+                )
+            return ComponentState.DRIFTED, _hash_json(
+                {"bootstrap": bootstrap, "status": "seed-authority-drifted"}
             )
         return ComponentState.EXACT, _hash_json(
             {
@@ -816,8 +841,14 @@ class KubernetesProtectedStagingCapacityRuntime:
         """Return one strictly validated private staging credential seed."""
         return self._parse_credential_seed(self._read_private_file(self.credential_seed_path))
 
+    def _credential_seed_for_plan(self, plan: FinalGatePlan) -> dict[str, object]:
+        return self._parse_credential_seed(
+            self._read_private_file(self.credential_seed_path),
+            expected_authority_incarnation=self._manager_authority(plan),
+        )
+
     def _effective_credential_seed(self, plan: FinalGatePlan) -> dict[str, object]:
-        seed = self.read_credential_seed()
+        seed = self._credential_seed_for_plan(plan)
         seed["reporter_incarnation"] = str(
             derive_staging_reporter_incarnation(
                 seed["reporter_incarnation"],
@@ -843,7 +874,7 @@ class KubernetesProtectedStagingCapacityRuntime:
 
         if not isinstance(lease, BackupLease):
             raise RuntimeError("zero-ceiling bootstrap authority is unavailable")
-        credential_state, credential_evidence = self._classify_credentials()
+        credential_state, credential_evidence = self._classify_credentials_for_lease(lease)
         if (
             credential_state not in {ComponentState.READY, ComponentState.EXACT}
             or lease.checkpoint_schema_version != 3
@@ -870,9 +901,55 @@ class KubernetesProtectedStagingCapacityRuntime:
             }
         )
 
-    def _parse_credential_seed(self, payload: bytes) -> dict[str, object]:
+    def _classify_credentials_for_lease(
+        self,
+        lease: BackupLease,
+    ) -> tuple[ComponentState, str]:
+        if lease.manager_authority_incarnation is None:
+            return ComponentState.DRIFTED, _hash_json({"status": "lease-authority-absent"})
+        try:
+            bootstrap = self._read_credential_bootstrap()
+        except (OSError, RuntimeError, ValueError):
+            return ComponentState.DRIFTED, _hash_json({"status": "bootstrap-drifted"})
+        if not self.credential_seed_path.exists():
+            return ComponentState.READY, _hash_json(
+                {"bootstrap": bootstrap, "status": "seed-absent"}
+            )
+        try:
+            payload = self._read_private_file(self.credential_seed_path)
+            seed = self._parse_credential_seed(payload)
+        except (OSError, RuntimeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return ComponentState.DRIFTED, _hash_json(
+                {"bootstrap": bootstrap, "status": "seed-drifted"}
+            )
+        expected = str(lease.manager_authority_incarnation)
+        if seed["authority_incarnation"] == expected:
+            state = ComponentState.EXACT
+        elif seed["authority_incarnation"] == str(
+            _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+        ) and self._zero_ceiling_lease(lease):
+            state = ComponentState.READY
+        else:
+            state = ComponentState.DRIFTED
+        return state, _hash_json(
+            {
+                "bootstrap": bootstrap,
+                "seed_sha256": hashlib.sha256(payload).hexdigest(),
+                "status": state.value,
+            }
+        )
+
+    def _parse_credential_seed(
+        self,
+        payload: bytes,
+        *,
+        expected_authority_incarnation: UUID | None = None,
+    ) -> dict[str, object]:
         seed = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
-        self._validate_credential_seed(seed)
+        self._validate_credential_seed(
+            seed,
+            expected_authority_incarnation=expected_authority_incarnation,
+        )
         assert isinstance(seed, dict)
         return seed
 
@@ -1069,19 +1146,22 @@ class KubernetesProtectedStagingCapacityRuntime:
             os.close(descriptor)
 
     @staticmethod
-    def _validate_credential_seed(value: object) -> None:
+    def _validate_credential_seed(
+        value: object,
+        *,
+        expected_authority_incarnation: UUID | None = None,
+    ) -> None:
         if not isinstance(value, dict) or set(value) != _CREDENTIAL_SEED_KEYS:
             raise ValueError("protected staging credential seed fields are invalid")
         if value["schema_version"] != 1:
             raise ValueError("protected staging credential seed schema is invalid")
         expected_ids = {
             "agent_incarnation": _AGENT_INCARNATION,
-            "authority_incarnation": _AUTHORITY_INCARNATION,
             "subject_id": _SUBJECT_ID,
             "subject_incarnation": _SUBJECT_INCARNATION,
         }
         parsed_ids: dict[str, UUID] = {}
-        for seed_field in (*expected_ids, "reporter_incarnation"):
+        for seed_field in (*expected_ids, "authority_incarnation", "reporter_incarnation"):
             raw = value[seed_field]
             if not isinstance(raw, str):
                 raise ValueError("protected staging credential seed identity is invalid")
@@ -1091,6 +1171,11 @@ class KubernetesProtectedStagingCapacityRuntime:
             parsed_ids[seed_field] = parsed
         if any(parsed_ids[field] != expected for field, expected in expected_ids.items()):
             raise ValueError("protected staging credential seed binding is invalid")
+        if (
+            expected_authority_incarnation is not None
+            and parsed_ids["authority_incarnation"] != expected_authority_incarnation
+        ):
+            raise ValueError("protected staging credential seed authority is invalid")
         if len(set(parsed_ids.values())) != len(parsed_ids):
             raise ValueError("protected staging credential seed identities overlap")
         for credential_field in (
@@ -1108,14 +1193,30 @@ class KubernetesProtectedStagingCapacityRuntime:
             ):
                 raise ValueError("protected staging opaque credential is invalid")
 
-    def _create_credential_seed(self) -> None:
+    def _converge_credential_seed(self, plan: FinalGatePlan) -> None:
+        authority = self._manager_authority(plan)
+        if not self.credential_seed_path.exists():
+            self._create_credential_seed(authority)
+            return
+        before = self._read_private_file(self.credential_seed_path)
+        seed = self._parse_credential_seed(before)
+        if not self._legacy_authority_rebinding_allowed(plan, seed=seed):
+            raise RuntimeError("protected staging credential seed changed before convergence")
+        seed["authority_incarnation"] = str(authority)
+        self._validate_credential_seed(
+            seed,
+            expected_authority_incarnation=authority,
+        )
+        self._replace_credential_seed(before=before, seed=seed)
+
+    def _create_credential_seed(self, authority_incarnation: UUID) -> None:
         bootstrap = self._read_credential_bootstrap()
         if self.credential_seed_path.exists():
             raise RuntimeError("protected staging credential seed appeared before creation")
         seed = {
             "agent_database_password": secrets.token_urlsafe(48),
             "agent_incarnation": str(_AGENT_INCARNATION),
-            "authority_incarnation": str(_AUTHORITY_INCARNATION),
+            "authority_incarnation": str(authority_incarnation),
             "migrator_database_password": secrets.token_urlsafe(48),
             "observer_database_password": secrets.token_urlsafe(48),
             "reporter_incarnation": str(uuid4()),
@@ -1125,7 +1226,10 @@ class KubernetesProtectedStagingCapacityRuntime:
             "subject_id": str(_SUBJECT_ID),
             "subject_incarnation": str(_SUBJECT_INCARNATION),
         }
-        self._validate_credential_seed(seed)
+        self._validate_credential_seed(
+            seed,
+            expected_authority_incarnation=authority_incarnation,
+        )
         payload = (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
         temporary_name = f".seed.{uuid4().hex}.tmp"
         directory_fd = os.open(
@@ -1170,6 +1274,87 @@ class KubernetesProtectedStagingCapacityRuntime:
             os.close(directory_fd)
         if not bootstrap:
             raise RuntimeError("protected staging credential bootstrap disappeared")
+
+    def _replace_credential_seed(self, *, before: bytes, seed: dict[str, object]) -> None:
+        if self._read_private_file(self.credential_seed_path) != before:
+            raise RuntimeError("protected staging credential seed changed before repair")
+        payload = (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        temporary_name = f".seed.{uuid4().hex}.tmp"
+        directory_fd = os.open(
+            self.credentials_root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                offset = 0
+                while offset < len(payload):
+                    offset += os.write(descriptor, payload[offset:])
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            if self._read_private_file(self.credential_seed_path) != before:
+                raise RuntimeError("protected staging credential seed changed during repair")
+            os.replace(
+                temporary_name,
+                self.credential_seed_path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        except Exception:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _manager_authority(plan: FinalGatePlan) -> UUID:
+        authority = UUID(str(plan.manager_authority_incarnation))
+        if authority.int == 0 or str(authority) != plan.manager_authority_incarnation:
+            raise ValueError("protected staging plan manager authority is invalid")
+        return authority
+
+    def _legacy_authority_rebinding_allowed(
+        self,
+        plan: FinalGatePlan,
+        *,
+        seed: Mapping[str, object],
+    ) -> bool:
+        return bool(
+            seed.get("authority_incarnation") == str(_LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION)
+            and self._manager_authority(plan) != _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            and plan.schema_version in {6, 7}
+            and plan.manager_execution_state == "shadow"
+            and plan.manager_execution_epoch == 0
+            and plan.manager_execution_manifest_sha256 is None
+            and plan.manager_executable_new_capacity_ceiling == 0
+            and plan.manager_increase_freeze is True
+        )
+
+    @staticmethod
+    def _zero_ceiling_lease(lease: BackupLease) -> bool:
+        return bool(
+            lease.checkpoint_schema_version == 3
+            and lease.manager_execution_state == "shadow"
+            and lease.manager_execution_epoch == 0
+            and lease.manager_execution_manifest_sha256 is None
+            and lease.manager_executable_new_capacity_ceiling == 0
+            and lease.manager_increase_freeze is True
+        )
 
     @staticmethod
     def _observation(
