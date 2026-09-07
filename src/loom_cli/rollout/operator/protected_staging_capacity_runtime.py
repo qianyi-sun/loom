@@ -25,6 +25,8 @@ from .model import validate_safe_identifier
 from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
+    ComponentTerminal,
+    ComponentTerminalRecoveryAuthority,
     ProtectedApplyComponent,
 )
 from .protected_capacity_execution_preparation_component import (
@@ -318,6 +320,17 @@ class KubernetesProtectedStagingCapacityRuntime:
                     )
                 self._apply(component_id, bound_plan)
 
+            def terminal_recovery_authority(
+                bound_plan: FinalGatePlan,
+                _terminal: ComponentTerminal,
+                observation: ComponentObservation,
+            ) -> ComponentTerminalRecoveryAuthority | None:
+                return self._terminal_recovery_authority(
+                    component_id,
+                    bound_plan,
+                    observation,
+                )
+
             return ProtectedApplyComponent(
                 component_id=component_id,
                 implementation_digest=_hash_json(
@@ -338,6 +351,9 @@ class KubernetesProtectedStagingCapacityRuntime:
                 ),
                 classify=classify,
                 apply=apply,
+                terminal_recovery_authority=(
+                    terminal_recovery_authority if component_id in _COMPONENT_IDS[:3] else None
+                ),
             )
 
         component_ids: tuple[str, ...] = _COMPONENT_IDS
@@ -1336,13 +1352,62 @@ class KubernetesProtectedStagingCapacityRuntime:
     ) -> bool:
         return bool(
             seed.get("authority_incarnation") == str(_LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION)
-            and self._manager_authority(plan) != _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            and self._legacy_authority_rebinding_plan_allowed(plan)
+        )
+
+    def _legacy_authority_rebinding_plan_allowed(self, plan: FinalGatePlan) -> bool:
+        return bool(
+            self._manager_authority(plan) != _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
             and plan.schema_version in {6, 7}
             and plan.manager_execution_state == "shadow"
             and plan.manager_execution_epoch == 0
             and plan.manager_execution_manifest_sha256 is None
             and plan.manager_executable_new_capacity_ceiling == 0
             and plan.manager_increase_freeze is True
+        )
+
+    def _terminal_recovery_authority(
+        self,
+        component_id: str,
+        plan: FinalGatePlan,
+        observation: ComponentObservation,
+    ) -> ComponentTerminalRecoveryAuthority | None:
+        if (
+            component_id not in _COMPONENT_IDS[:3]
+            or observation.state not in {ComponentState.READY, ComponentState.EXACT}
+            or not self._legacy_authority_rebinding_plan_allowed(plan)
+        ):
+            return None
+
+        if component_id == "staging-capacity-credentials":
+            try:
+                seed = self._parse_credential_seed(
+                    self._read_private_file(self.credential_seed_path)
+                )
+            except (OSError, RuntimeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                return None
+            if observation.state is ComponentState.READY:
+                if not self._legacy_authority_rebinding_allowed(plan, seed=seed):
+                    return None
+            elif seed.get("authority_incarnation") != str(self._manager_authority(plan)):
+                return None
+        elif component_id == "staging-capacity-database":
+            if self._database_component(plan).classify_authority_forward(plan) is not (
+                observation.state
+            ):
+                return None
+        else:
+            runtime_secret_state, _evidence = self._runtime_secret_component(plan).classify(plan)
+            if (
+                observation.state is not ComponentState.EXACT
+                or runtime_secret_state is not ComponentState.EXACT
+            ):
+                return None
+
+        return ComponentTerminalRecoveryAuthority.build(
+            component_id=component_id,
+            source_authority_incarnation=str(_LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION),
+            target_authority_incarnation=str(self._manager_authority(plan)),
         )
 
     @staticmethod
