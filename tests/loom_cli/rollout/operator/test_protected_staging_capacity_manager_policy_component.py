@@ -479,6 +479,23 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
         "--expected-authority-incarnation",
         "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
     ]
+    assert migration["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+    assert migration["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+    assert migration["volumeMounts"] == [
+        {
+            "name": "runtime",
+            "mountPath": "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        }
+    ]
     assert all(
         resource["metadata"]["labels"][_COMPONENT_LABEL] == _COMPONENT_VALUE
         for resource in resources.values()

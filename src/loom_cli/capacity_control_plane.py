@@ -1015,6 +1015,31 @@ def _postgres_statefulset(profile: CapacityControlPlaneProfile) -> dict[str, Any
     }
 
 
+def _migration_container(
+    profile: CapacityControlPlaneProfile,
+    *,
+    name: str,
+    manager_image: str,
+    authority_incarnation: UUID,
+    volume_mounts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "image": manager_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["python", "-m", "loom_capacity_manager.migrate"],
+        "args": [
+            "--db-url-file",
+            f"{_CREDENTIALS}/database-url",
+            "--expected-authority-incarnation",
+            str(authority_incarnation),
+        ],
+        "securityContext": _container_security(read_only_root=True),
+        "resources": profile.migration_resources.kubernetes(),
+        "volumeMounts": volume_mounts,
+    }
+
+
 def _migration_job(
     profile: CapacityControlPlaneProfile,
     *,
@@ -1041,21 +1066,13 @@ def _migration_job(
                 "securityContext": _pod_security(65532),
                 "initContainers": init,
                 "containers": [
-                    {
-                        "name": "migration",
-                        "image": manager_image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["python", "-m", "loom_capacity_manager.migrate"],
-                        "args": [
-                            "--db-url-file",
-                            f"{_CREDENTIALS}/database-url",
-                            "--expected-authority-incarnation",
-                            str(authority_incarnation),
-                        ],
-                        "securityContext": _container_security(read_only_root=True),
-                        "resources": profile.migration_resources.kubernetes(),
-                        "volumeMounts": mounts,
-                    }
+                    _migration_container(
+                        profile,
+                        name="migration",
+                        manager_image=manager_image,
+                        authority_incarnation=authority_incarnation,
+                        volume_mounts=mounts,
+                    )
                 ],
                 "volumes": volumes,
             },
@@ -1498,17 +1515,22 @@ def _manager_deployment_with_migration_init(
         execution_policy_config_map=execution_policy_config_map,
         execution_policy_sha256=execution_policy_sha256,
     )
-    migration = _migration_job(
+    migration = _migration_container(
         profile,
+        name="migrate-capacity-schema",
         manager_image=manager_image,
         authority_incarnation=authority_incarnation,
-        migration_head=_capacity_head(),
-        image_digest=manager_image.rsplit("@sha256:", 1)[1],
+        volume_mounts=[
+            {
+                "name": "runtime",
+                "mountPath": f"{_CREDENTIALS}/database-url",
+                "subPath": "credentials/database-url",
+                "readOnly": True,
+            }
+        ],
     )
-    migration_container = migration["spec"]["template"]["spec"]["containers"][0]
-    migration_container["name"] = "migrate-capacity-schema"
     init_containers = deployment["spec"]["template"]["spec"]["initContainers"]
-    init_containers.insert(1, migration_container)
+    init_containers.insert(1, migration)
     return deployment
 
 

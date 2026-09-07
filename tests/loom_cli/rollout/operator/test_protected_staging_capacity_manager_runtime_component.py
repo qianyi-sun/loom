@@ -714,10 +714,15 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
 
 def test_manager_runtime_migrates_capacity_schema_before_starting_manager(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = _candidate(tmp_path)
     plan = _plan_with_manager(tmp_path)
     cluster = _ManagerCluster(candidate)
+    monkeypatch.setattr(
+        "loom_cli.capacity_control_plane._capacity_head",
+        lambda: (_ for _ in ()).throw(AssertionError("local migration head lookup is forbidden")),
+    )
 
     _component(cluster, candidate).apply(plan)
 
@@ -737,6 +742,23 @@ def test_manager_runtime_migrates_capacity_schema_before_starting_manager(
         "/var/run/loom-capacity-manager/runtime/credentials/database-url",
         "--expected-authority-incarnation",
         "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+    ]
+    assert migration["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+    assert migration["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+    assert migration["volumeMounts"] == [
+        {
+            "name": "runtime",
+            "mountPath": "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        }
     ]
 
 
