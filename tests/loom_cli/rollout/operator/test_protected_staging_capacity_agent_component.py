@@ -586,6 +586,54 @@ def test_controller_status_and_ready_pod_failures_do_not_relax_spec_ownership(
         _component(malformed).apply(plan)
 
 
+def test_k3s_status_ownership_is_limited_to_deployment_revision_metadata(
+    tmp_path: Path,
+) -> None:
+    """Break caught: live K3s revision ownership is rejected or foreign metadata is trusted."""
+
+    class _ExactDiffCluster(_Cluster):
+        def run_status(self, argv, *, env, input_payload, timeout_seconds):
+            return 0
+
+    cluster = _ExactDiffCluster()
+    component = _component(cluster)
+    plan = _plan(tmp_path)
+    component.apply(plan)
+    deployment = cluster.objects[("Deployment", "loom-capacity-agent")]
+    deployment["metadata"]["annotations"] = {"deployment.kubernetes.io/revision": "1"}
+    status_owner = {
+        "apiVersion": "apps/v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+            "f:metadata": {
+                "f:annotations": {
+                    ".": {},
+                    "f:deployment.kubernetes.io/revision": {},
+                }
+            },
+            "f:status": {"f:availableReplicas": {}},
+        },
+        "manager": "k3s",
+        "operation": "Update",
+        "subresource": "status",
+    }
+    deployment["metadata"]["managedFields"].append(status_owner)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+    status_owner["fieldsV1"]["f:metadata"]["f:labels"] = {"f:foreign": {}}
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["fieldsV1"]["f:metadata"].pop("f:labels")
+    status_owner["fieldsV1"].pop("f:status")
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["fieldsV1"]["f:status"] = {}
+    status_owner["apiVersion"] = "v1"
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["apiVersion"] = "apps/v1"
+    status_owner["fieldsV1"]["f:metadata"] = None
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+
+
 def test_rollout_and_readback_failures_are_closed_without_secret_disclosure(tmp_path: Path) -> None:
     """Break caught: failed rollout, malformed readback, or readback command failure is accepted."""
 
