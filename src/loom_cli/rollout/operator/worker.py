@@ -1217,6 +1217,7 @@ def _default_dependencies(
         read_mutation_epoch=composition.read_mutation_epoch,
         now=clock,
         post_apply_plan_factory=post_apply_plan,
+        post_apply_attested_dependencies=(deep_preflight.post_apply_attested_dependencies),
         execution_prerequisite_store=ProtectedExecutionPrerequisiteStore(
             config.state_root,
             service_uid=service_uid,
