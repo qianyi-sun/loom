@@ -24,8 +24,8 @@ from loom_capacity_manager.executable_contracts import (
 )
 from loom_cli.capacity_control_plane import (
     _manager_deployment_with_migration_init,
+    _render_capacity_control_plane_manifests,
     load_capacity_control_plane_profile,
-    render_capacity_control_plane_manifests,
 )
 
 from .final_gate_plan import FinalGatePlan
@@ -671,13 +671,14 @@ def build_manager_policy_resource_documents(
     )
     routes = tuple(sorted(set(prerequisite.manager_client_cidrs.values())))
     profile = load_capacity_control_plane_profile(candidate_root / _PROFILE_PATH)
-    rendered = render_capacity_control_plane_manifests(
+    rendered = _render_capacity_control_plane_manifests(
         profile,
         manager_image=manager_image,
         authority_incarnation=authority_incarnation,
         execution_policy=prerequisite.execution_policy,
         execution_policy_sha256=prerequisite.execution_policy_sha256,
         external_manager_client_cidrs=routes,
+        include_migration_job=False,
     )
     policy_name = f"loom-capacity-execution-policy-{prerequisite.execution_policy_sha256[:32]}"
     manager = _manager_deployment_with_migration_init(

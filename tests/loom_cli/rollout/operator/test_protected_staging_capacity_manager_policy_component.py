@@ -427,6 +427,7 @@ class _PolicyCluster:
 
 def test_policy_resource_builder_selects_only_bound_router_and_manager_resources(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert importlib.util.find_spec(MODULE) is not None, "manager policy component is missing"
     module = importlib.import_module(MODULE)
@@ -434,6 +435,10 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
     assert builder is not None, "manager policy resource builder is missing"
     plan, prerequisite = _plan_and_prerequisite(tmp_path)
     registry = b'{"principals":[],"schema_version":1}\n'
+    monkeypatch.setattr(
+        "loom_cli.capacity_control_plane._capacity_head",
+        lambda: (_ for _ in ()).throw(AssertionError("local migration head lookup is forbidden")),
+    )
 
     resources = builder(
         plan,
