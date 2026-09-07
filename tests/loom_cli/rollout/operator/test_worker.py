@@ -1488,7 +1488,7 @@ def test_default_attempt_dependencies_release_guard_when_bootstrap_fails(
     assert released == [REQUEST_ID]
 
 
-def test_default_dependencies_wires_execution_prerequisite_store_into_final_gate(
+def test_default_dependencies_wires_schema7_authority_into_final_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1502,7 +1502,9 @@ def test_default_dependencies_wires_execution_prerequisite_store_into_final_gate
 
     config = make_config(tmp_path)
     request_store = SimpleNamespace()
-    deep_preflight = object()
+    deep_preflight = SimpleNamespace(
+        post_apply_attested_dependencies=frozenset({"runner.install"}),
+    )
     composition = SimpleNamespace(
         artifact_store=object(),
         attestation_store=object(),
@@ -1548,6 +1550,7 @@ def test_default_dependencies_wires_execution_prerequisite_store_into_final_gate
     assert isinstance(prerequisite_store, ProtectedExecutionPrerequisiteStore)
     assert prerequisite_store.state_root == config.state_root
     assert prerequisite_store.service_uid == os.geteuid()
+    assert captured.get("post_apply_attested_dependencies") == frozenset({"runner.install"})
 
 
 @pytest.mark.parametrize(
