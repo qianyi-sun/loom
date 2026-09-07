@@ -576,6 +576,64 @@ def test_shared_desired_configuration_derivation_uses_authenticated_live_state(
     assert desired.staging_subject.subject_id == _STAGING_SUBJECT
 
 
+def test_component_bootstraps_canonical_service_account_from_owner_only_fleet(
+    tmp_path: Path,
+) -> None:
+    """Catch pristine personal-capacity state blocking staging activation."""
+    fleet = _live_fleet()
+    owner_only = fleet.model_copy(
+        update={
+            "fleet_digest": "0" * 64,
+            "account_policies": tuple(
+                account for account in fleet.account_policies if account.kind != "service"
+            ),
+        }
+    )
+    owner_only = owner_only.model_copy(
+        update={"fleet_digest": canonical_digest_excluding(owner_only, "fleet_digest")}
+    )
+    client = _Client(_active_document(owner_only, ()))
+    component = _component(client, _seed())
+    plan = _plan(tmp_path)
+
+    assert component.classify(plan)[0] is ComponentState.READY
+    component.apply(plan)
+
+    fleet_payload = next(payload for kind, payload, _key in client.calls if kind == "fleet")
+    desired_fleet = FleetManifestV1.model_validate_json(json.dumps(fleet_payload))
+    assert desired_fleet.fleet_generation == owner_only.fleet_generation + 1
+    assert desired_fleet.fleet_digest == canonical_digest_excluding(desired_fleet, "fleet_digest")
+    assert (
+        tuple(
+            account
+            for account in desired_fleet.account_policies
+            if account.kind == "owner_template"
+        )
+        == owner_only.account_policies
+    )
+    service = next(
+        account for account in desired_fleet.account_policies if account.kind == "service"
+    )
+    assert service.model_dump(mode="json", exclude_none=False) == {
+        "schema_version": 1,
+        "account_id": "shared-development",
+        "kind": "service",
+        "owner_id": None,
+        "min_reservation_slots": 0,
+        "max_slots": 16,
+        "max_surge_slots": 2,
+        "max_pending_slots": 16,
+        "max_pending_jobs": 16,
+        "submission_rate_per_minute": 8,
+        "max_live_subjects": 16,
+    }
+    staging = SubjectConfigurationV1.model_validate_json(
+        json.dumps(_find_subject(client.calls, _STAGING_SUBJECT))
+    )
+    assert staging.account_id == "shared-development"
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+
 def test_component_preserves_live_state_and_converges_exact_staging_subject(
     tmp_path: Path,
 ) -> None:
@@ -778,6 +836,52 @@ def test_component_prefers_an_existing_staging_subject_as_profile_authority(
     assert desired.min_slots == 0
 
 
+def test_component_preserves_existing_staging_account_with_multiple_services(
+    tmp_path: Path,
+) -> None:
+    """Catch bootstrap account discovery overriding existing staging authority."""
+    fleet = _live_fleet()
+    service = next(account for account in fleet.account_policies if account.kind == "service")
+    fleet = fleet.model_copy(
+        update={
+            "fleet_digest": "0" * 64,
+            "account_policies": tuple(
+                sorted(
+                    (
+                        *fleet.account_policies,
+                        service.model_copy(update={"account_id": "another-service"}),
+                    ),
+                    key=lambda account: account.account_id,
+                )
+            ),
+        }
+    )
+    fleet = fleet.model_copy(
+        update={"fleet_digest": canonical_digest_excluding(fleet, "fleet_digest")}
+    )
+    staging = subject_configuration(
+        fleet,
+        subject_id=_STAGING_SUBJECT,
+        subject_incarnation=_STAGING_INCARNATION,
+        demand_reporter_incarnation=DEMAND_REPORTER_ID,
+        display_name="staging",
+        tier_id="staging",
+        min_slots=1,
+    )
+    client = _Client(_active_document(fleet, (staging,)))
+    component = _component(client, _seed())
+    plan = _plan(tmp_path)
+
+    assert component.classify(plan)[0] is ComponentState.READY
+    component.apply(plan)
+
+    desired = SubjectConfigurationV1.model_validate_json(
+        json.dumps(_find_subject(client.calls, _STAGING_SUBJECT))
+    )
+    assert desired.account_id == staging.account_id
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+
 @pytest.mark.parametrize("failure", ["missing-template", "ambiguous-service-account"])
 def test_component_fails_closed_without_unambiguous_live_staging_authority(
     tmp_path: Path,
@@ -789,9 +893,14 @@ def test_component_fails_closed_without_unambiguous_live_staging_authority(
         fleet = fleet.model_copy(
             update={
                 "fleet_digest": "0" * 64,
-                "account_policies": (
-                    *fleet.account_policies,
-                    service.model_copy(update={"account_id": "another-service"}),
+                "account_policies": tuple(
+                    sorted(
+                        (
+                            *fleet.account_policies,
+                            service.model_copy(update={"account_id": "another-service"}),
+                        ),
+                        key=lambda account: account.account_id,
+                    )
                 ),
             }
         )
