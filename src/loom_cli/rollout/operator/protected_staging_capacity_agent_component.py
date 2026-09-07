@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -30,6 +31,7 @@ _REQUEST_TIMEOUT = "60s"
 _QUERY_TIMEOUT_SECONDS = 30.0
 _MUTATION_TIMEOUT_SECONDS = 60.0
 _ROLLOUT_TIMEOUT_SECONDS = 660.0
+_LOCAL_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EXPECTED = (
     ("Secret", _NAME),
     ("Deployment", _NAME),
@@ -563,15 +565,30 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                 return False
             expected_image = f"{self.container_registry}/loom-control-plane@{plan.image_digests['loom-control-plane']}"
             containers, statuses = spec.get("containers"), status.get("containerStatuses")
+            runtime_status = (
+                statuses[0]
+                if isinstance(statuses, list)
+                and len(statuses) == 1
+                and isinstance(statuses[0], dict)
+                else None
+            )
+            runtime_image = runtime_status.get("image") if runtime_status is not None else None
+            runtime_image_id = runtime_status.get("imageID") if runtime_status is not None else None
+            runtime_identity_exact = runtime_image == expected_image or (
+                isinstance(runtime_image, str)
+                and _LOCAL_IMAGE_ID.fullmatch(runtime_image) is not None
+                and runtime_image_id == expected_image
+            )
             return (
                 isinstance(containers, list)
                 and isinstance(statuses, list)
                 and len(containers) == len(statuses) == 1
                 and isinstance(containers[0], dict)
-                and isinstance(statuses[0], dict)
-                and containers[0].get("name") == statuses[0].get("name") == "capacity-agent"
-                and containers[0].get("image") == statuses[0].get("image") == expected_image
-                and statuses[0].get("ready") is True
+                and runtime_status is not None
+                and containers[0].get("name") == runtime_status.get("name") == "capacity-agent"
+                and containers[0].get("image") == expected_image
+                and runtime_identity_exact
+                and runtime_status.get("ready") is True
             )
         except (UnicodeError, ValueError):
             return False
