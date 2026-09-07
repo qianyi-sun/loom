@@ -403,7 +403,9 @@ def test_runtime_dispatches_agent_only_after_manager_configuration(
         container_registry="registry.example.test/loom",
     )
     monkeypatch.setattr(
-        KubernetesProtectedStagingCapacityRuntime, "_agent_component", lambda _self: _Agent()
+        KubernetesProtectedStagingCapacityRuntime,
+        "_agent_component",
+        lambda _self, _plan: _Agent(),
     )
     plan = _plan(tmp_path)
     epoch = ComponentObservation(

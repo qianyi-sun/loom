@@ -6,6 +6,7 @@ import os
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import AsyncMock
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -673,6 +674,219 @@ async def test_staging_peer_arm_composes_with_converge_seal_retry_and_replacemen
             assert details["roles"][migrator]["credential_validity"] == "infinite"
             for role in (agent, observer, runtime):
                 assert details["roles"][role]["credential_validity"] == "infinite"
+
+        target_authority = UUID("841e79c2-8a76-4eeb-af56-f6d03bcb1bd8")
+        target_seed = {**seed, "authority_incarnation": str(target_authority)}
+        repair_plan = SimpleNamespace(
+            candidate_sha="c" * 40,
+            artifact_bundle_digest="d" * 64,
+            starting_mutation_epoch=42,
+            manager_authority_incarnation=str(target_authority),
+        )
+
+        class DirectPostgresRunner:
+            environment: ClassVar[dict[str, str]] = {}
+
+            def __init__(self) -> None:
+                self.fail_before_commit = False
+                self.lose_committed_response = False
+
+            def _connect(self):
+                return psycopg.connect(loom_admin_url, autocommit=True)
+
+            def capture_stdout(self, argv, *, env, timeout_seconds) -> bytes:
+                assert env == self.environment
+                assert timeout_seconds == 30.0
+                with self._connect() as direct:
+                    direct.execute("SET SESSION AUTHORIZATION postgres")
+                    result = direct.execute(argv[-1])
+                    row = result.fetchone()
+                    assert row is not None and len(row) == 1
+                    value = row[0]
+                    if isinstance(value, (dict, list)):
+                        return json.dumps(value, sort_keys=True).encode("ascii")
+                    return f"{value}\n".encode("ascii")
+
+            def run_checked(
+                self,
+                _argv,
+                *,
+                env,
+                input_payload,
+                timeout_seconds,
+            ) -> None:
+                assert env == self.environment
+                assert input_payload is not None
+                assert timeout_seconds == 60.0
+                payload = input_payload
+                if self.fail_before_commit:
+                    self.fail_before_commit = False
+                    payload = payload.removesuffix(b"COMMIT;\n") + b"SELECT 1 / 0;\nCOMMIT;\n"
+                with self._connect() as direct:
+                    direct.execute("SET SESSION AUTHORIZATION postgres")
+                    direct.execute(payload.decode("ascii"))
+                if self.lose_committed_response:
+                    self.lose_committed_response = False
+                    raise RuntimeError("injected committed response loss")
+
+        direct_runner = DirectPostgresRunner()
+        repair = KubernetesProtectedStagingCapacityDatabaseComponent(
+            runner=direct_runner,  # type: ignore[arg-type]
+            container_registry="registry.example.test/loom",
+            seed_reader=lambda: target_seed,
+        )
+        repair._disable_transient_credentials(preserve_runtime_credentials=False)
+        repair._terminate_transient_sessions(preserve_runtime_credentials=False)
+        repair._remove_transient_authority()
+        repair._verify_transient_authority_sealed(
+            preserve_runtime_credentials=False,
+            durable_runtime_credentials=True,
+        )
+        target_fence, target_registration, _, _ = repair._authority_rebind_bindings(
+            repair_plan,  # type: ignore[arg-type]
+            target_seed,
+        )
+        assert repair._authority_rebind_foundation_exact()
+        assert repair._authority_rebind_triggers_exact()
+        assert (
+            len(
+                repair._certify_authority_rebind_audits(
+                    expected_fence=target_fence,
+                    expected_registration=target_registration,
+                    committed=False,
+                ).rows
+            )
+            == 4
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            timestamp = await connection.execute(
+                "SELECT updated_at FROM loom_capacity_guard.authority_state WHERE singleton_id = 1"
+            )
+            original_updated_at = (await timestamp.fetchone())[0]
+            digest = await connection.execute(
+                "SELECT payload_digest FROM loom_capacity_guard.audit_events WHERE event_id = 1"
+            )
+            original_digest = (await digest.fetchone())[0]
+
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "DISABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.agent_reporter_state SET high_water = 1"
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "ENABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+            assert not repair._authority_rebind_foundation_exact()
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "DISABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.agent_reporter_state SET high_water = 0"
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "ENABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "DISABLE TRIGGER audit_events_append_only_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.audit_events SET payload_digest = repeat('0', 64) "
+                "WHERE event_id = 1"
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "ENABLE TRIGGER audit_events_append_only_row"
+            )
+            with pytest.raises(ValueError, match="not canonical"):
+                repair._certify_authority_rebind_audits(
+                    expected_fence=target_fence,
+                    expected_registration=target_registration,
+                    committed=False,
+                )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "DISABLE TRIGGER audit_events_append_only_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.audit_events SET payload_digest = %s "
+                "WHERE event_id = 1",
+                (original_digest,),
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "ENABLE TRIGGER audit_events_append_only_row"
+            )
+
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.authority_state "
+                "DISABLE TRIGGER authority_state_monotonic_row"
+            )
+            assert not repair._authority_rebind_triggers_exact()
+            with pytest.raises(RuntimeError, match="triggers drifted"):
+                repair._rebind_legacy_authority(
+                    repair_plan,  # type: ignore[arg-type]
+                    target_seed,
+                )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.authority_state "
+                "ENABLE TRIGGER authority_state_monotonic_row"
+            )
+
+        direct_runner.fail_before_commit = True
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            repair._rebind_legacy_authority(
+                repair_plan,  # type: ignore[arg-type]
+                target_seed,
+            )
+        async with await psycopg.AsyncConnection.connect(loom_admin_url) as connection:
+            authority = await connection.execute(
+                "SELECT authority_incarnation FROM loom_capacity_guard.authority_state"
+            )
+            audits = await connection.execute(
+                "SELECT count(*) FROM loom_capacity_guard.audit_events"
+            )
+            assert await authority.fetchone() == (UUID("558afea6-2a37-55a1-9f7c-3399695da966"),)
+            assert await audits.fetchone() == (4,)
+
+        direct_runner.lose_committed_response = True
+        with pytest.raises(RuntimeError, match="committed response loss"):
+            repair._rebind_legacy_authority(
+                repair_plan,  # type: ignore[arg-type]
+                target_seed,
+            )
+        committed = repair._certify_authority_rebind_audits(
+            expected_fence=target_fence,
+            expected_registration=target_registration,
+            committed=True,
+        )
+        assert len(committed.rows) == 6
+        assert [row["event_id"] for row in committed.rows] == [1, 2, 3, 4, 7, 8]
+        repair._restore_runtime_credentials(
+            repair_plan,  # type: ignore[arg-type]
+            target_seed,
+        )
+
+        async with await psycopg.AsyncConnection.connect(loom_admin_url) as connection:
+            authority = await connection.execute(
+                "SELECT authority_incarnation, updated_at FROM loom_capacity_guard.authority_state"
+            )
+            assert await authority.fetchone() == (target_authority, original_updated_at)
+            registration = await connection.execute(
+                "SELECT authority_incarnation FROM loom_capacity_guard.agent_registrations"
+            )
+            assert await registration.fetchone() == (target_authority,)
         assert installation.runtime_database_url == runtime_url.replace(
             "postgresql://",
             "postgresql+psycopg://",
