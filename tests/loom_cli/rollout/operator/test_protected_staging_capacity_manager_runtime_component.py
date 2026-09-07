@@ -58,7 +58,7 @@ def _registry() -> dict[str, object]:
                 "pool_reporter_incarnation": None,
             },
             {
-                "principal_id": "configuration-activate",
+                "principal_id": "capacity-config-activate",
                 "token_sha256": "2" * 64,
                 "scopes": ["capacity:configure:activate"],
                 "subject_id": None,
@@ -409,8 +409,8 @@ def test_registry_mutation_preserves_existing_principals_and_adds_one_bound_repo
     principals = {principal["principal_id"]: principal for principal in parsed["principals"]}
     assert principals["existing-operator"] == registry["principals"][0]
     assert principals["existing-demand-reporter"] == registry["principals"][2]
-    assert principals["configuration-activate"] == {
-        "principal_id": "configuration-activate",
+    assert principals["capacity-config-activate"] == {
+        "principal_id": "capacity-config-activate",
         "token_sha256": "2" * 64,
         "scopes": [
             "capacity:configure:activate",
@@ -651,21 +651,21 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
     principals = json.loads(principal_payload)["principals"]
     assert [principal["principal_id"] for principal in principals] == [
         "existing-operator",
-        "configuration-activate",
+        "capacity-config-activate",
         "existing-demand-reporter",
         "staging-demand-reporter",
     ]
     principal_scopes = {
         principal["principal_id"]: set(principal["scopes"]) for principal in principals
     }
-    assert principal_scopes["configuration-activate"] == {
+    assert principal_scopes["capacity-config-activate"] == {
         "capacity:configure:activate",
         "capacity:configure:rollback",
     }
     assert all(
         "capacity:configure:rollback" not in scopes
         for principal_id, scopes in principal_scopes.items()
-        if principal_id != "configuration-activate"
+        if principal_id != "capacity-config-activate"
     )
     desired_image = "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
     template = cluster.deployment["spec"]["template"]
