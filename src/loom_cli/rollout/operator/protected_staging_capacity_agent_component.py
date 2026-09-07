@@ -38,6 +38,15 @@ _EXPECTED = (
     ("NetworkPolicy", "loom-capacity-agent-egress"),
     ("NetworkPolicy", "loom-capacity-agent-postgres-ingress"),
 )
+_K3S_DEPLOYMENT_REVISION_FIELDS: tuple[dict[str, object], ...] = (
+    {"f:annotations": {"f:deployment.kubernetes.io/revision": {}}},
+    {
+        "f:annotations": {
+            ".": {},
+            "f:deployment.kubernetes.io/revision": {},
+        }
+    },
+)
 
 
 class ProtectedStagingCapacityAgentCommandRunner(Protocol):
@@ -724,11 +733,18 @@ def _safe_owned(observed: Mapping[str, object], desired: Mapping[str, object]) -
             return True
         fields = entry.get("fieldsV1")
         return (
-            entry.get("manager") == "k3s"
+            observed.get("kind") == "Deployment"
+            and entry.get("manager") == "k3s"
             and entry.get("operation") == "Update"
+            and entry.get("apiVersion") == "apps/v1"
             and entry.get("subresource") == "status"
             and isinstance(fields, dict)
-            and set(fields) == {"f:status"}
+            and set(fields) <= {"f:metadata", "f:status"}
+            and isinstance(fields.get("f:status"), dict)
+            and (
+                "f:metadata" not in fields
+                or fields["f:metadata"] in _K3S_DEPLOYMENT_REVISION_FIELDS
+            )
         )
 
     return (

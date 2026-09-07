@@ -119,6 +119,11 @@ def _projection(document):  # type: ignore[no-untyped-def]
         "uid",
     ):
         metadata.pop(field, None)
+    annotations = metadata.get("annotations")
+    if isinstance(annotations, dict):
+        annotations.pop("deployment.kubernetes.io/revision", None)
+        if not annotations:
+            metadata.pop("annotations")
     spec = value.get("spec")
     if isinstance(spec, dict):
         template = spec.get("template")
@@ -270,12 +275,21 @@ class _PolicyCluster:
                 {
                     "apiVersion": "apps/v1",
                     "fieldsType": "FieldsV1",
-                    "fieldsV1": {"f:status": {}},
+                    "fieldsV1": {
+                        "f:metadata": {
+                            "f:annotations": {
+                                ".": {},
+                                "f:deployment.kubernetes.io/revision": {},
+                            }
+                        },
+                        "f:status": {},
+                    },
                     "manager": "k3s",
                     "operation": "Update",
                     "subresource": "status",
                 }
             )
+            metadata.setdefault("annotations", {})["deployment.kubernetes.io/revision"] = "1"
             value["status"] = {
                 "availableReplicas": replicas,
                 "observedGeneration": metadata["generation"],
@@ -1002,6 +1016,41 @@ def test_policy_component_rejects_foreign_ownership_on_expected_resource(
         and "--dry-run=server" not in command
         for command, payload in cluster.calls
     )
+
+
+def test_policy_component_limits_k3s_status_owner_to_deployment_revision(
+    tmp_path: Path,
+) -> None:
+    """Break caught: the manager's K3s status owner is trusted for foreign metadata."""
+    module = importlib.import_module(MODULE)
+    candidate = _candidate(tmp_path)
+    plan, prerequisite = _plan_and_prerequisite(tmp_path)
+    cluster = _PolicyCluster(candidate)
+    manager = cluster.resources[("Deployment", "loom-dev", "loom-capacity-manager")]
+    managed = manager["metadata"]["managedFields"]
+    status_owner = next(entry for entry in managed if entry.get("manager") == "k3s")
+    status_owner["fieldsV1"]["f:metadata"]["f:labels"] = {"f:foreign": {}}
+    authority = module.ManagerPolicyRuntimeAuthority(
+        authority_incarnation=UUID(str(_seed()["authority_incarnation"])),
+        principal_registry=b'{"principals":[],"schema_version":1}\n',
+        server_certificate=_server_certificate(),
+    )
+    component = module.KubernetesProtectedStagingCapacityManagerPolicyComponent(
+        runner=cluster,
+        candidate_root=candidate,
+        container_registry="registry.example.test/loom",
+        prerequisite_reader=lambda _plan: prerequisite,
+        runtime_authority_reader=lambda: authority,
+        manager_status_reader=lambda: dict(cluster.status),
+    )
+
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["fieldsV1"]["f:metadata"].pop("f:labels")
+    status_owner["apiVersion"] = "v1"
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["apiVersion"] = "apps/v1"
+    status_owner["fieldsV1"]["f:metadata"] = None
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
 
 
 def test_policy_component_rejects_unexpected_server_diff_status(tmp_path: Path) -> None:

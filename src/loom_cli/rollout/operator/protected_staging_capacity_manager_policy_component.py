@@ -63,8 +63,16 @@ _MANAGER_DEPLOYMENT_MANAGER_CONTRACTS = frozenset(
         ("kubectl-client-side-apply", "Update", "apps/v1", None),
         ("kubectl-rollout", "Update", "apps/v1", None),
         (_FIELD_MANAGER, "Update", "apps/v1", None),
-        ("k3s", "Update", "apps/v1", "status"),
     }
+)
+_K3S_DEPLOYMENT_REVISION_FIELDS: tuple[dict[str, object], ...] = (
+    {"f:annotations": {"f:deployment.kubernetes.io/revision": {}}},
+    {
+        "f:annotations": {
+            ".": {},
+            "f:deployment.kubernetes.io/revision": {},
+        }
+    },
 )
 _STATUS_FIELDS = {
     "schema_version",
@@ -875,8 +883,14 @@ def _safe_owned(
             observed.get("kind") == "Deployment"
             and manager == "k3s"
             and operation == "Update"
+            and entry.get("apiVersion") == "apps/v1"
             and subresource == "status"
-            and set(fields) == {"f:status"}
+            and set(fields) <= {"f:metadata", "f:status"}
+            and isinstance(fields.get("f:status"), dict)
+            and (
+                "f:metadata" not in fields
+                or fields["f:metadata"] in _K3S_DEPLOYMENT_REVISION_FIELDS
+            )
         ):
             continue
         return False
