@@ -793,6 +793,23 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             }
         )
 
+    def classify_authority_forward(self, plan: FinalGatePlan) -> ComponentState:
+        """Narrow terminal recovery to an unused legacy database or its exact target."""
+        try:
+            snapshot = self._snapshot(plan)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return ComponentState.DRIFTED
+        if snapshot.resources is not _ResourceState.ABSENT:
+            return ComponentState.DRIFTED
+        if snapshot.database in {
+            _DatabaseState.AUTHORITY_REBIND_REQUIRED,
+            _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED,
+        }:
+            return ComponentState.READY
+        if snapshot.database is _DatabaseState.EXACT:
+            return ComponentState.EXACT
+        return ComponentState.DRIFTED
+
     def apply(self, plan: FinalGatePlan) -> None:
         seed = self.seed_reader()
         payload = self._manifest(plan, seed)

@@ -36,6 +36,8 @@ from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePl
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
+    ProtectedApplyJournal,
+    ProtectedApplyJournalError,
 )
 from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
@@ -1014,6 +1016,30 @@ def test_runtime_builds_fixed_chain_and_epoch_drift_blocks_every_component(
             component.apply(plan)
 
 
+def test_runtime_scopes_terminal_recovery_to_legacy_capacity_foundations(
+    tmp_path: Path,
+) -> None:
+    """Break caught: authority-forward recovery is missing or exposed to later components."""
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+
+    components = _runtime(tmp_path).components(plan, epoch_guard=lambda _plan: epoch)
+
+    assert tuple(
+        component.component_id
+        for component in components
+        if component.terminal_recovery_authority is not None
+    ) == (
+        "staging-capacity-credentials",
+        "staging-capacity-database",
+        "staging-protected-runtime-secret",
+    )
+
+
 def test_execution_plan_converges_both_controller_prerequisites_before_credentials(
     tmp_path: Path,
 ) -> None:
@@ -1424,6 +1450,136 @@ def test_credentials_component_repairs_only_legacy_deterministic_authority(
     }
     assert runtime.credential_seed_path.stat().st_mode & 0o777 == 0o600
     assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_journal_recovers_immutable_legacy_capacity_terminal_by_authority_forward(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a legacy terminal blocks its narrowly authorized authority repair."""
+    runtime = _runtime(tmp_path)
+    _write_bootstrap(runtime)
+    legacy_authority = "558afea6-2a37-55a1-9f7c-3399695da966"
+    runtime._create_credential_seed(UUID(legacy_authority))
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+    component = runtime.components(plan, epoch_guard=lambda _plan: epoch)[0]
+    legacy_observation = component.classify(plan)
+    assert legacy_observation.state is ComponentState.READY
+
+    historical_component = replace(
+        component,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest=legacy_observation.evidence_digest,
+            observed_epoch=legacy_observation.observed_epoch,
+        ),
+        apply=lambda _plan: pytest.fail("historical exact state must not mutate"),
+    )
+    attempt_root = runtime.state_root / f"requests/{plan.request_id}/attempts/{plan.attempt_number}"
+    attempt_root.mkdir(parents=True, mode=0o700)
+    journal = ProtectedApplyJournal(
+        runtime.state_root,
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    historical_terminal = journal.execute(plan, (historical_component,))[component.component_id]
+    component_root = journal.root / f"00-{component.component_id}"
+    original_terminal = (component_root / "terminal.json").read_bytes()
+
+    recovered_terminal = journal.execute(plan, (component,))[component.component_id]
+    repaired_seed = runtime.credential_seed_path.read_bytes()
+    replayed_terminal = journal.execute(plan, (component,))[component.component_id]
+
+    assert json.loads(repaired_seed)["authority_incarnation"] == plan.manager_authority_incarnation
+    assert (component_root / "terminal.json").read_bytes() == original_terminal
+    assert recovered_terminal == replayed_terminal
+    assert recovered_terminal.evidence_digest != historical_terminal.evidence_digest
+    assert runtime.credential_seed_path.read_bytes() == repaired_seed
+
+    recovery_intent = json.loads((component_root / "terminal-recovery-intent.json").read_text())
+    recovery = json.loads((component_root / "terminal-recovery.json").read_text())
+    historical_record = json.loads(original_terminal)
+    assert recovery_intent["request_id"] == plan.request_id
+    assert recovery_intent["attempt_number"] == plan.attempt_number
+    assert recovery_intent["plan_digest"] == plan.plan_digest
+    assert recovery_intent["candidate_sha"] == plan.candidate_sha
+    assert recovery_intent["candidate_tree"] == plan.candidate_tree
+    assert recovery_intent["component_id"] == component.component_id
+    assert recovery_intent["ordinal"] == 0
+    assert recovery_intent["component_intent_digest"] == historical_record["intent_digest"]
+    assert recovery_intent["prior_terminal_digest"] == historical_record["terminal_digest"]
+    assert recovery_intent["source_authority_incarnation"] == legacy_authority
+    assert recovery_intent["target_authority_incarnation"] == plan.manager_authority_incarnation
+    assert recovery_intent["observed_epoch"] == plan.starting_mutation_epoch + 1
+    assert recovery["recovery_intent_digest"] == recovery_intent["recovery_intent_digest"]
+    assert recovery["evidence_digest"] == recovered_terminal.evidence_digest
+    assert recovery["observed_epoch"] == recovered_terminal.observed_epoch
+    assert recovery["effective_terminal_digest"] == recovered_terminal.terminal_digest
+
+
+def test_journal_recovers_authority_mutation_without_repeating_after_publish_crash(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a crash after authority mutation causes replay to mutate it again."""
+    runtime = _runtime(tmp_path)
+    _write_bootstrap(runtime)
+    runtime._create_credential_seed(UUID("558afea6-2a37-55a1-9f7c-3399695da966"))
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+    component = runtime.components(plan, epoch_guard=lambda _plan: epoch)[0]
+    legacy_observation = component.classify(plan)
+    historical_component = replace(
+        component,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest=legacy_observation.evidence_digest,
+            observed_epoch=legacy_observation.observed_epoch,
+        ),
+        apply=lambda _plan: pytest.fail("historical exact state must not mutate"),
+    )
+    attempt_root = runtime.state_root / f"requests/{plan.request_id}/attempts/{plan.attempt_number}"
+    attempt_root.mkdir(parents=True, mode=0o700)
+    journal = ProtectedApplyJournal(
+        runtime.state_root,
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    journal.execute(plan, (historical_component,))
+    original_publish = journal._publish_or_match
+    crashed = False
+
+    def crash_before_recovery_terminal(path, value):
+        nonlocal crashed
+        if path.name == "terminal-recovery.json" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated recovery terminal publication crash")
+        original_publish(path, value)
+
+    journal._publish_or_match = crash_before_recovery_terminal  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="publication crash"):
+        journal.execute(plan, (component,))
+    repaired_seed = runtime.credential_seed_path.read_bytes()
+    assert json.loads(repaired_seed)["authority_incarnation"] == plan.manager_authority_incarnation
+    component_root = journal.root / f"00-{component.component_id}"
+    assert (component_root / "terminal-recovery-intent.json").exists()
+    assert not (component_root / "terminal-recovery.json").exists()
+
+    journal._publish_or_match = original_publish  # type: ignore[method-assign]
+    recovered = journal.execute(plan, (component,))[component.component_id]
+
+    assert runtime.credential_seed_path.read_bytes() == repaired_seed
+    assert recovered.applied is False
+    assert (component_root / "terminal-recovery.json").exists()
 
 
 def test_credentials_component_rejects_unrelated_authority_drift(tmp_path: Path) -> None:
@@ -2190,6 +2346,83 @@ def test_database_component_repairs_exact_unused_legacy_authority(
         "authority-runtime-restore"
     )
     assert "arm" not in runner.events
+    assert "create" not in runner.events
+
+
+def test_journal_recovers_legacy_database_terminal_by_authority_forward(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a historical database terminal prevents certified authority rebinding."""
+    plan, runner, component = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {
+        "authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966",
+    }
+    legacy_observation = component.classify(plan)
+    assert legacy_observation.state is ComponentState.READY
+    historical_component = replace(
+        component,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest=legacy_observation.evidence_digest,
+            observed_epoch=legacy_observation.observed_epoch,
+        ),
+        apply=lambda _plan: pytest.fail("historical exact database must not mutate"),
+    )
+    attempt_root = tmp_path / f"state/requests/{plan.request_id}/attempts/{plan.attempt_number}"
+    attempt_root.mkdir(parents=True, mode=0o700)
+    journal = ProtectedApplyJournal(
+        tmp_path / "state",
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    journal.execute(plan, (historical_component,))
+    component_root = journal.root / f"00-{component.component_id}"
+    original_terminal = (component_root / "terminal.json").read_bytes()
+
+    recovered = journal.execute(plan, (component,))[component.component_id]
+    rebound_events = runner.events.count("authority-rebind")
+    replayed = journal.execute(plan, (component,))[component.component_id]
+
+    assert component.classify(plan).state is ComponentState.EXACT
+    assert runner.registration_overrides == {}
+    assert rebound_events == 1
+    assert runner.events.count("authority-rebind") == rebound_events
+    assert (component_root / "terminal.json").read_bytes() == original_terminal
+    assert recovered == replayed
+
+
+def test_journal_does_not_recover_an_ordinary_ready_database_terminal(
+    tmp_path: Path,
+) -> None:
+    """Break caught: terminal recovery turns an ordinary database bootstrap into a replay repair."""
+    plan, runner, component = _database_component(tmp_path, database_state="absent")
+    ready_observation = component.classify(plan)
+    assert ready_observation.state is ComponentState.READY
+    historical_component = replace(
+        component,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest=ready_observation.evidence_digest,
+            observed_epoch=ready_observation.observed_epoch,
+        ),
+        apply=lambda _plan: pytest.fail("historical exact database must not mutate"),
+    )
+    attempt_root = tmp_path / f"state/requests/{plan.request_id}/attempts/{plan.attempt_number}"
+    attempt_root.mkdir(parents=True, mode=0o700)
+    journal = ProtectedApplyJournal(
+        tmp_path / "state",
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    journal.execute(plan, (historical_component,))
+
+    with pytest.raises(ProtectedApplyJournalError, match="terminal state drifted"):
+        journal.execute(plan, (component,))
+
+    component_root = journal.root / f"00-{component.component_id}"
+    assert not (component_root / "terminal-recovery-intent.json").exists()
     assert "create" not in runner.events
 
 

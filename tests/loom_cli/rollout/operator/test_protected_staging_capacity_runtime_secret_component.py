@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
@@ -19,6 +20,7 @@ from sqlalchemy.engine import make_url
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
+    ProtectedApplyJournal,
 )
 from loom_cli.rollout.operator.protected_staging_capacity_runtime import (
     KubernetesProtectedStagingCapacityRuntime,
@@ -222,3 +224,71 @@ def test_runtime_dispatches_third_journal_slot_to_runtime_secret_component(
     assert component.classify(plan).state is ComponentState.READY
     component.apply(plan)
     assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_legacy_runtime_secret_terminal_remains_exact_after_authority_forward(
+    tmp_path: Path,
+) -> None:
+    """Break caught: unchanged runtime-secret state is needlessly mutated after UUID rebinding."""
+    credential_runtime = _runtime(tmp_path)
+    _write_bootstrap(credential_runtime)
+    credential_runtime._create_credential_seed(
+        uuid5(NAMESPACE_URL, "loom:staging:capacity-authority:v1")
+    )
+    plan = _plan(tmp_path)
+    epoch = ComponentObservation(
+        state=ComponentState.EXACT,
+        evidence_digest="e" * 64,
+        observed_epoch=plan.starting_mutation_epoch + 1,
+    )
+    runner = _Runner(_ca_certificate())
+    legacy_secret = KubernetesProtectedStagingCapacityRuntimeSecretComponent(
+        runner=runner,
+        seed_reader=credential_runtime.read_credential_seed,
+    )
+    legacy_secret.apply(plan)
+    legacy_state, legacy_evidence = legacy_secret.classify(plan)
+    assert legacy_state is ComponentState.EXACT
+    runtime = KubernetesProtectedStagingCapacityRuntime(
+        runner=runner,  # type: ignore[arg-type]
+        state_root=credential_runtime.state_root,
+        candidate_root=credential_runtime.candidate_root,
+        service_uid=os.geteuid(),
+        service_gid=os.getegid(),
+        container_registry="registry.example.test/loom",
+    )
+    components = runtime.components(plan, epoch_guard=lambda _plan: epoch)
+    component = components[2]
+    historical_observation = runtime._observation(
+        plan,
+        component_id=component.component_id,
+        state=ComponentState.EXACT,
+        epoch=epoch,
+        component_evidence=legacy_evidence,
+    )
+    historical_component = replace(
+        component,
+        classify=lambda _plan: historical_observation,
+        apply=lambda _plan: pytest.fail("historical exact runtime Secret must not mutate"),
+    )
+    attempt_root = runtime.state_root / f"requests/{plan.request_id}/attempts/{plan.attempt_number}"
+    attempt_root.mkdir(parents=True, mode=0o700)
+    journal = ProtectedApplyJournal(
+        runtime.state_root,
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+        service_uid=os.geteuid(),
+    )
+    historical_terminal = journal.execute(plan, (historical_component,))[component.component_id]
+
+    components[0].apply(plan)
+    current = component.classify(plan)
+    replayed_terminal = journal.execute(plan, (component,))[component.component_id]
+
+    assert current.state is ComponentState.EXACT
+    assert current.evidence_digest == historical_terminal.evidence_digest
+    assert replayed_terminal == historical_terminal
+    assert len([call for call in runner.calls if "apply" in call]) == 1
+    component_root = journal.root / f"00-{component.component_id}"
+    assert not (component_root / "terminal-recovery-intent.json").exists()
+    assert not (component_root / "terminal-recovery.json").exists()
