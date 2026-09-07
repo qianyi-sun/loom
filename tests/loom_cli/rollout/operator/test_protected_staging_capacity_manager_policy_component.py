@@ -459,6 +459,26 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
         ("NetworkPolicy", "loom-capacity-router", "capacity-manager-router-ingress"),
         ("NetworkPolicy", "loom-capacity-router", "capacity-manager-router-egress"),
     }
+
+    manager = resources[("Deployment", "loom-dev", "loom-capacity-manager")]
+    pod_spec = manager["spec"]["template"]["spec"]
+    init_containers = pod_spec["initContainers"]
+    assert [container["name"] for container in init_containers] == [
+        "prepare-credentials",
+        "migrate-capacity-schema",
+        "execution-policy-init",
+    ]
+    migration = init_containers[1]
+    assert migration["image"] == (
+        "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
+    )
+    assert migration["command"] == ["python", "-m", "loom_capacity_manager.migrate"]
+    assert migration["args"] == [
+        "--db-url-file",
+        "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+        "--expected-authority-incarnation",
+        "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+    ]
     assert all(
         resource["metadata"]["labels"][_COMPONENT_LABEL] == _COMPONENT_VALUE
         for resource in resources.values()

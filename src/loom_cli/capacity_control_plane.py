@@ -1481,6 +1481,37 @@ def _manager_deployment(
     }
 
 
+def _manager_deployment_with_migration_init(
+    profile: CapacityControlPlaneProfile,
+    *,
+    manager_image: str,
+    authority_incarnation: UUID,
+    execution_policy_config_map: str | None = None,
+    execution_policy_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Render a manager that reaches capacity schema head before it starts."""
+
+    deployment = _manager_deployment(
+        profile,
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        execution_policy_config_map=execution_policy_config_map,
+        execution_policy_sha256=execution_policy_sha256,
+    )
+    migration = _migration_job(
+        profile,
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        migration_head=_capacity_head(),
+        image_digest=manager_image.rsplit("@sha256:", 1)[1],
+    )
+    migration_container = migration["spec"]["template"]["spec"]["containers"][0]
+    migration_container["name"] = "migrate-capacity-schema"
+    init_containers = deployment["spec"]["template"]["spec"]["initContainers"]
+    init_containers.insert(1, migration_container)
+    return deployment
+
+
 def _witness_publication_documents() -> list[dict[str, Any]]:
     return [
         {

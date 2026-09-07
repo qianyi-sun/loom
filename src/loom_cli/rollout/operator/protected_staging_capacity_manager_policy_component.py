@@ -23,6 +23,7 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 from loom_cli.capacity_control_plane import (
+    _manager_deployment_with_migration_init,
     load_capacity_control_plane_profile,
     render_capacity_control_plane_manifests,
 )
@@ -669,8 +670,9 @@ def build_manager_policy_resource_documents(
         f"{container_registry}/loom-capacity-manager@{plan.image_digests['loom-capacity-manager']}"
     )
     routes = tuple(sorted(set(prerequisite.manager_client_cidrs.values())))
+    profile = load_capacity_control_plane_profile(candidate_root / _PROFILE_PATH)
     rendered = render_capacity_control_plane_manifests(
-        load_capacity_control_plane_profile(candidate_root / _PROFILE_PATH),
+        profile,
         manager_image=manager_image,
         authority_incarnation=authority_incarnation,
         execution_policy=prerequisite.execution_policy,
@@ -678,6 +680,13 @@ def build_manager_policy_resource_documents(
         external_manager_client_cidrs=routes,
     )
     policy_name = f"loom-capacity-execution-policy-{prerequisite.execution_policy_sha256[:32]}"
+    manager = _manager_deployment_with_migration_init(
+        profile,
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        execution_policy_config_map=policy_name,
+        execution_policy_sha256=prerequisite.execution_policy_sha256,
+    )
     expected = {
         ("Namespace", "", "loom-capacity-router"),
         ("ConfigMap", "loom-dev", policy_name),
@@ -702,7 +711,7 @@ def build_manager_policy_resource_documents(
             continue
         if identity in selected:
             raise ValueError("protected manager policy render contains duplicates")
-        desired = copy.deepcopy(document)
+        desired = copy.deepcopy(manager if identity == _MANAGER_IDENTITY else document)
         metadata = desired["metadata"]
         assert isinstance(metadata, dict)
         labels = metadata.get("labels")
