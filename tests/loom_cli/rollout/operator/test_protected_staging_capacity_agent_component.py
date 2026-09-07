@@ -106,9 +106,16 @@ def test_redaction_assertion_covers_authority_change_tls_values() -> None:
 class _Cluster:
     environment: ClassVar[dict[str, str]] = {"KUBECONFIG": "/fixed"}
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_status_image: str | None = None,
+        runtime_image_id: str | None = None,
+    ) -> None:
         self.objects: dict[tuple[str, str], dict[str, object]] = {}
         self.calls: list[tuple[tuple[str, ...], bytes | None]] = []
+        self.runtime_status_image = runtime_status_image
+        self.runtime_image_id = runtime_image_id
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
@@ -140,6 +147,13 @@ class _Cluster:
             if deployment is None:
                 return b'{"apiVersion":"v1","kind":"List","items":[]}'
             image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+            status = {
+                "name": "capacity-agent",
+                "image": self.runtime_status_image or image,
+                "ready": True,
+            }
+            if self.runtime_image_id is not None:
+                status["imageID"] = self.runtime_image_id
             return json.dumps(
                 {
                     "apiVersion": "v1",
@@ -153,9 +167,7 @@ class _Cluster:
                             "spec": {"containers": [{"name": "capacity-agent", "image": image}]},
                             "status": {
                                 "phase": "Running",
-                                "containerStatuses": [
-                                    {"name": "capacity-agent", "image": image, "ready": True}
-                                ],
+                                "containerStatuses": [status],
                             },
                         }
                     ],
@@ -361,6 +373,25 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
         assert str(credential) not in evidence
 
 
+def test_ready_pod_accepts_containerd_local_status_image_with_exact_image_id(
+    tmp_path: Path,
+) -> None:
+    """Break caught: containerd image normalization falsely fails exact pod readback."""
+    plan = _plan(tmp_path)
+    expected_image = (
+        f"registry.example.test/loom/loom-control-plane@{plan.image_digests['loom-control-plane']}"
+    )
+    cluster = _Cluster(
+        runtime_status_image="sha256:" + "1" * 64,
+        runtime_image_id=expected_image,
+    )
+    component = _component(cluster)
+
+    component.apply(plan)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+
 def test_agent_diff_uses_installed_kubectl_flags(tmp_path: Path) -> None:
     """Break caught: adding apply-only validation flags makes kubectl diff exit 2."""
     cluster = _Cluster()
@@ -529,6 +560,26 @@ def test_controller_status_and_ready_pod_failures_do_not_relax_spec_ownership(
     unready = _UnreadyCluster()
     with pytest.raises(RuntimeError, match="did not converge"):
         _component(unready).apply(plan)
+
+    wrong_runtime_identity = _Cluster(
+        runtime_status_image="sha256:" + "2" * 64,
+        runtime_image_id="registry.example.test/loom/loom-control-plane@sha256:" + "3" * 64,
+    )
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(wrong_runtime_identity).apply(plan)
+
+    class _MalformedStatusCluster(_Cluster):
+        def capture_stdout(self, argv, *, env, timeout_seconds):
+            payload = super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
+            if "pods" in argv and payload:
+                value = json.loads(payload)
+                value["items"][0]["status"]["containerStatuses"][0] = []
+                return json.dumps(value).encode("ascii")
+            return payload
+
+    malformed = _MalformedStatusCluster()
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(malformed).apply(plan)
 
 
 def test_rollout_and_readback_failures_are_closed_without_secret_disclosure(tmp_path: Path) -> None:
