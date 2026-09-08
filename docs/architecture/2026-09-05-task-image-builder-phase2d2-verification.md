@@ -380,6 +380,10 @@ keyset/revocation counters. A state-first, nonwaiting table-lock set precedes
 any removal; a busy database refuses the downgrade and releases acquired locks
 instead of risking deadlock with normal publication. Used authority and audit
 history are retained during rollback; operational rollback is not schema reset.
+Upgrade also acquires its complete preexisting DDL/FK table set without waiting.
+If existing materialization, attempt or audit work holds incompatible locks,
+the migration aborts for a later controlled retry rather than retaining audit
+locks while waiting on an in-flight parent transaction.
 
 ## Failure, retention and compatibility
 
@@ -395,6 +399,29 @@ Migration adds explicit rootless publication authority rather than inferring it
 for existing Phase 1 ready rows. Legacy completion must reject rootless attempts
 while preserving Phase 1 behavior. D2 runtime composition remains unavailable
 until execution trust, shadow acceptance and architecture-fence gates exist.
+
+The current rootless ready map has an explicit nullable publication-operation
+binding, set atomically with verified completion, the exact ready timestamp and
+immutable receipt. A restrictive composite foreign key binds that operation to
+the same materialization. Existing Phase 1 rows retain NULL; upgrade does not
+invent publication authority. A bound map, timestamp and operation cannot be
+rewritten in place. Clearing ownership requires clearing the map and timestamp
+and leaving ready state in the same update. Administrative retry does this while
+retaining completed jobs and their historical receipts.
+
+Legacy GC excludes bound rows before observations, recovery and leasing, even
+when legacy image history coexists. It rejects pending materialization edits
+before observing work and freshly reloads its selected row under lock, so a
+cached rootless map cannot be returned after a concurrent Phase 1 rebuild.
+Legacy evidence recording rejects grant-bound attempts before appending history;
+the separate rootless authority owns their publication and failure lifecycle.
+A subsequent actual Phase 1 completion after explicit retry can own a new
+unbound map; historical rootless receipt replay
+does not restore its old readiness. This binding is current ownership/provenance,
+not signature verification, execution authority or permission to delete bytes.
+Rootless retirement must still validate the exact immutable attempt, completed
+job, image map and receipt under the full reference fence. A NULL pointer alone
+does not prove arbitrary repository history safe for deletion.
 
 Attempt repository discovery uses retained registry credentials, not only
 candidate callbacks: a completed push or partial upload may outlive a lost
