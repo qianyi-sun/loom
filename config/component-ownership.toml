@@ -982,6 +982,7 @@ include_paths = [
 ]
 exclude_paths = [
   "tests/integration/test_execution_actuator_k3s.py",
+  "tests/integration/test_nebius_platform_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
@@ -1045,7 +1046,7 @@ include_paths = [
 id = "python-cluster-smoke"
 language = "python"
 lane = "cluster-smoke"
-include_paths = ["tests/cluster/**/*.py", "tests/integration/test_execution_actuator_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
+include_paths = ["tests/cluster/**/*.py", "tests/integration/test_execution_actuator_k3s.py", "tests/integration/test_nebius_platform_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
 
 [[test_suites]]
 id = "python-system-smoke"

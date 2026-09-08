@@ -124,7 +124,7 @@ def test_pool_capacity_contract_keeps_stale_observations_non_executable() -> Non
         )
 
 
-def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
+def test_topology_accepts_deployed_environment_subset_on_one_cluster() -> None:
     base = {
         "schema_version": "loom.execution-target.v1",
         "logical_pool_id": "nebius-cpu",
@@ -164,6 +164,12 @@ def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
     )
     assert len(topology.targets) == 3
     assert {target.cluster_scope_id for target in topology.targets} == {"nebius-eu-north1-shared"}
+    standalone = topology.model_dump()
+    standalone["targets"] = standalone["targets"][:1]
+    assert len(ExecutionTopologyV1.model_validate(standalone).targets) == 1
+    standalone["targets"] = []
+    with pytest.raises(ValidationError, match="at least 1"):
+        ExecutionTopologyV1.model_validate(standalone)
 
     invalid = topology.model_dump()
     invalid["targets"][2]["cluster_scope_id"] = "nebius-eu-west1-secondary"

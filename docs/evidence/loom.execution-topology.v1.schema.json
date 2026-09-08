@@ -120,7 +120,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Checked environment bindings for one shared physical cluster.",
+  "description": "Checked deployed environment bindings for one physical cluster.",
   "properties": {
     "execution_class_id": {
       "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
@@ -148,7 +148,7 @@
         "$ref": "#/$defs/ExecutionTargetV1"
       },
       "maxItems": 3,
-      "minItems": 3,
+      "minItems": 1,
       "title": "Targets",
       "type": "array"
     }

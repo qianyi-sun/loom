@@ -6,7 +6,7 @@ on:
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   merge_group:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.
@@ -29,19 +29,10 @@ on:
         type: boolean
         default: false
 
-# Authoritative PR events supersede older admission runs for that PR. Draft and
-# unrelated metadata events use a unique slot so they cannot evict a running or
-# pending head/base/selector validation when GitHub delivers events out of order.
+# Every subscribed event validates its candidate. Older head/base events cannot
+# cancel the current candidate; same-candidate events may supersede earlier runs.
 concurrency:
-  group: >-
-    ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (github.event.action == 'edited' && github.event.changes.base == null) ||
-       ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
-      format('filtered-{0}', github.run_id) || 'authoritative' }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -55,79 +46,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      event_relevant: ${{ steps.plan.outputs.event_relevant || steps.event.outputs.event_relevant }}
-      full_gate: ${{ steps.plan.outputs.full_gate || steps.event.outputs.full_gate }}
-      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
-      docs_only: ${{ steps.plan.outputs.docs_only || steps.event.outputs.docs_only }}
-      integration: ${{ steps.plan.outputs.integration || steps.event.outputs.integration }}
-      integration_docker: ${{ steps.plan.outputs.integration_docker || steps.event.outputs.integration_docker }}
-      images: ${{ steps.image-plan.outputs.required || steps.event.outputs.images }}
+      event_relevant: ${{ steps.plan.outputs.event_relevant }}
+      full_gate: ${{ steps.plan.outputs.full_gate }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode }}
+      docs_only: ${{ steps.plan.outputs.docs_only }}
+      integration: ${{ steps.plan.outputs.integration }}
+      integration_docker: ${{ steps.plan.outputs.integration_docker }}
+      images: ${{ steps.image-plan.outputs.required }}
       native_builds: ${{ steps.image-plan.outputs.native_builds || '[]' }}
-      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.cluster_smoke }}
-      staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
+      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke }}
+      staging_smoke: ${{ steps.plan.outputs.staging_smoke }}
       coverage_summary: >-
         ${{ steps.plan.outputs.gate_mode == 'full' &&
             (contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') ||
              inputs.coverage_summary == true) && 'true' || 'false' }}
-      web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
+      web_checks: ${{ steps.plan.outputs.web_checks }}
     steps:
-      - name: Classify filtered event before checkout
-        id: event
-        shell: bash
-        env:
-          FILTERED_EVENT: >-
-            ${{ github.event_name == 'pull_request' &&
-                (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft' ||
-                 (github.event.action == 'edited' &&
-                  github.event.changes.base == null) ||
-                 ((github.event.action == 'labeled' ||
-                   github.event.action == 'unlabeled') &&
-                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
-                            github.event.label.name))) }}
-        run: |
-          set -euo pipefail
-          if [[ "$FILTERED_EVENT" == "true" ]]; then
-            {
-              echo 'checkout_required=false'
-              echo 'event_relevant=false'
-              echo 'full_gate=false'
-              echo 'gate_mode=filtered'
-              echo 'docs_only=true'
-              echo 'integration=false'
-              echo 'integration_docker=false'
-              echo 'images=false'
-              echo 'cluster_smoke=false'
-              echo 'staging_smoke=false'
-              echo 'coverage_summary=false'
-              echo 'web_checks=false'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        if: steps.event.outputs.checkout_required == 'true'
         with:
           fetch-depth: 0
 
       - name: Enforce repository path policy
-        if: steps.event.outputs.checkout_required == 'true'
         run: python3 scripts/check_repository_paths.py
 
       - name: Plan required validations
         id: plan
-        if: steps.event.outputs.checkout_required == 'true'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          PR_ACTION: ${{ github.event.action }}
-          PR_ACTION_LABEL: ${{ github.event.label.name }}
-          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
-          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
           DISPATCH_INTEGRATION: ${{ inputs.integration }}
           DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker }}
         run: |
@@ -175,10 +124,6 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
-            --pull-request-action "$PR_ACTION" \
-            --pull-request-action-label "$PR_ACTION_LABEL" \
-            --pull-request-draft "$PR_DRAFT" \
-            --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Select affected native image builds
@@ -608,6 +553,10 @@ jobs:
           terraform -chdir=deploy/terraform/nebius/modules/execution-target test
           terraform -chdir=deploy/terraform/nebius/stack init -backend=false -input=false
           terraform -chdir=deploy/terraform/nebius/stack validate
+          terraform -chdir=deploy/terraform/nebius/modules/platform init -backend=false -input=false
+          terraform -chdir=deploy/terraform/nebius/modules/platform test
+          terraform -chdir=deploy/terraform/nebius/platform init -backend=false -input=false
+          terraform -chdir=deploy/terraform/nebius/platform validate
 
   # Fail closed on all parallel functional checks; no report tooling needed.
   fast-checks:
@@ -942,15 +891,9 @@ jobs:
           if-no-files-found: error
 
   repository-checks:
-    name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' ||
-          github.event_name == 'push' && 'repository-checks-push' ||
-          needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' ||
-          'repository-checks-filtered' }}
+    name: ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || 'repository-checks' }}
     runs-on: ubuntu-latest
-    if: >-
-      always() &&
-      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    if: always()
     needs:
       - workflow-plan
       - images
@@ -983,15 +926,11 @@ jobs:
           WEB_RESULT: ${{ needs.web-checks.result }}
         run: |
           set -euo pipefail
-          case "$GATE_MODE" in
-            full|filtered) ;;
-            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
-          esac
+          [[ "$GATE_MODE" == "full" ]] || {
+            echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2
+            exit 1
+          }
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
-          if [[ "$GATE_MODE" == "filtered" ]]; then
-            echo "Metadata-only event filtered."
-            exit 0
-          fi
           require_boolean() {
             local name="$1" value="$2"
             case "$value" in

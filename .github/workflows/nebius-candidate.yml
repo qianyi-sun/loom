@@ -1,0 +1,130 @@
+name: nebius-candidate
+
+# Independent publication authority. PR CI cannot invoke this workflow, and
+# the legacy dev/main release and deployment allowlists remain unchanged.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/nebius-main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nebius-candidate-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'qianyi-sun/loom' &&
+      github.ref == 'refs/heads/codex/nebius-main' &&
+      vars.NEBIUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: nebius-integration
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+      - name: Install locked candidate tooling
+        run: |
+          uv sync --locked --no-dev --extra cluster
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
+          test "$(dpkg-query -W -f='${Version}' skopeo)" = '1.13.3+ds1-2ubuntu0.24.04.3'
+          skopeo --version
+      - name: Start pinned rootless BuildKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='docker.io/moby/buildkit:v0.33.0-rootless@sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef'
+          docker create --name nebius-candidate-buildkit --user 1000:1000 \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            --publish 127.0.0.1:1234:1234 "$image" \
+            --addr=tcp://0.0.0.0:1234 --oci-worker-no-process-sandbox
+          docker cp nebius-candidate-buildkit:/usr/bin/buildctl "$RUNNER_TEMP/buildctl"
+          chmod 0755 "$RUNNER_TEMP/buildctl"
+          docker start nebius-candidate-buildkit
+          export BUILDKIT_HOST=tcp://127.0.0.1:1234
+          "$RUNNER_TEMP/buildctl" --version
+          for _ in $(seq 1 30); do
+            if "$RUNNER_TEMP/buildctl" debug workers; then
+              echo "BUILDKIT_HOST=$BUILDKIT_HOST" >> "$GITHUB_ENV"
+              echo "BUILDKIT_CLIENT=$RUNNER_TEMP/buildctl" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Rootless BuildKit failed to become ready' >&2
+          exit 1
+      - name: Build, scan, publish and sign the fixed candidate
+        env:
+          NEBIUS_REGISTRY_PREFIX: ${{ vars.NEBIUS_REGISTRY_PREFIX }}
+          NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON: ${{ secrets.NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON }}
+          NEBIUS_SIGNING_KEY: ${{ secrets.NEBIUS_IMAGE_ADMISSION_SIGNING_KEY }}
+          NEBIUS_SIGNING_KEY_ID: ${{ vars.NEBIUS_IMAGE_ADMISSION_SIGNING_KEY_ID }}
+          NEBIUS_TRUSTED_KEYRING: ${{ vars.NEBIUS_IMAGE_ADMISSION_TRUSTED_KEYRING_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          work=$(mktemp -d "$RUNNER_TEMP/nebius-publish.XXXXXX")
+          trap 'rm -rf -- "$work"' EXIT
+          export DOCKER_CONFIG="$work/docker"
+          mkdir "$DOCKER_CONFIG"
+          export REGISTRY_AUTH_FILE="$DOCKER_CONFIG/config.json"
+          export NEBIUS_REGISTRY_CREDENTIALS_FILE="$work/registry-service-account.json"
+          export NEBIUS_PUBLISH_WORK="$work"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          registry = os.environ["NEBIUS_REGISTRY_PREFIX"]
+          if not re.fullmatch(r"cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+", registry):
+              raise SystemExit("Invalid Nebius registry prefix")
+          for name in ("NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON", "NEBIUS_SIGNING_KEY_ID"):
+              if not os.environ[name]:
+                  raise SystemExit("Missing required publication configuration")
+          root = Path(os.environ["NEBIUS_PUBLISH_WORK"])
+          (root / "signing.pem").write_text(os.environ.pop("NEBIUS_SIGNING_KEY"))
+          (root / "keyring.json").write_text(os.environ["NEBIUS_TRUSTED_KEYRING"])
+          Path(os.environ["NEBIUS_REGISTRY_CREDENTIALS_FILE"]).write_text(os.environ.pop("NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON"))
+          PY
+          unset NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON NEBIUS_SIGNING_KEY
+          uv run --no-sync python scripts/ops/nebius_registry_auth.py \
+            --credentials "$NEBIUS_REGISTRY_CREDENTIALS_FILE" \
+            --registry-prefix "$NEBIUS_REGISTRY_PREFIX" \
+            --auth-file "$REGISTRY_AUTH_FILE"
+          uv run --no-sync python scripts/ops/nebius_candidate.py build \
+            --registry-prefix "$NEBIUS_REGISTRY_PREFIX" \
+            --signing-key "$work/signing.pem" \
+            --signing-key-id "$NEBIUS_SIGNING_KEY_ID" \
+            --trusted-keyring "$work/keyring.json" \
+            --output "$RUNNER_TEMP/nebius-candidate"
+      - name: Preserve builder state and stop ephemeral builder
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/nebius-candidate"
+          docker logs nebius-candidate-buildkit > "$RUNNER_TEMP/nebius-buildkit.log" 2>&1 || true
+          docker inspect --format '{"status":"{{.State.Status}}","exit_code":{{.State.ExitCode}}}' \
+            nebius-candidate-buildkit > "$RUNNER_TEMP/nebius-candidate/builder-state.json" || true
+          docker rm --force --volumes nebius-candidate-buildkit || true
+      - name: Preserve candidate and partial scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-candidate/
+          if-no-files-found: warn
+          retention-days: 30

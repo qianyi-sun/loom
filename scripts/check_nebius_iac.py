@@ -358,21 +358,18 @@ def check_nebius_iac(
         f"{state_wrapper}: ambient state credentials must be rejected",
     )
 
-    versions = (root / "modules" / "execution-target" / "versions.tf").read_text(encoding="utf-8")
-    stack_versions = (root / "stack" / "versions.tf").read_text(encoding="utf-8")
-    for path, text in (
-        (root / "modules" / "execution-target" / "versions.tf", versions),
-        (root / "stack" / "versions.tf", stack_versions),
-    ):
+    for directory in ("modules/execution-target", "stack", "modules/platform", "platform"):
+        path = root / directory / "versions.tf"
+        text = path.read_text(encoding="utf-8")
         _require(
             'required_version = "= 1.16.0"' in text, f"{path}: Terraform must be pinned to 1.16.0"
         )
         _require(
-            re.search(r'^\s*source\s*=\s*"nebius/nebius"\s*$', text, re.MULTILINE) is not None,
+            re.search(r'\bsource\s*=\s*"nebius/nebius"', text) is not None,
             f"{path}: provider source must be nebius/nebius",
         )
         _require(
-            re.search(r'^\s*version\s*=\s*"= 0.6.46"\s*$', text, re.MULTILINE) is not None,
+            re.search(r'\bversion\s*=\s*"= 0.6.46"', text) is not None,
             f"{path}: Nebius provider must be pinned to 0.6.46",
         )
         _require(
@@ -448,7 +445,7 @@ def main() -> int:
         check_nebius_iac()
     except (ContractError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Nebius IaC contract failed: {exc}") from exc
-    print("Nebius IaC contract passed for 1 shared cluster and 3 environment bindings.")
+    print("Nebius IaC contract passed for the shared execution stack and independent platform roots.")
     return 0
 
 

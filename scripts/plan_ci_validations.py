@@ -74,6 +74,15 @@ NEBIUS_IAC_EXACT = {
 
 NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
 
+NEBIUS_PLATFORM_EXACT = {
+    ".github/workflows/nebius-candidate.yml",
+    "scripts/ops/deploy_nebius_platform.py",
+    "scripts/ops/nebius_candidate.py",
+    "scripts/ops/nebius_registry_auth.py",
+    "scripts/ops/render_nebius_platform.py",
+}
+NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
+
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     ".github/workflows/deploy-environment.yml",
     ".github/workflows/release-promotion-gate.yml",
@@ -187,29 +196,6 @@ class ValidationPlan:
         return outputs
 
 
-def _pull_request_gate_mode(
-    *,
-    action: str,
-    action_label: str,
-    draft: bool,
-    base_changed: bool,
-) -> tuple[bool, bool, str]:
-    """Return event relevance, full-gate eligibility, and the gate context mode.
-
-    Head, base, readiness, and supported validation-selector changes emit the
-    the protected aggregate result. Drafts and unrelated metadata events are filtered
-    before checkout. Unknown actions remain fail-closed and run the full gate.
-    """
-
-    if draft or action == "converted_to_draft":
-        return False, False, "filtered"
-    if action == "edited" and not base_changed:
-        return False, False, "filtered"
-    if action in {"labeled", "unlabeled"} and action_label not in LABEL_TO_CHECK:
-        return False, False, "filtered"
-    return True, True, "full"
-
-
 def _is_documentation_path(path: str) -> bool:
     return (
         path in DOC_METADATA_PATHS
@@ -270,16 +256,15 @@ def plan_validations(
     event_relevant = True
     full_gate = True
     gate_mode = "full"
-    if event_name == "pull_request":
-        event_relevant, full_gate, gate_mode = _pull_request_gate_mode(
-            action=pull_request_action,
-            action_label=pull_request_action_label,
-            draft=pull_request_draft,
-            base_changed=pull_request_base_changed,
-        )
+    # Lifecycle metadata cannot skip a subscribed run: a newer empty GitHub
+    # check suite can hide an earlier successful required check for this SHA.
+    # Keep metadata arguments for CLI/caller compatibility; selection uses the
+    # changed paths and the event's full label snapshot below.
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
-    paths = tuple(path for path in paths if not _component_ownership_manifest().ci_ignores_path(path))
+    paths = tuple(
+        path for path in paths if not _component_ownership_manifest().ci_ignores_path(path)
+    )
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
@@ -357,6 +342,9 @@ def plan_validations(
     )
     cluster_exact = {
         ".github/workflows/cluster-smoke.yml",
+        "src/loom/nebius_platform_render.py",
+        "scripts/ops/render_nebius_platform.py",
+        "tests/unit/test_nebius_platform_render.py",
         ".github/workflows/release-promotion-gate.yml",
         "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/cluster_cmd.py",
@@ -428,6 +416,7 @@ def plan_validations(
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+            or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
             or _is_protected_staging_rollout_path(path)
             or _is_protected_native_authority_path(path)
             or bool(test_owner_lanes)

@@ -48,7 +48,7 @@ def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
         ("labeled", ""),
     ],
 )
-def test_unrelated_pr_metadata_event_is_filtered(
+def test_unrelated_pr_metadata_event_runs_the_complete_gate(
     action: str,
     action_label: str,
 ) -> None:
@@ -61,9 +61,9 @@ def test_unrelated_pr_metadata_event_is_filtered(
         pull_request_base_changed=False,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
 @pytest.mark.parametrize(
@@ -92,7 +92,7 @@ def test_supported_selector_metadata_event_runs_full_gate(action: str, label: st
     assert plan.gate_mode == "full"
 
 
-def test_draft_pr_is_filtered() -> None:
+def test_draft_pr_runs_the_complete_gate() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],
         labels=set(),
@@ -101,25 +101,25 @@ def test_draft_pr_is_filtered() -> None:
         pull_request_draft=True,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
-def test_converting_to_draft_filters_gate_until_ready_again() -> None:
+def test_delayed_draft_snapshot_does_not_replace_ready_checks_with_an_empty_suite() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],
         labels=set(),
         event_name="pull_request",
-        pull_request_action="converted_to_draft",
-        # The action itself must remain filtered even if a synthetic or
-        # replayed payload has not yet reflected the new draft state.
-        pull_request_draft=False,
+        pull_request_action="opened",
+        # A delayed original event can arrive after ready_for_review at the
+        # same head. It must still validate instead of emitting an empty suite.
+        pull_request_draft=True,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
 def test_docs_only_selects_no_heavy_validation() -> None:
@@ -256,6 +256,9 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
     "path",
     [
         "deploy/terraform/nebius/stack/main.tf",
+        "deploy/terraform/nebius/modules/platform/main.tf",
+        "deploy/terraform/nebius/platform/main.tf",
+        "deploy/terraform/nebius/integration-platform.tfvars.json.example",
         "scripts/check_nebius_iac.py",
         "tests/ops/test_nebius_iac.py",
     ],
@@ -270,6 +273,37 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
     assert plan.integration is True
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == {"integration"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/ops/deploy_nebius_platform.py",
+        "scripts/ops/nebius_candidate.py",
+        "scripts/ops/nebius_registry_auth.py",
+        "deploy/nebius/integration.platform.json.example",
+        ".github/workflows/nebius-candidate.yml",
+    ],
+)
+def test_nebius_platform_tools_do_not_fall_back_to_unrelated_heavy_lanes(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == {"integration"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/loom/nebius_platform_render.py",
+        "scripts/ops/render_nebius_platform.py",
+        "tests/unit/test_nebius_platform_render.py",
+        "tests/integration/test_nebius_platform_k3s.py",
+    ],
+)
+def test_nebius_manifest_changes_select_actual_kubernetes_admission(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.unowned_runtime is False
+    assert plan.cluster_smoke is True
 
 
 @pytest.mark.parametrize(
@@ -385,6 +419,9 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "tests/unit/test_metrics_enumeration.py",
         "tests/loom_cli/test_config.py",
         "tests/ops/test_nebius_ci_scope.py",
+        "tests/ops/test_nebius_candidate.py",
+        "tests/ops/test_nebius_registry_auth.py",
+        "tests/ops/test_deploy_nebius_platform.py",
     ],
 )
 def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str) -> None:
@@ -416,6 +453,10 @@ def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> N
             {"integration", "integration_docker"},
         ),
         ("tests/unit/test_nebius_runtime_render.py", {"cluster_smoke"}),
+        (
+            "tests/integration/test_nebius_platform_bootstrap.py",
+            {"integration", "integration_docker"},
+        ),
         ("tests/system/test_full_stack_hello.py", {"staging_smoke"}),
     ],
 )
