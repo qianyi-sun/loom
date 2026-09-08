@@ -929,13 +929,13 @@ jobs:
         run: uv sync --locked --all-packages --extra dev --python 3.11
 
       - name: Build Go V2 handoff test binary
-        run: go test -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" ./cmd/loom-task-image-builder-supervisor
+        run: go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" ./cmd/loom-task-image-builder-supervisor
 
       - name: Python-Go V2 handoff
         env:
           LOOM_GO_V2_TEST_BINARY: ${{ runner.temp }}/loom-task-image-builder-supervisor.test
           LOOM_GO_V2_TEST_REQUIRED: "1"
-        run: uv run --no-sync pytest tests/integration/test_task_image_builder_guard_local_flow.py::test_go_v2_candidate_handoff_reaches_actual_python_service
+        run: uv run --no-sync pytest tests/integration/test_task_image_builder_guard_local_flow.py tests/integration/test_task_image_publication_full_flow.py
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at both
