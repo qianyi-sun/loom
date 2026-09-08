@@ -423,6 +423,14 @@ fault injection is not prevented by triggers that such an owner can disable.
 Retirement transactions still must load the complete inventory under their
 shared fence and separately prove references and registry quiescence.
 
+Reference ensure freshly reloads existing materializations under consistently
+ordered row locks, so a cached ready object cannot survive committed retirement.
+It rejects pending materialization edits before refreshing rather than discarding
+caller-owned state. The returned architecture order is unchanged. This refresh
+does not replace the task revision already supplied by a trial submission with
+the catalog's newer revision; full registration/reference retirement fencing is
+a separate pending contract.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency
