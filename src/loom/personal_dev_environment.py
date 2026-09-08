@@ -17,6 +17,8 @@ from uuid import UUID
 
 from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
 from loom.personal_dev_candidate import PersonalDevCandidateRecord
+from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelopeV1
+from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
 
 PersonalDevEnvironmentStatus = Literal[
     "provisioning",
@@ -39,6 +41,7 @@ PersonalDevOperationState = Literal[
     "cancelled",
 ]
 PersonalDevAccessKind = Literal["bearer", "session"]
+PersonalDevCapacityMode = Literal["shadow-v1", "membership-v1"]
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -194,6 +197,8 @@ class PersonalDevEnvironmentRecord:
     ready_at: datetime | None = None
     deleted_at: datetime | None = None
     failure_reason: str | None = None
+    accepted_capacity_mode: PersonalDevCapacityMode = "shadow-v1"
+    accepted_capacity_membership_checkpoint: PersonalMembershipCheckpointV1 | None = None
     capacity_configuration_epoch: int | None = None
     capacity_configuration_sha256: str | None = None
     capacity_reporter_incarnation: UUID | None = None
@@ -235,6 +240,8 @@ class PersonalDevLifecycleOperationRecord:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_reason: str | None = None
+    capacity_mode: PersonalDevCapacityMode = "shadow-v1"
+    capacity_membership_envelope: PersonalDevMembershipEnvelopeV1 | None = None
     readiness_evidence_sha256: str | None = None
     activation_acknowledgement_sha256: str | None = None
     local_activation_sha256: str | None = None
@@ -295,6 +302,7 @@ __all__ = [
     "PersonalDevAccessBinding",
     "PersonalDevAccessKind",
     "PersonalDevApplyReservation",
+    "PersonalDevCapacityMode",
     "PersonalDevEnvironmentApplyRequest",
     "PersonalDevEnvironmentDestroyRequest",
     "PersonalDevEnvironmentRecord",

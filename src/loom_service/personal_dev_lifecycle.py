@@ -33,6 +33,13 @@ from loom.personal_dev_environment import (
     PersonalDevReconciliationClaim,
 )
 from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
+from loom.personal_dev_membership_reconciler import (
+    MembershipAdmissionGuard,
+    MembershipClient,
+    MembershipInstaller,
+    MembershipObserver,
+    PersonalDevMembershipReconciler,
+)
 from loom.personal_dev_reconciler import (
     PersonalDevEnvironmentReconciler,
     PersonalDevPreparationExecutor,
@@ -56,6 +63,21 @@ from loom_service.config import LoomServiceSettings
 from loom_service.dev_instance_access import load_owner_access_snapshot_by_binding
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevMembershipRuntime:
+    """Trusted active ports; each saved operation still chooses its own mode.
+
+    The service owns client lifetime. The loop must keep running for historical
+    recovery and release when the independent admission interlock is unavailable.
+    """
+
+    installer: MembershipInstaller
+    client: MembershipClient
+    observer: MembershipObserver
+    admission: MembershipAdmissionGuard
+    management_principal_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +267,21 @@ class SessionPersonalDevReconciliationAuthority:
     async def record_capacity_projection(self, **kwargs: Any) -> Any:
         return await self._call("record_capacity_projection", **kwargs)
 
+    async def prepare_capacity_membership(self, **kwargs: Any) -> Any:
+        return await self._call("prepare_capacity_membership", **kwargs)
+
+    async def refresh_capacity_membership(self, **kwargs: Any) -> Any:
+        return await self._call("refresh_capacity_membership", **kwargs)
+
+    async def record_capacity_membership(self, **kwargs: Any) -> Any:
+        return await self._call("record_capacity_membership", **kwargs)
+
+    async def record_capacity_membership_outcome(self, **kwargs: Any) -> Any:
+        return await self._call("record_capacity_membership_outcome", **kwargs)
+
+    async def record_capacity_membership_release(self, **kwargs: Any) -> Any:
+        return await self._call("record_capacity_membership_release", **kwargs)
+
     async def advance_destroy_checkpoint(self, **kwargs: Any) -> Any:
         return await self._call("advance_destroy_checkpoint", **kwargs)
 
@@ -274,6 +311,7 @@ async def personal_dev_reconcile_run_loop(
     reconciler_id: str,
     lease_seconds: int,
     poll_interval_seconds: float,
+    membership: PersonalDevMembershipRuntime | None = None,
 ) -> None:
     if poll_interval_seconds <= 0:
         raise ValueError("personal-dev reconcile poll interval must be positive")
@@ -289,6 +327,18 @@ async def personal_dev_reconcile_run_loop(
         access_loader=personal_dev_access_loader(session_factory),
         reconciler_id=reconciler_id,
         lease_seconds=lease_seconds,
+        membership_reconciler=(
+            PersonalDevMembershipReconciler(
+                authority=authority,
+                client=membership.client,
+                installer=membership.installer,
+                management_principal_id=membership.management_principal_id,
+                observer=membership.observer,
+                cleanup_executor=executor,
+                admission=membership.admission,
+            )
+            if membership is not None else None
+        ),
     )
     while True:
         try:
@@ -307,6 +357,7 @@ async def personal_dev_reconcile_run_loop(
 
 __all__ = [
     "PersonalDevCapacityRuntime",
+    "PersonalDevMembershipRuntime",
     "SessionPersonalDevReconciliationAuthority",
     "build_personal_dev_capacity_runtime",
     "personal_dev_access_loader",

@@ -27,6 +27,7 @@ from loom.dev_instance_provisioner import (
 )
 from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_membership_cleanup import validated_membership_destroy
 from loom.personal_dev_reconciler import (
     PersonalDevReadinessObservation,
     personal_dev_candidate_images,
@@ -528,23 +529,32 @@ class PersonalDevPreparationRuntime:
         await self.access.bootstrap(identity, password=password, access=access)
 
     @staticmethod
-    def _destroy_identity(claim: PersonalDevReconciliationClaim) -> DevInstanceIdentity:
+    def _destroy_identity(
+        claim: PersonalDevReconciliationClaim, *, checkpoints: tuple[str, ...]
+    ) -> DevInstanceIdentity:
         if claim.operation.kind != "destroy":
             raise ValueError("personal-dev cleanup requires a destroy operation")
+        if claim.operation.capacity_mode == "membership-v1":
+            validated_membership_destroy(claim, checkpoints=checkpoints)
         return derive_identity(claim.operation.environment_name)
 
     async def delete_namespace(self, claim: PersonalDevReconciliationClaim) -> None:
-        await self.cluster.destroy(self._destroy_identity(claim))
+        await self.cluster.destroy(
+            self._destroy_identity(claim, checkpoints=("local_authority_sealed",))
+        )
 
     async def delete_buckets(self, claim: PersonalDevReconciliationClaim) -> None:
-        identity = self._destroy_identity(claim)
+        identity = self._destroy_identity(claim, checkpoints=("database_deleted",))
         await self.buckets.remove_buckets(identity, dev_buckets(identity))
 
     async def delete_tenant(self, claim: PersonalDevReconciliationClaim) -> None:
-        await self.object_store_tenant.delete(self._destroy_identity(claim))
+        checkpoint = "namespace_deleted" if claim.operation.keep_data else "buckets_deleted"
+        await self.object_store_tenant.delete(
+            self._destroy_identity(claim, checkpoints=(checkpoint,))
+        )
 
     async def delete_credentials(self, claim: PersonalDevReconciliationClaim) -> None:
-        await self.vault.delete(self._destroy_identity(claim))
+        await self.vault.delete(self._destroy_identity(claim, checkpoints=("tenant_deleted",)))
 
 
 __all__ = [
