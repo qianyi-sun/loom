@@ -86,5 +86,8 @@ output "deployment_access" {
     public_allocation  = nebius_vpc_v1_allocation.deployment_access.id
     public_address     = nebius_compute_v1_instance.deployment_access.status.network_interfaces[0].public_ip_address.address
     private_address    = nebius_compute_v1_instance.deployment_access.status.network_interfaces[0].ip_address.address
+    # Do not repurpose private_address: existing callers may need the DHCP IP.
+    private_service_allocation = nebius_vpc_v1_allocation.deployment_access_private.id
+    private_service_cidr       = nebius_vpc_v1_allocation.deployment_access_private.status.details.allocated_cidr
   }
 }

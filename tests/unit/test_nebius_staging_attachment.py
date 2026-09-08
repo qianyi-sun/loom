@@ -77,6 +77,16 @@ def binding() -> dict:
     }
 
 
+def private_binding() -> dict:
+    payload = binding()
+    payload["private_entry"] = {"hostname": "staging.example", "address": "10.42.0.8"}
+    payload["canonical"]["endpoint"] = "https://staging.example:19443"
+    payload["collector"]["control_plane_url"] = "https://staging.example:18443"
+    for name, port in (("database", 15432), ("canonical_store", 19443), ("control_plane", 18443)):
+        payload["network"][name] = [{"cidr": "10.42.0.8/32", "port": port}]
+    return payload
+
+
 def render(tmp_path: Path, payload: dict, environment: str = "staging") -> tuple[dict, list[dict]]:
     attachment = tmp_path / "attachment.json"
     attachment.write_text(json.dumps(payload))
@@ -144,6 +154,66 @@ def test_staging_attachment_separates_spool_without_second_control_plane(tmp_pat
     )
     roles = [row for row in docs if row["kind"] in {"ClusterRole", "ClusterRoleBinding"}]
     assert all(row["metadata"]["name"].endswith("-staging") for row in roles)
+
+
+@pytest.mark.parametrize("database", ["loom", "loom_staging"])
+def test_attachment_preserves_existing_canonical_database_and_secret_refs(
+    tmp_path: Path, database: str
+) -> None:
+    payload = binding()
+    payload["canonical_database"] = database
+    manifest, docs = render(tmp_path, payload)
+    assert manifest["canonical_database"] == database
+    assert manifest["source_sha256"]["staging_attachment"]
+    assert not any(row["kind"] in {"Secret", "StatefulSet", "Cluster", "Job"} for row in docs)
+    for row in docs:
+        if row["kind"] != "Deployment":
+            continue
+        env = row["spec"]["template"]["spec"]["containers"][0]["env"]
+        dsn_refs = [entry for entry in env if entry["name"].endswith("DB_URL")]
+        assert len(dsn_refs) == 1
+        assert "value" not in dsn_refs[0]
+        assert dsn_refs[0]["valueFrom"]["secretKeyRef"]["name"] == "staging-db"
+
+
+@pytest.mark.parametrize(
+    "database", ["", "loom_development", "loom_production", "postgres", None, [], {}, "loom\n"]
+)
+def test_attachment_rejects_unknown_database_declarations(tmp_path: Path, database: object) -> None:
+    payload = binding()
+    payload["canonical_database"] = database
+    with pytest.raises(NebiusRuntimeRenderError, match="staging target and database"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("environment", "development"),
+        ("target_id", "nebius-eu-north1-development"),
+        ("namespace", "loom-nebius-development"),
+    ],
+)
+def test_shared_database_name_does_not_allow_cross_environment_attachment(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    payload = binding()
+    payload["canonical_database"] = "loom"
+    payload[field] = value
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize("field", ["artifacts_bucket", "trajectories_bucket"])
+def test_shared_database_name_keeps_canonical_bucket_fence(tmp_path: Path, field: str) -> None:
+    payload = binding()
+    payload["canonical_database"] = "loom"
+    payload["canonical"][field] = "loom-development-artifacts"
+    with pytest.raises(NebiusRuntimeRenderError, match="canonical buckets"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
 
 
 @pytest.mark.parametrize(
@@ -336,3 +406,296 @@ def test_cli_attachment_render_and_rejection_are_offline(tmp_path: Path, capsys)
     stderr = capsys.readouterr().err
     assert "must-not-leak" not in stderr
     assert not (tmp_path / "rejected").exists()
+
+
+def test_private_entry_cli_persists_all_consumer_aliases_without_rewriting_identity(
+    tmp_path: Path, capsys
+) -> None:
+    payload = private_binding()
+    manifest, _ = render(tmp_path, payload)
+    output = tmp_path / "cli"
+    assert (
+        render_main(
+            [
+                "--environment",
+                "staging",
+                "--image",
+                IMAGE,
+                "--capacity-policy",
+                str(tmp_path / "capacity.json"),
+                "--staging-attachment",
+                str(tmp_path / "attachment.json"),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert "target: nebius-eu-north1-staging" in capsys.readouterr().out
+    assert manifest["source_sha256"]["staging_attachment"]
+    docs = [doc for path in output.glob("*.yaml") for doc in yaml.safe_load_all(path.read_text())]
+    consumers = [doc for doc in docs if doc["kind"] in {"Deployment", "CronJob"}]
+    assert len(consumers) == 3
+    for doc in consumers:
+        template = (
+            doc["spec"] if doc["kind"] == "Deployment" else doc["spec"]["jobTemplate"]["spec"]
+        )
+        assert template["template"]["spec"]["hostAliases"] == [
+            {"ip": "10.42.0.8", "hostnames": ["staging.example"]}
+        ]
+        if doc["kind"] == "Deployment":
+            env = {
+                item["name"]: item for item in template["template"]["spec"]["containers"][0]["env"]
+            }
+            db = next(item for name, item in env.items() if name.endswith("DB_URL"))
+            assert "value" not in db
+            assert db["valueFrom"]["secretKeyRef"]["name"] == "staging-db"
+            if doc["metadata"]["name"] == "loom-llm-gateway":
+                assert env["LOOM_GW_MINIO_ENDPOINT"]["value"] == payload["canonical"]["endpoint"]
+                assert (
+                    env["LOOM_GW_SERVICE_EXECUTION_SOURCE_ENDPOINT"]["value"]
+                    == payload["source"]["endpoint"]
+                )
+    collector = next(doc for doc in docs if doc["kind"] == "ConfigMap")
+    assert (
+        collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_CONTROL_PLANE_URL"]
+        == payload["collector"]["control_plane_url"]
+    )
+
+
+def test_private_entry_omission_keeps_legacy_render_without_aliases(tmp_path: Path) -> None:
+    _, docs = render(tmp_path, binding())
+    assert "hostAliases" not in yaml.safe_dump_all(docs)
+
+
+def test_private_entry_does_not_redirect_independent_spool(tmp_path: Path) -> None:
+    payload = private_binding()
+    payload["source"]["endpoint"] = "https://staging.example:9443"
+    payload["network"]["source_store"] = [{"cidr": "192.0.2.3/32", "port": 9443}]
+    with pytest.raises(NebiusRuntimeRenderError, match="independent spool host"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "8.8.8.8",
+        "192.0.2.8",
+        "127.0.0.1",
+        "169.254.1.1",
+        "100.64.0.1",
+        "::1",
+        "fd00::1",
+        "10.42.0.8/32",
+        "010.42.0.8",
+        "staging.example",
+        "",
+        None,
+    ],
+)
+def test_private_entry_rejects_non_rfc1918_ipv4(tmp_path: Path, address: object) -> None:
+    payload = private_binding()
+    payload["private_entry"]["address"] = address
+    with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "10.42.0.8",
+        "127.0.0.1",
+        "::1",
+        "localhost",
+        "staging.example.",
+        "bad..example",
+        "-bad.example",
+        "bad-.example",
+        "bad_name.example",
+        "https://staging.example",
+        "staging.example:19443",
+        "*.example",
+        "x" * 64 + ".example",
+        "staging.example\n",
+        "",
+        None,
+    ],
+)
+def test_private_entry_rejects_invalid_dns_hostname(tmp_path: Path, hostname: object) -> None:
+    payload = private_binding()
+    payload["private_entry"]["hostname"] = hostname
+    with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "section,field,endpoint",
+    [
+        ("canonical", "endpoint", "https://other.example:19443"),
+        ("canonical", "endpoint", "https://10.42.0.8:19443"),
+        ("canonical", "endpoint", "https://staging.example:9443"),
+        ("collector", "control_plane_url", "https://other.example:18443"),
+        ("collector", "control_plane_url", "https://10.42.0.8:18443"),
+        ("collector", "control_plane_url", "https://staging.example"),
+    ],
+)
+def test_private_entry_requires_exact_tls_origins(
+    tmp_path: Path, section: str, field: str, endpoint: str
+) -> None:
+    payload = private_binding()
+    payload[section][field] = endpoint
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize("name", ["database", "canonical_store", "control_plane"])
+@pytest.mark.parametrize("change", ["address", "port", "uncoupled", "ipv6"])
+def test_private_entry_requires_matching_address_and_port_rule(
+    tmp_path: Path, name: str, change: str
+) -> None:
+    payload = private_binding()
+    port = payload["network"][name][0]["port"]
+    payload["network"][name] = {
+        "address": [{"cidr": "10.42.0.9/32", "port": port}],
+        "port": [{"cidr": "10.42.0.8/32", "port": port + 1}],
+        "uncoupled": [
+            {"cidr": "10.42.0.8/32", "port": port + 1},
+            {"cidr": "10.42.0.9/32", "port": port},
+        ],
+        "ipv6": [{"cidr": "fd00::/64", "port": port}],
+    }[change]
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "cidr,address",
+    [
+        ("10.42.0.0/24", "10.42.0.8"),
+        ("172.16.0.0/12", "172.31.255.254"),
+        ("192.168.0.0/16", "192.168.42.8"),
+    ],
+)
+def test_private_entry_accepts_rfc1918_routed_ranges(
+    tmp_path: Path, cidr: str, address: str
+) -> None:
+    payload = private_binding()
+    payload["private_entry"]["address"] = address
+    for name in ("database", "canonical_store", "control_plane"):
+        payload["network"][name][0]["cidr"] = cidr
+    render(tmp_path, payload)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        None,
+        {},
+        [],
+        {"hostname": "staging.example"},
+        {"hostname": "staging.example", "address": "10.42.0.8", "aliases": ["other.example"]},
+    ],
+)
+def test_private_entry_rejects_incomplete_or_generic_dns_override(
+    tmp_path: Path, entry: object
+) -> None:
+    payload = private_binding()
+    payload["private_entry"] = entry
+    with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+def database_tls_binding() -> dict:
+    payload = private_binding()
+    payload["database_tls"] = {
+        "server_name": "loom-postgres-rw.loom-staging.svc.cluster.local",
+        "ca_secret": {"name": "loom-staging-db-ca", "key": "server-ca.crt"},
+    }
+    return payload
+
+
+def test_database_tls_mounts_renewable_ca_and_native_name_only_for_db_consumers(
+    tmp_path: Path,
+) -> None:
+    payload = database_tls_binding()
+    _, docs = render(tmp_path, payload)
+    for doc in docs:
+        if doc["kind"] not in {"Deployment", "CronJob"}:
+            continue
+        spec = doc["spec"] if doc["kind"] == "Deployment" else doc["spec"]["jobTemplate"]["spec"]
+        pod = spec["template"]["spec"]
+        container = pod["containers"][0]
+        env = {item["name"]: item for item in container.get("env", [])}
+        if doc["kind"] == "CronJob":
+            assert pod["hostAliases"] == [{"ip": "10.42.0.8", "hostnames": ["staging.example"]}]
+            assert not {"PGSSLMODE", "PGSSLROOTCERT"} & env.keys()
+            assert "loom-postgres-ca" not in {item["name"] for item in pod.get("volumes", [])}
+            continue
+        assert pod["hostAliases"] == [
+            {"ip": "10.42.0.8", "hostnames": ["staging.example"]},
+            {"ip": "10.42.0.8", "hostnames": [payload["database_tls"]["server_name"]]},
+        ]
+        assert env["PGSSLMODE"]["value"] == "verify-full"
+        assert env["PGSSLROOTCERT"]["value"] == "/var/run/loom/postgres-tls/ca.crt"
+        ca = next(item for item in pod["volumes"] if item["name"] == "loom-postgres-ca")
+        assert ca["secret"] == {
+            "secretName": "loom-staging-db-ca",
+            "defaultMode": 0o444,
+            "items": [{"key": "server-ca.crt", "path": "ca.crt"}],
+        }
+        mount = next(item for item in container["volumeMounts"] if item["name"] == ca["name"])
+        assert mount == {
+            "name": "loom-postgres-ca",
+            "mountPath": "/var/run/loom/postgres-tls",
+            "readOnly": True,
+        }
+        # The public CA is world-readable, including the non-root runtime UID.
+        assert ca["secret"]["defaultMode"] & 0o004
+        assert "value" not in next(item for item in env.values() if item["name"].endswith("DB_URL"))
+    assert not any(doc["kind"] == "Secret" for doc in docs)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda x: x.pop("private_entry"),
+        lambda x: x.update(database_tls=None),
+        lambda x: x["database_tls"].update(password="never-emit-this"),
+        lambda x: x["database_tls"].pop("ca_secret"),
+        lambda x: x["database_tls"].update(server_name="staging.example"),
+        lambda x: x["database_tls"].update(server_name="spool.example"),
+        lambda x: x["database_tls"].update(server_name="10.42.0.8"),
+        lambda x: x["database_tls"].update(server_name="localhost"),
+        lambda x: x["database_tls"].update(server_name="db.example."),
+        lambda x: x["database_tls"].update(server_name="bad_name.example"),
+        lambda x: x["database_tls"].update(server_name="db.example:15432"),
+        lambda x: x["database_tls"].update(server_name="db.example\n"),
+        lambda x: x["database_tls"].update(server_name=None),
+        lambda x: x["database_tls"]["ca_secret"].update(key="../../ca.crt"),
+        lambda x: x["database_tls"]["ca_secret"].update(name=""),
+        lambda x: x["database_tls"]["ca_secret"].update(certificate="never-emit-this"),
+    ],
+)
+def test_database_tls_rejects_incomplete_unsafe_or_colliding_identity(
+    tmp_path: Path, mutation
+) -> None:
+    payload = database_tls_binding()
+    mutation(payload)
+    with pytest.raises(NebiusRuntimeRenderError) as error:
+        render(tmp_path, payload)
+    assert "never-emit-this" not in str(error.value)
+    assert not (tmp_path / "rendered").exists()
+
+
+def test_database_tls_omission_does_not_add_ca_mount_or_libpq_environment(tmp_path: Path) -> None:
+    _, docs = render(tmp_path, private_binding())
+    serialized = yaml.safe_dump_all(docs)
+    assert "PGSSLMODE" not in serialized
+    assert "PGSSLROOTCERT" not in serialized
+    assert "loom-postgres-ca" not in serialized

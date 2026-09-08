@@ -150,6 +150,14 @@ if TYPE_CHECKING:
         execution_ingress_cidrs: list[str] = field(default_factory=list)
 
     @dataclass(frozen=True)
+    class _NebiusPrivateEntryConfig:
+        enabled: bool = False
+        node_name: str = ""
+        wireguard_address: str = ""
+        peer_address: str = ""
+        proxy_image: str = ""
+
+    @dataclass(frozen=True)
     class _TopologyConfig:
         multi_node: bool = False
         storage_backend: str = "host_path"
@@ -198,6 +206,9 @@ if TYPE_CHECKING:
             default_factory=_PipelineStage1SmokeAuthorityConfig
         )
         nebius_execution: _NebiusExecutionConfig = field(default_factory=_NebiusExecutionConfig)
+        nebius_private_entry: _NebiusPrivateEntryConfig = field(
+            default_factory=_NebiusPrivateEntryConfig
+        )
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"

@@ -37,3 +37,9 @@ output "capacity_observer_public_key_id" {
 output "deployment_access" {
   value = module.execution_target.deployment_access
 }
+
+output "staging_spool" {
+  description = "Protected staging source-spool configuration and GetSecret reference, not secret bytes."
+  sensitive   = true
+  value       = module.execution_target.staging_spool
+}
