@@ -35,8 +35,10 @@ Out of scope for this route:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -52,6 +54,7 @@ from loom_llm_gateway.attempt_deadline import (
     upstream_timeout,
 )
 from loom_llm_gateway.dialect import DIALECTS
+from loom_llm_gateway.dispatch_audit import request_dispatch_audit
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
@@ -177,6 +180,11 @@ async def anthropic_messages_facade(
             settings=settings,
             dialect="facade_anthropic",
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="facade_anthropic",
+                provider_connection_id=connection_id,
+            ),
         )
         upstream_response = outcome.response
     except AttemptDeadlineReachedError as exc:
@@ -314,8 +322,9 @@ async def _stream_anthropic_messages(
     row: Any,
     ctx: Any,
 ) -> StreamingResponse:
+    provider_completed = asyncio.Event()
     try:
-        stream_cm = upstream.stream(
+        upstream_stream_cm = upstream.stream(
             "POST",
             upstream_url,
             json=payload,
@@ -327,9 +336,23 @@ async def _stream_anthropic_messages(
             follow_redirects=False,
         )
         deadline = request_attempt_deadline(request)
+        audit = request_dispatch_audit(
+            request,
+            dialect="facade_anthropic_stream",
+            provider_connection_id=row.id,
+        )
+        stream_cm = (
+            upstream_stream_cm
+            if audit is None
+            else audit.stream(
+                lambda: upstream_stream_cm,
+                deadline=deadline,
+                completed=provider_completed.is_set,
+            )
+        )
         upstream_response = (
             await stream_cm.__aenter__()
-            if deadline is None
+            if deadline is None or audit is not None
             else await deadline.run(stream_cm.__aenter__)
         )
     except AttemptDeadlineReachedError as exc:
@@ -365,7 +388,11 @@ async def _stream_anthropic_messages(
             detail=(f"upstream request error against {upstream_url}: {type(e).__name__}: {e}"),
         ) from e
 
-    enforce_request_attempt_deadline(request)
+    try:
+        enforce_request_attempt_deadline(request)
+    except BaseException:
+        await stream_cm.__aexit__(*sys.exc_info())
+        raise
     if upstream_response.status_code >= 400:
         try:
             deadline = request_attempt_deadline(request)
@@ -375,9 +402,9 @@ async def _stream_anthropic_messages(
                 else await deadline.run(upstream_response.aread)
             )
         except AttemptDeadlineReachedError as exc:
-            await stream_cm.__aexit__(None, None, None)
             raise_deadline_http_exception(exc)
-        await stream_cm.__aexit__(None, None, None)
+        finally:
+            await stream_cm.__aexit__(*sys.exc_info())
         excerpt = redact_api_key(body.decode(errors="replace"), api_key)
         await record_facade_failed_call(
             request=request,
@@ -403,6 +430,7 @@ async def _stream_anthropic_messages(
             ctx=ctx,
             model=payload["model"],
             request_payload=payload,
+            provider_completed=provider_completed,
         ),
         media_type=upstream_response.headers.get(
             "content-type",
@@ -421,6 +449,7 @@ async def _iter_anthropic_sse_and_record_usage(
     ctx: Any,
     model: str,
     request_payload: dict[str, Any],
+    provider_completed: asyncio.Event | None = None,
 ) -> AsyncIterator[bytes]:
     tracker = _AnthropicStreamUsageTracker()
     try:
@@ -434,6 +463,8 @@ async def _iter_anthropic_sse_and_record_usage(
                     else await deadline.anext(iterator)
                 )
             except StopAsyncIteration:
+                if provider_completed is not None:
+                    provider_completed.set()
                 break
             tracker.feed(chunk)
             yield chunk
@@ -447,7 +478,7 @@ async def _iter_anthropic_sse_and_record_usage(
             request_payload=request_payload,
         )
     finally:
-        await stream_cm.__aexit__(None, None, None)
+        await stream_cm.__aexit__(*sys.exc_info())
 
 
 class _AnthropicStreamUsageTracker:

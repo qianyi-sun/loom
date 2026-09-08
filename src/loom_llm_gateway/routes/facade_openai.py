@@ -59,6 +59,7 @@ from loom_llm_gateway.attempt_deadline import (
     upstream_timeout,
 )
 from loom_llm_gateway.dialect import DIALECTS
+from loom_llm_gateway.dispatch_audit import request_dispatch_audit
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.model_switch_correlation import (
     extract_and_strip_loom_fields,
@@ -183,6 +184,11 @@ async def openai_chat_facade(
             settings=settings,
             dialect="facade_openai",
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="facade_openai",
+                provider_connection_id=connection_id,
+            ),
         )
         upstream_response = outcome.response
     except AttemptDeadlineReachedError as exc:
@@ -294,16 +300,19 @@ async def openai_chat_facade(
                 api_key=api_key,
             ),
             response_model=body.get("model") if isinstance(body.get("model"), str) else None,
-            **{k: correlation[k] for k in (
-                "client_call_id",
-                "agent_execution_id",
-                "agent_run_attempt_id",
-                "episode",
-                "call_ordinal",
-                "requested_model",
-                "role",
-                "correlation_status",
-            )},
+            **{
+                k: correlation[k]
+                for k in (
+                    "client_call_id",
+                    "agent_execution_id",
+                    "agent_run_attempt_id",
+                    "episode",
+                    "call_ordinal",
+                    "requested_model",
+                    "role",
+                    "correlation_status",
+                )
+            },
         )
 
     return openai_chat_facade_result(
@@ -345,29 +354,45 @@ def _synthetic_openai_chat_sse_chunks(body: dict[str, Any]) -> list[bytes]:
             index = _choice_index(choice)
             delta = _message_to_delta(choice.get("message"))
             if delta:
-                chunks.append(_sse_chunk({
-                    **base,
-                    "choices": [{
-                        "index": index,
-                        "delta": delta,
-                        "finish_reason": None,
-                    }],
-                }))
-            chunks.append(_sse_chunk({
-                **base,
-                "choices": [{
-                    "index": index,
-                    "delta": {},
-                    "finish_reason": choice.get("finish_reason"),
-                }],
-            }))
+                chunks.append(
+                    _sse_chunk(
+                        {
+                            **base,
+                            "choices": [
+                                {
+                                    "index": index,
+                                    "delta": delta,
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+                )
+            chunks.append(
+                _sse_chunk(
+                    {
+                        **base,
+                        "choices": [
+                            {
+                                "index": index,
+                                "delta": {},
+                                "finish_reason": choice.get("finish_reason"),
+                            }
+                        ],
+                    }
+                )
+            )
     usage = body.get("usage")
     if isinstance(usage, dict):
-        chunks.append(_sse_chunk({
-            **base,
-            "choices": [],
-            "usage": usage,
-        }))
+        chunks.append(
+            _sse_chunk(
+                {
+                    **base,
+                    "choices": [],
+                    "usage": usage,
+                }
+            )
+        )
     chunks.append(b"data: [DONE]\n\n")
     return chunks
 
@@ -412,7 +437,5 @@ def _message_to_delta(message: Any) -> dict[str, Any]:
 
 def _sse_chunk(event: dict[str, Any]) -> bytes:
     return (
-        "data: "
-        + json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-        + "\n\n"
+        "data: " + json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n\n"
     ).encode("utf-8")

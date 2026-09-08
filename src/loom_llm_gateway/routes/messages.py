@@ -19,8 +19,10 @@ from the upstream stream.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import sys
 from typing import Any
 
 import httpx
@@ -38,6 +40,7 @@ from loom_llm_gateway.attempt_deadline import (
 )
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
+from loom_llm_gateway.dispatch_audit import request_dispatch_audit
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -122,6 +125,10 @@ async def messages(
             settings=settings,
             dialect="anthropic",
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="anthropic",
+            ),
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)
@@ -286,8 +293,9 @@ async def _stream_messages(
     whether to reissue.
     """
     upstream: httpx.AsyncClient = request.app.state.upstream_client
+    provider_completed = asyncio.Event()
     try:
-        stream_ctx = upstream.stream(
+        upstream_stream_ctx = upstream.stream(
             "POST",
             f"{ANTHROPIC_BASE_URL}/v1/messages",
             json=payload,
@@ -299,9 +307,19 @@ async def _stream_messages(
             timeout=upstream_timeout(request, settings.upstream_timeout_sec),
         )
         deadline = request_attempt_deadline(request)
+        audit = request_dispatch_audit(request, dialect="anthropic_stream")
+        stream_ctx = (
+            upstream_stream_ctx
+            if audit is None
+            else audit.stream(
+                lambda: upstream_stream_ctx,
+                deadline=deadline,
+                completed=provider_completed.is_set,
+            )
+        )
         upstream_response = (
             await stream_ctx.__aenter__()
-            if deadline is None
+            if deadline is None or audit is not None
             else await deadline.run(stream_ctx.__aenter__)
         )
     except AttemptDeadlineReachedError as exc:
@@ -333,7 +351,11 @@ async def _stream_messages(
             detail=f"anthropic upstream request error: {type(exc).__name__}: {exc}",
         ) from exc
 
-    enforce_request_attempt_deadline(request)
+    try:
+        enforce_request_attempt_deadline(request)
+    except BaseException:
+        await stream_ctx.__aexit__(*sys.exc_info())
+        raise
     if upstream_response.status_code >= 400:
         try:
             deadline = request_attempt_deadline(request)
@@ -345,7 +367,7 @@ async def _stream_messages(
         except AttemptDeadlineReachedError as exc:
             raise_deadline_http_exception(exc)
         finally:
-            await stream_ctx.__aexit__(None, None, None)
+            await stream_ctx.__aexit__(*sys.exc_info())
         excerpt = redact_api_key(body.decode("utf-8", "replace"), api_key)
         await _record_failed_message_call(
             request=request,
@@ -379,6 +401,7 @@ async def _stream_messages(
                         else await deadline.anext(iterator)
                     )
                 except StopAsyncIteration:
+                    provider_completed.set()
                     break
                 yield chunk
                 buffer += chunk
@@ -386,7 +409,7 @@ async def _stream_messages(
                 for name, data in events:
                     _extract_stream_usage(name, data, accum)
         finally:
-            await stream_ctx.__aexit__(None, None, None)
+            await stream_ctx.__aexit__(*sys.exc_info())
             await _record_stream_call(
                 request=request,
                 ctx=ctx,

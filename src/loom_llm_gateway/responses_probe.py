@@ -22,14 +22,19 @@ which is what actually matters.
 
 Reference: docs/architecture/responses-api.md
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 
 from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
+
+if TYPE_CHECKING:
+    from loom_llm_gateway.dispatch_audit import DispatchAudit
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,7 @@ async def probe_responses_api(
     client: httpx.AsyncClient | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     deadline: GatewayAttemptDeadline | None = None,
+    dispatch_audit: DispatchAudit | None = None,
 ) -> ProbeOutcome:
     """Fire one probe request.
 
@@ -93,21 +99,32 @@ async def probe_responses_api(
     """
     if client is None:
         async with httpx.AsyncClient(
-            timeout=_PROBE_TIMEOUT_SEC, transport=transport,
+            timeout=_PROBE_TIMEOUT_SEC,
+            transport=transport,
         ) as owned_client:
             return await _run_probe(
                 owned_client,
                 upstream_url,
                 api_key,
                 deadline=deadline,
+                dispatch_audit=dispatch_audit,
             )
-    return await _run_probe(client, upstream_url, api_key, deadline=deadline)
+    return await _run_probe(
+        client,
+        upstream_url,
+        api_key,
+        deadline=deadline,
+        dispatch_audit=dispatch_audit,
+    )
 
 
 async def _run_probe(
-    client: httpx.AsyncClient, upstream_url: str, api_key: str,
+    client: httpx.AsyncClient,
+    upstream_url: str,
+    api_key: str,
     *,
     deadline: GatewayAttemptDeadline | None = None,
+    dispatch_audit: DispatchAudit | None = None,
 ) -> ProbeOutcome:
     try:
         timeout: float | httpx.Timeout = _PROBE_TIMEOUT_SEC
@@ -126,7 +143,10 @@ async def _run_probe(
                 timeout=timeout,
             )
 
-        response = await _post() if deadline is None else await deadline.run(_post)
+        if dispatch_audit is not None:
+            response = await dispatch_audit.send(_post, deadline=deadline)
+        else:
+            response = await _post() if deadline is None else await deadline.run(_post)
     except (
         httpx.TimeoutException,
         httpx.ConnectError,
@@ -136,7 +156,8 @@ async def _run_probe(
         reason = type(exc).__name__
         logger.info(
             "responses_probe transport error url=%s err=%s",
-            upstream_url, reason,
+            upstream_url,
+            reason,
         )
         return ProbeOutcome(
             supported=False,

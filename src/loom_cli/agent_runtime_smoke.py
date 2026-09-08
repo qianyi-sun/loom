@@ -343,12 +343,14 @@ class _StepTokenClient:
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
+        agent_attempt_id: UUID | None = None,
     ) -> StepTokenGrant:
         del team_id, trial_id, step_id, ttl_sec
         return StepTokenGrant(
             token="loom_step_smoke-token",
             expires_at=attempt_deadline_wall_clock + timedelta(seconds=300),
             attempt_deadline_wall_clock=attempt_deadline_wall_clock,
+            local_only=True,
         )
 
 
