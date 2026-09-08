@@ -237,7 +237,10 @@ type orchestratorState struct {
 func (s *orchestratorState) claim(claimID string) (*SecretBuffer, bool, error) {
 	var claimSecret *SecretBuffer
 	var available bool
-	err := s.sessionManager.WithCurrent(func(current *SecretBuffer) error {
+	err := s.sessionManager.WithCurrentEnvelope(func(envelope *SessionEnvelope, current *SecretBuffer) error {
+		// Upload credential refresh may have replaced the cached claim session.
+		// Capture the exact envelope lent for this claim under the same lock.
+		s.session = envelope
 		var err error
 		claimSecret, available, err = s.o.Guard.Claim(s.ctx, s.o.GrantID, claimID, current)
 		return err
@@ -299,6 +302,7 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 		s.record(BuildOutcomeLeaseLost, "start_invalid", claim.firstComponent())
 		return safeError("start_invalid")
 	}
+	claim.LeaseExpiresAtPtr = lease.LeaseExpiresAt
 
 	executor, err := s.o.NewExecutor(s.o.Config, s.caps, claim.Plan)
 	if err != nil {
@@ -326,27 +330,47 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 		LeaseEpoch:        claim.LeaseEpoch,
 		Components:        append([]BuiltComponent(nil), s.built...),
 	}
-	if err := s.acceptPublication(set); err != nil {
+	receipt, err := s.acceptPublication(set)
+	if err != nil {
 		return s.handlePublicationError(err)
 	}
-	if err := s.releaseLease(); err != nil {
-		s.record(BuildOutcomeLeaseLost, "release_failed", "")
-		return err
+	// Atomic publication completion already cleared this lease. Never release
+	// or fail it again after exact authenticated receipt confirmation.
+	if receipt == nil {
+		if err := s.releaseLease(); err != nil {
+			s.record(BuildOutcomeLeaseLost, "release_failed", "")
+			return err
+		}
 	}
 	s.recordBuilt()
 	return nil
 }
 
-func (s *orchestratorState) acceptPublication(set BuiltComponentSet) error {
+func (s *orchestratorState) acceptPublication(set BuiltComponentSet) (*publicationReceipt, error) {
 	if credentialed, ok := s.o.Handoff.(CredentialedPublicationHandoff); ok {
 		binding, err := publicationAttemptBinding(set, s.claimData.Plan, credentialed.PublicationRegistryExpectation())
 		if err != nil {
-			return err
+			return nil, err
 		}
 		source := NewPublicationCredentialSource(s.sessionManager, s.o.Guard, binding)
-		return credentialed.AcceptWithCredentials(s.ctx, set, source)
+		type publicationUploader interface {
+			UploadWithCredentials(context.Context, BuiltComponentSet, *PublicationCredentialSource) ([]PublicationCandidateV2Acknowledgement, error)
+		}
+		if uploader, ok := credentialed.(publicationUploader); ok {
+			guard, ok := s.o.Guard.(publicationLifecycleGuard)
+			if !ok || s.claimData.LeaseExpiresAtPtr == nil {
+				return nil, ErrPublicationVerificationUnavailable
+			}
+			controller := publicationLifecycle{clock: s.clock, session: s.sessionManager, guard: guard, set: set, builderID: binding.BuilderID,
+				leaseExpiresAt: *s.claimData.LeaseExpiresAtPtr, timeout: 2 * time.Hour,
+				upload: func(ctx context.Context) ([]PublicationCandidateV2Acknowledgement, error) {
+					return uploader.UploadWithCredentials(ctx, set, source)
+				}}
+			return controller.run(s.ctx)
+		}
+		return nil, credentialed.AcceptWithCredentials(s.ctx, set, source)
 	}
-	return s.o.Handoff.Accept(s.ctx, set)
+	return nil, s.o.Handoff.Accept(s.ctx, set)
 }
 
 func (s *orchestratorState) handlePublicationError(err error) error {
@@ -495,7 +519,7 @@ func (s *orchestratorState) waitIdle() error {
 }
 
 func (s *orchestratorState) renewIfDue() error {
-	if !s.clock.Now().Before(renewalAt(s.clock.Now(), s.session.ExpiresAt)) {
+	if !s.clock.Now().Before(renewalAt(s.clock.Now(), s.sessionManager.ExpiresAt())) {
 		return s.renew()
 	}
 	return nil
