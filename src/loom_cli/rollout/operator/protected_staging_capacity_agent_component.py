@@ -253,6 +253,10 @@ class KubernetesProtectedStagingCapacityAgentComponent:
             if observed_item is None or self._diff(_encode_document(desired[key])) == 1:
                 mutable_drift = True
         state = ComponentState.READY if mutable_drift or secret is None else ComponentState.EXACT
+        if state is ComponentState.EXACT and not self._one_ready_candidate_pod(
+            plan, configuration_digest=_configuration_digest(desired[("ConfigMap", _NAME)])
+        ):
+            state = ComponentState.READY
         return _Snapshot(
             state,
             _hash_json(

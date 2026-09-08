@@ -421,8 +421,12 @@ def test_ready_same_image_pod_must_load_current_configuration(tmp_path: Path, an
         _component(StalePodCluster()).apply(_plan(tmp_path))
 
 
-def test_resume_cannot_certify_exact_resources_with_a_stale_configuration_pod(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pod_state", ["stale-configuration", "absent", "not-ready"])
+def test_resume_cannot_certify_exact_resources_with_a_stale_configuration_pod(
+    tmp_path: Path, pod_state: str
+) -> None:
     """Break caught: failed final readback is bypassed by EXACT resource-only classification."""
+
     class StalePodCluster(_Cluster):
         stale = True
 
@@ -430,7 +434,12 @@ def test_resume_cannot_certify_exact_resources_with_a_stale_configuration_pod(tm
             payload = super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
             if self.stale and "pods" in argv:
                 value = json.loads(payload)
-                value["items"][0]["metadata"]["annotations"] = {}
+                if pod_state == "absent":
+                    value["items"] = []
+                elif pod_state == "not-ready":
+                    value["items"][0]["status"]["containerStatuses"][0]["ready"] = False
+                else:
+                    value["items"][0]["metadata"]["annotations"] = {}
                 return json.dumps(value).encode()
             return payload
 
