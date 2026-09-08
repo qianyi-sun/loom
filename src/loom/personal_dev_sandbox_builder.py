@@ -569,7 +569,14 @@ def create_personal_dev_build_artifact(
     *,
     consume_image_archives: bool = False,
 ) -> None:
-    """Create the canonical outer bundle consumed by the trusted exporter."""
+    """Create the canonical outer bundle consumed by the trusted exporter.
+
+    The caller must exclusively control the input and output directories while
+    packaging. Identity checks detect drift but are not atomic conditional
+    unlinks against concurrent directory writers. Consuming mode reclaims each
+    verified copy independently; a later failure may leave earlier inputs
+    consumed, so a private attempt must rebuild them before retrying.
+    """
     if set(images) != set(PERSONAL_DEV_COMPONENTS):
         raise PersonalDevSandboxBuildError("native image output set is incomplete")
     components: dict[str, object] = {}

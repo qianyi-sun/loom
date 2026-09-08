@@ -117,9 +117,11 @@ def test_consuming_artifact_creation_bounds_packaging_disk_peak(
     assert max(observed_bytes) < total_image_bytes + artifact.stat().st_size
 
 
-def test_sandbox_build_consumes_its_private_image_outputs(
+@pytest.mark.parametrize("failing_flush", [None, 2, 10])
+def test_sandbox_build_reclaims_private_images_without_uploading_partial_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failing_flush: int | None,
 ) -> None:
     contract = _contract()
     images = _image_outputs(tmp_path / "private-images")
@@ -157,17 +159,40 @@ def test_sandbox_build_consumes_its_private_image_outputs(
         lambda _upload, artifact, **_kwargs: uploaded.append(artifact),
     )
     workspace = tmp_path / "workspace"
-
-    sandbox_builder.run_personal_dev_sandbox_build(
-        contract_file=contract_file,
-        capability_directory=capabilities,
-        workspace=workspace,
-    )
-
     artifact = workspace / "artifacts.tar"
-    assert uploaded == [artifact]
-    assert artifact.is_file()
-    assert all(not path.exists() for path, _digest in images.values())
+    real_fsync = os.fsync
+    flush_count = 0
+
+    def fail_later_flush(descriptor: int) -> None:
+        nonlocal flush_count
+        real_fsync(descriptor)
+        flush_count += 1
+        if flush_count == failing_flush:
+            raise OSError("injected later packaging failure")
+
+    monkeypatch.setattr(os, "fsync", fail_later_flush)
+    if failing_flush is None:
+        sandbox_builder.run_personal_dev_sandbox_build(
+            contract_file=contract_file,
+            capability_directory=capabilities,
+            workspace=workspace,
+        )
+        assert uploaded == [artifact]
+        assert artifact.is_file()
+        assert all(not path.exists() for path, _digest in images.values())
+    else:
+        with pytest.raises(OSError, match="injected later packaging failure"):
+            sandbox_builder.run_personal_dev_sandbox_build(
+                contract_file=contract_file,
+                capability_directory=capabilities,
+                workspace=workspace,
+            )
+        assert flush_count == failing_flush
+        assert not uploaded
+        assert not artifact.exists()
+        for index, component in enumerate(PERSONAL_DEV_COMPONENTS):
+            path, _digest = images[component]
+            assert path.exists() is (index >= failing_flush - 1)
 
 
 @pytest.mark.parametrize("replacement_kind", ["symlink", "hardlink"])
