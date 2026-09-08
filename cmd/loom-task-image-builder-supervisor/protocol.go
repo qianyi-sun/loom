@@ -316,8 +316,10 @@ func bootstrapExchangeMemfd(grantID string, exchangeID string, proofSHA256 strin
 	observedAt := receipt.IssuedAt
 	if observedAt == "" {
 		observedAt = time.Now().UTC().Format(time.RFC3339)
-	} else if parsed, err := time.Parse(time.RFC3339, observedAt); err == nil {
-		observedAt = parsed.UTC().Format(time.RFC3339)
+	} else if parsed, err := time.Parse(time.RFC3339Nano, observedAt); err == nil {
+		// The authority compares this instant with its unrounded receipt issue
+		// time. Dropping fractions backdates exchange before bootstrap issuance.
+		observedAt = parsed.UTC().Format(time.RFC3339Nano)
 	} else {
 		return -1, errors.New("bootstrap receipt invalid")
 	}
