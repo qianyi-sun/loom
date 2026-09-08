@@ -3700,25 +3700,6 @@ class CapacityManagementStore:
         report: DemandSnapshotV1,
         reporter: CapacityDemandReporter,
     ) -> None:
-        subject = (
-            await session.execute(
-                select(CapacitySubject)
-                .where(
-                    CapacitySubject.configuration_epoch == configuration_epoch,
-                    CapacitySubject.subject_id == report.subject_id,
-                    CapacitySubject.subject_incarnation == report.subject_incarnation,
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if subject is None or (
-            subject.demand_reporter_incarnation != report.reporter_incarnation
-            or subject.configuration_generation != report.configuration_generation
-            or subject.deployment_generation != report.deployment_generation
-            or reporter.configuration_generation != subject.configuration_generation
-            or reporter.deployment_generation != subject.deployment_generation
-        ):
-            raise AuthorityRecoveryError("active demand reporter binding changed")
         epoch = (
             await session.execute(
                 select(CapacityExecutionEpoch).where(
@@ -3728,44 +3709,27 @@ class CapacityManagementStore:
         ).scalar_one_or_none()
         if epoch is None:
             raise AuthorityRecoveryError("active execution epoch row is missing")
-        try:
-            preparation = parse_execution_preparation(
-                json.dumps(epoch.manifest_payload, sort_keys=True, separators=(",", ":"))
-            )
-        except ValueError as exc:
-            raise AuthorityRecoveryError("active execution manifest is invalid") from exc
-        acknowledgement = next(
-            (
-                item
-                for item in preparation.subject_acknowledgements
-                if item.subject_id == subject.subject_id
-            ),
-            None,
+        if epoch.configuration_epoch != configuration_epoch:
+            raise AuthorityRecoveryError("active execution configuration binding changed")
+        from loom_capacity_manager.membership_current import resolve_current_subject
+
+        subject, _acknowledgement = await resolve_current_subject(
+            session,
+            epoch,
+            subject_id=report.subject_id,
         )
-        if acknowledgement is None or (
-            acknowledgement.subject_incarnation != subject.subject_incarnation
-            or acknowledgement.configuration_generation != subject.configuration_generation
-            or acknowledgement.deployment_generation != subject.deployment_generation
-            or acknowledgement.reporter_incarnation != reporter.reporter_incarnation
-        ):
-            raise AuthorityRecoveryError("active demand subject binding changed")
-        candidate = (
-            await session.execute(
-                select(CapacityCandidate).where(
-                    CapacityCandidate.subject_id == subject.subject_id,
-                    CapacityCandidate.subject_incarnation == subject.subject_incarnation,
-                    CapacityCandidate.candidate_generation == subject.candidate_generation,
-                )
-            )
-        ).scalar_one_or_none()
         if (
-            candidate is None
-            or candidate.candidate_identity_algorithm != acknowledgement.candidate.algorithm
-            or candidate.candidate_identity != acknowledgement.candidate.identity
-            or candidate.source_payload.get("publication_sha256")
-            != acknowledgement.candidate.publication_sha256
+            subject.subject_incarnation != report.subject_incarnation
+            or subject.demand_reporter_incarnation != report.reporter_incarnation
+            or subject.configuration_generation != report.configuration_generation
+            or subject.deployment_generation != report.deployment_generation
+            or reporter.subject_id != subject.subject_id
+            or reporter.subject_incarnation != subject.subject_incarnation
+            or reporter.reporter_incarnation != subject.demand_reporter_incarnation
+            or reporter.configuration_generation != subject.configuration_generation
+            or reporter.deployment_generation != subject.deployment_generation
         ):
-            raise AuthorityRecoveryError("active demand candidate binding changed")
+            raise AuthorityRecoveryError("active demand reporter binding changed")
 
     async def _validate_active_pool_fact_binding(
         self,

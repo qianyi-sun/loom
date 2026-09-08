@@ -25,6 +25,8 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2
+from loom_capacity_manager.membership_contracts import DelegatedAllocationInputV2
+from loom_capacity_manager.membership_execution import bind_executable_membership
 from loom_capacity_manager.models import (
     CapacityAllocation,
     CapacityAllocationEpoch,
@@ -135,6 +137,8 @@ async def _commit_reconciled_epoch(
             executable_authority,
             allocation_epoch=allocation_epoch,
         )
+        if isinstance(current_input, DelegatedAllocationInputV2):
+            committed = bind_executable_membership(committed, current_input)
         row = CapacityAllocationEpoch(
             allocation_epoch=allocation_epoch,
             writer_epoch=writer.writer_epoch,

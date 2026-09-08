@@ -260,6 +260,42 @@ class PersonalApplicationMembershipResultV1(StrictV1Model):
     replayed: bool
 
 
+class PersonalMembershipCheckpointV1(StrictV1Model):
+    """Exact active delegation checkpoint, independent of configuration epochs."""
+
+    execution: ExecutionAuthorityV2
+    namespace_id: UUID
+    revision: Quantity
+    head_sha256: Digest
+
+    _namespace_is_nonzero = field_validator("namespace_id")(_nonzero_uuid)
+
+    @model_validator(mode="after")
+    def _active_checkpoint(self) -> PersonalMembershipCheckpointV1:
+        if self.execution.execution_state != "active":
+            raise ValueError("membership checkpoint requires active execution")
+        if (self.revision == 0) != (self.head_sha256 == _ZERO_DIGEST):
+            raise ValueError("membership checkpoint head does not match its revision")
+        return self
+
+
+class PersonalApplicationMembershipResponseV1(StrictV1Model):
+    """A mutation's original checkpoint, including exact replay responses."""
+
+    checkpoint: PersonalMembershipCheckpointV1
+    result: PersonalApplicationMembershipResultV1
+
+    @model_validator(mode="after")
+    def _exact_result_checkpoint(self) -> PersonalApplicationMembershipResponseV1:
+        if (
+            self.checkpoint.revision != self.result.revision
+            or self.checkpoint.head_sha256 != self.result.head_sha256
+            or self.result.member.revision != self.result.revision
+        ):
+            raise ValueError("membership response checkpoint differs from its result")
+        return self
+
+
 class DelegatedAllocationInputV2(AllocationInputV1):
     """Allocator input overlaid with a bounded personal membership snapshot."""
 
@@ -343,7 +379,9 @@ __all__ = [
     "ExecutionPreparationV3",
     "PersonalApplicationMemberV1",
     "PersonalApplicationMembershipMutationV1",
+    "PersonalApplicationMembershipResponseV1",
     "PersonalApplicationMembershipResultV1",
+    "PersonalMembershipCheckpointV1",
     "PersonalMembershipPolicyV1",
     "PersonalMembershipSnapshotV1",
     "PersonalReincarnationEvidenceV1",

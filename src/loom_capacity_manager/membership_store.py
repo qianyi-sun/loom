@@ -28,6 +28,7 @@ from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMembershipMutationV1,
     PersonalApplicationMembershipResultV1,
     PersonalApplicationMemberV1,
+    PersonalMembershipCheckpointV1,
     PersonalMembershipSnapshotV1,
     PersonalReincarnationEvidenceV1,
     parse_execution_preparation,
@@ -57,6 +58,10 @@ from loom_capacity_manager.store import (
 )
 
 _ZERO_DIGEST = "0" * 64
+
+
+class PersonalMembershipRevisionConflictError(ConfigurationConflictError):
+    """Only the membership revision changed within the supplied exact authority."""
 
 
 def _subject_reference(subject: SubjectConfigurationV1) -> ConfigurationGenerationRefV1:
@@ -306,6 +311,54 @@ class CapacityMembershipStore:
     def __init__(self, management: CapacityManagementStore) -> None:
         self._management = management
 
+    async def checkpoint(
+        self, session: AsyncSession, *, actor: str
+    ) -> PersonalMembershipCheckpointV1:
+        """Read authority and verified membership in one consistent transaction."""
+
+        async with _write_transaction(session):
+            authority = (
+                await session.execute(
+                    select(CapacityAuthorityState)
+                    .where(CapacityAuthorityState.singleton_id == 1)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if authority is None or authority.execution_state != "active":
+                raise ExecutionConflictError("personal membership authority is unavailable")
+            epoch = (
+                await session.execute(
+                    select(CapacityExecutionEpoch)
+                    .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if epoch is None:
+                raise ExecutionConflictError("personal membership execution is unavailable")
+            preparation = self._management._execution_preparation_from_row(epoch)
+            if (
+                not isinstance(preparation, ExecutionPreparationV3)
+                or preparation.personal_membership.management_principal_id != actor
+            ):
+                raise ExecutionConflictError("execution does not delegate personal membership")
+            current = self._management._execution_context(authority, epoch)
+            if not isinstance(current, ExecutionAuthorityV2) or current.execution_state != "active":
+                raise ExecutionConflictError("personal membership execution fence changed")
+            await self._management.load_allocation_input(
+                session,
+                WriterFence(
+                    authority_incarnation=current.authority_incarnation,
+                    writer_epoch=current.writer_epoch,
+                ),
+            )
+            snapshot = await self.snapshot(session, epoch)
+            return PersonalMembershipCheckpointV1(
+                execution=current,
+                namespace_id=snapshot.namespace_id,
+                revision=snapshot.revision,
+                head_sha256=snapshot.head_sha256,
+            )
+
     async def apply(
         self,
         session: AsyncSession,
@@ -421,7 +474,9 @@ class CapacityMembershipStore:
             current_revision = 0 if not prior_rows else prior_rows[-1].revision
             previous_sha256 = _ZERO_DIGEST if not prior_rows else prior_rows[-1].head_sha256
             if request.expected_revision != current_revision:
-                raise ConfigurationConflictError("personal membership revision is stale")
+                raise PersonalMembershipRevisionConflictError(
+                    "personal membership revision is stale"
+                )
             latest_members = {
                 result.member.configuration.subject_id: result.member
                 for result in (_event_result(row) for row in prior_rows)
@@ -794,19 +849,33 @@ class CapacityMembershipStore:
         self,
         session: AsyncSession,
         epoch: CapacityExecutionEpoch | int,
+        *,
+        through_revision: int | None = None,
     ) -> PersonalMembershipSnapshotV1:
+        """Read the current head or an exact immutable historical log prefix."""
+
+        if through_revision is not None and (
+            type(through_revision) is not int or through_revision < 0
+        ):
+            raise ConfigurationConflictError("personal membership revision is invalid")
         execution_epoch = epoch if isinstance(epoch, int) else epoch.execution_epoch
-        rows = (
-            (
-                await session.execute(
-                    select(CapacityPersonalMembershipEvent)
-                    .where(CapacityPersonalMembershipEvent.execution_epoch == execution_epoch)
-                    .order_by(CapacityPersonalMembershipEvent.revision)
-                )
+        statement = select(CapacityPersonalMembershipEvent).where(
+            CapacityPersonalMembershipEvent.execution_epoch == execution_epoch
+        )
+        if through_revision is not None:
+            statement = statement.where(
+                CapacityPersonalMembershipEvent.revision <= through_revision
             )
+        rows = (
+            (await session.execute(statement.order_by(CapacityPersonalMembershipEvent.revision)))
             .scalars()
             .all()
         )
+        if (
+            through_revision is not None
+            and (0 if not rows else rows[-1].revision) != through_revision
+        ):
+            raise ConfigurationConflictError("personal membership revision is unavailable")
         if not rows:
             epoch_row = (
                 epoch
@@ -1185,4 +1254,8 @@ async def resolve_subject_acknowledgement(
     raise ConfigurationConflictError("subject execution acknowledgement is unavailable")
 
 
-__all__ = ["CapacityMembershipStore", "resolve_subject_acknowledgement"]
+__all__ = [
+    "CapacityMembershipStore",
+    "PersonalMembershipRevisionConflictError",
+    "resolve_subject_acknowledgement",
+]
