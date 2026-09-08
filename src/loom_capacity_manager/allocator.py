@@ -58,6 +58,10 @@ from loom_capacity_manager.fleet_state import (
     validate_fleet_manifest_digests,
     validate_profile_narrowing,
 )
+from loom_capacity_manager.membership import (
+    PersonalMembershipResolutionError,
+    resolved_subject_references,
+)
 from loom_capacity_manager.topology import (
     SearchBudget,
     TopologyInfeasible,
@@ -655,7 +659,11 @@ class _AllocationState:
             raise ShadowAllocatorError("active fleet generation binding is inconsistent")
         if reference.digest != canonical_digest(fleet):
             raise ShadowAllocatorError("active fleet digest binding is inconsistent")
-        manifest_refs = {item.subject_id: item for item in self.value.configuration.subjects}
+        try:
+            subject_references = resolved_subject_references(self.value)
+        except PersonalMembershipResolutionError as exc:
+            raise ShadowAllocatorError(str(exc)) from exc
+        manifest_refs = {item.subject_id: item for item in subject_references}
         input_subjects = {item.configuration.subject_id: item for item in self.value.subjects}
         if set(manifest_refs) != set(input_subjects):
             raise ShadowAllocatorError("active subject manifest is incomplete")
