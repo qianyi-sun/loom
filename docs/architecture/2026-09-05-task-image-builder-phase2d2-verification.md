@@ -139,6 +139,15 @@ may change the materialization's current ready state. Wire timestamps never
 replace unrounded expiry checks. Receipt parsing alone does not prove completion,
 current readiness or execution authorization.
 
+The later fixed submit/poll API projects a closed
+`loom.task-image-publication-status/v1` object, bounded to 4 KiB. It contains grant,
+operation, materialization and attempt IDs, lease epoch, state, snapshot and
+candidate-set hashes, and component count. Completed status requires its exact
+receipt; failed status requires one bounded failure code. Queued/running statuses
+contain neither. The full durable snapshot, worker lease and registry inputs are
+not poll payloads. The API must authenticate the current session and exact job
+binding, and validate completed history before producing this projection.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
