@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from loom.nebius_platform_bootstrap import MigrationError, database_url
-from loom.nebius_platform_render import NebiusPlatformError, build_platform, digest, write_platform
+from loom.nebius_platform_render import NebiusPlatformError, build_platform, write_platform
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -49,7 +48,6 @@ def platform_inputs() -> tuple[dict, dict, dict]:
         "source_ref": "refs/heads/codex/nebius-main",
         "repository": "qianyi-sun/loom",
         "images": images,
-        "profile_sha256": digest(profile),
     }
     return config, candidate, profile
 
@@ -83,14 +81,67 @@ def test_independent_namespace_routing_storage_and_no_secret_material(
         for volume in pod.get("volumes", []):
             if volume["name"] == "db-ca":
                 assert volume["secret"]["items"] == [{"key": "ca.crt", "path": "ca.crt"}]
-    manifest = write_platform(files, config, candidate, tmp_path / "render")
-    for name, expected in manifest["files"].items():
-        assert (
-            "sha256:" + hashlib.sha256((tmp_path / "render" / name).read_bytes()).hexdigest()
-            == expected
-        )
-    with pytest.raises(NebiusPlatformError, match="empty"):
-        write_platform(files, config, candidate, tmp_path / "render")
+    output = tmp_path / "render"
+    result = write_platform(files, config, candidate, output)
+    assert set(result["files"]) == set(files)
+    assert not (output / "manifest.json").exists()
+    assert not (output / "candidate.json").exists()
+    assert not (output / "environment.json").exists()
+    (output / "README.md").write_text("Operator notes")
+    write_platform(files, config, candidate, output)
+    assert (output / "README.md").read_text() == "Operator notes"
+
+
+def test_config_only_change_creates_new_jobs_and_rollout(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    first = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    changed = dict(config, model_provider_base_url="https://provider.example/v1")
+    second = build_platform(changed, candidate, profile, {}, repo_root=ROOT)
+    assert (
+        first["50-configure.yaml"][0]["metadata"]["name"]
+        != second["50-configure.yaml"][0]["metadata"]["name"]
+    )
+
+    def templates(files):
+        return [
+            row["spec"]["template"]["metadata"]
+            for row in files["40-services.yaml"]
+            if row["kind"] == "Deployment"
+        ]
+
+    assert templates(first) != templates(second)
+
+
+@pytest.mark.parametrize("changed_input", ["profile", "keyring"])
+def test_runtime_configuration_changes_restart_consumers(
+    platform_inputs: tuple, changed_input: str
+) -> None:
+    config, candidate, profile = platform_inputs
+    first = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    updated_profile = (
+        dict(profile, image_admission={"admissions": [{"signing_key_id": "rotated"}]})
+        if changed_input == "profile"
+        else profile
+    )
+    updated_keyring = (
+        {"keys": [{"signing_key_id": "rotated"}]} if changed_input == "keyring" else {}
+    )
+    second = build_platform(config, candidate, updated_profile, updated_keyring, repo_root=ROOT)
+    assert (
+        first["50-configure.yaml"][0]["metadata"]["name"]
+        != second["50-configure.yaml"][0]["metadata"]["name"]
+    )
+    before = [
+        row["spec"]["template"]["metadata"]
+        for row in first["40-services.yaml"]
+        if row["kind"] == "Deployment"
+    ]
+    after = [
+        row["spec"]["template"]["metadata"]
+        for row in second["40-services.yaml"]
+        if row["kind"] == "Deployment"
+    ]
+    assert before != after
 
 
 @pytest.mark.parametrize(

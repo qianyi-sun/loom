@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Plan or apply one authenticated, independently rendered Nebius platform."""
+"""Plan or apply operator-reviewed manifests for the Nebius integration platform."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import subprocess
@@ -24,9 +23,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "src"))
 
-from scripts.ops.nebius_candidate import read_json, validate_candidate  # noqa: E402
-
-from loom.nebius_platform_render import build_platform, canonical, digest  # noqa: E402
+from loom.nebius_platform_render import canonical, validate_environment  # noqa: E402
 
 PHASE_FILES = (
     "00-namespaces.yaml",
@@ -45,55 +42,45 @@ class DeploymentError(ValueError):
     """A deployment boundary failed; its message contains no secret values."""
 
 
-def validate_render(
-    render_dir: Path, trusted_keyring: Path
+def load_render(
+    render_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, list[dict[str, Any]]]]:
-    manifest = read_json(render_dir / "manifest.json")
-    if manifest.get("schema_version") != "loom.nebius-platform-render.v1":
-        raise DeploymentError("unsupported render manifest")
-    expected_names = set(PHASE_FILES) | {"candidate.json", "environment.json"}
-    if set(manifest.get("files", {})) != expected_names:
-        raise DeploymentError("render manifest file inventory is incomplete")
-    if {path.name for path in render_dir.iterdir()} != expected_names | {"manifest.json"}:
-        raise DeploymentError("render directory contains unexpected files")
-    for filename, expected in manifest["files"].items():
-        path = render_dir / filename
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
-            raise DeploymentError("render artifact is not a bounded regular file")
-        if "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            raise DeploymentError(f"render artifact digest mismatch: {filename}")
-    config = read_json(render_dir / "environment.json")
-    candidate = read_json(render_dir / "candidate.json")
-    documents = list(yaml.safe_load_all((render_dir / "10-config-network.yaml").read_text()))
-    cms = [
-        doc
-        for doc in documents
-        if doc.get("kind") == "ConfigMap" and doc["metadata"]["name"] == "loom-platform-config"
+    """Read operator-reviewed manifests once; namespace boundaries remain explicit."""
+    files = {
+        filename: list(yaml.safe_load_all((render_dir / filename).read_text()))
+        for filename in PHASE_FILES
+    }
+    configs = [
+        row for row in files["10-config-network.yaml"]
+        if row["kind"] == "ConfigMap" and row["metadata"]["name"] == "loom-platform-config"
     ]
-    if len(cms) != 1:
+    if len(configs) != 1:
         raise DeploymentError("platform configuration identity is ambiguous")
-    profile = json.loads(cms[0]["data"]["profile.json"])
-    trust = trusted_keyring.read_text()
-    validate_candidate(candidate, profile, trust)
-    if (
-        manifest.get("candidate_sha256") != digest(candidate)
-        or manifest.get("configuration_sha256") != digest(config)
-        or manifest.get("candidate_sha") != candidate["candidate_sha"]
-        or any(
-            manifest.get(key) != config[key]
-            for key in ("namespace", "execution_namespace", "target_id", "cluster_id")
-        )
-        or manifest.get("public_origin") != "https://" + config["public_host"]
-    ):
-        raise DeploymentError("render identity differs from authenticated inputs")
-    regenerated = build_platform(config, candidate, profile, json.loads(trust), repo_root=ROOT)
-    for filename, rows in regenerated.items():
-        expected = yaml.safe_dump_all(rows, sort_keys=False).encode()
-        if (render_dir / filename).read_bytes() != expected:
-            raise DeploymentError(
-                f"render artifact does not match deterministic source: {filename}"
-            )
-    return manifest, config, regenerated
+    config = json.loads(configs[0]["data"]["environment.json"])
+    validate_environment(config)
+    namespaces = {config["namespace"], config["execution_namespace"]}
+    for filename, rows in files.items():
+        for row in rows:
+            metadata = row["metadata"]
+            namespace = metadata.get("namespace")
+            if row["kind"] == "Namespace":
+                namespace = metadata["name"]
+            if row["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
+                if metadata["name"] != config["execution_namespace"] + "-collector":
+                    raise DeploymentError("cluster resource does not belong to the integration target")
+                continue
+            if namespace not in namespaces:
+                raise DeploymentError(f"rendered resource targets a different namespace: {filename}")
+    profile = json.loads(configs[0]["data"]["profile.json"])
+    deployment = {
+        "candidate_sha": profile["candidate_sha"],
+        "cluster_id": config["cluster_id"],
+        "namespace": config["namespace"],
+        "execution_namespace": config["execution_namespace"],
+        "target_id": config["target_id"],
+        "public_origin": "https://" + config["public_host"],
+    }
+    return deployment, config, files
 
 
 def secret_requirements(
@@ -250,8 +237,7 @@ def preflight(
         same_candidate = (
             json.loads(current["data"]["profile.json"])["candidate_sha"]
             == manifest["candidate_sha"]
-            and digest(json.loads(current["data"]["environment.json"]))
-            == manifest["configuration_sha256"]
+            and json.loads(current["data"]["environment.json"]) == config
         )
     except (KeyError, ValueError, TypeError):
         pass
@@ -313,8 +299,8 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         print(f"Nebius deployment: {name}", flush=True)
 
     try:
-        phase("validate-render")
-        manifest, config, files = validate_render(args.render_dir, args.trusted_keyring)
+        phase("read-render")
+        manifest, config, files = load_render(args.render_dir)
         for filename, rows in files.items():
             (snapshot_root / filename).write_bytes(
                 yaml.safe_dump_all(rows, sort_keys=False).encode()
@@ -324,7 +310,6 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                 key: manifest[key]
                 for key in (
                     "candidate_sha",
-                    "configuration_sha256",
                     "cluster_id",
                     "namespace",
                     "execution_namespace",
@@ -342,21 +327,6 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             raise DeploymentError(
                 "candidate migration previously failed; fix the cause and explicitly retry failed jobs"
             )
-        if (
-            subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
-            ).stdout.strip()
-            != manifest["candidate_sha"]
-        ):
-            raise DeploymentError("apply requires the exact candidate checkout")
-        if subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip():
-            raise DeploymentError("apply requires an unmodified candidate checkout")
         ns = config["namespace"]
 
         def apply_file(filename: str) -> None:
@@ -491,7 +461,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("render-dir", "kubeconfig", "trusted-keyring", "evidence-dir"):
+    for name in ("render-dir", "kubeconfig", "evidence-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--expected-cluster-id", required=True)
     parser.add_argument("--apply", action="store_true")

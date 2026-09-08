@@ -458,16 +458,14 @@ def build_platform(
     *,
     repo_root: Path,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Build validated manifests; callers verify the signed candidate before use."""
+    """Build Kubernetes resources from published image refs and environment settings."""
     validate_environment(config)
     if (
         candidate.get("source_ref") != "refs/heads/codex/nebius-main"
         or candidate.get("repository") != "qianyi-sun/loom"
     ):
         raise NebiusPlatformError("candidate must originate from the Nebius integration branch")
-    if profile.get("candidate_sha") != candidate.get("candidate_sha") or candidate.get(
-        "profile_sha256"
-    ) != digest(profile):
+    if profile.get("candidate_sha") != candidate.get("candidate_sha"):
         raise NebiusPlatformError("runtime profile does not match the candidate")
     images = {key: value["image_ref"] for key, value in candidate["images"].items()}
     if (
@@ -476,7 +474,11 @@ def build_platform(
     ):
         raise NebiusPlatformError("execution images do not match the deployed candidate")
     ns, ex = config["namespace"], config["execution_namespace"]
-    revision = digest({"config": config, "candidate": candidate})
+    # One rollout fingerprint triggers config-only Pod updates and distinct Jobs.
+    # It is an identifier, not an integrity or deployment admission check.
+    revision = digest(
+        {"config": config, "candidate": candidate, "profile": profile, "keyring": keyring}
+    )
     short = revision.removeprefix("sha256:")[:12]
     files: dict[str, list[dict[str, Any]]] = {}
     files["00-namespaces.yaml"] = [_namespace(ns), _namespace(ex)]
@@ -1038,27 +1040,11 @@ def write_platform(
     output: Path,
 ) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
-    if any(output.iterdir()):
-        raise NebiusPlatformError("output directory must be empty")
-    manifest: dict[str, Any] = {
-        "schema_version": "loom.nebius-platform-render.v1",
+    for filename, docs in files.items():
+        (output / filename).write_text(yaml.safe_dump_all(docs, sort_keys=False))
+    return {
         "candidate_sha": candidate["candidate_sha"],
-        "cluster_id": config["cluster_id"],
-        "candidate_sha256": digest(candidate),
-        "configuration_sha256": digest(config),
         "namespace": config["namespace"],
         "execution_namespace": config["execution_namespace"],
-        "target_id": config["target_id"],
-        "public_origin": "https://" + config["public_host"],
-        "files": {},
+        "files": list(files),
     }
-    for filename, docs in files.items():
-        payload = yaml.safe_dump_all(docs, sort_keys=False).encode()
-        (output / filename).write_bytes(payload)
-        manifest["files"][filename] = "sha256:" + hashlib.sha256(payload).hexdigest()
-    for filename, document in (("candidate.json", candidate), ("environment.json", config)):
-        payload = canonical(document)
-        (output / filename).write_bytes(payload)
-        manifest["files"][filename] = "sha256:" + hashlib.sha256(payload).hexdigest()
-    (output / "manifest.json").write_bytes(canonical(manifest))
-    return manifest

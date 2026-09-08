@@ -13,7 +13,7 @@ are outside this integration lane and are explicitly rejected.
 
 Copy `deploy/nebius/integration.platform.json.example` to a protected operator
 directory and fill its non-secret values from the reviewed Terraform outputs.
-All application images come from one signed Nebius candidate. PostgreSQL 16
+All application images come from one published Nebius candidate. PostgreSQL 16
 Bookworm and the matching `pg_dump` image must also be mirrored to Nebius and
 pinned by digest; the PostgreSQL pod uses the image's UID/GID 999. Native CSI
 storage uses the explicitly selected `compute-csi-default-sc` class.
@@ -27,11 +27,16 @@ python scripts/ops/render_nebius_platform.py \
   --output /protected/rendered-candidate
 ```
 
-The trusted keyring is independently configured; a key shipped only alongside
-an untrusted candidate cannot authorize it. Rendering verifies the signed
-candidate and runtime profile, then produces ordered YAML, the source inputs,
-and a SHA-256 inventory. It performs no network or cloud mutation. The output
-directory must be empty, preventing stale manifests from entering deployment.
+The keyring is passed through to the existing control plane, which verifies its
+runtime image admission records. The publisher records commit and image digests;
+rendering does not re-verify a separate candidate signature or profile hash.
+It writes phase YAML with the environment settings in the application ConfigMap;
+there are no duplicate candidate/configuration files or file-hash inventories.
+Re-rendering replaces these known files and preserves operator notes. Deployment
+reads the reviewed output once instead of hashing and regenerating it again.
+A single configuration revision triggers Pod updates and new configure Jobs when
+environment settings, the runtime profile or trusted public keys change, while
+retries reuse the same completed Jobs.
 
 The example execution price records the September 8, 2026 cpu-e2 eu-north1
 [official rates](https://docs.nebius.com/compute/resources/pricing): 12,000 micro-USD/vCPU-hour,
@@ -138,7 +143,9 @@ The PostgreSQL StatefulSet has one replica for this integration environment.
 Its PVC is retained on scale-down/deletion. This is not database HA. A CronJob
 runs `pg_dump --format=custom --no-owner` every six hours using the pinned
 PostgreSQL client, then uploads with the separate backup identity. Upload success
-requires matching object size and SHA-256 metadata on readback. Dumps use a
+requires matching object size and SHA-256 metadata on readback. S3 metadata
+key casing is normalized for Nebius responses such as `Sha256`; missing,
+ambiguous or mismatched digests still fail verification. Dumps use a
 transient volume; backup objects have no automatic deletion in this lane.
 
 Before any upgrade mutation of an existing database, run and wait for a Job
@@ -165,7 +172,7 @@ establishes that acceptance.
 
 ## First bounded ordinary-user acceptance
 
-After the signed candidate is deployed, authenticate an ordinary member through
+After the published candidate is deployed, authenticate an ordinary member through
 the public HTTPS origin. Confirm its session can read its own team and submit
 tasks, and cannot access admin actions. Build the candidate-bound CPU TaskSet
 with `scripts/ops/build_nebius_acceptance_taskset.py`. Use the existing acceptance

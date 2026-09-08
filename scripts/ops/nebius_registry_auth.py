@@ -69,7 +69,7 @@ def refresh_registry_auth(
 
     token, expires = asyncio.run(mint())
     host = registry_prefix.split("/", 1)[0]
-    encoded = base64.b64encode(("oauth2accesstoken:" + token).encode()).decode()
+    encoded = base64.b64encode(("iam:" + token).encode()).decode()
     payload = json.dumps({"auths": {host: {"auth": encoded}}}, sort_keys=True).encode() + b"\n"
     auth_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary = tempfile.mkstemp(prefix=".nebius-auth-", dir=auth_file.parent)

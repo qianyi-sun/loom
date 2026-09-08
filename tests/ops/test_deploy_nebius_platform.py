@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import deploy_nebius_platform as deploy
 from scripts.ops import nebius_candidate as candidate
 
-from loom.nebius_platform_render import build_platform, canonical, write_platform
+from loom.nebius_platform_render import build_platform, write_platform
 
 
 @pytest.fixture
@@ -49,7 +48,6 @@ def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
         "repository": candidate.REPOSITORY,
         "source_ref": candidate.SOURCE_REF,
         "candidate_sha": "a" * 40,
-        "source_tree": "b" * 40,
         "workflow_path": candidate.WORKFLOW,
         "run_id": 1,
         "registry_prefix": "cr.eu-north1.nebius.cloud/test",
@@ -91,7 +89,6 @@ def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
     manifest = write_platform(files, config, release, output)
     args = argparse.Namespace(
         render_dir=output,
-        trusted_keyring=keyring,
         kubeconfig=tmp_path / "kubeconfig",
         evidence_dir=tmp_path / "evidence",
         expected_cluster_id=config["cluster_id"],
@@ -171,7 +168,7 @@ class FakeKubectl(deploy.Kubectl):
         return ""
 
 
-def test_real_render_revalidation_and_read_only_plan(rendered: tuple) -> None:
+def test_reviewed_render_read_only_plan(rendered: tuple) -> None:
     args, config, _, files = rendered
     kube = FakeKubectl(config, files)
     result = deploy.deploy(args, kube=kube)
@@ -182,14 +179,34 @@ def test_real_render_revalidation_and_read_only_plan(rendered: tuple) -> None:
     assert "certificate-authority-data" not in evidence
 
 
-def test_rehashed_manifest_cannot_change_rendered_namespace(rendered: tuple) -> None:
-    args, config, manifest, files = rendered
+def test_reviewed_yaml_can_be_tuned_without_rehash_or_git_checkout(
+    rendered: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, config, _, files = rendered
+    path = args.render_dir / "40-services.yaml"
+    rows = list(yaml.safe_load_all(path.read_text()))
+    service = next(row for row in rows if row["kind"] == "Deployment")
+    service["spec"]["replicas"] = 2
+    path.write_text(yaml.safe_dump_all(rows, sort_keys=False))
+    (args.render_dir / "README.md").write_text("Reviewed development settings")
+    args.apply = True
+    kube = FakeKubectl(config, files)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+
+    def no_checkout_gate(*args, **kwargs):
+        pytest.fail("deployment must not depend on operator Git checkout state")
+
+    monkeypatch.setattr(deploy.subprocess, "run", no_checkout_gate)
+    assert deploy.deploy(args, kube=kube)["status"] == "complete"
+    assert kube.objects["deployment", service["metadata"]["name"]]["spec"]["replicas"] == 2
+
+
+def test_foreign_namespace_fails_before_mutation(rendered: tuple) -> None:
+    args, config, _, files = rendered
     path = args.render_dir / "40-services.yaml"
     path.write_text(path.read_text().replace(config["namespace"], "other-namespace"))
-    manifest["files"][path.name] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    (args.render_dir / "manifest.json").write_bytes(canonical(manifest))
     kube = FakeKubectl(config, files)
-    with pytest.raises(deploy.DeploymentError, match="deterministic source"):
+    with pytest.raises(deploy.DeploymentError, match="namespace"):
         deploy.deploy(args, kube=kube)
     assert kube.commands == []
 
@@ -210,17 +227,10 @@ def test_wrong_cluster_and_missing_secret_fail_before_mutation(rendered: tuple) 
 def test_failed_upgrade_backup_prevents_all_apply(
     rendered: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    args, config, manifest, files = rendered
+    args, config, _, files = rendered
     args.apply = True
     kube = FakeKubectl(config, files, database=True)
     kube.fail_backup = True
-    monkeypatch.setattr(
-        deploy.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            stdout="" if args[0][1] == "status" else manifest["candidate_sha"]
-        ),
-    )
     with pytest.raises(deploy.DeploymentError, match="backup execution"):
         deploy.deploy(args, kube=kube)
     assert not any(command[0] in {"apply", "delete"} for command in kube.commands)
@@ -232,16 +242,9 @@ def test_failed_upgrade_backup_prevents_all_apply(
 def test_fresh_apply_and_completed_jobs_are_idempotent(
     rendered: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    args, config, manifest, files = rendered
+    args, config, _, files = rendered
     args.apply = True
     kube = FakeKubectl(config, files)
-    monkeypatch.setattr(
-        deploy.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            stdout="" if args[0][1] == "status" else manifest["candidate_sha"]
-        ),
-    )
     smoke: list[str] = []
     monkeypatch.setattr(deploy, "public_smoke", lambda origin, environment: smoke.append(origin))
     assert deploy.deploy(args, kube=kube)["status"] == "complete"
@@ -262,18 +265,11 @@ def test_fresh_apply_and_completed_jobs_are_idempotent(
 def test_failed_candidate_job_requires_explicit_retry(
     rendered: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    args, config, manifest, files = rendered
+    args, config, _, files = rendered
     args.apply = True
     kube = FakeKubectl(config, files, database=True)
     name = files["30-migrate.yaml"][0]["metadata"]["name"]
     kube.objects["job", name] = {"status": {"conditions": [{"type": "Failed", "status": "True"}]}}
-    monkeypatch.setattr(
-        deploy.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            stdout="" if args[0][1] == "status" else manifest["candidate_sha"]
-        ),
-    )
     monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
     with pytest.raises(deploy.DeploymentError, match="explicitly retry"):
         deploy.deploy(args, kube=kube)
