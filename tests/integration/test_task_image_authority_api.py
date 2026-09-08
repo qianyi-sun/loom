@@ -591,6 +591,8 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
         "/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential",
         "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-candidate",
         "/v2/projections/{grant_id}/materializations/{materialization_id}/publication-candidate",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-submit",
+        "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-poll",
         "/v1/projections/{grant_id}/revocation",
     }
     for disabled in ("/openapi.json", "/docs", "/redoc"):
