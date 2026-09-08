@@ -626,3 +626,23 @@ def test_test_lanes_run_without_coverage_unless_explicitly_requested(
         assert args[args.index("-p") + 1] == "no:cov"
     else:
         assert "--cov=src" in args and "--cov=packages" in args
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_retired_only_image_plan_honors_explicit_validation_request(tmp_path: Path, requested: bool) -> None:
+    from scripts.plan_ci_validations import plan_validations
+
+    paths = ("src/loom_control_plane/worker_pool_autoscaler.py",)
+    plan = plan_validations(
+        changed_paths=paths,
+        labels={"ci:images"} if requested else set(),
+        event_name="pull_request",
+    )
+    result, values = _run_image_plan(
+        tmp_path, paths=paths, required=str(plan.images).lower(), unowned="false",
+    )
+    assert result.returncode == 0, result.stderr
+    assert values["required"] == str(requested).lower()
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    expected = component_ownership.release_image_matrix(manifest) if requested else ()
+    assert json.loads(values["images"]) == list(expected)

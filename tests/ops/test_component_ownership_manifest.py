@@ -1060,14 +1060,14 @@ def test_retired_pool_images_are_excluded_from_release_selection(
 
 
 @pytest.mark.parametrize("fallback_all", [False, True])
-def test_ignored_source_does_not_select_images_even_with_fallback(fallback_all: bool) -> None:
+def test_ignored_source_selects_images_only_when_explicitly_requested(fallback_all: bool) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     assert component_ownership.select_release_image_matrix(
         manifest,
         changed_paths=("src/loom_control_plane/worker_pool_autoscaler.py",),
         force_all=False,
         fallback_all=fallback_all,
-    ) == ()
+    ) == (component_ownership.release_image_matrix(manifest) if fallback_all else ())
 
 
 def test_image_selection_ignores_retired_paths_but_preserves_active_and_forced_coverage() -> None:

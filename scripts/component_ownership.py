@@ -1069,8 +1069,9 @@ def select_release_image_matrix(
     else:
         changed_paths = tuple(path for path in changed_paths if not manifest.ci_ignores_path(path))
         if not changed_paths:
-            # An explicitly ignored change is different from missing path evidence.
-            return ()
+            # Ignore retired inputs by default, but preserve an explicit caller
+            # request (for example ci:images) for the active image set.
+            return release_image_matrix(manifest) if fallback_all else ()
         selected_ids = {
             component.id
             for path in changed_paths
