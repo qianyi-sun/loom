@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
     - loom-ci-image
+    - loom-nebius-release

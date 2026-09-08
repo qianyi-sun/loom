@@ -60,6 +60,24 @@ def test_repository_nebius_contract_passes() -> None:
     check_nebius_iac()
 
 
+@pytest.mark.parametrize("directory", ["modules/platform", "platform"])
+@pytest.mark.parametrize("change", ["provider", "lock"])
+def test_standalone_platform_provider_contract_is_checked(
+    tmp_path: Path, directory: str, change: str
+) -> None:
+    repo_root, nebius_root = _copy_contract(tmp_path)
+    root = nebius_root / directory
+    if change == "provider":
+        path = root / "versions.tf"
+        path.write_text(path.read_text().replace("= 0.6.46", ">= 0.6.46"))
+        error = "provider must be pinned"
+    else:
+        (root / ".terraform.lock.hcl").unlink()
+        error = "provider lock file is required"
+    with pytest.raises(ContractError, match=error):
+        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
+
+
 def test_topology_drift_is_rejected(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
     path = nebius_root / "targets" / "development-eu-north1.tfvars.json.example"

@@ -1030,7 +1030,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 13
+    assert len(matrix) == 14
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
@@ -1076,13 +1076,18 @@ def test_image_selection_ignores_retired_paths_but_preserves_active_and_forced_c
     active = ("deploy/Dockerfile.web",)
     select = component_ownership.select_release_image_matrix
     assert select(manifest, changed_paths=retired + active, force_all=False) == select(
-        manifest, changed_paths=active, force_all=False,
+        manifest,
+        changed_paths=active,
+        force_all=False,
     )
     assert select(manifest, changed_paths=retired, force_all=True) == (
         component_ownership.release_image_matrix(manifest)
     )
     assert select(
-        manifest, changed_paths=("new-runtime/entrypoint.sh",), force_all=False, fallback_all=True,
+        manifest,
+        changed_paths=("new-runtime/entrypoint.sh",),
+        force_all=False,
+        fallback_all=True,
     ) == component_ownership.release_image_matrix(manifest)
 
 
@@ -1134,9 +1139,11 @@ def test_native_release_image_matrix_builds_each_active_nebius_image_once_on_amd
     images = component_ownership.release_image_matrix(manifest)
     matrix = component_ownership.native_release_image_matrix(images)
 
-    assert all(component.platforms == ("linux/amd64",) for component in manifest.release_components())
+    assert all(
+        component.platforms == ("linux/amd64",) for component in manifest.release_components()
+    )
 
-    assert len(matrix) == len(images) == 13
+    assert len(matrix) == len(images) == 14
     assert {(entry["architecture"], entry["platform"]) for entry in matrix} == {
         ("amd64", "linux/amd64"),
     }
@@ -1146,9 +1153,37 @@ def test_native_release_image_matrix_builds_each_active_nebius_image_once_on_amd
         assert all({key: entry[key] for key in image} == image for entry in matching)
 
 
+def test_nebius_runner_builds_and_scans_without_joining_application_rollout() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("deploy/Dockerfile.nebius-runner",),
+        force_all=False,
+    )
+    assert [row["image"] for row in selected] == ["nebius-runner"]
+    assert (
+        component_ownership.validate_release_image_pair(
+            manifest,
+            image="nebius-runner",
+            image_name="loom-nebius-runner",
+            dockerfile="deploy/Dockerfile.nebius-runner",
+            build_context=".",
+        )
+        == []
+    )
+    for role in ("primary", "auxiliary"):
+        assert "loom-nebius-runner" not in {
+            row["image_name"]
+            for row in component_ownership.release_images_for_rollout_role(
+                manifest, rollout_role=role
+            )
+        }
+
+
 @pytest.mark.parametrize("platforms", [["linux/arm64"], ["linux/amd64", "linux/arm64"]])
 def test_active_manifest_rejects_platforms_outside_nebius_contract(
-    tmp_path: Path, platforms: list[str],
+    tmp_path: Path,
+    platforms: list[str],
 ) -> None:
     source = (REPO_ROOT / "config/component-ownership.toml").read_text(encoding="utf-8")
     manifest_path = tmp_path / "component-ownership.toml"

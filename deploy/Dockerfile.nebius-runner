@@ -1,0 +1,12 @@
+# Published only as an explicitly bootstrapped, digest-pinned Nebius runner image.
+# Runtime release pods run as UID 1001 with no privilege escalation or Docker daemon.
+FROM ghcr.io/actions/actions-runner:2.337.0@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3 \
+    && mkdir -p /opt/loom-runner \
+    && dpkg-query -W > /opt/loom-runner/packages.txt \
+    && skopeo --version > /opt/loom-runner/skopeo-version.txt \
+    && chmod 0444 /opt/loom-runner/packages.txt /opt/loom-runner/skopeo-version.txt \
+    && rm -rf /var/lib/apt/lists/*
+USER runner

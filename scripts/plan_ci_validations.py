@@ -74,6 +74,16 @@ NEBIUS_IAC_EXACT = {
 
 NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
 
+NEBIUS_PLATFORM_EXACT = {
+    ".github/workflows/nebius-candidate.yml",
+    "scripts/ops/deploy_nebius_platform.py",
+    "scripts/ops/nebius_candidate.py",
+    "scripts/ops/nebius_registry_auth.py",
+    "scripts/ops/render_nebius_platform.py",
+    "scripts/ops/render_nebius_runners.py",
+}
+NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
+
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     ".github/workflows/deploy-environment.yml",
     ".github/workflows/release-promotion-gate.yml",
@@ -279,7 +289,9 @@ def plan_validations(
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
-    paths = tuple(path for path in paths if not _component_ownership_manifest().ci_ignores_path(path))
+    paths = tuple(
+        path for path in paths if not _component_ownership_manifest().ci_ignores_path(path)
+    )
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
@@ -357,6 +369,9 @@ def plan_validations(
     )
     cluster_exact = {
         ".github/workflows/cluster-smoke.yml",
+        "src/loom/nebius_platform_render.py",
+        "scripts/ops/render_nebius_platform.py",
+        "tests/unit/test_nebius_platform_render.py",
         ".github/workflows/release-promotion-gate.yml",
         "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/cluster_cmd.py",
@@ -428,6 +443,7 @@ def plan_validations(
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+            or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
             or _is_protected_staging_rollout_path(path)
             or _is_protected_native_authority_path(path)
             or bool(test_owner_lanes)

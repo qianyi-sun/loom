@@ -204,13 +204,13 @@ class ExecutionTargetV1(_StrictContract):
 
 
 class ExecutionTopologyV1(_StrictContract):
-    """Checked environment bindings for one shared physical cluster."""
+    """Checked deployed environment bindings for one physical cluster."""
 
     schema_version: Literal["loom.execution-topology.v1"] = "loom.execution-topology.v1"
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     placement_policy: Literal["environment-local-health-first"]
-    targets: tuple[ExecutionTargetV1, ...] = Field(min_length=3, max_length=3)
+    targets: tuple[ExecutionTargetV1, ...] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def _targets_form_one_shared_cluster_topology(self) -> ExecutionTopologyV1:
@@ -230,8 +230,6 @@ class ExecutionTopologyV1(_StrictContract):
                 raise ValueError("every target must bind the declared execution class")
 
         environments = [target.environment for target in self.targets]
-        if set(environments) != {"development", "staging", "production"}:
-            raise ValueError("the shared cluster requires one binding per environment")
         if len(environments) != len(set(environments)):
             raise ValueError("every environment needs exactly one shared-cluster binding")
         cluster_scope_ids = {target.cluster_scope_id for target in self.targets}

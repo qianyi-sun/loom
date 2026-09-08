@@ -1,0 +1,19 @@
+{
+  "nebius_profile": "REPLACE_OPERATOR_PROFILE",
+  "tenant_id": "tenant-REPLACE",
+  "project_id": "project-REPLACE",
+  "cluster_id": "mk8scluster-REPLACE",
+  "cluster_scope_id": "nebius-eu-north1-shared",
+  "subnet_id": "vpcsubnet-REPLACE",
+  "public_pool_id": "publicippool-REPLACE",
+  "node_registry_pull_service_account_id": "serviceaccount-REPLACE",
+  "registry_fqdn": "cr.eu-north1.nebius.cloud/REPLACE",
+  "region": "eu-north1",
+  "kubernetes_version": "REPLACE_EXISTING_CLUSTER_VERSION",
+  "integration_platform": {
+    "bucket_prefix": "loom-nebius-integration-REPLACE",
+    "system_preset": "4vcpu-16gb",
+    "execution_max_nodes": 2,
+    "ci_max_nodes": 2
+  }
+}

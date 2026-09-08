@@ -256,6 +256,9 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
     "path",
     [
         "deploy/terraform/nebius/stack/main.tf",
+        "deploy/terraform/nebius/modules/platform/main.tf",
+        "deploy/terraform/nebius/platform/main.tf",
+        "deploy/terraform/nebius/integration-platform.tfvars.json.example",
         "scripts/check_nebius_iac.py",
         "tests/ops/test_nebius_iac.py",
     ],
@@ -270,6 +273,39 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
     assert plan.integration is True
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == {"integration"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/ops/deploy_nebius_platform.py",
+        "scripts/ops/nebius_candidate.py",
+        "scripts/ops/nebius_registry_auth.py",
+        "scripts/ops/render_nebius_runners.py",
+        "deploy/nebius/runners.example.json",
+        "deploy/nebius/integration.platform.json.example",
+        ".github/workflows/nebius-candidate.yml",
+    ],
+)
+def test_nebius_platform_tools_do_not_fall_back_to_unrelated_heavy_lanes(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == {"integration"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/loom/nebius_platform_render.py",
+        "scripts/ops/render_nebius_platform.py",
+        "tests/unit/test_nebius_platform_render.py",
+        "tests/integration/test_nebius_platform_k3s.py",
+    ],
+)
+def test_nebius_manifest_changes_select_actual_kubernetes_admission(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.unowned_runtime is False
+    assert plan.cluster_smoke is True
 
 
 @pytest.mark.parametrize(
@@ -385,6 +421,10 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "tests/unit/test_metrics_enumeration.py",
         "tests/loom_cli/test_config.py",
         "tests/ops/test_nebius_ci_scope.py",
+        "tests/ops/test_nebius_candidate.py",
+        "tests/ops/test_nebius_runners.py",
+        "tests/ops/test_nebius_registry_auth.py",
+        "tests/ops/test_deploy_nebius_platform.py",
     ],
 )
 def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str) -> None:
@@ -416,6 +456,10 @@ def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> N
             {"integration", "integration_docker"},
         ),
         ("tests/unit/test_nebius_runtime_render.py", {"cluster_smoke"}),
+        (
+            "tests/integration/test_nebius_platform_bootstrap.py",
+            {"integration", "integration_docker"},
+        ),
         ("tests/system/test_full_stack_hello.py", {"staging_smoke"}),
     ],
 )
