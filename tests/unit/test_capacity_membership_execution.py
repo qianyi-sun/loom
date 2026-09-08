@@ -62,6 +62,21 @@ def test_membership_seal_rejects_a_different_promoted_input(tamper: str) -> None
         module.bind_executable_membership(base.model_copy(update=changes[tamper]), value)
 
 
+def test_allocation_parser_requires_exact_integer_v2_discriminator() -> None:
+    module = import_module("loom_capacity_manager.membership_execution")
+    value = delegated_input_with_new_owner()
+    authority = execution_authority_fixture().model_copy(
+        update={
+            "execution_manifest_sha256": canonical_executable_digest(value.preparation),
+        }
+    )
+    base = promote_shadow_epoch(allocate_shadow(value), authority, allocation_epoch=1)
+    assert module.parse_executable_epoch(base.model_dump_json()) == base
+    payload = base.model_dump(mode="json") | {"schema_version": 2.0}
+    with pytest.raises(ValueError):
+        module.parse_executable_epoch(json.dumps(payload))
+
+
 @pytest.mark.parametrize("tag", (3.0, "3", 4, None))
 def test_delegated_allocation_parser_requires_supported_exact_schema(tag: object) -> None:
     module = import_module("loom_capacity_manager.membership_execution")

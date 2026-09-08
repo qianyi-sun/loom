@@ -166,6 +166,38 @@ async def test_allocation_reader_rejects_missing_or_changed_membership_evidence(
             )
 
 
+@pytest.mark.parametrize("state", ("active", "drain-only"))
+async def test_currentness_rejects_manifest_downgrade_before_version_dispatch(
+    pinned_personal_allocation,
+    state: str,
+):
+    sessions, _, active, request, allocation_id = pinned_personal_allocation
+    async with sessions() as session:
+        epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, allocation_id)
+        assert epoch is not None and allocation is not None
+        assert await CapacityExecutionStore._membership_target_current(
+            session,
+            epoch,
+            allocation,
+            subject_id=request.projection.subject_id,
+        )
+        # Isolate the reader's authentication from immutable database write guards.
+        session.expunge(epoch)
+        payload = dict(epoch.manifest_payload)
+        payload.pop("personal_membership")
+        payload["schema_version"] = 2
+        epoch.manifest_payload = payload
+        epoch.state = state
+        with pytest.raises(ExecutionConflictError, match="manifest digest"):
+            await CapacityExecutionStore._membership_target_current(
+                session,
+                epoch,
+                allocation,
+                subject_id=request.projection.subject_id,
+            )
+
+
 async def test_historical_allocation_resolves_exact_member_and_base(
     pinned_personal_allocation,  # type: ignore[no-untyped-def]
 ):
@@ -296,37 +328,60 @@ async def test_supersession_rejects_tampered_successor_materialization(
     async with sessions() as session, session.begin():
         epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
         allocation = await session.get(CapacityAllocationEpoch, allocation_id)
-        changed = request.projection.model_copy(update={
-            "operation_kind": "capacity", "operation_epoch": 2,
-            "operation_id": UUID(int=22331), "configuration_generation": 2, "max_slots": 1,
-        })
-        await CapacityMembershipStore(fixture.store).apply(
-            session, _request(active, changed, expected_revision=1),
-            actor=DELEGATE, idempotency_key=UUID(int=22332),
+        changed = request.projection.model_copy(
+            update={
+                "operation_kind": "capacity",
+                "operation_epoch": 2,
+                "operation_id": UUID(int=22331),
+                "configuration_generation": 2,
+                "max_slots": 1,
+            }
         )
-        await session.execute(update(CapacitySubject).where(
-            CapacitySubject.subject_id == request.projection.subject_id,
-        ).values(max_slots=2))
+        await CapacityMembershipStore(fixture.store).apply(
+            session,
+            _request(active, changed, expected_revision=1),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=22332),
+        )
+        await session.execute(
+            update(CapacitySubject)
+            .where(
+                CapacitySubject.subject_id == request.projection.subject_id,
+            )
+            .values(max_slots=2)
+        )
         with pytest.raises(ExecutionConflictError):
             await module.allocation_subject_is_current(
-                session, epoch, allocation, subject_id=request.projection.subject_id,
+                session,
+                epoch,
+                allocation,
+                subject_id=request.projection.subject_id,
             )
 
 
 @pytest.mark.parametrize("tamper", ({"deployment_generation": 2}, {"configuration_generation": 99}))
 async def test_historical_reporter_rejects_unrecorded_generation(
-    pinned_personal_allocation, tamper: dict[str, int],  # type: ignore[no-untyped-def]
+    pinned_personal_allocation,
+    tamper: dict[str, int],  # type: ignore[no-untyped-def]
 ):
     module = import_module("loom_capacity_manager.membership_execution_store")
     sessions, _, active, request, allocation_id = pinned_personal_allocation
     async with sessions() as session, session.begin():
         epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
         allocation = await session.get(CapacityAllocationEpoch, allocation_id)
-        await session.execute(update(CapacityDemandReporter).where(
-            CapacityDemandReporter.reporter_incarnation == request.acknowledgement.reporter_incarnation,
-        ).values(**tamper))
+        await session.execute(
+            update(CapacityDemandReporter)
+            .where(
+                CapacityDemandReporter.reporter_incarnation
+                == request.acknowledgement.reporter_incarnation,
+            )
+            .values(**tamper)
+        )
         with pytest.raises(ExecutionConflictError):
             await module.resolve_allocation_reporter(
-                session, epoch, allocation, subject_id=request.projection.subject_id,
+                session,
+                epoch,
+                allocation,
+                subject_id=request.projection.subject_id,
                 reporter_incarnation=request.acknowledgement.reporter_incarnation,
             )
