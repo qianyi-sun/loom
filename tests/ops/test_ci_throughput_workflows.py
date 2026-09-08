@@ -482,22 +482,30 @@ def test_planner_failure_is_never_accepted(result: str) -> None:
     assert _run_gate(env).returncode != 0
 
 
-def test_draft_filter_finishes_before_checkout_and_cannot_cancel_authoritative_run(tmp_path: Path) -> None:
+def test_every_subscribed_pr_event_runs_a_real_stable_required_gate() -> None:
     workflow = _workflow(CI_WORKFLOW)
-    event = workflow["jobs"]["workflow-plan"]["steps"][0]
-    output = tmp_path / "outputs"
-    result = subprocess.run(
-        ["bash"], input=event["run"], text=True, capture_output=True,
-        env={**os.environ, "FILTERED_EVENT": "true", "GITHUB_OUTPUT": str(output)}, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert values["checkout_required"] == "false"
-    assert values["gate_mode"] == "filtered"
+    assert set(_workflow_on(workflow)["pull_request"]["types"]) == {
+        "opened", "synchronize", "reopened", "ready_for_review", "edited", "labeled", "unlabeled",
+    }
+    gate = workflow["jobs"]["repository-checks"]
+    assert gate["if"] == "always()"
+    assert gate["name"] == "${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || 'repository-checks' }}"
+    planner = workflow["jobs"]["workflow-plan"]
+    assert "if" not in planner
+    assert planner["steps"][0]["uses"].startswith("actions/checkout@")
+    assert all("if" not in step for step in planner["steps"][:3])
+    assert "filtered" not in json.dumps(workflow)
     group = _normalized_expression(workflow["concurrency"]["group"])
-    assert "filtered-{0}" in group and "github.run_id" in group
-    assert "authoritative" in group
+    assert "github.event.pull_request.head.sha" in group
+    assert "github.event.pull_request.base.sha" in group
     assert "github.event_name == 'pull_request'" in workflow["concurrency"]["cancel-in-progress"]
+
+
+@pytest.mark.parametrize("mode", ["filtered", "", "invalid"])
+def test_required_gate_cannot_accept_an_unvalidated_event_mode(mode: str) -> None:
+    env = _gate_environment()
+    env["GATE_MODE"] = mode
+    assert _run_gate(env).returncode != 0
 
 
 def _run_image_plan(

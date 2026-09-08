@@ -48,7 +48,7 @@ def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
         ("labeled", ""),
     ],
 )
-def test_unrelated_pr_metadata_event_is_filtered(
+def test_unrelated_pr_metadata_event_runs_the_complete_gate(
     action: str,
     action_label: str,
 ) -> None:
@@ -61,9 +61,9 @@ def test_unrelated_pr_metadata_event_is_filtered(
         pull_request_base_changed=False,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
 @pytest.mark.parametrize(
@@ -92,7 +92,7 @@ def test_supported_selector_metadata_event_runs_full_gate(action: str, label: st
     assert plan.gate_mode == "full"
 
 
-def test_draft_pr_is_filtered() -> None:
+def test_draft_pr_runs_the_complete_gate() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],
         labels=set(),
@@ -101,25 +101,25 @@ def test_draft_pr_is_filtered() -> None:
         pull_request_draft=True,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
-def test_converting_to_draft_filters_gate_until_ready_again() -> None:
+def test_delayed_draft_snapshot_does_not_replace_ready_checks_with_an_empty_suite() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],
         labels=set(),
         event_name="pull_request",
-        pull_request_action="converted_to_draft",
-        # The action itself must remain filtered even if a synthetic or
-        # replayed payload has not yet reflected the new draft state.
-        pull_request_draft=False,
+        pull_request_action="opened",
+        # A delayed original event can arrive after ready_for_review at the
+        # same head. It must still validate instead of emitting an empty suite.
+        pull_request_draft=True,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
 def test_docs_only_selects_no_heavy_validation() -> None:

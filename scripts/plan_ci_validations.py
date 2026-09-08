@@ -197,29 +197,6 @@ class ValidationPlan:
         return outputs
 
 
-def _pull_request_gate_mode(
-    *,
-    action: str,
-    action_label: str,
-    draft: bool,
-    base_changed: bool,
-) -> tuple[bool, bool, str]:
-    """Return event relevance, full-gate eligibility, and the gate context mode.
-
-    Head, base, readiness, and supported validation-selector changes emit the
-    the protected aggregate result. Drafts and unrelated metadata events are filtered
-    before checkout. Unknown actions remain fail-closed and run the full gate.
-    """
-
-    if draft or action == "converted_to_draft":
-        return False, False, "filtered"
-    if action == "edited" and not base_changed:
-        return False, False, "filtered"
-    if action in {"labeled", "unlabeled"} and action_label not in LABEL_TO_CHECK:
-        return False, False, "filtered"
-    return True, True, "full"
-
-
 def _is_documentation_path(path: str) -> bool:
     return (
         path in DOC_METADATA_PATHS
@@ -280,13 +257,10 @@ def plan_validations(
     event_relevant = True
     full_gate = True
     gate_mode = "full"
-    if event_name == "pull_request":
-        event_relevant, full_gate, gate_mode = _pull_request_gate_mode(
-            action=pull_request_action,
-            action_label=pull_request_action_label,
-            draft=pull_request_draft,
-            base_changed=pull_request_base_changed,
-        )
+    # Lifecycle metadata cannot skip a subscribed run: a newer empty GitHub
+    # check suite can hide an earlier successful required check for this SHA.
+    # Keep metadata arguments for CLI/caller compatibility; selection uses the
+    # changed paths and the event's full label snapshot below.
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     paths = tuple(

@@ -213,7 +213,8 @@ assertion with an unconditional "whatever the current head is" check.
 
 When CI fails, inspect the current head's failing source job and fix a
 deterministic error before requesting another attempt. Distinguish an actual
-failure from a cancelled superseded run or a filtered metadata event. Repeating
+failure from a cancelled superseded run. Nebius PR metadata events run the real
+selected checks; they do not emit filtered suites. Repeating
 the same failing head uses runner capacity without resolving the defect. These
 are developer verification practices, not a fifth required check or an
 additional approval gate.

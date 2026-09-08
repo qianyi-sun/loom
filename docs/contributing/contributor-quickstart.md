@@ -253,10 +253,17 @@ preserves the suite's session-scoped Postgres setup/cleanup contract while the
 two shards start directly after the planner, in parallel with the fast tier.
 The local commands remain serial equivalents so they are easy to reproduce.
 
-Every relevant non-draft PR runs its path-selected validation plan and emits
-the four protected contexts. Drafts and unrelated metadata events use only a
-`*-filtered` context. No label, author, reviewer, or merge coordinator grants
-gate authority; validation labels only add work to the path-inferred plan.
+On the Nebius integration branch, every subscribed PR event runs its selected
+validation plan and emits `repository-checks`, including draft pushes, body
+edits, base retargets and label changes. There are no filtered suites. The
+legacy `dev` branch retains its four protected contexts. Validation labels
+only add work to the path-inferred plan; author or reviewer identity does not
+grant gate authority. Metadata changes can therefore start another real run.
+
+Nebius concurrency includes the head and base SHA: same-candidate events may
+supersede an earlier run, while an older candidate cannot cancel a different
+head/base validation. Older-candidate work may finish. A delayed draft event
+also runs real checks, and optional labels use the event's snapshot.
 
 Each protected name is the final aggregate job emitted directly by its source
 GitHub Actions workflow. The aggregate runs with `if: always()` and fails when

@@ -80,6 +80,21 @@ the measured population, so the inherited aggregate 70% floor is not retained
 or made green by excluding uncovered active code. Functional test failures
 still block admission.
 
+All subscribed PR events run the real selected validation plan, including draft
+pushes, body edits, base retargets and label changes. There are no filtered check
+suites: a newer metadata-only suite can hide an older successful required check
+on the same SHA. `repository-checks` always runs and fails if selected work is
+missing or unsuccessful; manual diagnostics retain a separate check name.
+Converting a PR to draft alone does not trigger CI. A delayed draft snapshot
+from another subscribed event still validates normally.
+
+Concurrency groups include the PR, head SHA and base SHA. Same-candidate events
+may supersede earlier runs; older candidates may finish but cannot cancel a
+different head/base candidate. Labels retain their event-snapshot meaning and
+only add validation to path-inferred work. No event-order cache or check replay
+is used. Revalidating metadata costs runner time, but preserves automatic base
+and selector validation without another admission mechanism.
+
 The Kubernetes lane exercises real disposable Kubernetes API operations and
 execution; system smoke retains the local Compose user flow. Both are
 credential-free checks, not live Nebius end-to-end acceptance. Deployment and
