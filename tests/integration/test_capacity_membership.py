@@ -143,8 +143,12 @@ async def _active_v3(
     *,
     max_subjects: int = 2,
     owner_min_reservation_slots: int = 4,
+    owner_submission_rate_per_minute: int = 0,
 ):  # type: ignore[no-untyped-def]
-    fleet = fleet_with_development_template(owner_min_reservation_slots=owner_min_reservation_slots)
+    fleet = fleet_with_development_template(
+        owner_min_reservation_slots=owner_min_reservation_slots,
+        owner_submission_rate_per_minute=owner_submission_rate_per_minute,
+    )
     base = subject_configuration(fleet)
     base_ack = execution_acknowledgement(subject=base)
     membership_policy = PersonalMembershipPolicyV1(
