@@ -564,7 +564,7 @@ async def test_guard_0023_downgrade_refuses_persisted_runtime_origin(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0029"
+                == "guard_0030"
             )
             assert (
                 connection.execute(
