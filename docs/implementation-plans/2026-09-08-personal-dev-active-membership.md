@@ -297,6 +297,18 @@ behavior. Return an authenticated membership checkpoint for management callers
 containing exact execution/delegation/revision. This plan delivers the manager
 interface, not a silent adaptation of the old lifecycle client's epoch semantics.
 
+Also expose `GET /v1/personal-memberships/checkpoint` to the exact prepared
+membership principal, returning a strict `PersonalMembershipCheckpointV1` with
+`execution: ExecutionAuthorityV2`, `namespace_id`, `revision`, and `head_sha256`.
+Read these fields in one consistent transaction; V2/prepared/retired epochs do not
+pretend to have active membership. Mutation responses wrap the original store
+result with this same checkpoint shape, using the request's execution/namespace
+and that result's revision/head, not a later concurrent head. Keep revision
+conflicts distinguishable from identity, idempotency and execution fencing so
+the lifecycle client refreshes only a stale revision within the same authority.
+Introduce typed conflict exceptions at this integration boundary if Task 2 uses
+the existing store conflict classes; do not classify by parsing error messages.
+
 Replace the executor's prepared-only acknowledgement lookups with the shared
 exact-generation resolver in bootstrap and protected admission. Every increase
 revalidates current subject lifecycle/generation and membership materialization;
