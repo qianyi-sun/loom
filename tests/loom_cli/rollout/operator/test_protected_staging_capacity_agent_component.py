@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 
 from loom_capacity_agent.contracts import ReporterConfigurationV1
 from loom_capacity_agent.secret_init import copy_projected_credentials
+from loom_capacity_guard.schema_startup import capacity_guard_schema_head
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -1230,6 +1231,28 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
     tmp_path: Path,
 ) -> None:
     """Break caught: the runtime serializes the bootstrap's null admission value."""
+    manifest = _component(_Cluster())._sources(_plan(tmp_path)).manifest
+    configuration_map = next(
+        item for item in yaml.safe_load_all(manifest) if item and item["kind"] == "ConfigMap"
+    )
+    configuration = ReporterConfigurationV1.model_validate_json(
+        configuration_map["data"]["reporter-configuration.json"]
+    )
+
+    assert capacity_guard_schema_head() == ("guard_0030", 30)
+    assert configuration.protected_admission_sha256 == (
+        "acc2da81b2a58f9d006622a3c83c9c2c4d327f9343fdb7cf1d31338fcc7338eb"
+    )
+
+
+def test_agent_admission_digest_does_not_reuse_the_previous_guard_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sealed digest includes the schema generation, not only reporter identity."""
+    monkeypatch.setattr(
+        "loom.personal_dev_capacity_runtime.capacity_guard_schema_head",
+        lambda: ("guard_0029", 29),
+    )
     manifest = _component(_Cluster())._sources(_plan(tmp_path)).manifest
     configuration_map = next(
         item for item in yaml.safe_load_all(manifest) if item and item["kind"] == "ConfigMap"
