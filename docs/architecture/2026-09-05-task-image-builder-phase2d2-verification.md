@@ -187,8 +187,24 @@ The guard cannot reconstruct candidate identities from an IDs-only request.
 The supervisor must independently hash its complete validated V2 acknowledgements
 and pin the first authenticated snapshot for subsequent polls. A well-formed
 status is not itself signature verification, current readiness, or trial-start
-authorization. Supervisor lifecycle composition and production activation remain
-gated separately.
+authorization. Production activation remains gated separately.
+
+The supervisor now composes candidate upload with receipt confirmation. One
+controller keeps the session and lease alive from upload start through polling;
+only upload runs concurrently, and cancellation always joins it before executor
+or credential cleanup. The phase is bounded to two hours, each liveness/status
+operation to five seconds, and consecutive failed status calls to three with
+backoff. These local bounds do not extend grant, Slurm or verification-job
+authority. The current session manager owns successor credentials installed by
+upload refresh and supplies the exact session for subsequent claims.
+
+A complete validated acknowledgement set produces one publication operation ID,
+retained across ambiguous submit retries. A racing heartbeat failure can be
+resolved only by an exact authenticated completed poll. Receipt-confirmed
+completion skips ordinary lease release because the authority already cleared
+that lease; other publication failures close the executor and release retryably
+without charging deterministic task-failure budget. Full HTTP/guard/Go/worker
+composition, release assembly and activation remain separate acceptance gates.
 
 ## Statement and signer
 

@@ -207,8 +207,14 @@ the guard does not claim to reconstruct candidate identities from IDs-only
 requests. A lifecycle-source review reproduced stale cached-session cleanup after
 credential refresh; `26bfa0887` closes the current manager-owned successor, with
 full race and focused session regression coverage. Supervisor publication
-liveness, terminal completion handling and independent composition review remain
-pending. No slice activates the provider.
+liveness and terminal completion handling are implemented through `bff9f04cc`.
+The standalone controller has independent review with no material findings;
+full Go normal/race/vet checks passed. Actual credential-source refresh through
+the orchestrator closes the successor and receipt-confirmed completion skips
+release. The extended real Go/Python guard flow (`eb756dadc`) passes eight
+required-mode checks, including candidate recording, queued submit and completed
+poll with an independently derived set hash. Full HTTP/guard/Go/worker composition
+and independent composed review remain pending. No slice activates the provider.
 
 Upstream reconciliation `2171ed1b7` moves only the unpublished publication
 migration to `0133`, after unchanged public `0132`. Independent review approved
