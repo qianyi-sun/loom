@@ -150,6 +150,26 @@ def test_actual_execution_job_tolerates_both_dedicated_pool_taints(platform_inpu
         ("loom.nebius/execution", "true"),
         ("loom.nebius/platform", "integration"),
     }
+    import yaml
+
+    historical = next(
+        doc
+        for doc in yaml.safe_load_all(
+            (ROOT / "deploy/k8s/nebius-capacity-collector.yaml").read_text()
+        )
+        if doc and doc["kind"] == "ConfigMap"
+    )
+    selector_key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR"
+    historical_labels = dict(
+        item.split("=", 1) for item in historical["data"][selector_key].split(",")
+    )
+    new_collector = next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "ConfigMap")
+    new_labels = dict(item.split("=", 1) for item in new_collector["data"][selector_key].split(","))
+    assert not all(
+        pod["nodeSelector"].get(key) == value for key, value in historical_labels.items()
+    ), "integration nodes must not enter the historical collector's inventory"
+    assert pod["nodeSelector"]["loom.nebius/node-role"] == "integration-execution"
+    assert all(pod["nodeSelector"].get(key) == value for key, value in new_labels.items())
 
 
 @pytest.mark.parametrize(

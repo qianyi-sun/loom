@@ -14,12 +14,16 @@ remain within the operator's permitted prefix. Never use the execution stack's
 `terraform.tfstate` key. Keep credentials in the existing operator profile and
 protected environment, not in tfvars or command arguments.
 
+On the configured macOS operator host, run from the repository root. The existing
+wrapper reads the state identity from Keychain into the Terraform child process;
+it rejects ambient AWS credentials and never places them in the backend file.
+
 ```sh
-terraform init -backend-config=/secure/platform.s3.tfbackend
-terraform plan -var-file=/secure/platform.tfvars.json -out=/secure/platform.tfplan
-terraform show /secure/platform.tfplan
-terraform apply /secure/platform.tfplan
-terraform plan -var-file=/secure/platform.tfvars.json -detailed-exitcode
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/platform init -backend-config=/secure/platform.s3.tfbackend
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/platform plan -var-file=/secure/platform.tfvars.json -out=/secure/platform.tfplan
+terraform -chdir=deploy/terraform/nebius/platform show /secure/platform.tfplan
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/platform apply /secure/platform.tfplan
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/platform plan -var-file=/secure/platform.tfvars.json -detailed-exitcode
 ```
 
 The final readback should report no changes. Save the plan digest, non-secret

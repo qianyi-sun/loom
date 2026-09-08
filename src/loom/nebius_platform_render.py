@@ -913,7 +913,7 @@ def build_platform(
                         if env_row["name"] == "LOOM_EXECUTION_ACTUATOR_NODE_SELECTOR":
                             env_row["value"] = json.dumps(
                                 {
-                                    "loom.nebius/node-role": "execution",
+                                    "loom.nebius/node-role": "integration-execution",
                                     "loom.nebius/platform": "integration",
                                 }
                             )
@@ -939,7 +939,7 @@ def build_platform(
                 )
             if doc["kind"] == "ConfigMap":
                 doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR"] = (
-                    "loom.nebius/node-role=execution,loom.nebius/platform=integration"
+                    "loom.nebius/node-role=integration-execution,loom.nebius/platform=integration"
                 )
             execution_docs.append(doc)
     files["60-execution.yaml"] = execution_docs

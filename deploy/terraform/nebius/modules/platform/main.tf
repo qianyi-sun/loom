@@ -137,7 +137,7 @@ resource "nebius_mk8s_v1_node_group" "integration" {
     max_pods           = 64
     metadata = {
       labels = {
-        "loom.nebius/node-role"        = each.key
+        "loom.nebius/node-role"        = each.key == "execution" ? "integration-execution" : each.key
         "loom.nebius/platform"         = "integration"
         "loom.nebius/cluster-scope-id" = var.cluster_scope_id
       }

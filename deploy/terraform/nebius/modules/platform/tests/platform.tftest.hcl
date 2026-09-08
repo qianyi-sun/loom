@@ -44,6 +44,10 @@ run "independent_platform" {
     error_message = "Release, PR and platform workloads must use different nodes."
   }
   assert {
+    condition     = nebius_mk8s_v1_node_group.integration["execution"].template.metadata.labels["loom.nebius/node-role"] == "integration-execution"
+    error_message = "Integration nodes must not match the existing collector's node-role=execution selector."
+  }
+  assert {
     condition     = alltrue([for key in nebius_iam_v2_access_key.integration_store : key.secret_delivery_mode == "EXPLICIT" && key.expires_at == null])
     error_message = "No secret bytes in state and no calendar credential outage."
   }

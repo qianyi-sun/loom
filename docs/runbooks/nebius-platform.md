@@ -42,8 +42,9 @@ No budget policy is introduced by this lane.
 
 The integration system nodes carry `loom.nebius/platform=integration` and
 `loom.nebius/node-role=system`, with the matching dedicated platform taint.
-Execution nodes carry the same platform label and `node-role=execution`, with
-the execution taint. A dedicated execution group avoids competing autoscalers
+Execution nodes carry the same platform label and `node-role=integration-execution`, with
+the execution taint. The distinct node-role keeps integration nodes outside the historical collector's
+`node-role=execution` inventory. A dedicated execution group avoids competing autoscalers
 and duplicate quota accounting against the older development pool. The example
 starts with four admitted tasks and at most two execution nodes; these are
 deployment bounds, not proof of available capacity or workload acceptance.
