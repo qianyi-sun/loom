@@ -59,7 +59,7 @@ from loom_llm_gateway.attempt_deadline import (
     upstream_timeout,
 )
 from loom_llm_gateway.dialect import DIALECTS
-from loom_llm_gateway.dispatch_audit import request_dispatch_audit
+from loom_llm_gateway.dispatch_audit import dispatch_request_headers, request_dispatch_audit
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.model_switch_correlation import (
     extract_and_strip_loom_fields,
@@ -177,7 +177,7 @@ async def openai_chat_facade(
             lambda: upstream.post(
                 upstream_url,
                 json=upstream_payload,
-                headers=upstream_headers,
+                headers=dispatch_request_headers(upstream_headers),
                 timeout=upstream_timeout(request, settings.upstream_timeout_sec),
                 follow_redirects=False,
             ),

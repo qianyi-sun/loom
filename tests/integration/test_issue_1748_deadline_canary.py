@@ -74,6 +74,7 @@ async def _seed_gateway(
     *,
     postgres_url: str,
     base_url: str,
+    provider_key: str = "local-placeholder-provider-key",
 ) -> tuple[GatewaySettings, UUID, UUID, UUID, str, str]:
     settings = GatewaySettings(_env_file=None)
     team_id = uuid4()
@@ -85,7 +86,7 @@ async def _seed_gateway(
     async with async_session_factory() as session:
         ref = await LocalEncryptedSecretStore(session).put(
             namespace=f"team:{team_id}",
-            value="local-placeholder-provider-key",
+            value=provider_key,
         )
         await session.commit()
     await async_engine.dispose()
