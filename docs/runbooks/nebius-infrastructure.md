@@ -498,6 +498,98 @@ disable certificate verification, assume PgBouncer speaks TLS, or claim that
 a WireGuard handshake proves canonical persistence. The Pod-facing Loom Gateway
 must remain in Nebius to preserve direct peer-IP/lease verification.
 
+#### Private service entry (opt-in, separate from execution activation)
+
+The canonical cluster renderer also supports a single private entry Pod on the
+existing staging WireGuard peer node. It uses the same hostPort mechanism as the
+existing worker/MinIO routers, but **every hostPort has an explicit WireGuard
+hostIP**. It creates no Ingress, NodePort, LoadBalancer or new database. The
+checked-in profile remains disabled; the table below is an operator example,
+not an approved live binding:
+
+```toml
+[nebius_private_entry]
+enabled = true
+node_name = "staging-control-1"
+wireguard_address = "10.253.71.2"
+peer_address = "10.253.71.1"
+proxy_image = "nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236"
+```
+
+Select the real existing peer node and non-conflicting transport addresses in
+the authorized candidate configuration. Both addresses must be distinct
+RFC1918 IPv4 hosts; public, wildcard and reserved documentation ranges fail
+render. This table is restricted to multi-node `loom-staging`, and may be
+enabled **before** `nebius_execution` so connectivity can be validated before
+provisioning execution credentials or enabling scheduling.
+
+| WireGuard-bound TCP port | Destination | Transport |
+| --- | --- | --- |
+| 15432 | `loom-postgres-rw:5432` | Native PostgreSQL SSLRequest/TLS passthrough |
+| 18443 | `loom-control-plane:8080` | TLS termination, unchanged HTTP bytes |
+| 19443 | `loom-minio:9000` | TLS termination, unchanged S3 Host/URI/body/signature |
+
+HTTPS clients must use a name covered by the existing
+`ingress_tls_secret_name` certificate (the canonical profile's
+`ingress_host`), with separately persisted private resolution to the Nebius
+gateway service entry. Do not use an IP URL with a DNS certificate, publish a
+private-service public DNS route, rewrite MinIO under a URL prefix, or add
+these backends to the existing public ingress.
+
+The Pod mounts the **existing cert-manager Secret directory**, without
+`subPath` or a one-time host copy. Every ten seconds the main process checks
+the projected certificate/key pair, validates nginx configuration, then reloads
+nginx on changes. Invalid pairs leave the previous active certificate serving
+and are retried; a failed reload validation emits a secret-free warning.
+Kubelet projection adds its own delay before this interval starts. Certificate
+renewal still belongs to the existing cert-manager Certificate/issuer, not to
+this proxy. nginx upstream DNS refresh uses its
+[dynamic upstream resolution](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html#server);
+the image must provide nginx >=1.27.3 with stream and stream SSL support.
+
+The entry follows the `loom-postgres-rw` Service, not a primary Pod IP or
+PgBouncer's non-TLS listener. Native TLS passthrough does not replace database
+certificate trust: approve the application's SSL mode and provide a persistent
+CA/trust path when certificate verification requires one. Verify the endpoint,
+role and `SELECT current_database()` before binding credentials; the accepted
+live staging database is `loom`, not a newly provisioned database.
+
+Configuration/script changes stamp a Pod-template revision and recreate this
+one replica (brief planned entry interruption, no surge hostPort collision).
+Kubernetes supervises the Pod; nginx exit ends its main process. New policies
+allow only the WireGuard peer /32 to these ports and the proxy to canonical CP,
+MinIO, CNPG and cluster DNS, with matching destination ingress allowances.
+Verify actual CNI source handling after deployment; do not broaden the policy
+because a host-only probe fails.
+
+Pre-merge reproducible transport verification:
+
+Requires Docker and locally cached copies of the pinned nginx image above and
+`python:3.12-slim`. The script never pulls images or publishes host ports. Its
+temporary Linux volume reproduces kubelet's atomic Secret-directory projection;
+Docker Desktop host-bind symlink behavior is not used as a renewal test.
+
+```bash
+PYTHONPATH=src:.:packages/loom-bundle-checksum \
+  python scripts/ops/smoke_nebius_private_entry.py
+```
+
+This uses disposable local Docker fixtures, not staging data or credentials.
+It is not Nebius Pod/CNI, database role, S3 authorization or full task acceptance.
+Protected activation must separately establish the host tunnel, stable
+Nebius-side private entry address/forwarding, private DNS and client trust,
+then test the three endpoints from the real Nebius Pod network. It must also
+verify recovery after restarting only the dedicated proxy/WireGuard services,
+and confirm that the public ingress and unrelated workloads are unchanged.
+Do not resume another initiator's staging rollout to install this table.
+
+Rollback through the supported candidate rollout by disabling this table and
+removing **only** `Deployment/loom-nebius-private-entry`, its same-name
+ConfigMap/NetworkPolicy and the three `loom-private-entry-to-*` policies.
+Preserve the shared TLS Secret, canonical databases/buckets, other routers and
+WireGuard identity. Verify resource removal rather than assuming an omitted
+rendered document is automatically pruned.
+
 #### Canonical render configuration
 
 The canonical render profile is
