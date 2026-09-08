@@ -316,7 +316,9 @@ def _component(raw: dict[str, Any]) -> Component:
     ci_enabled = raw.get("ci_enabled", True)
     if type(ci_enabled) is not bool:
         raise ManifestError(f"{context}.ci_enabled must be a boolean")
-    raw_platforms = raw.get("platforms", ["linux/amd64", "linux/arm64"])
+    raw_platforms = raw.get(
+        "platforms", ["linux/amd64"] if ci_enabled else ["linux/amd64", "linux/arm64"],
+    )
     if (
         not isinstance(raw_platforms, list)
         or not raw_platforms
@@ -324,8 +326,8 @@ def _component(raw: dict[str, Any]) -> Component:
     ):
         raise ManifestError(f"{context}.platforms must be a non-empty string array")
     platforms = tuple(raw_platforms)
-    if ci_enabled and platforms != ("linux/amd64", "linux/arm64"):
-        raise ManifestError(f"{context}.platforms must retain the native two-platform contract")
+    if ci_enabled and platforms != ("linux/amd64",):
+        raise ManifestError(f"{context}.platforms must match the Nebius linux/amd64 contract")
     rollout_role = raw.get("rollout_role", "none")
     if not isinstance(rollout_role, str) or rollout_role not in {
         "none",
@@ -1007,13 +1009,9 @@ def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
 def native_release_image_matrix(
     images: tuple[dict[str, str], ...],
 ) -> tuple[dict[str, str], ...]:
-    """Expand selected images into deterministic native architecture builds."""
+    """Build each selected image once for the active Nebius execution platform."""
 
-    architectures = (
-        {"architecture": "amd64", "platform": "linux/amd64"},
-        {"architecture": "arm64", "platform": "linux/arm64"},
-    )
-    return tuple({**image, **architecture} for image in images for architecture in architectures)
+    return tuple({**image, "architecture": "amd64", "platform": "linux/amd64"} for image in images)
 
 
 def release_images_for_runtime_policy(
@@ -1069,6 +1067,10 @@ def select_release_image_matrix(
     if force_all or not changed_paths:
         selected_ids = {component.id for component in release_components}
     else:
+        changed_paths = tuple(path for path in changed_paths if not manifest.ci_ignores_path(path))
+        if not changed_paths:
+            # An explicitly ignored change is different from missing path evidence.
+            return ()
         selected_ids = {
             component.id
             for path in changed_paths
@@ -1137,6 +1139,7 @@ def test_paths_for_lane(
         path
         for path in sorted(tracked_paths)
         if _is_runnable_test_path(path)
+        and not manifest.ci_ignores_path(path)
         and len(owners := manifest.test_owners_for_path(path)) == 1
         and owners[0].ci_enabled
         and owners[0].lane == lane
@@ -1157,7 +1160,9 @@ def test_paths_for_policy(
         path
         for path in sorted(tracked_paths)
         if _is_runnable_test_path(path)
+        and not manifest.ci_ignores_path(path)
         and len(owners := manifest.test_owners_for_path(path)) == 1
+        and owners[0].ci_enabled
         and owners[0].execution_policy == policy
     )
 
@@ -1280,6 +1285,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="Validate all tracked Dockerfiles and tests.")
+    subparsers.add_parser("python-paths", help="Print active Python lint paths, excluding retired CI scope.")
     query = subparsers.add_parser("query", help="Print the owners for one repository path.")
     query.add_argument("path")
     plan_images = subparsers.add_parser(
@@ -1363,6 +1369,15 @@ def main(argv: list[str] | None = None) -> int:
             for error in errors:
                 print(f"- {error}", file=sys.stderr)
             return 1
+        if args.command == "python-paths":
+            for path in tracked_paths:
+                if (
+                    path.endswith(".py")
+                    and path.startswith(("src/", "tests/", "packages/", "migrations/"))
+                    and not manifest.ci_ignores_path(path)
+                ):
+                    print(path)
+            return 0
         if args.command == "query":
             print(json.dumps(_query_payload(manifest, args.path), sort_keys=True))
             return 0

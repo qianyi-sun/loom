@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from scripts.component_ownership import load_manifest
 from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -176,14 +177,14 @@ def test_labels_add_corresponding_checks() -> None:
     assert plan.coverage_summary is True
 
 
-def test_coverage_summary_implies_integration() -> None:
+def test_coverage_summary_does_not_force_integration() -> None:
     plan = plan_validations(
         changed_paths=["docs/user-guide.md"],
         labels={"ci:coverage-summary"},
         event_name="pull_request",
     )
     assert plan.coverage_summary is True
-    assert plan.integration is True
+    assert plan.integration is False
 
 
 def test_ci_internal_pr_labels_disable_docs_only_fast_path() -> None:
@@ -195,11 +196,11 @@ def test_ci_internal_pr_labels_disable_docs_only_fast_path() -> None:
         )
 
         assert plan.docs_only is False
-        assert plan.integration is True
-        assert plan.coverage_summary is True
+        assert plan.integration is (label == "ci:integration")
+        assert plan.coverage_summary is (label == "ci:coverage-summary")
 
 
-def test_integration_label_selects_coverage_but_inferred_integration_does_not() -> None:
+def test_integration_label_and_inferred_integration_do_not_instrument_coverage() -> None:
     labeled_plan = plan_validations(
         changed_paths=["docs/user-guide.md"],
         labels={"ci:integration"},
@@ -212,7 +213,7 @@ def test_integration_label_selects_coverage_but_inferred_integration_does_not() 
     )
 
     assert labeled_plan.integration is True
-    assert labeled_plan.coverage_summary is True
+    assert labeled_plan.coverage_summary is False
     assert inferred_plan.integration is True
     assert inferred_plan.coverage_summary is False
 
@@ -279,6 +280,7 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
         ".github/workflows/release-promotion-gate.yml",
     ],
 )
+@pytest.mark.legacy_pool
 def test_k3s_staging_contract_selects_cluster_and_staging(path: str) -> None:
     plan = plan_validations(
         changed_paths=[path],
@@ -382,7 +384,7 @@ def test_planner_change_selects_every_heavy_gate() -> None:
     [
         "tests/unit/test_metrics_enumeration.py",
         "tests/loom_cli/test_config.py",
-        "tests/ops/test_release_runbook.py",
+        "tests/ops/test_nebius_ci_scope.py",
     ],
 )
 def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str) -> None:
@@ -413,7 +415,7 @@ def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> N
             "tests/integration/test_docker_driver_exec.py",
             {"integration", "integration_docker"},
         ),
-        ("tests/cluster/test_staging_k3s_render_contract.py", {"cluster_smoke"}),
+        ("tests/unit/test_nebius_runtime_render.py", {"cluster_smoke"}),
         ("tests/system/test_full_stack_hello.py", {"staging_smoke"}),
     ],
 )
@@ -518,6 +520,7 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
         "tests/ops/test_staging_rollout_shared_work2_export_authority.py",
     ],
 )
+@pytest.mark.legacy_pool
 def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
@@ -526,6 +529,7 @@ def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> N
     assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
+@pytest.mark.legacy_pool
 def test_rollout_module_changes_are_protected_staging_authority() -> None:
     plan = plan_validations(
         changed_paths=["src/loom_cli/rollout/operator_notes.py"],
@@ -541,8 +545,6 @@ def test_rollout_module_changes_are_protected_staging_authority() -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/instruction.md",
-        "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
         "unowned-runtime/new-input-two.bin",
         "unowned-runtime/new-input.bin",
     ],
@@ -593,35 +595,37 @@ def test_migration_change_selects_integration_images_and_staging() -> None:
     }
 
 
-def test_capacity_guard_migration_change_selects_owned_integration_lane() -> None:
-    plan = plan_validations(
-        changed_paths=[
-            "capacity_guard_migrations/versions/guard_0002_example.py",
-        ],
-        labels=set(),
-        event_name="pull_request",
-    )
+@pytest.mark.parametrize(
+    "path",
+    [
+        "capacity_guard_migrations/versions/guard_0002_example.py",
+        "src/loom_capacity_guard/store.py",
+        "src/loom_cli/rollout/operator_notes.py",
+        "deploy/staging-rollout/loom-staging-rollout.sudoers",
+        "deploy/worker-pools/gb10/known_hosts",
+        "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/instruction.md",
+        "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
+        "tests/cluster/test_staging_k3s_render_contract.py",
+    ],
+)
+def test_retired_platform_inputs_do_not_select_nebius_validation(path: str) -> None:
+    """Retired files are recognized exclusions, not unknown active runtime inputs."""
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
-    assert plan.integration is True
     assert plan.unowned_runtime is False
-
-
-def test_capacity_guard_source_change_selects_integration_lane() -> None:
-    plan = plan_validations(
-        changed_paths=["src/loom_capacity_guard/store.py"],
-        labels=set(),
-        event_name="pull_request",
-    )
-
-    assert plan.integration is True
+    assert plan.selected_heavy_checks() == set()
+    assert plan.web_checks is False
 
 
 def test_every_docker_marked_integration_module_selects_docker() -> None:
+    manifest = load_manifest(REPO_ROOT / "config" / "component-ownership.toml")
     integration_dir = REPO_ROOT / "tests" / "integration"
     docker_marked_modules = [
         path
         for path in sorted(integration_dir.rglob("*.py"))
         if "pytest.mark.docker" in path.read_text(encoding="utf-8")
+        and not manifest.ci_ignores_path(path.relative_to(REPO_ROOT).as_posix())
+        and manifest.test_owner_for_path(path.relative_to(REPO_ROOT).as_posix()).ci_enabled
     ]
     assert docker_marked_modules
 

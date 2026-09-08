@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -166,12 +167,10 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         assert inputs.get("cache-dependency-glob") == "uv.lock", path
 
 
-def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -> None:
-    # Per-PR locked-install validation gates the two Linux architectures Loom
-    # actually deploys to (x86_64 services + aarch64 GB10 workers). The macOS
-    # target stays in the uv.lock authority (TARGET_ENVIRONMENTS) and is
-    # exercised by the nightly `macos-locked-environment.yml` schedule rather
-    # than billed at ~10x on every pull request.
+def test_ci_requires_real_locked_install_on_nebius_linux_amd64() -> None:
+    # The active Nebius execution profile is Linux AMD64. The universal lock
+    # still describes other development platforms; that does not prove runtime
+    # parity for them. macOS CLI installation has its separate nightly check.
     workflow = _workflows()[ROOT / ".github/workflows/ci.yml"]
     jobs = workflow["jobs"]
     matrix_job = jobs["locked-environments"]
@@ -185,13 +184,6 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
             "expected_system": "Linux",
             "expected_machine": "x86_64",
             "uv_checksum": UV_CHECKSUMS["linux-x86_64"],
-        },
-        {
-            "target": "linux-arm64",
-            "runner": "ubuntu-24.04-arm",
-            "expected_system": "Linux",
-            "expected_machine": "aarch64",
-            "uv_checksum": UV_CHECKSUMS["linux-arm64"],
         },
     ]
     script = "\n".join(str(step.get("run", "")) for step in matrix_job["steps"] if "run" in step)
@@ -211,8 +203,9 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
         step
         for step in jobs["fast-checks"]["steps"]
         if step.get("name") == "Validate parallel check results"
-    )["run"]
-    assert "needs.locked-environments.result" in validation
+    )
+    assert validation["env"]["LOCKED_RESULT"] == "${{ needs.locked-environments.result }}"
+    assert '"$LOCKED_RESULT"' in validation["run"]
 
     setup_uv = next(
         step
@@ -222,6 +215,7 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
     assert setup_uv["with"]["checksum"] == MATRIX_CHECKSUM_EXPRESSION
 
 
+@pytest.mark.legacy_pool
 def test_deploy_environment_installs_locked_runtime() -> None:
     deploy_script = (ROOT / "scripts/ops/deploy_environment.sh").read_text(encoding="utf-8")
     assert "uv sync --locked --extra cluster --python 3.11" in deploy_script
@@ -244,6 +238,9 @@ def test_runbook_uv_commands_never_resolve_implicitly() -> None:
             if re.search(r"^\s*uv run ", line):
                 assert "uv run --no-sync " in line, (path, line)
 
+
+@pytest.mark.legacy_pool
+def test_legacy_operator_runbook_installs_rollout_runtime() -> None:
     operator_runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
     assert (
         "uv sync --locked --all-packages --extra cluster --extra rollout --extra dev --python 3.11"

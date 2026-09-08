@@ -58,6 +58,7 @@ def test_load_admin_secret_verifier_requires_file_in_production(
         _load_admin_secret_verifier(_settings(admin_secret_file=None))
 
 
+@pytest.mark.legacy_pool
 async def test_file_backed_admin_secret_grants_gb10_worker_scope() -> None:
     verifier = AdminSecretVerifier.from_token(RAW_ADMIN_TOKEN)
 

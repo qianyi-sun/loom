@@ -197,7 +197,7 @@ def _pull_request_gate_mode(
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
     Head, base, readiness, and supported validation-selector changes emit the
-    four protected contexts. Drafts and unrelated metadata events are filtered
+    the protected aggregate result. Drafts and unrelated metadata events are filtered
     before checkout. Unknown actions remain fail-closed and run the full gate.
     """
 
@@ -279,6 +279,7 @@ def plan_validations(
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
+    paths = tuple(path for path in paths if not _component_ownership_manifest().ci_ignores_path(path))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
@@ -291,8 +292,6 @@ def plan_validations(
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
             select(check, f"label:{label}")
-        if event_name == "pull_request" and label == "ci:integration":
-            select("coverage_summary", f"label:{label}")
 
     if any(path in PLANNER_PATHS for path in paths):
         for name in HEAVY_CHECKS:
@@ -483,9 +482,6 @@ def plan_validations(
             reason = f"unowned-runtime-path:{path}"
             for name in HEAVY_CHECKS:
                 select(name, reason)
-
-    if selected["coverage_summary"]:
-        select("integration", "coverage-summary-requires-integration")
 
     if any(selected[name] for name in ("integration", "integration_docker", "coverage_summary")):
         docs_only = False

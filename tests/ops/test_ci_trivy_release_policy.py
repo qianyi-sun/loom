@@ -193,7 +193,6 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
 
     for job_name, scan_name in (
         ("build", "Scan native image archive"),
-        ("publish", "Scan trusted image archive"),
     ):
         steps = workflow["jobs"][job_name]["steps"]
         scan_index = next(
@@ -224,28 +223,14 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert scan["env"]["IMAGE_NAME"] == "${{ matrix.image }}"
         assert scan["env"]["ARCHITECTURE"] == "${{ matrix.architecture }}"
 
-        if job_name == "build":
-            assert scan_index == len(steps) - 1
-        else:
-            next_step = steps[scan_index + 1]
-            assert next_step["name"] == "Record trusted scan digest"
+        assert scan_index == len(steps) - 1
 
 
-def test_workflow_validates_complete_reports_before_release_recording() -> None:
+def test_reusable_image_validation_has_no_publication_side_effects() -> None:
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8")
     )
-
     build_steps = workflow["jobs"]["build"]["steps"]
-    build_names = [step.get("name") for step in build_steps]
-    assert build_names[-1] == "Scan native image archive"
-
-    publish_steps = workflow["jobs"]["publish"]["steps"]
-    publish_names = [step.get("name") for step in publish_steps]
-    assert publish_names.index("Scan trusted image archive") < publish_names.index(
-        "Record trusted scan digest"
-    )
-    digest_step = next(
-        step for step in publish_steps if step.get("name") == "Record trusted scan digest"
-    )
-    assert 'sha256sum "$report"' in digest_step["run"]
+    assert build_steps[-1]["name"] == "Scan native image archive"
+    assert set(workflow["jobs"]) == {"trivy-binary", "build"}
+    assert workflow["permissions"] == {"contents": "read"}

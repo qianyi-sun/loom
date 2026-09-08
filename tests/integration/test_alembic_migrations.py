@@ -408,6 +408,7 @@ async def _claim_candidate_build(
     raise AssertionError("target personal-dev candidate was not in the bounded build queue")
 
 
+@pytest.mark.legacy_pool
 async def test_personal_dev_candidate_registration_and_build_lease(
     postgres_url: str,
 ) -> None:
@@ -589,6 +590,7 @@ async def test_personal_dev_candidate_registration_and_build_lease(
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("prefix_length", "accepted"),
     ((309, True), (310, False)),
@@ -663,6 +665,7 @@ async def test_personal_dev_candidate_registry_prefix_length_boundary(
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 async def test_personal_dev_candidate_registration_enforces_owner_retention_quota(
     postgres_url: str,
 ) -> None:
@@ -737,6 +740,7 @@ async def test_personal_dev_candidate_registration_enforces_owner_retention_quot
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydratable(
     postgres_url: str,
 ) -> None:
@@ -962,6 +966,7 @@ async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydr
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 async def test_personal_dev_build_claim_global_limit_is_concurrency_safe(
     postgres_url: str,
 ) -> None:
@@ -1062,6 +1067,7 @@ async def test_personal_dev_build_claim_global_limit_is_concurrency_safe(
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
     postgres_url: str,
 ) -> None:
@@ -1416,6 +1422,7 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomic(
     postgres_url: str,
 ) -> None:
@@ -1889,6 +1896,7 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize("keep_data", [False, True])
 async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed(
     postgres_url: str,
@@ -2116,6 +2124,7 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
         await engine.dispose()
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("unsafe_model", "unsafe_evidence"),
     (
@@ -2684,6 +2693,7 @@ def test_in_flight_count_trigger_is_safe_under_locked_search_path(
         pytest.param("loom-dev-other", "loom_dev_other", id="mismatched"),
     ),
 )
+@pytest.mark.legacy_pool
 def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
     postgres_url: str,
     capacity_namespace: str | None,
@@ -2754,6 +2764,7 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
         engine.dispose()
 
 
+@pytest.mark.legacy_pool
 def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration(
     postgres_url: str,
 ) -> None:

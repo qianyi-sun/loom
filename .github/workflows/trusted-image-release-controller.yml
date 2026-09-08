@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   reconcile:
+    if: github.ref == 'refs/heads/dev'
     name: reconcile protected dev image publication
     runs-on: ubuntu-24.04
     timeout-minutes: 10

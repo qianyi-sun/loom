@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   preflight:
+    if: github.ref == 'refs/heads/dev'
     name: Validate release inputs
     runs-on: ubuntu-latest
     timeout-minutes: 2

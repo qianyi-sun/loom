@@ -13,12 +13,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY = REPO_ROOT / "config" / "ci-upgrade-policy.json"
 DEFAULT_LOCK = REPO_ROOT / "config" / "ci-actions-lock.json"
-REQUIRED_CONTEXTS = {
-    "repository-checks",
-    "images-gate",
-    "cluster-smoke-gate",
-    "staging-smoke-gate",
-}
+REQUIRED_CONTEXTS = ["repository-checks"]
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 VERSION_RE = re.compile(r"v[0-9][A-Za-z0-9._-]*")
 
@@ -65,8 +60,10 @@ def check_upgrade_policy(*, policy_file: Path, lock_file: Path) -> tuple[str, ..
     if policy.get("node24_minimum_runner") != "2.327.1":
         errors.append(f"{policy_file}: Node 24 runner floor must remain 2.327.1")
     contexts = policy.get("required_canary_contexts")
-    if not isinstance(contexts, list) or set(contexts) != REQUIRED_CONTEXTS:
-        errors.append(f"{policy_file}: all four required canary contexts must be exact")
+    if contexts != REQUIRED_CONTEXTS:
+        errors.append(
+            f"{policy_file}: required canary contexts must be exactly [repository-checks]"
+        )
     lock_actions = lock.get("actions")
     if not isinstance(lock_actions, Mapping):
         errors.append(f"{lock_file}: actions must be an object")

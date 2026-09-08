@@ -45,6 +45,7 @@ def test_checked_in_profiles_are_exact_and_have_no_unsuffixed_alias() -> None:
     )
 
 
+@pytest.mark.legacy_pool
 def test_gpu_variants_encode_split_and_shared_device_roles_exactly() -> None:
     profile = load_resource_profiles().get("behavior-sim-local-none@1").profile
     gb10, oldlab = profile.execution_variants

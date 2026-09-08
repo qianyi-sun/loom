@@ -251,6 +251,7 @@ def test_rewrite_to_public_type_stability() -> None:
     )
 
 
+@pytest.mark.legacy_pool
 def test_native_builder_presign_client_uses_exact_https_public_origin(monkeypatch) -> None:
     settings = _settings("https://objects.example.test:9443/")
     expected_client = object()
@@ -281,6 +282,7 @@ def test_native_builder_presign_client_uses_exact_https_public_origin(monkeypatc
         "https://objects.example.test/%2f",
     ],
 )
+@pytest.mark.legacy_pool
 def test_native_builder_presign_client_rejects_non_origin_endpoint(endpoint) -> None:
     with pytest.raises(RuntimeError, match="native builder public object-store origin"):
         create_personal_dev_native_builder_presign_client(
@@ -288,6 +290,7 @@ def test_native_builder_presign_client_rejects_non_origin_endpoint(endpoint) -> 
         )
 
 
+@pytest.mark.legacy_pool
 def test_native_builder_storage_state_is_absent_when_provider_is_disabled(monkeypatch) -> None:
     app_state = SimpleNamespace(minio_client=object())
     settings = SimpleNamespace(personal_dev_native_builder_enabled=False)
@@ -306,6 +309,7 @@ def test_native_builder_storage_state_is_absent_when_provider_is_disabled(monkey
     assert not hasattr(app_state, "personal_dev_native_builder_capabilities")
 
 
+@pytest.mark.legacy_pool
 def test_native_builder_storage_state_uses_distinct_public_presign_client(monkeypatch) -> None:
     internal = object()
     public = object()
@@ -333,6 +337,7 @@ def test_native_builder_storage_state_uses_distinct_public_presign_client(monkey
     assert provider.max_artifact_bytes == 6 * 1024 * 1024 * 1024
 
 
+@pytest.mark.legacy_pool
 def test_native_builder_storage_state_rejects_reused_internal_client(monkeypatch) -> None:
     internal = object()
     app_state = SimpleNamespace(minio_client=internal)

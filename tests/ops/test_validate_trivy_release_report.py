@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import pytest
 from scripts import write_trivy_release_policy as policy
+from scripts.component_ownership import load_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
@@ -224,7 +225,14 @@ def _assert_rejected(result: subprocess.CompletedProcess[str]) -> None:
 
 _SUPPORTED_COMPONENT_ARCHITECTURES = tuple(
     (component, architecture)
-    for component in sorted(_EXPECTED_FINDINGS)
+    for component in sorted(
+        {
+            c.id
+            for c in load_manifest(
+                REPO_ROOT / "config/component-ownership.toml"
+            ).release_components()
+        }
+    )
     for architecture in ("amd64", "arm64")
 )
 
@@ -254,13 +262,10 @@ def test_validator_accepts_each_exact_component_inventory(
 @pytest.mark.parametrize(
     "component",
     (
-        "capacity-manager",
         "control-plane",
         "egress-xds",
         "family-orchestrator",
         "llm-gateway",
-        "personal-dev-activation-agent",
-        "personal-dev-native-builder-agent",
         "pipeline-orchestrator",
     ),
 )
@@ -269,7 +274,7 @@ def test_validator_accepts_observed_python_slim_perl_base_inventory(
     component: str,
 ) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("capacity-executor", ignore_file)
+    payload = _report("control-plane", ignore_file)
     payload["ArtifactName"] = f"/tmp/{component}-amd64.docker.tar"
 
     result = _run_validator(tmp_path, payload, component=component)

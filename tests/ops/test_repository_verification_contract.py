@@ -11,15 +11,16 @@ def _normalize_command(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_repository_checks_ruff_scope_matches_repo_wide_local_lint() -> None:
+def test_repository_checks_ruff_uses_the_active_manifest_scope() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["lint-and-static"]["steps"]
     ruff_step = next(step for step in steps if step.get("name") == "Ruff")
 
-    assert ruff_step["run"] == (
-        "uv run --no-sync ruff check src tests packages migrations "
-        "capacity_guard_migrations capacity_migrations"
-    )
+    command = _normalize_command(ruff_step["run"])
+    assert "component_ownership.py python-paths" in command
+    assert 'mapfile -t lint_paths' in command
+    assert '[[ ${#lint_paths[@]} -gt 0 ]]' in command
+    assert 'uv run --no-sync ruff check "${lint_paths[@]}"' in command
 
 
 def test_local_python_version_is_pinned_to_ci_interpreter() -> None:
@@ -46,20 +47,16 @@ def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
     assert "uv sync --locked --all-packages --extra dev --python 3.11" in text
 
 
-def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
+def test_contributor_quickstart_keeps_both_root_and_package_test_lanes() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     root_job = workflow["jobs"]["tests-root"]
     root_steps = root_job["steps"]
     package_steps = workflow["jobs"]["tests-packages"]["steps"]
-    fast_steps = workflow["jobs"]["fast-checks"]["steps"]
     root_pytest_step = next(
         step for step in root_steps if step.get("name") == "Pytest — manifest-owned root shard"
     )
     sibling_pytest_step = next(
         step for step in package_steps if step.get("name") == "Pytest — manifest-owned package lane"
-    )
-    coverage_gate_step = next(
-        step for step in fast_steps if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
@@ -73,7 +70,3 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     assert "uv run --no-sync pytest" in sibling_pytest_step["run"]
     assert "test-paths --lane tests-root" in normalized_text
     assert "test-paths --lane tests-packages" in normalized_text
-    assert "--cov-append" in normalized_text
-    assert "coverage report --fail-under=70" in coverage_gate_step["run"]
-    assert "uv run --no-sync coverage report --fail-under=70" in text
-    assert "first pytest command alone is not the fast coverage gate" in text

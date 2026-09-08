@@ -997,7 +997,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
         )
         == []
     )
-    assert len(rollout_images) == 12
+    assert len(rollout_images) == 10
 
 
 def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
@@ -1014,13 +1014,10 @@ def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
     primary_names = {entry["image_name"] for entry in primary}
     auxiliary_names = {entry["image_name"] for entry in auxiliary}
 
-    assert len(primary) == 12
-    assert len(auxiliary) == 2
+    assert len(primary) == 10
+    assert auxiliary == ()
     assert not primary_names & auxiliary_names
-    assert auxiliary_names == {
-        "loom-rehearsal-postgres",
-        "loom-staging-admin-browser-smoke",
-    }
+    assert not auxiliary_names
     assert {
         component.release_digest
         for component in manifest.release_components()
@@ -1033,45 +1030,60 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 21
+    assert len(matrix) == 13
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
     assert all(entry["context"] == "." for entry in matrix)
 
 
-def test_capacity_manager_image_has_narrow_ownership_and_primary_rollout_role() -> None:
+@pytest.mark.parametrize(
+    ("component_id", "changed_path"),
+    [
+        ("capacity-manager", "deploy/Dockerfile.capacity-manager"),
+        ("capacity-manager", "src/loom_capacity_manager/service.py"),
+        ("personal-dev-native-builder-agent", "src/loom/personal_dev_native_builder_agent.py"),
+    ],
+)
+def test_retired_pool_images_are_excluded_from_release_selection(
+    component_id: str, changed_path: str
+) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    component = next(
-        component
-        for component in manifest.release_components()
-        if component.id == "capacity-manager"
-    )
 
-    assert component.dockerfile == "deploy/Dockerfile.capacity-manager"
-    assert component.release_digest == "loom-capacity-manager"
-    assert component.runtime_policy == "start"
-    assert component.rollout_role == "primary"
-    assert {
-        ".dockerignore",
-        "README.md",
-        "deploy/Dockerfile.capacity-manager",
-        "capacity_migrations/**",
-        "pyproject.toml",
-        "src/loom_capacity_manager/**",
-    } <= set(component.source_paths)
+    assert component_id not in {component.id for component in manifest.release_components()}
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=(changed_path,),
+        force_all=False,
+    )
+    assert selected == ()
+
+
+@pytest.mark.parametrize("fallback_all", [False, True])
+def test_ignored_source_does_not_select_images_even_with_fallback(fallback_all: bool) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     assert component_ownership.select_release_image_matrix(
         manifest,
-        changed_paths=("deploy/Dockerfile.capacity-manager",),
+        changed_paths=("src/loom_control_plane/worker_pool_autoscaler.py",),
         force_all=False,
-    ) == (
-        {
-            "image": "capacity-manager",
-            "image_name": "loom-capacity-manager",
-            "dockerfile": "deploy/Dockerfile.capacity-manager",
-            "context": ".",
-        },
+        fallback_all=fallback_all,
+    ) == ()
+
+
+def test_image_selection_ignores_retired_paths_but_preserves_active_and_forced_coverage() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    retired = ("src/loom_control_plane/worker_pool_autoscaler.py",)
+    active = ("deploy/Dockerfile.web",)
+    select = component_ownership.select_release_image_matrix
+    assert select(manifest, changed_paths=retired + active, force_all=False) == select(
+        manifest, changed_paths=active, force_all=False,
     )
+    assert select(manifest, changed_paths=retired, force_all=True) == (
+        component_ownership.release_image_matrix(manifest)
+    )
+    assert select(
+        manifest, changed_paths=("new-runtime/entrypoint.sh",), force_all=False, fallback_all=True,
+    ) == component_ownership.release_image_matrix(manifest)
 
 
 def test_execution_actuator_image_owns_capacity_collector_source() -> None:
@@ -1085,40 +1097,6 @@ def test_execution_actuator_image_owns_capacity_collector_source() -> None:
         force_all=False,
     )
     assert any(item["image"] == "execution-actuator" for item in selected)
-
-
-def test_native_builder_agent_image_has_authority_minimal_release_ownership() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    component = next(
-        component
-        for component in manifest.release_components()
-        if component.id == "personal-dev-native-builder-agent"
-    )
-
-    assert component.dockerfile == "deploy/Dockerfile.personal-dev-native-builder-agent"
-    assert component.release_digest == "loom-personal-dev-native-builder-agent"
-    assert component.runtime_policy == "conformance"
-    assert component.rollout_role == "none"
-    assert set(component.source_paths) == {
-        ".dockerignore",
-        "deploy/Dockerfile.personal-dev-native-builder-agent",
-        "deploy/personal-dev-native-builder-agent-requirements.txt",
-        "src/loom/__init__.py",
-        "src/loom/personal_dev_native_builder_agent.py",
-        "src/loom/personal_dev_native_builder_protocol.py",
-        "src/loom_personal_dev_native_builder_agent/**",
-    }
-    selected = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("src/loom/personal_dev_native_builder_agent.py",),
-        force_all=False,
-    )
-    assert {
-        "image": "personal-dev-native-builder-agent",
-        "image_name": "loom-personal-dev-native-builder-agent",
-        "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
-        "context": ".",
-    } in selected
 
 
 def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:
@@ -1150,21 +1128,36 @@ def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -
     }
 
 
-def test_native_release_image_matrix_crosses_every_image_with_both_architectures() -> None:
+def test_native_release_image_matrix_builds_each_active_nebius_image_once_on_amd64() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
     images = component_ownership.release_image_matrix(manifest)
     matrix = component_ownership.native_release_image_matrix(images)
 
-    assert len(matrix) == len(images) * 2
+    assert all(component.platforms == ("linux/amd64",) for component in manifest.release_components())
+
+    assert len(matrix) == len(images) == 13
     assert {(entry["architecture"], entry["platform"]) for entry in matrix} == {
         ("amd64", "linux/amd64"),
-        ("arm64", "linux/arm64"),
     }
     for image in images:
         matching = [entry for entry in matrix if entry["image"] == image["image"]]
-        assert [entry["architecture"] for entry in matching] == ["amd64", "arm64"]
+        assert [entry["architecture"] for entry in matching] == ["amd64"]
         assert all({key: entry[key] for key in image} == image for entry in matching)
+
+
+@pytest.mark.parametrize("platforms", [["linux/arm64"], ["linux/amd64", "linux/arm64"]])
+def test_active_manifest_rejects_platforms_outside_nebius_contract(
+    tmp_path: Path, platforms: list[str],
+) -> None:
+    source = (REPO_ROOT / "config/component-ownership.toml").read_text(encoding="utf-8")
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        source.replace("[[components]]", f"[[components]]\nplatforms = {json.dumps(platforms)}", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(component_ownership.ManifestError, match="Nebius linux/amd64 contract"):
+        component_ownership.load_manifest(manifest_path)
 
 
 def test_behavior_stage1_image_is_dormant_and_excluded_from_ci_planning() -> None:
@@ -1211,41 +1204,23 @@ def test_release_image_selection_uses_manifest_source_ownership() -> None:
     )
 
 
-def test_browser_acceptance_dockerfile_selects_its_conformance_image() -> None:
+@pytest.mark.parametrize(
+    "dockerfile",
+    [
+        "deploy/Dockerfile.staging-admin-browser-smoke",
+        "deploy/Dockerfile.rehearsal-postgres",
+    ],
+)
+def test_retired_rollout_fixtures_do_not_select_release_images(dockerfile: str) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
-    matrix = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("deploy/Dockerfile.staging-admin-browser-smoke",),
-        force_all=False,
-    )
-
-    assert matrix == (
-        {
-            "image": "staging-admin-browser-smoke",
-            "image_name": "loom-staging-admin-browser-smoke",
-            "dockerfile": "deploy/Dockerfile.staging-admin-browser-smoke",
-            "context": ".",
-        },
-    )
-
-
-def test_rehearsal_postgres_dockerfile_selects_its_conformance_image() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-
-    matrix = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("deploy/Dockerfile.rehearsal-postgres",),
-        force_all=False,
-    )
-
-    assert matrix == (
-        {
-            "image": "rehearsal-postgres",
-            "image_name": "loom-rehearsal-postgres",
-            "dockerfile": "deploy/Dockerfile.rehearsal-postgres",
-            "context": ".",
-        },
+    assert (
+        component_ownership.select_release_image_matrix(
+            manifest,
+            changed_paths=(dockerfile,),
+            force_all=False,
+        )
+        == ()
     )
 
 
@@ -1344,7 +1319,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
         lane="runtime-payload",
     )
 
-    assert len(lane_paths) == 12
+    assert len(lane_paths) == 10
     policy_paths = {
         path
         for policy in manifest.execution_policies
@@ -1354,7 +1329,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
             policy=policy.id,
         )
     }
-    assert len(policy_paths) == 12
+    assert len(policy_paths) == 10
     assert policy_paths == set(lane_paths)
     assert all(
         manifest.test_owner_for_path(path).execution_policy is not None for path in policy_paths
@@ -1483,8 +1458,6 @@ def test_manifest_integration_shard_pins_are_exact_and_target_second_shard() -> 
     assert policy.strategy == "contiguous"
     assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
         ("tests/integration/test_cp_step_tokens.py", 1),
-        ("tests/integration/test_executable_global_capacity_bridge.py", 1),
-        ("tests/integration/test_capacity_manager_migrate.py", 1),
         ("tests/integration/test_migration_task_set_materialization_jobs.py", 1),
     }
 

@@ -287,6 +287,7 @@ def test_claim_carries_frozen_task_image_execution_grant(
     }
 
 
+@pytest.mark.legacy_pool
 def test_prod_pressure_controller_fences_claim_and_recovers_after_agent_confirmation(
     app,
     claim_seed,
@@ -420,6 +421,7 @@ def test_prod_pressure_controller_fences_claim_and_recovers_after_agent_confirma
         assert claimed.status_code == 200, claimed.text
 
 
+@pytest.mark.legacy_pool
 def test_prod_pressure_keeps_non_preemptible_busy_host_running(
     app,
     claim_seed,
@@ -478,6 +480,7 @@ def test_prod_pressure_keeps_non_preemptible_busy_host_running(
     engine.dispose()
 
 
+@pytest.mark.legacy_pool
 def test_prod_pressure_preempts_busy_host_only_after_zero_grace(
     app,
     claim_seed,
@@ -540,6 +543,7 @@ def test_prod_pressure_preempts_busy_host_only_after_zero_grace(
     engine.dispose()
 
 
+@pytest.mark.legacy_pool
 def test_neutral_prod_pressure_route_records_slurm_drain_intent(
     app,
     claim_seed,
@@ -593,6 +597,7 @@ def test_neutral_prod_pressure_route_records_slurm_drain_intent(
     engine.dispose()
 
 
+@pytest.mark.legacy_pool
 def test_gb10_prod_pressure_alias_route_still_drains_gb10_pool(
     app,
     claim_seed,

@@ -1,7 +1,7 @@
 name: macos-locked-environment
 
 # Loom deploys only to Linux, so the per-PR `locked-environments` matrix in
-# ci.yml gates x86_64 + aarch64 there. macOS is a contributor-laptop target:
+# ci.yml gates x86_64 there. macOS is a contributor-laptop target:
 # `uv sync --locked` must still resolve against the shared uv.lock, but that is
 # worth a nightly check rather than ~10x-billed macOS minutes on every PR.
 
