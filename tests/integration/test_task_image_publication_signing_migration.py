@@ -32,9 +32,9 @@ TABLES = (
 )
 
 
-def test_0133_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
+def test_0135_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
     config = _config(isolated_migration_postgres_url)
-    command.downgrade(config, "0132")
+    command.downgrade(config, "0134")
     engine = create_engine(isolated_migration_postgres_url)
     try:
         assert not set(TABLES) & set(inspect(engine).get_table_names())
@@ -69,10 +69,10 @@ def test_0133_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
             "task_image_publication_candidates",
         }
         assert all(item["options"]["ondelete"] == "RESTRICT" for item in foreign_keys)
-        command.downgrade(config, "0132")
+        command.downgrade(config, "0134")
         assert not set(TABLES) & set(inspect(engine).get_table_names())
         assert "task_image_publication_evidence" in inspect(engine).get_table_names()
-        command.upgrade(config, "0133")
+        command.upgrade(config, "0135")
     finally:
         engine.dispose()
 
@@ -102,7 +102,7 @@ def _reject(engine, sql, values=None):
 
 
 @pytest.mark.parametrize("used_authority", ["key", "keyset_version", "revocation_epoch"])
-def test_0133_downgrade_refuses_used_publication_authority(
+def test_0135_downgrade_refuses_used_publication_authority(
     isolated_migration_postgres_url,
     used_authority,
 ):
@@ -125,7 +125,7 @@ def test_0133_downgrade_refuses_used_publication_authority(
                 text("SELECT count(*) FROM task_image_publication_keys")
             ).scalar_one()
         with pytest.raises(DBAPIError, match="publication authority cannot be discarded"):
-            command.downgrade(_config(isolated_migration_postgres_url), "0132")
+            command.downgrade(_config(isolated_migration_postgres_url), "0134")
         assert set(TABLES) <= set(inspect(engine).get_table_names())
         with engine.connect() as connection:
             assert (
@@ -145,7 +145,7 @@ def test_0133_downgrade_refuses_used_publication_authority(
             )
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0133"
+                == "0135"
             )
     finally:
         engine.dispose()

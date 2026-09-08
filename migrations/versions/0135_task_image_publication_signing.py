@@ -1,14 +1,14 @@
 """Add inert publication key/epoch authority and immutable signed envelopes.
 
-Revision ID: 0133
-Revises: 0132
+Revision ID: 0135
+Revises: 0134
 Create Date: 2026-09-05
 """
 
 from alembic import op
 
-revision: str = "0133"
-down_revision: str | None = "0132"
+revision: str = "0135"
+down_revision: str | None = "0134"
 branch_labels: str | None = None
 depends_on: str | None = None
 
