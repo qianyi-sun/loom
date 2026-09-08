@@ -89,6 +89,7 @@ from loom_control_plane.execution_finance import (
     upsert_execution_budget_policy,
     upsert_target_price_binding,
 )
+from loom_control_plane.scheduler.crash_detector import reclaim_expired_workers
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -117,6 +118,7 @@ from loom_control_plane.service_execution_output import (
     resolve_service_execution_input,
 )
 from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
+from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_execution_actuator.contracts import (
     ExecutionTerminationSummaryV1,
     KubernetesApiError,
@@ -2426,6 +2428,167 @@ async def test_retry_creates_a_new_attempt_and_finalization_is_idempotent(
             assert trial.state == "succeeded"
             assert trial.result == {"reward": 1.0}
             assert trial.finished_at == now + timedelta(seconds=5)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("cached_trial", [False, True])
+async def test_retry_cannot_reopen_cancelled_trial_after_timeout_reclaim(
+    postgres_url: str,
+    cached_trial: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC) - timedelta(minutes=10)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="timeout",
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+        async with sessions() as retry_session:
+            cached = await retry_session.get(Trial, trial_id) if cached_trial else None
+            async with sessions() as session:
+                assert (
+                    await reclaim_expired_workers(
+                        session,
+                        expiry_sec=60,
+                        claimed_without_start_expiry_sec=60,
+                    )
+                    == 1
+                )
+                await session.commit()
+            cancelled = await cancel_trial_under_authority(
+                session_factory=sessions,
+                protected_store=None,
+                trial_id=trial_id,
+                team_id=None,
+            )
+            assert cancelled is not None and cancelled["state"] == "cancelled"
+            if cached is not None:
+                assert cached.state == "claimed"
+            before = await retry_session.get(ServiceExecutionLease, lease.id)
+            assert before is not None and before.desired_state == "timeout"
+            snapshot = (before.generation, before.revoked_at, before.cleanup_requested_at)
+            with pytest.raises(ServiceExecutionConflict, match="terminal trial"):
+                await enqueue_execution_transition(
+                    retry_session,
+                    lease_id=lease.id,
+                    expected_generation=2,
+                    desired_state="retry",
+                    now=now + timedelta(seconds=2),
+                )
+            # A rejected command must not leave partial intent for a caller to commit.
+            await retry_session.commit()
+            await retry_session.refresh(before)
+            assert before.desired_state == "timeout"
+            assert (before.generation, before.revoked_at, before.cleanup_requested_at) == snapshot
+            trial = await retry_session.get(Trial, trial_id, populate_existing=True)
+            assert trial is not None and trial.state == "cancelled"
+            assert trial.finished_at is not None
+            assert (
+                await retry_session.scalar(
+                    select(func.count())
+                    .select_from(ServiceExecutionCommand)
+                    .where(
+                        ServiceExecutionCommand.lease_id == lease.id,
+                    )
+                )
+                == 2
+            )  # create and timeout only
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("terminal_state", ["succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("cached_trial", [False, True])
+async def test_finalized_event_cannot_reopen_terminal_trial(
+    postgres_url: str,
+    terminal_state: str,
+    cached_trial: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            for desired_state in ("start", "finalize"):
+                await enqueue_execution_transition(
+                    session,
+                    lease_id=lease.id,
+                    expected_generation=1,
+                    desired_state=desired_state,
+                    now=now,
+                )
+            await session.commit()
+        async with sessions() as event_session:
+            cached = await event_session.get(Trial, trial_id) if cached_trial else None
+            final_payload = {"trial_state": terminal_state, "result": {"reward": 0.0}}
+            async with sessions() as session:
+                event, duplicate = await record_execution_event(
+                    session,
+                    lease_id=lease.id,
+                    generation=1,
+                    ordinal=1,
+                    event_kind="finalized",
+                    payload=final_payload,
+                    observed_at=now,
+                )
+                assert not duplicate
+                await session.commit()
+            if cached is not None:
+                assert cached.state == "claimed"
+            with pytest.raises(ServiceExecutionConflict, match="terminal trial"):
+                await record_execution_event(
+                    event_session,
+                    lease_id=lease.id,
+                    generation=1,
+                    ordinal=2,
+                    event_kind="finalized",
+                    payload={"trial_state": "materializing", "result": {"reward": 1.0}},
+                    observed_at=now + timedelta(seconds=1),
+                )
+            await event_session.commit()
+            trial = await event_session.get(Trial, trial_id, populate_existing=True)
+            assert trial is not None and trial.state == terminal_state
+            assert trial.finished_at == now
+            assert trial.result == {"reward": 0.0}
+            stored_lease = await event_session.get(
+                ServiceExecutionLease,
+                lease.id,
+                populate_existing=True,
+            )
+            assert stored_lease is not None
+            assert stored_lease.last_event_ordinal == 1
+            assert stored_lease.finalized_at == now
+            assert (
+                await event_session.scalar(
+                    select(func.count())
+                    .select_from(ServiceExecutionEvent)
+                    .where(
+                        ServiceExecutionEvent.lease_id == lease.id,
+                    )
+                )
+                == 1
+            )
+            replay, duplicate = await record_execution_event(
+                event_session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="finalized",
+                payload=final_payload,
+                observed_at=now,
+            )
+            assert duplicate and replay.id == event.id
     finally:
         await engine.dispose()
 
