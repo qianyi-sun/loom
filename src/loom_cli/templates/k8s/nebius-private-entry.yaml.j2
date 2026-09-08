@@ -1,0 +1,205 @@
+{% if nebius_private_entry.enabled %}
+# Private-only entry. The selected node must own this WireGuard address.
+# No public Ingress, NodePort, whole-cluster route or copied certificate.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loom-nebius-private-entry
+data:
+  nginx.conf: |
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+    events { worker_connections 1024; }
+    stream {
+      resolver ${LOOM_DNS_RESOLVER} valid=10s ipv6=off;
+      resolver_timeout 5s;
+      proxy_connect_timeout 10s;
+      proxy_timeout 3600s;
+      ssl_certificate /tls/tls.crt;
+      ssl_certificate_key /tls/tls.key;
+      ssl_protocols TLSv1.2 TLSv1.3;
+      upstream postgres {
+        zone postgres 64k;
+        server loom-postgres-rw.{{ namespace }}.svc.cluster.local:5432 resolve;
+      }
+      upstream control_plane {
+        zone control_plane 64k;
+        server loom-control-plane.{{ namespace }}.svc.cluster.local:8080 resolve;
+      }
+      upstream minio {
+        zone minio 64k;
+        server loom-minio.{{ namespace }}.svc.cluster.local:9000 resolve;
+      }
+      # Native PostgreSQL SSLRequest/TLS is passed through, not terminated.
+      server { listen 15432; proxy_pass postgres; }
+      # TCP TLS termination preserves HTTP bytes, including S3 Host/signature,
+      # URI encoding, streaming bodies and response headers without rewriting.
+      server { listen 18443 ssl; proxy_pass control_plane; }
+      server { listen 19443 ssl; proxy_pass minio; }
+    }
+    http {
+      access_log off;
+      server {
+        listen 18080;
+        location = /healthz { return 200; }
+      }
+    }
+  run.sh: |
+    #!/bin/sh
+    set -eu
+    umask 077
+    # Pod DNS, not a pinned Service/Pod IP: CNPG promotion and Service changes
+    # are resolved by nginx without operator reloads.
+    LOOM_DNS_RESOLVER="$(awk '/^nameserver / {print $2; exit}' /etc/resolv.conf)"
+    test -n "$LOOM_DNS_RESOLVER"
+    export LOOM_DNS_RESOLVER
+    envsubst '${LOOM_DNS_RESOLVER}' < /config/nginx.conf > /tmp/nginx.conf
+    fingerprint() { sha256sum /tls/tls.crt /tls/tls.key; }
+    # Record before starting nginx so a rotation during startup is retried.
+    applied="$(fingerprint)"
+    nginx -t -c /tmp/nginx.conf >/dev/null 2>&1
+    nginx -c /tmp/nginx.conf -g 'daemon off;' &
+    master=$!
+    stop() {
+      kill -QUIT "$master" 2>/dev/null || true
+      wait "$master" || true
+    }
+    trap 'stop; exit 0' TERM INT
+    while kill -0 "$master" 2>/dev/null; do
+      sleep 10 &
+      wait $! || true
+      current="$(fingerprint 2>/dev/null)" || continue
+      if [ "$current" != "$applied" ]; then
+        # Invalid/intermediate pairs keep the previous live certificate;
+        # retry without logging PEMs or a secret-bearing nginx config dump.
+        if nginx -t -c /tmp/nginx.conf >/dev/null 2>&1 &&
+           nginx -s reload -c /tmp/nginx.conf >/dev/null 2>&1; then
+          applied="$current"
+          echo "private-entry: TLS reload requested"
+        else
+          echo "private-entry: TLS reload validation failed; retaining active certificate" >&2
+        fi
+      fi
+    done
+    wait "$master"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-nebius-private-entry
+spec:
+  replicas: 1
+  # Same-node host ports cannot be allocated by a surge replica.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: loom-nebius-private-entry }
+  template:
+    metadata:
+      labels: { app: loom-nebius-private-entry }
+      annotations:
+        # ConfigMap script/config changes must restart the entry through rollout.
+        loom.ca/private-entry-revision: {{ nebius_private_entry_revision | tojson }}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ nebius_private_entry.node_name | tojson }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 300
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: proxy
+          image: {{ nebius_private_entry.proxy_image | tojson }}
+          command: ["/bin/sh", "/config/run.sh"]
+          ports:
+{% for name, port in [("postgres", 15432), ("control-plane", 18443), ("minio", 19443)] %}
+            - name: {{ name }}
+              containerPort: {{ port }}
+              hostPort: {{ port }}
+              hostIP: {{ nebius_private_entry.wireguard_address | tojson }}
+              protocol: TCP
+{% endfor %}
+          readinessProbe:
+            httpGet: { path: /healthz, port: 18080 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 18080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            # No subPath: kubelet must project cert-manager's renewed pair.
+            - { name: tls, mountPath: /tls, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: loom-nebius-private-entry }
+        - name: tls
+          secret:
+            secretName: {{ ingress_tls_secret_name | tojson }}
+            defaultMode: 0600
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-nebius-private-entry
+spec:
+  podSelector:
+    matchLabels: { app: loom-nebius-private-entry }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: {{ nebius_private_entry.peer_address }}/32
+      ports:
+        - { port: 15432, protocol: TCP }
+        - { port: 18443, protocol: TCP }
+        - { port: 19443, protocol: TCP }
+  egress:
+{% for label, value, port in [
+  ("app", "loom-control-plane", 8080),
+  ("app", "loom-minio", 9000),
+  ("cnpg.io/cluster", "loom-postgres", 5432)
+] %}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{ label }}: {{ value }}
+      ports:
+        - { port: {{ port }}, protocol: TCP }
+{% endfor %}
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchExpressions:
+              - { key: k8s-app, operator: In, values: [kube-dns, coredns] }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+{% for name, label, value, port in [
+  ("control-plane", "app", "loom-control-plane", 8080),
+  ("minio", "app", "loom-minio", 9000),
+  ("postgres-cnpg", "cnpg.io/cluster", "loom-postgres", 5432)
+] %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-private-entry-to-{{ name }}
+spec:
+  podSelector:
+    matchLabels:
+      {{ label }}: {{ value }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: loom-nebius-private-entry } }
+      ports:
+        - { port: {{ port }}, protocol: TCP }
+{% endfor %}
+{% endif %}
