@@ -359,6 +359,89 @@ assert work.account_id == f'dev-owner-{bob_owner_id.hex}'
   No live readiness claim: typed build execution and concurrent-owner fleet
   acceptance remain required by the architecture spec.
 
+### Integration refinement: allocation generations and dynamic protected agents
+
+Inspection after Task 3 found two required consumers beyond the preparation-only
+lookups. Executable intent bindings retain deployment/candidate, but not subject
+configuration generation; committed allocation payloads currently retain only the
+immutable base configuration and a non-reversible input digest. Protected-agent
+HTTP endpoints still accept only static registry principals, unlike demand reports.
+Store-only integration cannot establish unknown-owner executable acceptance.
+
+Retain V2 allocation bytes unchanged. Add `ExecutableEpochV3` with an exact
+`PersonalMembershipSnapshotV1` under the unchanged base execution fence. Commit it
+only when the CAS-verified input is delegated V2, using its exact snapshot. Use a
+strict V2/V3 allocation parser at every allocation payload reader. The existing
+immutable allocation JSON column carries this evidence; do not change executable
+intent wire identities or rewrite base generations. A V3 execution requires this
+V3 allocation evidence; missing delegation cannot silently become V2 authority.
+
+Extend membership snapshot reading with an explicit historical revision bound.
+Validate that revision/head and latest members against the authenticated log up to
+that revision, including recreation proofs. An allocation's pinned subject reference
+then comes from its verified member or exact immutable base reference. Before each
+increase, compare the target's full pinned configuration/reporter evidence with
+current verified membership materialization. A different owner's later revision
+alone must not invalidate this subject. A target capacity/update/disable change
+does invalidate its old increase, even when deployment generation did not change.
+Historical cleanup resolves that allocation's pinned acknowledgement, never an
+arbitrary latest or first same-deployment acknowledgement.
+
+Use a route-local dynamic subject-agent dependency for V2 bootstrap/admission,
+terminal evidence, closure and protected release endpoints. Check the static
+registry first; a known wrong-scope principal fails without dynamic fallback.
+For an unknown bearer, resolve its hash to one exact retained personal reporter,
+using the existing hashed credential records, without rewriting a registry or
+giving personal source management credentials. This principal has only the subject
+reporter identity and cannot authenticate management, executor, pool or read-all
+routes. Demand-report authentication remains current-only and requires active
+current subject generation. Equivocal/revoked/unknown credentials remain rejected.
+
+Fenced reporters retained by a legitimate membership rollover may authenticate
+only exact historical work whose immutable allocation/acknowledgement binds that
+reporter. Cleanup endpoints may consume this identity for retained bootstrap-close,
+admission closure, terminal evidence and protected release; store checks must
+separate those paths from new admission, permit consumption and demand. Mixed
+work polling may return a bounded closure for an old reporter, never a new plan.
+Do not simply remove all current-reporter predicates. Preserve the existing
+bootstrap-before-release cleanup protocol and reporter token hashes through drain.
+
+Additional acceptance: new owner with no static registry row completes real HTTP
+bootstrap/admission; wrong owner/token rejected; capacity-only supersession rejects
+the old allocation's increase; another owner still admits; old reporter performs
+only exact retained cleanup after update/disable; missing/tampered allocation
+membership snapshot rejected; historical receipt after later revisions resolves
+the original generation; literal V2 allocation round trips unchanged.
+
+#### Review amendment: executable SQL guards and membership-only supersession
+
+The allocation column needs no migration merely to store V3 JSON, but the
+executable acknowledgement guards do. Add the next numbered migration; preserve
+old migration files. Use one allocation-pinned SQL subject resolver with exact
+V2/V3 pairing, immutable base, authenticated revision/head/latest-target member,
+and a separate current-target predicate. Apply it to bootstrap acknowledgement,
+admission proposal/acknowledgement, protected launch-ready, and a narrow companion
+intent-increase trigger. Historical bootstrap/closure/release guards may accept
+only the allocation's exact legitimate retained reporter. Keep complete-payload,
+protected receipt, terminal evidence, search-path and privilege guards intact.
+Update migration upgrade/downgrade and packaging/current-head expectations.
+
+An allocation is also superseded *for a target* when that target's authenticated
+current configuration/acknowledgement differs from its pinned evidence. Reuse the
+existing `allocation-superseded` closure reason for this loss of target authority,
+without changing the wire enum or pretending the global allocation number changed.
+Python and SQL must establish this from immutable membership evidence; malformed
+evidence is an error, not a convenient supersession result. This permits historical
+bootstrap-before-release without issuing a new admission plan. Pool polling must
+close stale target work while continuing unaffected owners. Already-issued permits
+and cached proposals remain subject to current-target validation.
+
+Acceptance must seal allocation K with A and B, change only B without K+1, reject
+B's stale increase, complete its exact historical cleanup, and keep A admissible.
+Cover B capacity-only, update and destroy, accepted-before-bootstrap work and
+already-delivered admission plans/permits. Include direct SQL rejection controls;
+Python-only coverage cannot establish these authority boundaries.
+
 ## Following lifecycle task (separate dependent plan)
 
 `src/loom/personal_dev_capacity.py`, `personal_dev_reconciler.py`,

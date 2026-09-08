@@ -1,6 +1,7 @@
 # Personal development membership under active capacity authority
 
-Status: design for implementation; not live acceptance evidence.
+Status: manager-side application membership implemented; integration validation
+in progress. Lifecycle/build connection and live acceptance remain incomplete.
 
 ## Outcome
 
@@ -127,9 +128,8 @@ typed digest by itself is not authentication. Repeated recreations preserve the
 first origin and extend the immutable predecessor chain. Historical exact
 identities remain available for status and cleanup; they cannot reopen admission.
 
-Implementation is staged: durable ordinary membership first rejects every
-incarnation change; the separately reviewed recreation task adds only this
-explicit transition before the executable membership interface is delivered.
+The manager implements only this explicit recreation transition; an ordinary
+update cannot change incarnation or reactivate a disabled predecessor.
 
 Protected acknowledgement lookup must use the exact admission generation:
 current generation for increases, stored generation for authenticated cleanup.
@@ -137,6 +137,39 @@ It must not fall back to an old prepared acknowledgement when a delegated
 subject has been disabled or superseded. Reporter authentication, pool work,
 bootstrap, launch consumption, pending limits and retirement all use the same
 resolved membership authority.
+
+## Delivered manager interface
+
+`POST /v3/execution-preparations` explicitly prepares delegated authority; the
+V2 endpoint and its static manifest retain their original contract. Membership
+management has a separate single-purpose, unbound `capacity:membership:manage`
+principal whose identity must match the prepared delegation.
+
+`GET /v1/personal-memberships/checkpoint` returns a consistent active execution,
+namespace and membership revision/head. `PUT /v1/personal-memberships/{subject_id}`
+uses that checkpoint for compare-and-swap; an exact replay returns its original
+checkpoint. Only a stale revision returns the typed `membership_revision_conflict`
+code. Identity, authority and idempotency failures are not refresh instructions.
+
+Committed `ExecutableEpochV3` allocations retain the exact authenticated membership
+snapshot alongside the immutable base configuration. Executor increases check the
+target's pinned configuration against current evidence. A change to B supersedes
+B's old admission even without another allocation, but a membership revision for
+B alone does not supersede A. Old permits cannot launch after target supersession.
+Historical bootstrap, admission closure and protected release resolve the exact
+original generation; outstanding work stays charged until authenticated release.
+
+Personal agents authenticate through retained hashed reporter records on only the
+protected subject routes. No static registry rewrite or management/executor scope
+is granted. A legitimately rotated reporter can finish its exact old cleanup,
+but cannot admit new work. After retirement, archive-only authentication is limited
+to retained admission closure polling and acknowledgement, including exact retries;
+it cannot return a new proposal. Demand authentication remains current-only.
+
+Migrated PostgreSQL and HTTP tests exercise this manager boundary. They do not
+establish a live rollout, personal lifecycle convergence or build-provider readiness.
+The lifecycle client still needs its separate durable membership checkpoint and
+authenticated installer connection described in the dependent implementation plan.
 
 ## Build service and runtime connection
 
