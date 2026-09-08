@@ -146,6 +146,66 @@ def test_staging_attachment_separates_spool_without_second_control_plane(tmp_pat
     assert all(row["metadata"]["name"].endswith("-staging") for row in roles)
 
 
+@pytest.mark.parametrize("database", ["loom", "loom_staging"])
+def test_attachment_preserves_existing_canonical_database_and_secret_refs(
+    tmp_path: Path, database: str
+) -> None:
+    payload = binding()
+    payload["canonical_database"] = database
+    manifest, docs = render(tmp_path, payload)
+    assert manifest["canonical_database"] == database
+    assert manifest["source_sha256"]["staging_attachment"]
+    assert not any(row["kind"] in {"Secret", "StatefulSet", "Cluster", "Job"} for row in docs)
+    for row in docs:
+        if row["kind"] != "Deployment":
+            continue
+        env = row["spec"]["template"]["spec"]["containers"][0]["env"]
+        dsn_refs = [entry for entry in env if entry["name"].endswith("DB_URL")]
+        assert len(dsn_refs) == 1
+        assert "value" not in dsn_refs[0]
+        assert dsn_refs[0]["valueFrom"]["secretKeyRef"]["name"] == "staging-db"
+
+
+@pytest.mark.parametrize(
+    "database", ["", "loom_development", "loom_production", "postgres", None, [], {}, "loom\n"]
+)
+def test_attachment_rejects_unknown_database_declarations(tmp_path: Path, database: object) -> None:
+    payload = binding()
+    payload["canonical_database"] = database
+    with pytest.raises(NebiusRuntimeRenderError, match="staging target and database"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("environment", "development"),
+        ("target_id", "nebius-eu-north1-development"),
+        ("namespace", "loom-nebius-development"),
+    ],
+)
+def test_shared_database_name_does_not_allow_cross_environment_attachment(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    payload = binding()
+    payload["canonical_database"] = "loom"
+    payload[field] = value
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize("field", ["artifacts_bucket", "trajectories_bucket"])
+def test_shared_database_name_keeps_canonical_bucket_fence(tmp_path: Path, field: str) -> None:
+    payload = binding()
+    payload["canonical_database"] = "loom"
+    payload["canonical"][field] = "loom-development-artifacts"
+    with pytest.raises(NebiusRuntimeRenderError, match="canonical buckets"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

@@ -557,7 +557,7 @@ in `loom-nebius-staging`, not claims that those objects already exist.
   "environment": "staging",
   "target_id": "nebius-eu-north1-staging",
   "namespace": "loom-nebius-staging",
-  "canonical_database": "loom_staging",
+  "canonical_database": "loom",
   "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "local_providers_secret_name": "staging-local-providers",
   "gateway_image": "registry.example/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -641,11 +641,22 @@ its owning lane; do not skip backup, resume another initiator's request, or
 substitute the development gateway helper for protected staging deployment.
 This render work does not transfer rollout ownership or authorize production.
 
+The existing shared staging database is named `loom`; `loom_staging` remains an
+accepted declaration for installations already using that name. Set
+`canonical_database` to the actual approved database name, not an environment
+label. The renderer records this declaration in its manifest without reading
+Secrets, rewriting a DSN, provisioning a database or migrating data. A database
+named `loom` also exists in development, so the name alone is not authority proof.
+
 Deployment preflight still must verify:
 
-- Actual referenced actuator/Gateway DSNs reach the existing `loom_staging`
-  database with the intended roles, TLS and schema/candidate; the JSON database
-  label is not proof of endpoint identity. Keep secrets out of evidence.
+- Actual referenced actuator/Gateway DSNs reach the approved existing live
+  staging PostgreSQL endpoint with the intended roles, TLS and schema/candidate.
+  A read-only `SELECT current_database()` must match `canonical_database`
+  (`loom` for the existing shared staging), but also verify the endpoint's
+  environment identity: a matching name alone cannot distinguish development.
+  Never create another database or substitute a label to pass the render check.
+  Keep secrets out of evidence.
 - Persistent, scoped routes for Nebius actuator/Gateway to staging DB, Gateway
   to canonical input storage and model providers, staging Control Plane to the
   source spool, and collector to its authenticated Control Plane endpoint.
@@ -660,7 +671,9 @@ Deployment preflight still must verify:
   and restart/reconciliation procedures before calling access persistent.
 - Gateway master/step-signing keys match the staging identities, local model
   routes are configured, and the collector token is issued by staging with
-  target-bound `execution:capacity:observe` scope. Development credentials are
+  worker-only `execution:capacity:observe` scope. The current token is single-scope,
+  not token-level target-bound; the collector configuration selects the target.
+  Development credentials are
   not substitutes; compare identities without exposing secret values.
 - Runtime profile/admission keys and both clusters' image digests match the
   reviewed release, the staging target has a quota-backed capacity policy, and

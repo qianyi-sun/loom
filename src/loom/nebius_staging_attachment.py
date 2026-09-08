@@ -103,7 +103,10 @@ def validate_staging_attachment(
         or value["schema_version"] != "loom.nebius-staging-attachment.v1"
         or value["target_id"] != target["target_id"]
         or value["namespace"] != target["namespace_name"]
-        or value["canonical_database"] != "loom_staging"
+        # Existing shared staging uses `loom`; retain the named staging profile
+        # for compatibility. This declaration is not proof of the Secret DSN's
+        # endpoint identity (development can also have a database named `loom`).
+        or value["canonical_database"] not in ("loom", "loom_staging")
     ):
         raise StagingAttachmentError(
             "attachment must bind the selected staging target and database"
