@@ -742,7 +742,8 @@ async def test_completed_receipt_constraints_and_terminal_retention(
             )
             == receipt
         )
-        # Subsequent materialization history must not overwrite the immutable job timestamp.
+
+        # Later materialization history cannot rewrite the immutable job timestamp.
         row = (await session.scalars(select(TaskImageMaterialization))).one()
         row.ready_at = NOW + timedelta(days=1)
         await session.commit()
@@ -752,3 +753,61 @@ async def test_completed_receipt_constraints_and_terminal_retention(
             )
             == receipt
         )
+
+
+async def test_valid_signature_for_different_frozen_input_is_not_authority(
+    registry_authority_session, registry_issuer
+):
+    async with registry_authority_session() as session:
+        values = await _signed_job(
+            session, registry_issuer, binding_changes={"task_id": "different-task"}
+        )
+        await session.commit()
+        with pytest.raises(RuntimeError, match=r"binding invalid|frozen input"):
+            await _complete(session, values)
+        await session.rollback()
+    await _untouched(registry_authority_session)
+
+
+@pytest.mark.parametrize("authority", ["grant", "attestation", "materialization", "deadline"])
+async def test_completion_rechecks_each_expiry_after_state_lock_wait(
+    registry_authority_session, registry_issuer, authority
+):
+    context = {}
+    options = (
+        {"lease_seconds": 6}
+        if authority == "materialization"
+        else {"lifetime_seconds": 2}
+        if authority == "deadline"
+        else {}
+    )
+    async with registry_authority_session() as setup:
+        values = await _signed_job(setup, registry_issuer, context=context, **options)
+        await setup.commit()
+    expiry = (
+        context["authorization"].grant_expires_at
+        if authority == "grant"
+        else context["authorization"].attestation_expires_at
+        if authority == "attestation"
+        else NOW + timedelta(seconds=16)
+        if authority == "materialization"
+        else values[0].deadline
+    )
+    now = NOW + timedelta(seconds=14)
+    async with registry_authority_session() as blocker, registry_authority_session() as worker:
+        await blocker.scalar(select(TaskImagePublicationState).with_for_update())
+        pid = await worker.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(_complete(worker, values, clock=lambda: now))
+        try:
+            await _blocked(blocker, pid, task)
+            now = expiry
+            await blocker.rollback()
+            with pytest.raises(RuntimeError):
+                await task
+        finally:
+            await blocker.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await worker.rollback()
+    await _untouched(registry_authority_session)
