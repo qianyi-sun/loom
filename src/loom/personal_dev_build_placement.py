@@ -57,6 +57,19 @@ def _validate_node_id(value: str, *, label: str, allowed: frozenset[str]) -> Non
         raise ValueError(f"native build {label} node id is invalid")
 
 
+def _is_within_age(
+    observed_at: datetime,
+    *,
+    now: datetime,
+    maximum_age_seconds: int,
+) -> bool:
+    if now < observed_at:
+        return False
+    age = now - observed_at
+    age_seconds = age.days * 86_400 + age.seconds
+    return (age_seconds, age.microseconds) <= (maximum_age_seconds, 0)
+
+
 @dataclass(frozen=True, slots=True)
 class NativeBuildPlacementPolicy:
     """Resource, freshness, and release requirements for native build nodes."""
@@ -191,9 +204,11 @@ def eligible_native_build_nodes(
         and observation.available_disk_bytes >= policy.minimum_disk_free_bytes
         and observation.available_inodes >= policy.minimum_free_inodes
         and observation.certified_runtime_profile_sha256 == policy.runtime_profile_sha256
-        and normalized_now >= observation.observed_at
-        and (normalized_now - observation.observed_at).total_seconds()
-        <= policy.max_observation_age_seconds
+        and _is_within_age(
+            observation.observed_at,
+            now=normalized_now,
+            maximum_age_seconds=policy.max_observation_age_seconds,
+        )
     )
     return tuple(sorted(eligible, key=lambda observation: observation.node_id))
 

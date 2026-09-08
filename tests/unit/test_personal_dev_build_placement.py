@@ -193,6 +193,43 @@ def test_eligible_nodes_enforce_exact_freshness_boundary(
 
 
 @_MISSING_FEATURE
+def test_eligible_nodes_preserve_microseconds_at_large_age_boundary() -> None:
+    """Float rounding must not admit a report one microsecond beyond a large age."""
+    maximum_age_seconds = 31_525_372_800
+    observed_at = datetime(1, 1, 1, tzinfo=UTC)
+    exact_boundary = observed_at + timedelta(seconds=maximum_age_seconds)
+    observation = _observation(observed_at=observed_at)
+    policy = _policy(max_observation_age_seconds=maximum_age_seconds)
+
+    assert eligible_native_build_nodes(
+        policy,
+        (observation,),
+        now=exact_boundary,
+    ) == (observation,)
+    assert (
+        eligible_native_build_nodes(
+            policy,
+            (observation,),
+            now=exact_boundary + timedelta(microseconds=1),
+        )
+        == ()
+    )
+
+
+@_MISSING_FEATURE
+def test_eligible_nodes_accept_signed_64_maximum_age_without_timedelta_overflow() -> None:
+    """A valid signed-64 age must not be converted into an overflowing timedelta."""
+    observation = _observation(observed_at=datetime.min.replace(tzinfo=UTC))
+    policy = _policy(max_observation_age_seconds=2**63 - 1)
+
+    assert eligible_native_build_nodes(
+        policy,
+        (observation,),
+        now=datetime.max.replace(tzinfo=UTC),
+    ) == (observation,)
+
+
+@_MISSING_FEATURE
 def test_policy_narrowing_removes_an_otherwise_eligible_node() -> None:
     """Ignoring the policy allowlist would schedule onto removed capacity."""
     node3 = _observation("trt-gb10-3")
