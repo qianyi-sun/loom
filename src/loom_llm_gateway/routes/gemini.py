@@ -23,6 +23,7 @@ from loom_llm_gateway.attempt_deadline import (
     upstream_timeout,
 )
 from loom_llm_gateway.dialect import DIALECTS
+from loom_llm_gateway.dispatch_audit import request_dispatch_audit
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
@@ -104,6 +105,10 @@ async def gemini_generate_content(
             settings=settings,
             dialect="gemini",
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="gemini",
+            ),
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)

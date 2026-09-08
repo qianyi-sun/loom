@@ -267,10 +267,18 @@ class SubprocessAgent:
                     trial_id=self.trial_id,
                     step_id=step_id,
                     ttl_sec=self.step_token_ttl_sec,
-                    attempt_deadline_wall_clock=(
-                        self._attempt_deadline.wall_deadline
+                    attempt_deadline_wall_clock=(self._attempt_deadline.wall_deadline),
+                    **(
+                        {"agent_attempt_id": self._attempt_deadline.agent_attempt_id}
+                        if self._attempt_deadline.agent_attempt_id is not None
+                        else {}
                     ),
                 )
+                if self._attempt_deadline.agent_attempt_id is not None and not grant.local_only:
+                    await self._attempt_deadline.record_step_token_grant(
+                        agent_attempt_id=grant.agent_attempt_id,
+                        step_jwt_id=grant.step_jwt_id,
+                    )
                 step_token = grant.token
         except Exception as exc:
             raise AgentError(
@@ -419,9 +427,7 @@ class SubprocessAgent:
             # stdout line — could carry an env-leaked API key or other
             # secret. Redact before it lands in failure_message.
             sample = redact_text(raw_sample) if raw_sample else ""
-            sample_text = (
-                f"; first bad line: {sample!r}" if sample else ""
-            )
+            sample_text = f"; first bad line: {sample!r}" if sample else ""
             raise AgentError(
                 f"{self.adapter.name} emitted no parseable events on "
                 f"step {step_id} (rc=0, but "
@@ -501,9 +507,8 @@ def _extract_terminal_error(payload: dict[str, object]) -> str | None:
 
     event_type = payload.get("type")
     event_subtype = payload.get("subtype")
-    if (
-        (isinstance(event_type, str) and "error" in event_type.lower())
-        or (isinstance(event_subtype, str) and "error" in event_subtype.lower())
+    if (isinstance(event_type, str) and "error" in event_type.lower()) or (
+        isinstance(event_subtype, str) and "error" in event_subtype.lower()
     ):
         return _extract_diagnostic_text(
             payload,

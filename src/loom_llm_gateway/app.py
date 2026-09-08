@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from starlette.responses import JSONResponse
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
@@ -29,6 +30,7 @@ from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution_output import ServiceExecutionOutputRouteService
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.dispatch_audit import DispatchAuditMiddleware, DispatchAuditUnavailableError
 from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.provider_dispatch import settle_stale_provider_dispatches
@@ -195,6 +197,20 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     ensure_drain_state(app)
     # #547: register middleware BEFORE routers so it wraps every route.
     install_drain_middleware(app)
+    app.add_middleware(DispatchAuditMiddleware)
+
+    @app.exception_handler(DispatchAuditUnavailableError)
+    async def dispatch_audit_unavailable(
+        request: Request,
+        exc: DispatchAuditUnavailableError,
+    ) -> JSONResponse:
+        # Admission failed before provider I/O; do not leak driver/SQL details
+        # or misreport this infrastructure failure as provider/auth failure.
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"code": "dispatch_audit_unavailable"}},
+        )
+
     app.include_router(health.router)
     app.include_router(drain.router)
     app.include_router(chat.router)

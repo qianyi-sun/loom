@@ -40,6 +40,8 @@ class EventKind(StrEnum):
     AGENT_THOUGHT = "agent_thought"
     AGENT_RETRY = "agent_retry"
     AGENT_TIMEOUT = "agent_timeout"
+    AGENT_ATTEMPT_START = "agent_attempt_start"
+    AGENT_STEP_TOKEN_GRANT = "agent_step_token_grant"
     # Verifier-level
     VERIFIER_START = "verifier_start"
     VERIFIER_END = "verifier_end"
@@ -73,6 +75,7 @@ class EventKind(StrEnum):
 
 class _EventBase(BaseModel):
     """Common envelope fields. All events carry these."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     emitted_at: datetime
     trial_id: UUID
@@ -88,6 +91,7 @@ class TrialStartEvent(_EventBase):
 
 
 # Trial-level ──────────────────────────────────────────────────────────────────
+
 
 class TrialEndEvent(_EventBase):
     kind: Literal[EventKind.TRIAL_END] = EventKind.TRIAL_END
@@ -111,6 +115,7 @@ class TrialCancelledEvent(_EventBase):
 
 # Step-level ───────────────────────────────────────────────────────────────────
 
+
 class StepStartEvent(_EventBase):
     kind: Literal[EventKind.STEP_START] = EventKind.STEP_START
     instruction_excerpt: str
@@ -123,6 +128,7 @@ class StepEndEvent(_EventBase):
 
 
 # Environment-level ────────────────────────────────────────────────────────────
+
 
 class EnvStartEvent(_EventBase):
     kind: Literal[EventKind.ENV_START] = EventKind.ENV_START
@@ -155,6 +161,7 @@ class EnvExecEvent(_EventBase):
 
 # File ops ─────────────────────────────────────────────────────────────────────
 
+
 class FileUploadEvent(_EventBase):
     kind: Literal[EventKind.FILE_UPLOAD] = EventKind.FILE_UPLOAD
     src_size_bytes: int
@@ -178,6 +185,7 @@ from loom.models.types import ModelSpec  # noqa: E402
 
 class ChatMessage(BaseModel):
     """OpenAI-compatible chat message used in LLMCallEvent.messages / .response."""
+
     model_config = ConfigDict(frozen=True, extra="allow")  # allow provider-specific fields
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[dict[str, Any]] | None = None
@@ -188,6 +196,7 @@ class ChatMessage(BaseModel):
 
 class ToolSpec(BaseModel):
     """Tool definition sent in LLMCallEvent.tools."""
+
     model_config = ConfigDict(frozen=True, extra="allow")
     name: str
     description: str | None = None
@@ -196,6 +205,7 @@ class ToolSpec(BaseModel):
 
 class LLMCallEvent(_EventBase):
     """The training-data load-bearing event (spec §4.4.1)."""
+
     kind: Literal[EventKind.LLM_CALL] = EventKind.LLM_CALL
 
     # Model identification (frozen at call time)
@@ -218,7 +228,7 @@ class LLMCallEvent(_EventBase):
     cache_write_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     thinking_tokens: int = Field(ge=0)
-    provider_extras: dict[str, int]                 # NAMED counters (int-valued)
+    provider_extras: dict[str, int]  # NAMED counters (int-valued)
     request_params: dict[str, Any] = Field(default_factory=legacy_request_params)
 
     # Derived (recomputable)
@@ -292,6 +302,23 @@ class AgentTimeoutEvent(_EventBase):
     cancellation_drain_sec: float = Field(ge=0)
     transport_close_required: bool
     task_stopped: bool
+    agent_attempt_id: UUID | None = None
+
+
+class AgentAttemptStartEvent(_EventBase):
+    """Supervisor-owned retry identity; not a scheduled Trial attempt counter."""
+
+    kind: Literal[EventKind.AGENT_ATTEMPT_START] = EventKind.AGENT_ATTEMPT_START
+    agent_attempt_id: UUID
+    attempt_deadline_wall_clock: datetime
+
+
+class AgentStepTokenGrantEvent(_EventBase):
+    """Safe CP grant correlation, without the bearer or provider credentials."""
+
+    kind: Literal[EventKind.AGENT_STEP_TOKEN_GRANT] = EventKind.AGENT_STEP_TOKEN_GRANT
+    agent_attempt_id: UUID
+    step_jwt_id: UUID
 
 
 class VerifierStartEvent(_EventBase):
@@ -330,10 +357,9 @@ class WorkerDrainInterruptedEvent(_EventBase):
 
 # Terminus-2 native runtime (#744) ────────────────────────────────────────────
 
+
 class Terminus2RuntimeProvenanceEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_RUNTIME_PROVENANCE] = (
-        EventKind.TERMINUS2_RUNTIME_PROVENANCE
-    )
+    kind: Literal[EventKind.TERMINUS2_RUNTIME_PROVENANCE] = EventKind.TERMINUS2_RUNTIME_PROVENANCE
     loom_runtime_revision: str
     harbor_compat_sha: str
     parser_name: Literal["json", "xml"]
@@ -402,9 +428,7 @@ class Terminus2ParseRetryEvent(_EventBase):
 
 
 class Terminus2ContextBoundaryEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_CONTEXT_BOUNDARY] = (
-        EventKind.TERMINUS2_CONTEXT_BOUNDARY
-    )
+    kind: Literal[EventKind.TERMINUS2_CONTEXT_BOUNDARY] = EventKind.TERMINUS2_CONTEXT_BOUNDARY
     turn_id: str
     reason: str
     tokens_before: int = Field(ge=0)
@@ -444,9 +468,7 @@ class Terminus2ModelSwitchPlannedEvent(_EventBase):
 class Terminus2ModelMixPlannedEvent(_EventBase):
     """Durable beta-mixture plan (episode grain). No K1/K2 cuts."""
 
-    kind: Literal[EventKind.TERMINUS2_MODEL_MIX_PLANNED] = (
-        EventKind.TERMINUS2_MODEL_MIX_PLANNED
-    )
+    kind: Literal[EventKind.TERMINUS2_MODEL_MIX_PLANNED] = EventKind.TERMINUS2_MODEL_MIX_PLANNED
     policy: Literal["beta_mixture"] = "beta_mixture"
     beta: float = Field(ge=0.0, le=1.0)
     grain: Literal["episode"] = "episode"
@@ -456,9 +478,7 @@ class Terminus2ModelMixPlannedEvent(_EventBase):
 
 
 class Terminus2LlmCallStartedEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_LLM_CALL_STARTED] = (
-        EventKind.TERMINUS2_LLM_CALL_STARTED
-    )
+    kind: Literal[EventKind.TERMINUS2_LLM_CALL_STARTED] = EventKind.TERMINUS2_LLM_CALL_STARTED
     client_call_id: UUID
     episode: int = Field(ge=0)
     call_ordinal: int = Field(ge=1)
@@ -467,9 +487,7 @@ class Terminus2LlmCallStartedEvent(_EventBase):
 
 
 class Terminus2LlmCallCompletedEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_LLM_CALL_COMPLETED] = (
-        EventKind.TERMINUS2_LLM_CALL_COMPLETED
-    )
+    kind: Literal[EventKind.TERMINUS2_LLM_CALL_COMPLETED] = EventKind.TERMINUS2_LLM_CALL_COMPLETED
     client_call_id: UUID
     episode: int = Field(ge=0)
     call_ordinal: int = Field(ge=1)
@@ -479,9 +497,7 @@ class Terminus2LlmCallCompletedEvent(_EventBase):
 
 
 class Terminus2LlmCallFailedEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_LLM_CALL_FAILED] = (
-        EventKind.TERMINUS2_LLM_CALL_FAILED
-    )
+    kind: Literal[EventKind.TERMINUS2_LLM_CALL_FAILED] = EventKind.TERMINUS2_LLM_CALL_FAILED
     client_call_id: UUID
     episode: int = Field(ge=0)
     call_ordinal: int = Field(ge=1)
@@ -491,9 +507,7 @@ class Terminus2LlmCallFailedEvent(_EventBase):
 
 
 class Terminus2EpisodeCheckpointEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_EPISODE_CHECKPOINT] = (
-        EventKind.TERMINUS2_EPISODE_CHECKPOINT
-    )
+    kind: Literal[EventKind.TERMINUS2_EPISODE_CHECKPOINT] = EventKind.TERMINUS2_EPISODE_CHECKPOINT
     episode: int = Field(ge=1)
     active_role: Literal["student", "teacher"]
     checksum: str
@@ -501,14 +515,13 @@ class Terminus2EpisodeCheckpointEvent(_EventBase):
 
 
 class Terminus2RecoveryFailedEvent(_EventBase):
-    kind: Literal[EventKind.TERMINUS2_RECOVERY_FAILED] = (
-        EventKind.TERMINUS2_RECOVERY_FAILED
-    )
+    kind: Literal[EventKind.TERMINUS2_RECOVERY_FAILED] = EventKind.TERMINUS2_RECOVERY_FAILED
     reason: str
     last_episode: int | None = None
 
 
 # OpenHands SDK native runtime (#1590) ──────────────────────────────────────────
+
 
 class OpenHandsSdkRuntimeProvenanceEvent(_EventBase):
     kind: Literal[EventKind.OPENHANDS_SDK_RUNTIME_PROVENANCE] = (
@@ -521,9 +534,7 @@ class OpenHandsSdkRuntimeProvenanceEvent(_EventBase):
 
 
 class OpenHandsSdkArtifactRefEvent(_EventBase):
-    kind: Literal[EventKind.OPENHANDS_SDK_ARTIFACT_REF] = (
-        EventKind.OPENHANDS_SDK_ARTIFACT_REF
-    )
+    kind: Literal[EventKind.OPENHANDS_SDK_ARTIFACT_REF] = EventKind.OPENHANDS_SDK_ARTIFACT_REF
     artifact_kind: Literal["openhands_sdk.events"]
     sandbox_path: str
     content_hash: str
@@ -532,23 +543,48 @@ class OpenHandsSdkArtifactRefEvent(_EventBase):
 
 
 TrajectoryEvent = Annotated[
-    TrialStartEvent | TrialEndEvent | TrialErrorEvent | TrialCancelledEvent
-    | StepStartEvent | StepEndEvent
-    | EnvStartEvent | EnvReadyEvent | EnvStopEvent | EnvExecEvent
-    | FileUploadEvent | FileDownloadEvent
-    | LLMCallEvent | ToolUseEvent | AgentThoughtEvent | AgentRetryEvent
+    TrialStartEvent
+    | TrialEndEvent
+    | TrialErrorEvent
+    | TrialCancelledEvent
+    | StepStartEvent
+    | StepEndEvent
+    | EnvStartEvent
+    | EnvReadyEvent
+    | EnvStopEvent
+    | EnvExecEvent
+    | FileUploadEvent
+    | FileDownloadEvent
+    | LLMCallEvent
+    | ToolUseEvent
+    | AgentThoughtEvent
+    | AgentRetryEvent
     | AgentTimeoutEvent
-    | VerifierStartEvent | VerifierEndEvent | VerifierCheckEvent
+    | AgentAttemptStartEvent
+    | AgentStepTokenGrantEvent
+    | VerifierStartEvent
+    | VerifierEndEvent
+    | VerifierCheckEvent
     | NetworkPolicyChangeEvent
-    | WorkerLostClaimEvent | WorkerDrainInterruptedEvent
-    | Terminus2RuntimeProvenanceEvent | Terminus2UserPromptEvent | Terminus2TurnEvent
-    | Terminus2CommandEvent | Terminus2TerminalObservationEvent | Terminus2ParseRetryEvent
-    | Terminus2ContextBoundaryEvent | Terminus2ArtifactRefEvent
-    | Terminus2ModelSwitchEvent | Terminus2ModelSwitchPlannedEvent
+    | WorkerLostClaimEvent
+    | WorkerDrainInterruptedEvent
+    | Terminus2RuntimeProvenanceEvent
+    | Terminus2UserPromptEvent
+    | Terminus2TurnEvent
+    | Terminus2CommandEvent
+    | Terminus2TerminalObservationEvent
+    | Terminus2ParseRetryEvent
+    | Terminus2ContextBoundaryEvent
+    | Terminus2ArtifactRefEvent
+    | Terminus2ModelSwitchEvent
+    | Terminus2ModelSwitchPlannedEvent
     | Terminus2ModelMixPlannedEvent
-    | Terminus2LlmCallStartedEvent | Terminus2LlmCallCompletedEvent
-    | Terminus2LlmCallFailedEvent | Terminus2EpisodeCheckpointEvent
+    | Terminus2LlmCallStartedEvent
+    | Terminus2LlmCallCompletedEvent
+    | Terminus2LlmCallFailedEvent
+    | Terminus2EpisodeCheckpointEvent
     | Terminus2RecoveryFailedEvent
-    | OpenHandsSdkRuntimeProvenanceEvent | OpenHandsSdkArtifactRefEvent,
+    | OpenHandsSdkRuntimeProvenanceEvent
+    | OpenHandsSdkArtifactRefEvent,
     Field(discriminator="kind"),
 ]

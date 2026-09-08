@@ -79,4 +79,7 @@ async def require_llm_call_bearer(
             ) from None
         except AttemptDeadlineReachedError as exc:
             raise_deadline_http_exception(exc)
+        # Internal verified principal only; never derive audit identity from
+        # model payloads or forward these fields to a provider.
+        request.scope["_loom_dispatch_auth"] = result.context
     return result.context
