@@ -151,7 +151,7 @@ production signer/distribution adapter or worker scheduler is composed.
 Extend authority API/contracts and guard fixed operation transport; extend Go
 supervisor protocol, BuildKit metadata capture, publication and orchestration.
 
-- [ ] Test bounded submit/poll operations with current session credentials and
+- [x] Test bounded submit/poll operations with current session credentials and
   no caller-selected repository, signing key, URL, platform or digest set.
 - [ ] Record observed base resolution metadata from pinned BuildKit, covering
   FROM scratch, multiple stages, malformed metadata and missing evidence.
@@ -197,7 +197,16 @@ has independent review and status has focused controller review. The authenticat
 HTTP submit/poll slice (`cf3e925d9`) passes eight real API tests plus six package
 checks, including actual worker completion after lease clearing, successor sessions,
 revocation, redaction and a five-second transaction deadline. Existing authority
-API/deployment/package checks passed 51 tests. Guard transport, supervisor publication
+API/deployment/package checks passed 51 tests. Guard submit/poll transport
+(`c79dc1fac`) passes 412 guard, cross-language vector and isolated-package checks,
+Ruff and strict mypy; independent focused review found no material defects.
+Supervisor fixed transport (`139c643d0`) passes full normal/race/vet checks and
+six required-mode real Go/Python local-flow checks; independent focused review
+also passed. Both boundaries enforce compact closed status and receipt bindings;
+the guard does not claim to reconstruct candidate identities from IDs-only
+requests. A lifecycle-source review reproduced stale cached-session cleanup after
+credential refresh; `26bfa0887` closes the current manager-owned successor, with
+full race and focused session regression coverage. Supervisor publication
 liveness, terminal completion handling and independent composition review remain
 pending. No slice activates the provider.
 
