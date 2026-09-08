@@ -38,9 +38,11 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
         response for path, response in tls_registry.routes.items() if "/manifests/" in path
     ).wait_for_peer_close_before_response = True
     base, started = NOW + timedelta(seconds=14), time.monotonic()
+    last_sample = [base]
 
     def clock():
-        return base + timedelta(seconds=time.monotonic() - started)
+        last_sample[0] = base + timedelta(seconds=time.monotonic() - started)
+        return last_sample[0]
 
     values = (*values[:4], clock)
     async with registry_authority_session() as session:
@@ -77,7 +79,8 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
             assert query.strip().upper() == "COMMIT"
             # Simulate clock passage while a genuine deferred PostgreSQL commit
             # owns the new lease. Do not mock claim, transaction, renewal or I/O.
-            base = NOW + timedelta(seconds=18.2 if expired_at_commit else 17.95)
+            claimed_lease_expiry = last_sample[0] + timedelta(seconds=4)
+            base = claimed_lease_expiry + timedelta(seconds=0.2 if expired_at_commit else -0.05)
             started = time.monotonic()
             await blocker.rollback()
         if expired_at_commit:
@@ -97,7 +100,7 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
                         expiry = await observer.scalar(
                             select(TaskImagePublicationJob.worker_expires_at)
                         )
-                    if expiry is not None and expiry > NOW + timedelta(seconds=20):
+                    if expiry is not None and expiry > claimed_lease_expiry:
                         break
                     await asyncio.sleep(0.01)
             assert tls_registry.request_received.is_set()

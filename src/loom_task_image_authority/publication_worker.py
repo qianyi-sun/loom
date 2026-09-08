@@ -221,7 +221,12 @@ class PublicationWorker:
                 raise
 
             try:
-                remaining = (job.deadline - _now(self._clock)).total_seconds()
+                checked_at = _now(self._clock)
+                # Claim computes expiry before committing. A slow commit must
+                # not grant fresh network work an already consumed lease.
+                if job.lease is None or checked_at >= job.lease.expires_at:
+                    raise PublicationJobOwnershipError("publication worker fence lost")
+                remaining = (job.deadline - checked_at).total_seconds()
                 async with asyncio.timeout(max(0, remaining)):
                     return await self._supervise(job, owner)
             except BaseException as error:
@@ -282,22 +287,24 @@ class PublicationWorker:
         assert job.lease is not None
         expires_at = job.lease.expires_at
         while True:
-            await asyncio.sleep(self._limits.renewal_interval_seconds)
-            # A blocked heartbeat cannot extend local work beyond the last
-            # committed lease. Bound its whole transaction, including commit.
             remaining = (expires_at - _now(self._clock)).total_seconds()
             if remaining <= 0:
                 raise PublicationJobOwnershipError("publication worker fence lost")
-            async with asyncio.timeout(min(self._limits.database_timeout_seconds, remaining)):
-                async with self._sessions.begin() as session:
-                    renewed = await renew_publication_job(
-                        session,
-                        operation_id=UUID(job.operation_id),
-                        owner_id=owner,
-                        generation=job.worker_generation,
-                        clock=self._clock,
-                        lease_seconds=self._limits.lease_seconds,
-                    )
+            # Commit latency may leave less than a normal interval. Recover
+            # that live lease promptly; bound BOTH sleep and the whole renewal
+            # transaction by its last committed expiry, including commit.
+            async with asyncio.timeout(remaining):
+                await asyncio.sleep(min(self._limits.renewal_interval_seconds, remaining / 2))
+                async with asyncio.timeout(self._limits.database_timeout_seconds):
+                    async with self._sessions.begin() as session:
+                        renewed = await renew_publication_job(
+                            session,
+                            operation_id=UUID(job.operation_id),
+                            owner_id=owner,
+                            generation=job.worker_generation,
+                            clock=self._clock,
+                            lease_seconds=self._limits.lease_seconds,
+                        )
             assert renewed.lease is not None
             expires_at = renewed.lease.expires_at
 
