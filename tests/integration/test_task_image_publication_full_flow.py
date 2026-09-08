@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic
 from uuid import UUID, uuid4
 
 import httpx
@@ -23,12 +26,17 @@ from loom.db.schema import (
     TaskImagePublicationKey,
     TaskImagePublicationState,
 )
+from loom_task_image_authority import api as authority_api
+from loom_task_image_authority import materializations as authority_materializations
 from loom_task_image_authority.api import create_app
 from loom_task_image_authority.bundle_capability import TaskImageBundleCapabilityProvider
+from loom_task_image_authority.oci_verification import OCIVerificationError
+from loom_task_image_authority.publication_contracts import PUBLICATION_DOMAIN
 from loom_task_image_authority.publication_signing import (
     DistributedKeysetSnapshot,
     PublicationKeyRecord,
 )
+from loom_task_image_authority.store import TaskImageProjectionAuthorizationError
 from loom_task_image_builder_guard.authority import AuthorityClient
 from loom_task_image_builder_guard.errors import GuardError
 from tests.integration import test_task_image_projection_store as projection
@@ -58,9 +66,18 @@ class _ASGIAuthority(AuthorityClient):
         self.registry, self.reader, self.root = registry, reader, root
         self.operations = []
         self.jobs = asyncio.Queue()
+        self.complete_before_heartbeat = False
+        self.submitted = False
+        self.heartbeat_entered = asyncio.Event()
+        self.worker_complete = asyncio.Event()
 
     def _request(self, route, body, *, expected_status, method="PUT", maximum_bytes=None):
         async def request():
+            if self.complete_before_heartbeat and self.submitted and route.endswith("/heartbeat"):
+                self.heartbeat_entered.set()
+                # Schedule actual atomic completion before the racing heartbeat,
+                # without changing either HTTP request or authority response.
+                await asyncio.wait_for(self.worker_complete.wait(), 5)
             response = await self.client.request(method, route, json=body)
             self.operations.append((method, route, response.status_code))
             statuses = (expected_status,) if isinstance(expected_status, int) else expected_status
@@ -86,12 +103,24 @@ class _ASGIAuthority(AuthorityClient):
                         chunks=(value[: len(value) // 2], value[len(value) // 2 :]),
                     )
             if route.endswith("publication-submit"):
+                self.submitted = True
                 self.jobs.put_nowait(UUID(body["operation_id"]))
             return payload
 
         return asyncio.run_coroutine_threadsafe(request(), self.loop).result(timeout=6)
 
 
+class _CurrentBundleBackend(_FakeBundleBackend):
+    def presign_get(self, *, bucket, key, expires_in_seconds):
+        assert bucket == "loom-bundles"
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        return f"https://objects.example/{key}?X-Amz-Date={stamp}&X-Amz-Expires={expires_in_seconds}&X-Amz-Signature=fixture"
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["complete", "complete-before-heartbeat", "corrupt-registry", "revoke-during-signing"],
+)
 async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
     tmp_path,
     monkeypatch,
@@ -99,6 +128,7 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
     registry_authority_session,
     tls_registry,
     token_key,
+    condition,
 ):
     helper_value = os.environ.get("LOOM_GO_V2_TEST_BINARY")
     if helper_value is None:
@@ -127,6 +157,16 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
         return datetime.now(UTC)
 
     signer = Signer(private, key, distribution, clock)
+    succeeds = condition in {"complete", "complete-before-heartbeat"}
+    if condition in {"revoke-during-signing", "complete-before-heartbeat"}:
+        signer.proceed.clear()
+    if condition == "complete-before-heartbeat":
+        # Shorten only the fixture lease policy; the real API and heartbeat
+        # implementations still produce and enforce every expiry themselves.
+        monkeypatch.setattr(authority_api, "DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS", 9.0)
+        monkeypatch.setattr(
+            authority_materializations, "DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS", 9.0
+        )
     async with registry_authority_session() as session:
         await projection._release_grant(session, expires_at=now + timedelta(hours=2))
         materialization = await _queued_materialization(session)
@@ -143,7 +183,7 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
         await session.commit()
     settings = _settings(tmp_path, isolated_migration_postgres_url)
     bundle = TaskImageBundleCapabilityProvider(
-        backend=_FakeBundleBackend(),
+        backend=_CurrentBundleBackend(),
         public_https_origin="https://objects.example",
         expected_bucket="loom-bundles",
         maximum_objects=2000,
@@ -155,7 +195,13 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
     )
     ready = Event()
     service, ledger, peer, _, _ = _service(
-        tmp_path, ready=ready.set, now_factory=clock, max_packet_bytes=32768
+        tmp_path,
+        ready=ready.set,
+        now_factory=clock,
+        # This is a wall-clock integration, not the unit fixture's frozen time:
+        # rate windows and guard liveness must advance with the real Go client.
+        monotonic=monotonic,
+        max_packet_bytes=32768,
     )
     service.config = replace(
         service.config,
@@ -216,9 +262,8 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
                 root,
             )
             service.authority = authority
+            authority.complete_before_heartbeat = condition == "complete-before-heartbeat"
             thread = Thread(target=run_guard)
-            thread.start()
-            assert await asyncio.to_thread(ready.wait, 3)
             worker = _worker(
                 registry_authority_session,
                 tls_registry,
@@ -227,11 +272,45 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
 
             async def verify():
                 operation = await authority.jobs.get()
+                if condition == "corrupt-registry":
+                    for path, response in tls_registry.routes.items():
+                        if "/manifests/" in path:
+                            payload = b"".join(response.chunks)
+                            response.chunks = (b"!" + payload[1:],)
+                if condition == "revoke-during-signing":
+                    task = asyncio.create_task(worker.run(operation))
+                    try:
+                        await asyncio.wait_for(signer.entered.wait(), 5)
+                        response = await client.put(
+                            f"/v1/projections/{projection.GRANT_ID}/revocation",
+                            json=projection._revocation(observed_at=clock()).model_dump(
+                                mode="json"
+                            ),
+                        )
+                        assert response.status_code == 204
+                        signer.proceed.set()
+                        return await task
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                if condition == "complete-before-heartbeat":
+                    task = asyncio.create_task(worker.run(operation))
+                    try:
+                        await asyncio.wait_for(signer.entered.wait(), 5)
+                        await asyncio.wait_for(authority.heartbeat_entered.wait(), 5)
+                        signer.proceed.set()
+                        return await task
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        authority.worker_complete.set()
                 return await worker.run(operation)
 
             verifying = asyncio.create_task(verify())
             process = None
+            thread.start()
             try:
+                assert await asyncio.to_thread(ready.wait, 3)
                 process = await asyncio.create_subprocess_exec(
                     str(helper),
                     "-test.v",
@@ -246,18 +325,39 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
                         "LOOM_GO_HTTP_ROOT_SIZE": str(root.size),
                         "LOOM_GO_HTTP_REGISTRY": tls_registry.origin,
                         "LOOM_GO_HTTP_REGISTRY_KEY": issuer.key_id,
+                        "LOOM_GO_HTTP_REJECT": "0" if succeeds else "1",
                     },
                 )
                 stdout, stderr = await asyncio.wait_for(process.communicate(), 40)
                 assert process.returncode == 0, (stdout + stderr).decode() + repr(
                     authority.operations
                 )
-                receipt = await asyncio.wait_for(verifying, 10)
-                assert receipt.component_count == 1
+                assert b"--- PASS: TestGoPublicationHTTPOrchestratorHelper" in stdout
+                if succeeds:
+                    receipt = await asyncio.wait_for(verifying, 10)
+                    assert receipt.component_count == 1
+                else:
+                    expected_error = (
+                        OCIVerificationError
+                        if condition == "corrupt-registry"
+                        else TaskImageProjectionAuthorizationError
+                    )
+                    with pytest.raises(expected_error):
+                        await asyncio.wait_for(verifying, 10)
                 assert any(path.endswith("publication-poll") for _, path, _ in authority.operations)
-                assert not any(
-                    path.endswith(("/release", "/fail")) for _, path, _ in authority.operations
+                releases = [
+                    code for _, path, code in authority.operations if path.endswith("/release")
+                ]
+                assert releases == (
+                    [] if succeeds else [200] if condition == "corrupt-registry" else [403]
                 )
+                assert not any(path.endswith("/fail") for _, path, _ in authority.operations)
+                if condition == "complete-before-heartbeat":
+                    assert authority.heartbeat_entered.is_set()
+                    assert any(
+                        path.endswith("/heartbeat") and code == 409
+                        for _, path, code in authority.operations
+                    )
                 assert b"loom_tibs_" not in stdout + stderr
             finally:
                 if process is not None and process.returncode is None:
@@ -267,13 +367,35 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
                 await asyncio.gather(verifying, return_exceptions=True)
                 service.stop()
                 await asyncio.to_thread(thread.join, 7)
+                assert not thread.is_alive(), "guard must stop before ledger cleanup"
                 service.close()
                 ledger.close()
             assert not thread.is_alive() and not failures
     async with registry_authority_session() as session:
         row = await session.get(TaskImageMaterialization, materialization_id)
-        assert row.state == "ready" and row.ready_at is not None and row.registry_images
         job = (await session.scalars(select(TaskImagePublicationJob))).one()
-        assert job.state == "completed"
-        assert len(list(await session.scalars(select(TaskImagePublicationEnvelope)))) == 1
-        assert len(list(await session.scalars(select(TaskImageBuildSessionGeneration)))) >= 2
+        envelopes = list(await session.scalars(select(TaskImagePublicationEnvelope)))
+        sessions = list(
+            await session.scalars(
+                select(TaskImageBuildSessionGeneration).order_by(
+                    TaskImageBuildSessionGeneration.generation
+                )
+            )
+        )
+        assert len(sessions) >= 2
+        assert row.attempt_count == 0
+        if succeeds:
+            assert row.state == "ready" and row.ready_at is not None and row.registry_images
+            assert job.state == "completed" and len(envelopes) == 1
+            envelope = envelopes[0]
+            # Independent Ed25519 verification of durable bytes, not just row count.
+            private.public_key().verify(
+                base64.urlsafe_b64decode(envelope.signature + "=="),
+                PUBLICATION_DOMAIN + envelope.canonical_statement,
+            )
+            statement = json.loads(envelope.canonical_statement)
+            assert statement["original_claim_session_id"] == str(sessions[0].session_id)
+            assert statement["original_claim_session_generation"] == 1
+        else:
+            assert row.state != "ready" and row.ready_at is None and not row.registry_images
+            assert job.state == "failed" and not envelopes

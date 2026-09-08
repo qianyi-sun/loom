@@ -65,10 +65,17 @@ func TestGoPublicationHTTPOrchestratorHelper(t *testing.T) {
 		RecordOutcome: func(outcome BuildOutcome) { outcomes = append(outcomes, outcome) }}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := o.Run(ctx); err != nil {
+	err = o.Run(ctx)
+	wantStatus := BuildOutcomeBuilt
+	if os.Getenv("LOOM_GO_HTTP_REJECT") == "1" {
+		wantStatus = BuildOutcomeTransientFailure
+		if err == nil || !strings.Contains(err.Error(), "publication_failed") {
+			t.Fatalf("invalid publication did not fail at verification: %v", err)
+		}
+	} else if err != nil {
 		t.Fatalf("HTTP orchestrator failed: %v", err)
 	}
-	if !executor.closed || len(outcomes) != 1 || outcomes[0].Status != BuildOutcomeBuilt {
+	if !executor.closed || len(outcomes) != 1 || outcomes[0].Status != wantStatus {
 		t.Fatal("HTTP orchestrator did not complete and clean up")
 	}
 }
