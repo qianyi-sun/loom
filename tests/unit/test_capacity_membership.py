@@ -1064,3 +1064,138 @@ def test_allocator_translates_membership_resolution_failure() -> None:
 
     with pytest.raises(ShadowAllocatorError):
         allocate_shadow(value)
+
+
+def _reincarnated_base_input() -> DelegatedAllocationInputV2:
+    value = delegated_input_with_new_owner()
+    original = value.managed_base_subjects[0]
+    predecessor = original.model_copy(
+        update={
+            "lifecycle_state": "disabled",
+            "min_slots": 0,
+            "max_slots": 0,
+            "configuration_generation": original.configuration_generation + 1,
+        }
+    )
+    successor = original.model_copy(
+        update={
+            "subject_incarnation": UUID(int=55_551),
+            "demand_reporter_incarnation": UUID(int=55_552),
+            "configuration_generation": predecessor.configuration_generation + 1,
+            "candidate_generation": 1,
+            "deployment_generation": 1,
+        }
+    )
+    evidence_type = import_module(
+        "loom_capacity_manager.membership_contracts"
+    ).PersonalReincarnationEvidenceV1
+    evidence = evidence_type(
+        namespace_id=value.membership.namespace_id,
+        execution_manifest_sha256=canonical_executable_digest(value.preparation),
+        origin=value.configuration.subjects[0],
+        predecessor=predecessor,
+        predecessor_revision=2,
+        predecessor_head_sha256="c" * 64,
+        admission_revision=3,
+        successor_incarnation=successor.subject_incarnation,
+        release_set_sha256="d" * 64,
+    )
+    member = _member(successor, OWNER_A, revision=3).model_copy(update={"reincarnation": evidence})
+    return value.model_copy(
+        update={
+            "subjects": tuple(
+                item.model_copy(update={"configuration": successor})
+                if item.configuration.subject_id == successor.subject_id
+                else item
+                for item in value.subjects
+            ),
+            "membership": value.membership.model_copy(
+                update={
+                    "revision": 3,
+                    "members": (*value.membership.members, member),
+                }
+            ),
+        }
+    )
+
+
+def test_reincarnation_resolves_successor_without_rewriting_base() -> None:
+    value = _reincarnated_base_input()
+    original_bytes = canonical_bytes(value.configuration)
+    member = value.membership.members[-1]
+    references = resolved_subject_references(value)
+    successor = next(
+        item for item in references if item.subject_id == member.configuration.subject_id
+    )
+    assert successor.subject_incarnation == member.configuration.subject_incarnation
+    assert successor.subject_incarnation != value.managed_base_subjects[0].subject_incarnation
+    assert canonical_bytes(allocate_shadow(value).configuration) == original_bytes
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "namespace_id",
+        "execution_manifest_sha256",
+        "origin",
+        "predecessor",
+        "predecessor_revision",
+        "admission_revision",
+        "successor_incarnation",
+        "release_set_sha256",
+        "owner",
+        "name",
+        "reporter",
+    ),
+)
+def test_reincarnation_rejects_changed_evidence_binding(field: str) -> None:
+    value = _reincarnated_base_input()
+    member = value.membership.members[-1]
+    evidence = member.reincarnation
+    changes = {
+        "namespace_id": UUID(int=55_553),
+        "execution_manifest_sha256": "e" * 64,
+        "origin": evidence.origin.model_copy(update={"digest": "e" * 64}),
+        "predecessor": evidence.predecessor.model_copy(update={"lifecycle_state": "active"}),
+        "predecessor_revision": evidence.admission_revision,
+        "admission_revision": member.revision + 1,
+        "successor_incarnation": evidence.predecessor.subject_incarnation,
+        "release_set_sha256": ZERO_DIGEST,
+    }
+    if field in {"owner", "name", "reporter"}:
+        configuration = member.configuration.model_copy(
+            update={
+                "owner": {"account_id": f"dev-owner-{OWNER_B.hex}"},
+                "name": {"display_name": "dev-carol"},
+                "reporter": {
+                    "demand_reporter_incarnation": evidence.predecessor.demand_reporter_incarnation
+                },
+            }[field]
+        )
+        member = _member(configuration, OWNER_B if field == "owner" else OWNER_A, revision=3)
+        member = member.model_copy(update={"reincarnation": evidence})
+    else:
+        member = member.model_copy(
+            update={
+                "reincarnation": evidence.model_copy(update={field: changes[field]}),
+            }
+        )
+    changed = value.model_copy(
+        update={
+            "membership": value.membership.model_copy(
+                update={
+                    "members": (*value.membership.members[:-1], member),
+                }
+            ),
+            "subjects": tuple(
+                item.model_copy(update={"configuration": member.configuration})
+                if item.configuration.subject_id == member.configuration.subject_id
+                else item
+                for item in value.subjects
+            ),
+        }
+    )
+    with pytest.raises(
+        PersonalMembershipResolutionError, match=r"membership contract|reincarnation"
+    ):
+        resolved_subject_references(changed)

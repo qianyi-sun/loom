@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from loom_capacity_manager.allocator import allocate_shadow
-from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from loom_capacity_manager.contracts import ObservedCommitmentV1, canonical_bytes, canonical_digest
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutionDrainV2,
@@ -32,12 +33,15 @@ from loom_capacity_manager.membership_contracts import (
 )
 from loom_capacity_manager.membership_store import (
     CapacityMembershipStore,
+    _head_digest,
+    _validated_membership_history,
     resolve_subject_acknowledgement,
 )
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityCandidate,
     CapacityExecutionEpoch,
+    CapacityObservedCommitment,
     CapacityPersonalMembershipEvent,
     CapacitySubject,
 )
@@ -250,6 +254,29 @@ def _request(active, projection=None, *, expected_revision: int = 0):  # type: i
         expected_revision=expected_revision,
         projection=resolved,
         acknowledgement=_acknowledgement(resolved),
+    )
+
+
+def _recreation_projection(
+    projection,
+    *,
+    generation: int,
+    subject_incarnation: UUID,
+    reporter_incarnation: UUID,
+    reporter_token_sha256: str,
+):  # type: ignore[no-untyped-def]
+    return projection.model_copy(
+        update={
+            "operation_kind": "create",
+            "operation_id": UUID(int=21900 + generation),
+            "operation_epoch": generation,
+            "configuration_generation": generation,
+            "subject_incarnation": subject_incarnation,
+            "demand_reporter_incarnation": reporter_incarnation,
+            "demand_reporter_token_sha256": reporter_token_sha256,
+            "candidate_generation": 1,
+            "deployment_generation": 1,
+        }
     )
 
 
@@ -880,6 +907,635 @@ async def test_preparation_requires_exact_base_materialization(
             idempotency_key=UUID(int=20820),
         )
         assert prepared.execution_state == "prepared"
+
+
+async def test_recreation_preserves_origin_and_exact_historical_acknowledgements(
+    capacity_session: AsyncSession,
+) -> None:
+    """Fresh incarnations never overwrite the disabled predecessor's history."""
+
+    fixture, active = await _active_v3(capacity_session)
+    membership = CapacityMembershipStore(fixture.store)
+    projection = _projection()
+    result = await membership.apply(
+        capacity_session,
+        _request(active, projection),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=20900),
+    )
+    first = result.member
+    origin_digest = canonical_digest(first.configuration)
+    historical = [first]
+    for generation in (2, 4):
+        disabled_projection = projection.model_copy(
+            update={
+                "operation_kind": "destroy",
+                "operation_id": UUID(int=20900 + generation),
+                "operation_epoch": generation,
+                "configuration_generation": generation,
+            }
+        )
+        disabled = await membership.apply(
+            capacity_session,
+            _request(active, disabled_projection, expected_revision=result.revision),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=20910 + generation),
+        )
+        projection = projection.model_copy(
+            update={
+                "operation_kind": "create",
+                "operation_id": UUID(int=20900 + generation + 1),
+                "operation_epoch": generation + 1,
+                "configuration_generation": generation + 1,
+                "subject_incarnation": UUID(int=20920 + generation),
+                "demand_reporter_incarnation": UUID(int=20930 + generation),
+                "demand_reporter_token_sha256": str(generation) * 64,
+                "candidate_generation": 1,
+                "deployment_generation": 1,
+            }
+        )
+        result = await membership.apply(
+            capacity_session,
+            _request(active, projection, expected_revision=disabled.revision),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=20910 + generation + 1),
+        )
+        evidence = result.member.reincarnation
+        assert evidence is not None
+        assert evidence.origin.digest == origin_digest
+        assert evidence.predecessor == disabled.member.configuration
+        assert evidence.predecessor_revision == disabled.revision
+        assert evidence.predecessor_head_sha256 == disabled.head_sha256
+        assert evidence.admission_revision == result.revision
+        assert result.member.configuration.subject_id == first.configuration.subject_id
+        assert result.member.configuration.deployment_generation == 1
+        historical.extend((disabled.member, result.member))
+        value = await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+        assert value.membership.members[0] == result.member
+    epoch = (await capacity_session.execute(select(CapacityExecutionEpoch))).scalar_one()
+    for member in historical:
+        subject = member.configuration
+        assert (
+            await resolve_subject_acknowledgement(
+                capacity_session,
+                epoch,
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                configuration_generation=subject.configuration_generation,
+                deployment_generation=subject.deployment_generation,
+                reporter_incarnation=subject.demand_reporter_incarnation,
+            )
+            == member.acknowledgement
+        )
+
+
+async def test_managed_base_disable_and_recreation_preserve_immutable_origin(
+    capacity_session: AsyncSession,
+) -> None:
+    """A projected managed base remains the origin after membership recreation."""
+
+    fixture, active, managed = await _active_v3_with_managed_base(capacity_session)
+    allocation_input = await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+    origin = next(
+        reference
+        for reference in allocation_input.configuration.subjects
+        if reference.subject_id == managed.subject_id
+    )
+    owner_id = UUID(hex=managed.account_id.removeprefix("dev-owner-"))
+    admitted_projection = _projection(
+        operation_kind="update",
+        operation_epoch=2,
+        operation_id=UUID(int=21001),
+        subject_id=managed.subject_id,
+        subject_incarnation=managed.subject_incarnation,
+        owner_id=owner_id,
+        environment_name=managed.display_name.removeprefix("dev-"),
+        expected_configuration_epoch=2,
+        reporter_incarnation=UUID(int=21002),
+        deployment_generation=2,
+    )
+    membership = CapacityMembershipStore(fixture.store)
+    admitted = await membership.apply(
+        capacity_session,
+        _request(active, admitted_projection),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21003),
+    )
+    disabled_projection = admitted_projection.model_copy(
+        update={
+            "operation_kind": "destroy",
+            "operation_id": UUID(int=21004),
+            "operation_epoch": 3,
+            "configuration_generation": 3,
+        }
+    )
+    disabled = await membership.apply(
+        capacity_session,
+        _request(active, disabled_projection, expected_revision=admitted.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21005),
+    )
+    successor = _recreation_projection(
+        admitted_projection,
+        generation=4,
+        subject_incarnation=UUID(int=21006),
+        reporter_incarnation=UUID(int=21007),
+        reporter_token_sha256="6" * 64,
+    )
+    recreated = await membership.apply(
+        capacity_session,
+        _request(active, successor, expected_revision=disabled.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21008),
+    )
+
+    evidence = recreated.member.reincarnation
+    assert evidence is not None
+    assert evidence.origin == origin
+    assert evidence.predecessor == disabled.member.configuration
+    assert recreated.member.configuration.subject_id == managed.subject_id
+    assert recreated.member.configuration.subject_incarnation == UUID(int=21006)
+    assert recreated.member.configuration.candidate_generation == 1
+    assert recreated.member.configuration.deployment_generation == 1
+
+
+async def test_recreated_member_update_and_capacity_retain_certificate(
+    capacity_session: AsyncSession,
+) -> None:
+    """Ordinary successor generations carry the authenticated recreation proof."""
+
+    fixture, active = await _active_v3(capacity_session)
+    membership = CapacityMembershipStore(fixture.store)
+    original_projection = _projection()
+    created = await membership.apply(
+        capacity_session,
+        _request(active, original_projection),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21101),
+    )
+    disabled_projection = original_projection.model_copy(
+        update={
+            "operation_kind": "destroy",
+            "operation_id": UUID(int=21102),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+    disabled = await membership.apply(
+        capacity_session,
+        _request(active, disabled_projection, expected_revision=created.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21103),
+    )
+    successor = _recreation_projection(
+        original_projection,
+        generation=3,
+        subject_incarnation=UUID(int=21104),
+        reporter_incarnation=UUID(int=21105),
+        reporter_token_sha256="4" * 64,
+    )
+    recreated = await membership.apply(
+        capacity_session,
+        _request(active, successor, expected_revision=disabled.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21106),
+    )
+    update_projection = successor.model_copy(
+        update={
+            "operation_kind": "update",
+            "operation_id": UUID(int=21107),
+            "operation_epoch": 4,
+            "configuration_generation": 4,
+            "candidate_generation": 2,
+            "deployment_generation": 2,
+            "demand_reporter_incarnation": UUID(int=21108),
+            "demand_reporter_token_sha256": "5" * 64,
+        }
+    )
+    updated = await membership.apply(
+        capacity_session,
+        _request(active, update_projection, expected_revision=recreated.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21109),
+    )
+    capacity_projection = update_projection.model_copy(
+        update={
+            "operation_kind": "capacity",
+            "operation_id": UUID(int=21110),
+            "operation_epoch": 5,
+            "configuration_generation": 5,
+            "min_slots": 1,
+        }
+    )
+    capacity = await membership.apply(
+        capacity_session,
+        _request(active, capacity_projection, expected_revision=updated.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21111),
+    )
+
+    assert recreated.member.reincarnation is not None
+    assert updated.member.reincarnation == recreated.member.reincarnation
+    assert capacity.member.reincarnation == recreated.member.reincarnation
+    assert capacity.member.configuration.subject_incarnation == UUID(int=21104)
+    assert capacity.member.configuration.deployment_generation == 2
+
+
+@pytest.mark.parametrize(
+    ("reused", "error"),
+    (
+        ("incarnation", "fresh deployment identity"),
+        ("reporter", "reporter identity was already used"),
+        ("token", "reporter identity was already used"),
+    ),
+)
+async def test_recreation_rejects_globally_reused_identity_evidence(
+    capacity_session: AsyncSession,
+    reused: str,
+    error: str,
+) -> None:
+    """No predecessor incarnation, reporter, or token can authorize a successor."""
+
+    fixture, active = await _active_v3(capacity_session)
+    membership = CapacityMembershipStore(fixture.store)
+    original_projection = _projection()
+    created = await membership.apply(
+        capacity_session,
+        _request(active, original_projection),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21201),
+    )
+    disabled_projection = original_projection.model_copy(
+        update={
+            "operation_kind": "destroy",
+            "operation_id": UUID(int=21202),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+    disabled = await membership.apply(
+        capacity_session,
+        _request(active, disabled_projection, expected_revision=created.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21203),
+    )
+    successor = _recreation_projection(
+        original_projection,
+        generation=3,
+        subject_incarnation=UUID(int=21204),
+        reporter_incarnation=UUID(int=21205),
+        reporter_token_sha256="6" * 64,
+    )
+    replacement = {
+        "incarnation": {"subject_incarnation": original_projection.subject_incarnation},
+        "reporter": {
+            "demand_reporter_incarnation": original_projection.demand_reporter_incarnation
+        },
+        "token": {"demand_reporter_token_sha256": original_projection.demand_reporter_token_sha256},
+    }[reused]
+    successor = successor.model_copy(update=replacement)
+
+    with pytest.raises(ConfigurationConflictError, match=error):
+        await membership.apply(
+            capacity_session,
+            _request(active, successor, expected_revision=disabled.revision),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=21206),
+        )
+
+
+async def test_outstanding_observed_predecessor_commitment_blocks_recreation(
+    capacity_session: AsyncSession,
+) -> None:
+    """A disabled identity cannot be replaced while observed capacity remains attributed."""
+
+    fixture, active = await _active_v3(capacity_session)
+    membership = CapacityMembershipStore(fixture.store)
+    original_projection = _projection()
+    created = await membership.apply(
+        capacity_session,
+        _request(active, original_projection),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21301),
+    )
+    disabled_projection = original_projection.model_copy(
+        update={
+            "operation_kind": "destroy",
+            "operation_id": UUID(int=21302),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+    disabled = await membership.apply(
+        capacity_session,
+        _request(active, disabled_projection, expected_revision=created.revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21303),
+    )
+    predecessor = disabled.member.configuration
+    profile = predecessor.profiles[0]
+    shape = profile.worker_shapes[0]
+    observed = ObservedCommitmentV1(
+        kind="physical",
+        commitment_id="disabled-predecessor-worker",
+        physical_identity="disabled-predecessor-worker",
+        subject_id=predecessor.subject_id,
+        subject_incarnation=predecessor.subject_incarnation,
+        deployment_generation=predecessor.deployment_generation,
+        pool_id=profile.pool_id,
+        pool_generation=profile.pool_generation,
+        profile_id=shape.shape_id,
+        profile_generation=profile.profile_generation,
+        profile_digest=profile.profile_digest,
+        shape_id=shape.shape_id,
+        resources=shape.total_resources,
+        state="observed",
+    )
+    now = datetime.now(UTC)
+    capacity_session.add(
+        CapacityObservedCommitment(
+            kind=observed.kind,
+            commitment_identity=observed.commitment_id,
+            source_incarnation=UUID(int=21304),
+            subject_id=observed.subject_id,
+            subject_incarnation=observed.subject_incarnation,
+            pool_id=observed.pool_id,
+            pool_generation=observed.pool_generation,
+            deployment_generation=observed.deployment_generation,
+            profile_id=observed.profile_id,
+            profile_generation=observed.profile_generation,
+            profile_digest=observed.profile_digest,
+            shape_id=observed.shape_id,
+            attempt_id=None,
+            concurrency_slots=None,
+            binding_payload={
+                "observed_contract": observed.model_dump(mode="json", exclude_none=False)
+            },
+            resource_vector=observed.resources.model_dump(mode="json", exclude_none=False),
+            state=observed.state,
+            first_reporter_high_water=1,
+            last_reporter_high_water=1,
+            first_receipt_time=now,
+            last_receipt_time=now,
+        )
+    )
+    await capacity_session.flush()
+    successor = _recreation_projection(
+        original_projection,
+        generation=3,
+        subject_incarnation=UUID(int=21305),
+        reporter_incarnation=UUID(int=21306),
+        reporter_token_sha256="7" * 64,
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="unreleased observed commitments"):
+        await membership.apply(
+            capacity_session,
+            _request(active, successor, expected_revision=disabled.revision),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=21307),
+        )
+
+
+async def test_authenticated_history_rejects_reuse_of_intermediate_incarnation(
+    capacity_session: AsyncSession,
+) -> None:
+    """A validly rehashed A to B to C to B chain must still fail authentication."""
+
+    fixture, active = await _active_v3(capacity_session)
+    membership = CapacityMembershipStore(fixture.store)
+    projection = _projection()
+    result = await membership.apply(
+        capacity_session,
+        _request(active, projection),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=21501),
+    )
+    intermediate_incarnation = UUID(int=21502)
+    for generation, incarnation in (
+        (2, intermediate_incarnation),
+        (4, UUID(int=21503)),
+        (6, UUID(int=21504)),
+    ):
+        disabled_projection = projection.model_copy(
+            update={
+                "operation_kind": "destroy",
+                "operation_id": UUID(int=21510 + generation),
+                "operation_epoch": generation,
+                "configuration_generation": generation,
+            }
+        )
+        disabled = await membership.apply(
+            capacity_session,
+            _request(active, disabled_projection, expected_revision=result.revision),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=21520 + generation),
+        )
+        projection = _recreation_projection(
+            projection,
+            generation=generation + 1,
+            subject_incarnation=incarnation,
+            reporter_incarnation=UUID(int=21530 + generation),
+            reporter_token_sha256=str(generation + 1) * 64,
+        )
+        result = await membership.apply(
+            capacity_session,
+            _request(active, projection, expected_revision=disabled.revision),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=21540 + generation),
+        )
+
+    last_row = (
+        await capacity_session.execute(
+            select(CapacityPersonalMembershipEvent).where(
+                CapacityPersonalMembershipEvent.revision == result.revision
+            )
+        )
+    ).scalar_one()
+    reused_projection = projection.model_copy(
+        update={"subject_incarnation": intermediate_incarnation}
+    )
+    reused_request = _request(
+        active,
+        reused_projection,
+        expected_revision=result.revision - 1,
+    )
+    reused_configuration = result.member.configuration.model_copy(
+        update={"subject_incarnation": intermediate_incarnation}
+    )
+    assert result.member.reincarnation is not None
+    reused_evidence = result.member.reincarnation.model_copy(
+        update={"successor_incarnation": intermediate_incarnation}
+    )
+    reused_member = type(result.member).model_validate(
+        result.member.model_copy(
+            update={
+                "configuration": reused_configuration,
+                "acknowledgement": reused_request.acknowledgement,
+                "reincarnation": reused_evidence,
+            }
+        ).model_dump(mode="python", exclude_none=False)
+    )
+    request_payload = reused_request.model_dump(mode="json", exclude_none=False)
+    request_digest = canonical_digest(reused_request)
+    head_sha256 = _head_digest(
+        actor=last_row.actor,
+        execution_epoch=last_row.execution_epoch,
+        idempotency_key=last_row.idempotency_key,
+        operation_id=last_row.operation_id,
+        previous_sha256=last_row.previous_sha256,
+        request_digest=request_digest,
+        request_payload=request_payload,
+        member=reused_member,
+        revision=last_row.revision,
+    )
+    reused_result = type(result).model_validate(
+        result.model_copy(
+            update={
+                "head_sha256": head_sha256,
+                "member": reused_member,
+            }
+        ).model_dump(mode="python", exclude_none=False)
+    )
+    await capacity_session.execute(
+        text(
+            "ALTER TABLE capacity_personal_membership_events "
+            "DISABLE TRIGGER capacity_personal_membership_append_only_guard"
+        )
+    )
+    try:
+        await capacity_session.execute(
+            update(CapacityPersonalMembershipEvent)
+            .where(CapacityPersonalMembershipEvent.id == last_row.id)
+            .values(
+                subject_incarnation=intermediate_incarnation,
+                request_digest=request_digest,
+                request_payload=request_payload,
+                result_payload=reused_result.model_dump(mode="json", exclude_none=False),
+                head_sha256=head_sha256,
+            )
+        )
+    finally:
+        await capacity_session.execute(
+            text(
+                "ALTER TABLE capacity_personal_membership_events "
+                "ENABLE TRIGGER capacity_personal_membership_append_only_guard"
+            )
+        )
+    capacity_session.expire_all()
+    rows = (
+        (
+            await capacity_session.execute(
+                select(CapacityPersonalMembershipEvent).order_by(
+                    CapacityPersonalMembershipEvent.revision
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    epoch = (
+        await capacity_session.execute(
+            select(CapacityExecutionEpoch).where(
+                CapacityExecutionEpoch.execution_epoch == active.execution_epoch
+            )
+        )
+    ).scalar_one()
+
+    with pytest.raises(ConfigurationConflictError, match=r"incarnation.*already used"):
+        await _validated_membership_history(capacity_session, rows, epoch)
+
+
+async def test_disable_recreate_fences_stale_allocation_and_membership_admission(
+    isolated_capacity_postgres_url: str,
+) -> None:
+    """Separate sessions cannot commit allocation or admission based on the predecessor."""
+
+    engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        original_projection = _projection()
+        async with sessions() as setup_session, setup_session.begin():
+            fixture, active = await _active_v3(setup_session)
+            created = await CapacityMembershipStore(fixture.store).apply(
+                setup_session,
+                _request(active, original_projection),
+                actor=DELEGATE,
+                idempotency_key=UUID(int=21401),
+            )
+        async with sessions() as stale_reader, stale_reader.begin():
+            stale_input = await fixture.store.load_allocation_input(stale_reader, fixture.writer)
+        stale_allocation = allocate_shadow(stale_input)
+        stale_admission_projection = original_projection.model_copy(
+            update={
+                "operation_kind": "capacity",
+                "operation_id": UUID(int=21402),
+                "operation_epoch": 2,
+                "configuration_generation": 2,
+                "min_slots": 1,
+            }
+        )
+        stale_admission = _request(
+            active,
+            stale_admission_projection,
+            expected_revision=created.revision,
+        )
+
+        disabled_projection = original_projection.model_copy(
+            update={
+                "operation_kind": "destroy",
+                "operation_id": UUID(int=21403),
+                "operation_epoch": 2,
+                "configuration_generation": 2,
+            }
+        )
+        successor = _recreation_projection(
+            original_projection,
+            generation=3,
+            subject_incarnation=UUID(int=21404),
+            reporter_incarnation=UUID(int=21405),
+            reporter_token_sha256="8" * 64,
+        )
+        async with sessions() as mutator, mutator.begin():
+            membership = CapacityMembershipStore(fixture.store)
+            disabled = await membership.apply(
+                mutator,
+                _request(active, disabled_projection, expected_revision=created.revision),
+                actor=DELEGATE,
+                idempotency_key=UUID(int=21406),
+            )
+            recreated = await membership.apply(
+                mutator,
+                _request(active, successor, expected_revision=disabled.revision),
+                actor=DELEGATE,
+                idempotency_key=UUID(int=21407),
+            )
+
+        async with sessions() as allocation_committer:
+            with pytest.raises(StaleAllocationInputError, match="input changed"):
+                await _commit_reconciled_epoch(
+                    allocation_committer,
+                    fixture.store,
+                    fixture.writer,
+                    stale_allocation,
+                )
+        async with sessions() as admission_committer:
+            with pytest.raises(ConfigurationConflictError, match="revision is stale"):
+                await CapacityMembershipStore(fixture.store).apply(
+                    admission_committer,
+                    stale_admission,
+                    actor=DELEGATE,
+                    idempotency_key=UUID(int=21408),
+                )
+        async with sessions() as verifier, verifier.begin():
+            current = await fixture.store.load_allocation_input(verifier, fixture.writer)
+            assert current.membership.revision == recreated.revision
+            assert current.membership.members[0] == recreated.member
+            assert current.membership.members[0].configuration.subject_incarnation == UUID(
+                int=21404
+            )
+    finally:
+        await engine.dispose()
 
 
 async def test_allocation_compare_and_swap_observes_cross_session_membership_change(
