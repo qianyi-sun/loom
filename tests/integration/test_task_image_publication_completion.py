@@ -4,21 +4,28 @@ import asyncio
 import base64
 import hashlib
 import importlib
+from dataclasses import replace
 from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import event, select, text, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from loom.db.schema import (
+    TaskImageBuildContainmentAttestation,
     TaskImageBuildGrant,
+    TaskImageBuildProjection,
+    TaskImageBuildSessionGeneration,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
+    TaskImagePublicationCandidate,
     TaskImagePublicationEnvelope,
     TaskImagePublicationJob,
     TaskImagePublicationKey,
     TaskImagePublicationState,
+    TaskImageRegistryCredentialGeneration,
 )
 from loom_task_image_authority.contracts import TaskImagePublicationCandidateRequestV2
 from loom_task_image_authority.materializations import claim_session_materialization
@@ -67,8 +74,25 @@ def completion():
     return importlib.import_module(name)
 
 
-async def _queued_job(session, issuer, *, names=("task",), root=None, lease_seconds=300):
-    authorization, _, _, build_session, secrets = await _active_authorization(session)
+async def _queued_job(
+    session,
+    issuer,
+    *,
+    names=("task",),
+    root=None,
+    lease_seconds=300,
+    context=None,
+    lifetime_seconds=1800,
+):
+    authorization, principal, proof, build_session, secrets = await _active_authorization(session)
+    if context is not None:
+        context.update(
+            authorization=authorization,
+            principal=principal,
+            proof=proof,
+            build_session=build_session,
+            secrets=secrets,
+        )
     row = await _queued_materialization(session)
     config = dict(row.task_config)
     environment = dict(config["environment"])
@@ -143,6 +167,7 @@ async def _queued_job(session, issuer, *, names=("task",), root=None, lease_seco
         attempt_id=attempt.id,
         lease_epoch=row.lease_epoch,
         registry_origin=issuer.registry_origin,
+        lifetime_seconds=lifetime_seconds,
         clock=lambda: NOW + timedelta(seconds=14),
     )
 
@@ -276,27 +301,38 @@ async def test_post_flush_expiry_rolls_back_everything(
 ):
     async with registry_authority_session() as session:
         values = await _signed_job(session, registry_issuer, names=("task", "sidecar:db"))
+        await session.execute(
+            text("""CREATE FUNCTION completion_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_advisory_xact_lock(4421); RETURN NEW; END $$""")
+        )
+        table, operation = (
+            ("task_image_publication_envelopes", "INSERT")
+            if stage == "envelopes"
+            else ("task_image_materializations", "UPDATE")
+        )
+        await session.execute(
+            text(
+                f"CREATE TRIGGER completion_test_wait AFTER {operation} ON {table} FOR EACH ROW EXECUTE FUNCTION completion_test_wait()"
+            )
+        )
         await session.commit()
-        now = NOW + timedelta(seconds=14)
-
-        def after_flush(sync_session, context):
-            nonlocal now
-            rows = sync_session.new if stage == "envelopes" else sync_session.dirty
-            if any(
-                isinstance(
-                    row,
-                    TaskImagePublicationEnvelope
-                    if stage == "envelopes"
-                    else TaskImageMaterialization,
-                )
-                for row in rows
-            ):
-                now = values[0].lease.expires_at
-
-        event.listen(session.sync_session, "after_flush", after_flush)
-        with pytest.raises(RuntimeError, match=r"expired|fence lost"):
-            await _complete(session, values, clock=lambda: now)
-        await session.rollback()
+    now = NOW + timedelta(seconds=14)
+    async with registry_authority_session() as blocker, registry_authority_session() as worker:
+        await blocker.execute(text("SELECT pg_advisory_xact_lock(4421)"))
+        pid = await worker.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(_complete(worker, values, clock=lambda: now))
+        try:
+            await _blocked(blocker, pid, task)
+            now = values[0].lease.expires_at
+            await blocker.rollback()
+            with pytest.raises(RuntimeError, match=r"expired|fence lost"):
+                await task
+        finally:
+            await blocker.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await worker.rollback()
     await _untouched(registry_authority_session)
 
 
@@ -306,8 +342,13 @@ async def test_post_flush_expiry_rolls_back_everything(
         TaskImagePublicationState,
         TaskImagePublicationKey,
         TaskImageBuildGrant,
+        TaskImageBuildProjection,
+        TaskImageBuildSessionGeneration,
+        TaskImageBuildContainmentAttestation,
         TaskImageMaterialization,
         TaskImageMaterializationAttempt,
+        TaskImageRegistryCredentialGeneration,
+        TaskImagePublicationCandidate,
         TaskImagePublicationJob,
     ],
 )
@@ -335,6 +376,193 @@ async def test_completion_expiry_after_real_lock_wait(
             await asyncio.gather(task, return_exceptions=True)
             await worker.rollback()
     await _untouched(registry_authority_session)
+
+
+@pytest.mark.parametrize(
+    "mutation", ["signature", "statement", "snapshot", "key", "set", "distribution"]
+)
+async def test_rejects_forged_verified_publication_and_bindings(
+    registry_authority_session, registry_issuer, mutation
+):
+    async with registry_authority_session() as session:
+        job, owner, publications, distribution = await _signed_job(session, registry_issuer)
+        await session.commit()
+        original = publications[0]
+        if mutation == "signature":
+            publications = (
+                replace(
+                    original, envelope=original.envelope.model_copy(update={"signature": "A" * 86})
+                ),
+            )
+        elif mutation == "statement":
+            publications = (
+                replace(
+                    original, statement=original.statement.model_copy(update={"task_id": "changed"})
+                ),
+            )
+        elif mutation == "snapshot":
+            job = job.model_copy(update={"snapshot_sha256": "e" * 64})
+        elif mutation == "key":
+            publications = (
+                replace(
+                    original, envelope=original.envelope.model_copy(update={"key_id": "other"})
+                ),
+            )
+        elif mutation == "set":
+            publications = ()
+        else:
+            distribution = replace(distribution, keyset_version=2)
+        with pytest.raises(RuntimeError):
+            await _complete(session, (job, owner, publications, distribution))
+        await session.rollback()
+    await _untouched(registry_authority_session)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "retired",
+        "revoked_key",
+        "version",
+        "revoked_grant",
+        "revoked_projection",
+        "lost_lease",
+        "takeover",
+    ],
+)
+async def test_committed_authority_change_during_completion_lock_wait(
+    registry_authority_session, registry_issuer, change
+):
+    async with registry_authority_session() as session:
+        values = await _signed_job(session, registry_issuer)
+        await session.commit()
+    model = (
+        TaskImagePublicationState
+        if change in ("retired", "revoked_key", "version")
+        else TaskImageBuildGrant
+        if change in ("revoked_grant", "revoked_projection")
+        else TaskImageMaterialization
+        if change == "lost_lease"
+        else TaskImagePublicationJob
+    )
+    async with registry_authority_session() as blocker, registry_authority_session() as worker:
+        await blocker.scalar(select(model).with_for_update())
+        pid = await worker.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(_complete(worker, values, instant=NOW + timedelta(seconds=15)))
+        try:
+            await _blocked(blocker, pid, task)
+            if change == "retired":
+                await blocker.execute(
+                    update(TaskImagePublicationKey).values(
+                        status="verify_only", retired_at=NOW + timedelta(seconds=15)
+                    )
+                )
+            elif change == "revoked_key":
+                await blocker.execute(
+                    update(TaskImagePublicationKey).values(
+                        status="revoked", revoked_at=NOW + timedelta(seconds=15)
+                    )
+                )
+            elif change == "version":
+                await blocker.execute(update(TaskImagePublicationState).values(keyset_version=2))
+            elif change == "revoked_grant":
+                await blocker.execute(
+                    update(TaskImageBuildGrant).values(
+                        state="revoked",
+                        released_at=None,
+                        revoked_at=NOW + timedelta(seconds=15),
+                        revoke_reason="test_revocation",
+                    )
+                )
+            elif change == "revoked_projection":
+                await blocker.execute(
+                    update(TaskImageBuildProjection).values(
+                        state="revoked",
+                        revoked_at=NOW + timedelta(seconds=15),
+                        revoke_reason="test_revocation",
+                    )
+                )
+            elif change == "lost_lease":
+                await blocker.execute(update(TaskImageMaterialization).values(lease_epoch=2))
+            else:
+                await blocker.execute(
+                    update(TaskImagePublicationJob).values(worker_id=uuid4(), worker_generation=2)
+                )
+            await blocker.commit()
+            with pytest.raises(RuntimeError):
+                await task
+        finally:
+            await blocker.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await worker.rollback()
+    await _untouched(registry_authority_session)
+
+
+async def test_partial_envelope_insert_failure_is_atomic(
+    registry_authority_session, registry_issuer
+):
+    async with registry_authority_session() as session:
+        values = await _signed_job(session, registry_issuer, names=("task", "sidecar:db"))
+        await session.execute(
+            text("""CREATE FUNCTION completion_test_partial() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.component = 'sidecar:db' THEN
+                    IF NOT EXISTS (SELECT 1 FROM task_image_publication_envelopes WHERE component = 'task') THEN
+                        RAISE EXCEPTION 'first component not inserted';
+                    END IF;
+                    RAISE EXCEPTION 'second component insert failed' USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END $$""")
+        )
+        await session.execute(
+            text(
+                "CREATE TRIGGER completion_test_partial BEFORE INSERT ON task_image_publication_envelopes FOR EACH ROW EXECUTE FUNCTION completion_test_partial()"
+            )
+        )
+        await session.commit()
+        with pytest.raises(IntegrityError, match="second component insert failed"):
+            await _complete(session, values)
+        await session.rollback()
+    await _untouched(registry_authority_session)
+
+
+async def test_two_completing_workers_and_nonlocking_historical_receipt(
+    registry_authority_session, registry_issuer
+):
+    async with registry_authority_session() as session:
+        values = await _signed_job(session, registry_issuer)
+        await session.commit()
+    async with registry_authority_session() as first, registry_authority_session() as second:
+        receipt = await _complete(first, values)
+        pid = await second.scalar(text("SELECT pg_backend_pid()"))
+        # A later owner's claim response may have been lost; exact history wins.
+        contender = (values[0], uuid4(), values[2], values[3])
+        task = asyncio.create_task(_complete(second, contender))
+        try:
+            await _blocked(first, pid, task)
+            await first.commit()
+            assert await task == receipt
+            await second.commit()
+        finally:
+            await first.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    async with registry_authority_session() as blocker, registry_authority_session() as history:
+        await blocker.scalar(select(TaskImagePublicationState).with_for_update())
+        await blocker.scalar(select(TaskImagePublicationKey).with_for_update())
+        # Models auth's grant-first order: historical lookup must not lock state/key/job.
+        await history.scalar(select(TaskImageBuildGrant).with_for_update())
+        async with asyncio.timeout(2):
+            assert (
+                await completion().replay_completed_publication(
+                    history, operation_id=values[0].operation_id
+                )
+                == receipt
+            )
 
 
 async def test_atomic_completion_preserves_exact_microseconds_and_historical_replay(

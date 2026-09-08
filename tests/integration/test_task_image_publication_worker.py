@@ -7,11 +7,12 @@ import importlib
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 
 from loom.db.schema import (
     TaskImageBuildGrant,
@@ -33,7 +34,12 @@ from loom_task_image_authority.publication_signing import (
     PublicationState,
     prepare_publication_statement,
 )
+from loom_task_image_authority.publication_store import (
+    claim_publication_job,
+    submit_publication_job,
+)
 from tests.integration.test_task_image_publication_completion import _queued_job
+from tests.integration.test_task_image_publication_jobs import _independent_publication_chain
 from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
 )
@@ -108,14 +114,18 @@ class Signer:
             raise
 
 
-async def _prepared(factory, registry, token_key, *, names=("task",), delay=0):
+async def _prepared(
+    factory, registry, token_key, *, names=("task",), delay=0, lifetime_seconds=1800
+):
     reader, root, _ = _graph(arch="arm64")
     issuer = _issuer(registry, token_key)
     private = Ed25519PrivateKey.generate()
     key = PublicationKeyRecord("publication-1", private.public_key().public_bytes_raw(), NOW)
     distribution = DistributedKeysetSnapshot(1, 0, (key.key_id,), NOW, NOW + timedelta(minutes=10))
     async with factory() as session:
-        job = await _queued_job(session, issuer, names=names, root=root)
+        job = await _queued_job(
+            session, issuer, names=names, root=root, lifetime_seconds=lifetime_seconds
+        )
         session.add(
             TaskImagePublicationKey(
                 key_id=key.key_id,
@@ -147,6 +157,68 @@ async def _prepared(factory, registry, token_key, *, names=("task",), delay=0):
 
     signer = Signer(private, key, distribution, clock)
     return job, issuer, signer, Distribution(distribution), clock
+
+
+@pytest.mark.parametrize("expired_before_claim", [False, True])
+async def test_total_deadline_has_durable_terminal_disposition(
+    registry_authority_session, tls_registry, token_key, expired_before_claim
+):
+    values = await _prepared(
+        registry_authority_session, tls_registry, token_key, lifetime_seconds=0.5
+    )
+    job = values[0]
+    if expired_before_claim:
+        values = (*values[:4], lambda: job.deadline)
+    else:
+        next(
+            response for path, response in tls_registry.routes.items() if "/manifests/" in path
+        ).wait_for_peer_close_before_response = True
+    worker = _worker(
+        registry_authority_session,
+        tls_registry,
+        values,
+        lease_seconds=0.4,
+        renewal_interval_seconds=0.08,
+    )
+    with pytest.raises((RuntimeError, TimeoutError)):
+        await worker.run(UUID(job.operation_id))
+    async with registry_authority_session() as session:
+        stored = await session.get(TaskImagePublicationJob, UUID(job.operation_id))
+        assert stored.state == "failed" and stored.failure_code == "deadline"
+        assert stored.worker_id is None and stored.worker_expires_at is None
+        row = (await session.scalars(select(TaskImageMaterialization))).one()
+        assert not row.registry_images and row.ready_at is None and row.attempt_count == 0
+    if not expired_before_claim:
+        await asyncio.wait_for(tls_registry.peer_closed.wait(), 5)
+
+
+@pytest.mark.parametrize(
+    "sqlstate,retryable", [("08006", True), ("40001", True), ("40P01", True), ("42601", False)]
+)
+async def test_database_errors_are_narrowly_classified(
+    registry_authority_session, tls_registry, token_key, sqlstate, retryable
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+
+    class DatabaseFailureError(Exception):
+        pass
+
+    original = DatabaseFailureError("generated transport failure")
+    original.sqlstate = sqlstate
+    failure = OperationalError("SELECT", {}, original)
+
+    class FailingDistribution:
+        async def snapshot(self, *, state, key):
+            raise failure
+
+    values = (*values[:3], FailingDistribution(), values[4])
+    worker = _worker(registry_authority_session, tls_registry, values)
+    with pytest.raises(OperationalError):
+        await worker.run(UUID(values[0].operation_id))
+    async with registry_authority_session() as session:
+        stored = (await session.scalars(select(TaskImagePublicationJob))).one()
+        assert stored.state == ("queued" if retryable else "failed")
+        assert not list(await session.scalars(select(TaskImagePublicationEnvelope)))
 
 
 def _worker(factory, registry, values, **limits):
@@ -228,7 +300,9 @@ async def test_worker_cancellation_closes_io_and_joins_renewal(
     job, _, signer, _, _ = values
     signer.proceed.clear()
     if during == "stream":
-        next(iter(tls_registry.routes.values())).wait_for_peer_close_before_response = True
+        next(
+            response for path, response in tls_registry.routes.items() if "/manifests/" in path
+        ).wait_for_peer_close_before_response = True
     worker = _worker(
         registry_authority_session,
         tls_registry,
@@ -260,3 +334,221 @@ async def test_worker_cancellation_closes_io_and_joins_renewal(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("failure", ["retryable_registry", "bad_digest", "signer_timeout"])
+async def test_worker_failures_preserve_task_budget(
+    registry_authority_session, tls_registry, token_key, failure
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    response = next(
+        response for path, response in tls_registry.routes.items() if "/manifests/" in path
+    )
+    if failure == "retryable_registry":
+        response.status = 401
+    elif failure == "bad_digest":
+        response.chunks = (b"X" * sum(map(len, response.chunks)),)
+    else:
+        values[2].proceed.clear()
+    worker = _worker(registry_authority_session, tls_registry, values, signer_timeout_seconds=0.1)
+    with pytest.raises((RuntimeError, ValueError, TimeoutError)):
+        await worker.run(UUID(values[0].operation_id))
+    async with registry_authority_session() as session:
+        job = (await session.scalars(select(TaskImagePublicationJob))).one()
+        assert job.state == ("failed" if failure == "bad_digest" else "queued")
+        if failure == "bad_digest":
+            assert job.failure_code == "integrity"
+        else:
+            assert job.available_at > values[4]()
+        row = (await session.scalars(select(TaskImageMaterialization))).one()
+        assert row.attempt_count == 0 and row.ready_at is None and not row.registry_images
+        assert not list(await session.scalars(select(TaskImagePublicationEnvelope)))
+    assert values[2].closed.is_set()
+
+
+@pytest.mark.parametrize("during", ["stream", "signer"])
+async def test_worker_takeover_cancels_io_without_releasing_successor(
+    registry_authority_session, tls_registry, token_key, during
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    now = NOW + timedelta(seconds=14)
+    values = (*values[:4], lambda: now)
+    values[2].clock = values[4]
+    values[2].proceed.clear()
+    if during == "stream":
+        next(
+            response for path, response in tls_registry.routes.items() if "/manifests/" in path
+        ).wait_for_peer_close_before_response = True
+    worker = _worker(
+        registry_authority_session,
+        tls_registry,
+        values,
+        lease_seconds=0.6,
+        renewal_interval_seconds=0.08,
+    )
+    task = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
+    try:
+        await asyncio.wait_for(
+            (tls_registry.request_received if during == "stream" else values[2].entered).wait(), 5
+        )
+        successor = uuid4()
+        async with registry_authority_session() as session:
+            job = (await session.scalars(select(TaskImagePublicationJob))).one()
+            now = job.worker_expires_at
+            await claim_publication_job(
+                session,
+                operation_id=UUID(values[0].operation_id),
+                owner_id=successor,
+                clock=lambda: now,
+            )
+            await session.commit()
+        with pytest.raises(RuntimeError, match="fence lost"):
+            await asyncio.wait_for(task, 5)
+        async with registry_authority_session() as session:
+            job = (await session.scalars(select(TaskImagePublicationJob))).one()
+            assert (
+                job.state == "running" and job.worker_id == successor and job.worker_generation == 2
+            )
+            assert not list(await session.scalars(select(TaskImagePublicationEnvelope)))
+        if during == "stream":
+            await asyncio.wait_for(tls_registry.peer_closed.wait(), 5)
+        else:
+            assert values[2].cancelled.is_set() and values[2].closed.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_service_admission_precedes_second_durable_claim(
+    registry_authority_session, tls_registry, token_key
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    operation = uuid4()
+    async with registry_authority_session() as session:
+        arguments, _ = await _independent_publication_chain(
+            session, values[1], operation_id=operation, job_id="812345"
+        )
+        arguments["registry_origin"] = tls_registry.origin
+        await submit_publication_job(session, **arguments)
+        await session.commit()
+    values[2].proceed.clear()
+    worker = _worker(registry_authority_session, tls_registry, values, maximum_jobs=1)
+    first = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
+    waiting = asyncio.Event()
+
+    async def second_run():
+        waiting.set()
+        return await worker.run(operation)
+
+    second = None
+    try:
+        await asyncio.wait_for(values[2].entered.wait(), 5)
+        second = asyncio.create_task(second_run())
+        await waiting.wait()
+        async with registry_authority_session() as session:
+            row = await session.get(TaskImagePublicationJob, operation)
+            assert row.state == "queued" and row.worker_generation == 0
+        assert not second.done()
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        values[2].proceed.set()
+        assert (await asyncio.wait_for(first, 5)).component_count == 1
+    finally:
+        first.cancel()
+        if second is not None:
+            second.cancel()
+        await asyncio.gather(first, *((second,) if second else ()), return_exceptions=True)
+
+
+async def _wait_blocked_pids(session, blocker_pid):
+    async with asyncio.timeout(5):
+        while True:
+            pids = list(
+                await session.scalars(
+                    text(
+                        "SELECT pid FROM pg_stat_activity WHERE :blocker = ANY(pg_blocking_pids(pid)) AND datname=current_database()"
+                    ),
+                    {"blocker": blocker_pid},
+                )
+            )
+            if pids:
+                return pids
+            await asyncio.sleep(0.01)
+
+
+async def test_renewal_database_disconnect_cancels_stream_and_retries(
+    registry_authority_session, tls_registry, token_key
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    next(
+        response for path, response in tls_registry.routes.items() if "/manifests/" in path
+    ).wait_for_peer_close_before_response = True
+    worker = _worker(
+        registry_authority_session,
+        tls_registry,
+        values,
+        lease_seconds=2,
+        renewal_interval_seconds=0.1,
+    )
+    task = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
+    try:
+        await asyncio.wait_for(tls_registry.request_received.wait(), 5)
+        async with registry_authority_session() as blocker:
+            await blocker.scalar(select(TaskImagePublicationJob).with_for_update())
+            pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            waiting = await _wait_blocked_pids(blocker, pid)
+            assert len(waiting) == 1
+            assert await blocker.scalar(
+                text("SELECT pg_terminate_backend(:pid)"), {"pid": waiting[0]}
+            )
+            await blocker.rollback()
+        with pytest.raises(OperationalError):
+            await asyncio.wait_for(task, 5)
+        await asyncio.wait_for(tls_registry.peer_closed.wait(), 5)
+        async with registry_authority_session() as session:
+            row = (await session.scalars(select(TaskImagePublicationJob))).one()
+            assert row.state == "queued" and row.worker_id is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_completion_wins_over_late_renewal_only_with_exact_receipt(
+    registry_authority_session, tls_registry, token_key
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    async with registry_authority_session() as session:
+        await session.execute(
+            text("""CREATE FUNCTION worker_completion_wait() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN IF NEW.state = 'ready' THEN PERFORM pg_advisory_xact_lock(4422); END IF; RETURN NEW; END $$""")
+        )
+        await session.execute(
+            text(
+                "CREATE TRIGGER worker_completion_wait AFTER UPDATE ON task_image_materializations FOR EACH ROW EXECUTE FUNCTION worker_completion_wait()"
+            )
+        )
+        await session.commit()
+    worker = _worker(
+        registry_authority_session,
+        tls_registry,
+        values,
+        lease_seconds=2,
+        renewal_interval_seconds=0.1,
+    )
+    async with registry_authority_session() as blocker:
+        await blocker.execute(text("SELECT pg_advisory_xact_lock(4422)"))
+        pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
+        try:
+            completing = await _wait_blocked_pids(blocker, pid)
+            assert len(completing) == 1
+            await _wait_blocked_pids(blocker, completing[0])
+            await blocker.rollback()
+            receipt = await asyncio.wait_for(task, 5)
+            assert await worker.run(UUID(values[0].operation_id)) == receipt
+            assert values[2].calls == 1
+        finally:
+            await blocker.rollback()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
