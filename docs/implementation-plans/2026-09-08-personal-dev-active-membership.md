@@ -257,7 +257,11 @@ require fresh globally unused incarnation/reporter/token, configuration generati
 greater than predecessor and candidate/deployment generation 1. Check all epochs'
 exact predecessor identity intents and legacy reservations under authority-first
 SERIALIZABLE locking. Reject unless all have reached their existing released
-state and durable release evidence is valid; do not release them here. Canonically
+state and durable release evidence is valid; do not release them here. A legacy
+never-accepted proposal may use its existing expired/superseded closed-tranche
+witness only if no shapes or submission intents remain. Outstanding observed
+commitments attributed to the exact predecessor also block recreation; do not
+delete or rewrite those observations here. Canonically
 hash IDs, identity/binding digests and existing release witnesses (including the
 valid no-intents case), persist that certificate in the append-only event, and
 retain all old candidate/deployment/reporter/acknowledgement history.
@@ -278,6 +282,8 @@ Pydantic-valid caller-made certificate as authenticated.
   still returns only old evidence; repeated recreation preserves origin.
 - [ ] Prove pending, proposed, unknown, quarantined and terminal-but-unreleased
   predecessor work each blocks recreation; valid released and empty sets pass.
+  Cover closed never-accepted legacy proposals and outstanding predecessor
+  observations separately; neither is a reason to invent a worker release receipt.
   Race disable/recreate against stale allocation/admission in separate sessions;
   one must fence/retry, never acquire new predecessor work after release proof.
 - [ ] Implement; run covering unit/integration tests, Ruff and diff checks;

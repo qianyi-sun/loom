@@ -104,7 +104,12 @@ Recreation is a distinct manager-verified transition. The immediate predecessor
 must be a disabled zero-capacity membership entry. Under the common authority
 lock and SERIALIZABLE transaction, every intent for that predecessor identity
 across epochs must be released through the existing authenticated release path;
-every legacy reservation must also be released. Pending, proposed, unknown,
+every accepted legacy reservation must also be released. A legacy proposal that
+was never accepted may instead have its existing authenticated expired/superseded
+closure, with no remaining shapes or submission intents; this is not a physical
+release and must be recorded as a distinct witness. Any outstanding attributed
+observed commitment for the predecessor also blocks recreation until the existing
+inventory/claim reconciliation clears it. Pending, proposed, unknown,
 quarantined and terminal-but-unreleased work blocks recreation. The membership
 writer never changes an intent to released itself. An empty release set is valid;
 zero capacity alone is not release evidence. Current-generation checks fence
