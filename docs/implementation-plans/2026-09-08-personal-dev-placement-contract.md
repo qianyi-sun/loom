@@ -73,6 +73,9 @@ class NativeBuildAllocationBinding:
     node_boot_id: UUID
 ```
 
+Node IDs use exact inventory/Slurm names `trt-gb10-1` through `trt-gb10-15`,
+not bare numeric suffixes or SSH destination hostnames. The allocation binding's
+`slurm_cluster` must be exactly `trt-gb10`; other nonempty strings are invalid.
 Observations may describe any canonical GB10 inventory node 1–15 so reserved
 and controller observations can be reported but filtered; policy and allocation
 binding permit only nodes 3–15. State/architecture are bounded nonempty strings
@@ -83,7 +86,7 @@ future timestamp ineligible, malformed `now` raises ValueError. Allocation job
 ID is positive decimal <= signed 64-bit; reject `0`, leading zeros, arrays and
 step suffixes. No JSON parser, CLI, new dependency, or production v1 integration.
 
-- [ ] Write tests first. Hand-derived example policy: nodes (9,3), profile `a*64`, CPU=4000, memory=34359738368, free disk=21474836480, inodes=100000, max age=60; these are TEST VALUES, not approved operating defaults.
+- [ ] Write tests first. Hand-derived example policy: nodes (`trt-gb10-9`, `trt-gb10-3`), profile `a*64`, CPU=4000, memory=34359738368, free disk=21474836480, inodes=100000, max age=60; these are TEST VALUES, not approved operating defaults.
 - [ ] Test node3 and node9 eligible together (returned in lexical order); node2, node1, unlisted node4, reserved, DRAIN/DOWN/MIXED+DRAIN, wrong architecture, absent KVM and absent/wrong certification excluded. Test exact resource equality and one-unit shortages independently, age 60/61 seconds and future reports.
 - [ ] Test invalid input construction, duplicate node observations, malformed `now`, policy narrowing, and allocation binding preservation across two different owners/attempts/nodes. Mutation targets: omitting a single filter or accepting array/step job IDs must fail a named test.
 - [ ] Run RED with imports inside tests if needed so the missing feature gives an explicit assertion failure, not an unexplained collection crash.
