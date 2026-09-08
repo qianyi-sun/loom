@@ -71,7 +71,7 @@ def fixture(arch="arm64"):
 
 def credential_row(plan, component="task", predecessor=None, **changes):
     generation = 1 if predecessor is None else predecessor.generation + 1
-    issued_at = NOW + timedelta(seconds=10 * (generation - 1))
+    issued_at = changes.pop("issued_at", NOW + timedelta(seconds=10 * (generation - 1)))
     credential = _credential(
         credential_id=uuid4(),
         request_id=uuid4(),
@@ -86,7 +86,7 @@ def credential_row(plan, component="task", predecessor=None, **changes):
         predecessor_generation=None if predecessor is None else predecessor.generation,
         lease_heartbeat_operation_id=None if predecessor is None else uuid4(),
         issued_at=issued_at,
-        expires_at=issued_at + timedelta(seconds=45),
+        expires_at=changes.pop("expires_at", issued_at + timedelta(seconds=45)),
         repository=publication_repository(
             purpose="production",
             shadow_campaign_id=None,
@@ -175,6 +175,23 @@ def test_historical_registry_identity_rotation_preserves_inventory():
     assert len(inventory.repositories) == 1
     assert inventory.repositories[0].credential_count == 2
     assert inventory.repositories[0].last_credential_expires_at == successor.expires_at
+
+
+def test_same_second_successor_preserves_inventory():
+    materialization, attempt, plan = fixture()
+    first = credential_row(plan)
+    successor = credential_row(plan, predecessor=first, issued_at=first.issued_at)
+    inventory = derive(materialization, attempt, [first, successor])
+    assert inventory.repositories[0].credential_count == 2
+
+
+def test_expiry_bound_covers_earlier_generation_with_longer_lifetime():
+    materialization, attempt, plan = fixture()
+    first = credential_row(plan)
+    successor = credential_row(plan, predecessor=first, expires_at=NOW + timedelta(seconds=20))
+    assert successor.expires_at < first.expires_at
+    inventory = derive(materialization, attempt, [successor, first])
+    assert inventory.repositories[0].last_credential_expires_at == first.expires_at
 
 
 @pytest.mark.parametrize(
