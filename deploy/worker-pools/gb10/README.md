@@ -19,6 +19,18 @@ Every trial container is capped at 2 CPUs, 11500 MiB, and 512 PIDs. Jobs are
 non-exclusive, resource-aware, limited to the partition's one-day maximum, and
 bounded by `max_jobs=14` and `pending_job_cap=2`.
 
+Staging opts into the bounded `MemAvailable` observation contract in
+[#1801](https://github.com/qianyi-sun/loom/issues/1801). This supersedes the
+OLDLAB-only decision in #1339 for this staging policy only: low Slurm FreeMem
+can mean reclaimable page cache, not physical exhaustion. The controller uses
+the minimum of fresh physical availability and `RealMemory - AllocMem`; the
+existing CPU/load, reservation, node, slot and containment limits still apply.
+No production or personal-dev policy is enabled by this change. See
+[bounded memory observations](../../../docs/runbooks/remote-worker-pool.md#bounded-memory-observations)
+for the probe trust and cleanup contract. Merged configuration is not live
+acceptance: formal installer activation and fixed-candidate smoke/scale-down
+evidence remain required.
+
 ## Task-image builders
 
 Dockerfile-backed task images use the separate

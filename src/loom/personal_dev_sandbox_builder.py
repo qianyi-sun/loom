@@ -470,7 +470,11 @@ def _build_images(
     return outputs
 
 
-def _hash_regular_file(path: Path, *, max_bytes: int) -> tuple[str, int]:
+def _hash_regular_file(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> tuple[str, int, tuple[int, ...]]:
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
         before = os.fstat(descriptor)
@@ -490,22 +494,93 @@ def _hash_regular_file(path: Path, *, max_bytes: int) -> tuple[str, int]:
         os.close(descriptor)
     if (
         observed != before.st_size
-        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or _regular_file_identity(before) != _regular_file_identity(after)
     ):
         raise PersonalDevSandboxBuildError("native image archive binding changed")
-    return digest.hexdigest(), observed
+    return digest.hexdigest(), observed, _regular_file_identity(before)
+
+
+def _regular_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _unlink_unchanged_regular_file(
+    path: Path,
+    *,
+    expected_identity: tuple[int, ...],
+) -> None:
+    parent_descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        metadata = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or _regular_file_identity(metadata) != expected_identity
+        ):
+            raise PersonalDevSandboxBuildError(
+                "native image archive changed during artifact creation"
+            )
+        os.unlink(path.name, dir_fd=parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+def _unlink_failed_output(
+    *,
+    parent_descriptor: int,
+    name: str,
+    descriptor: int,
+) -> None:
+    try:
+        path_metadata = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        descriptor_metadata = os.fstat(descriptor)
+        if (
+            stat.S_ISREG(path_metadata.st_mode)
+            and path_metadata.st_nlink == 1
+            and (path_metadata.st_dev, path_metadata.st_ino)
+            == (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+        ):
+            os.unlink(name, dir_fd=parent_descriptor)
+    except OSError:
+        pass
 
 
 def create_personal_dev_build_artifact(
     contract: PersonalDevSandboxBuildContract,
     images: Mapping[str, tuple[Path, str]],
     output_path: Path,
+    *,
+    consume_image_archives: bool = False,
 ) -> None:
-    """Create the canonical outer bundle consumed by the trusted exporter."""
+    """Create the canonical outer bundle consumed by the trusted exporter.
+
+    The caller must exclusively control the input and output directories while
+    packaging. Identity checks detect drift but are not atomic conditional
+    unlinks against concurrent directory writers. Consuming mode reclaims each
+    verified copy independently; a later failure may leave earlier inputs
+    consumed, so a private attempt must rebuild them before retrying.
+    """
     if set(images) != set(PERSONAL_DEV_COMPONENTS):
         raise PersonalDevSandboxBuildError("native image output set is incomplete")
     components: dict[str, object] = {}
+    image_attestations: dict[str, tuple[str, int, tuple[int, ...]]] = {}
     total = 0
     for component in PERSONAL_DEV_COMPONENTS:
         path, expected_manifest_digest = images[component]
@@ -515,10 +590,11 @@ def create_personal_dev_build_artifact(
             max_bytes=contract.max_image_archive_bytes,
             expected_manifest_digest=expected_manifest_digest,
         )
-        digest, size = _hash_regular_file(
+        digest, size, identity = _hash_regular_file(
             path,
             max_bytes=contract.max_image_archive_bytes,
         )
+        image_attestations[component] = (digest, size, identity)
         total += size
         if total > contract.max_artifact_bytes:
             raise PersonalDevSandboxBuildError("native image output set is oversized")
@@ -547,52 +623,90 @@ def create_personal_dev_build_artifact(
         ensure_ascii=True,
         allow_nan=False,
     ).encode("ascii")
-    descriptor = os.open(
-        output_path,
-        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-        0o600,
+    output_parent_descriptor = os.open(
+        output_path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
     )
     try:
-        with os.fdopen(os.dup(descriptor), "w+b") as raw, tarfile.open(
-            fileobj=raw,
-            mode="w",
-            format=tarfile.USTAR_FORMAT,
-        ) as artifact:
-            manifest_info = tarfile.TarInfo("manifest.json")
-            manifest_info.size = len(manifest_payload)
-            manifest_info.mode = 0o644
-            artifact.addfile(manifest_info, io.BytesIO(manifest_payload))
-            for component in PERSONAL_DEV_COMPONENTS:
-                image_path, _manifest_digest = images[component]
-                info = tarfile.TarInfo(f"images/{component}.oci.tar")
-                _digest, image_size = _hash_regular_file(
-                    image_path,
-                    max_bytes=contract.max_image_archive_bytes,
+        descriptor = os.open(
+            output_path.name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=output_parent_descriptor,
+        )
+        try:
+            try:
+                with (
+                    os.fdopen(os.dup(descriptor), "w+b") as raw,
+                    tarfile.open(
+                        fileobj=raw,
+                        mode="w",
+                        format=tarfile.USTAR_FORMAT,
+                    ) as artifact,
+                ):
+                    manifest_info = tarfile.TarInfo("manifest.json")
+                    manifest_info.size = len(manifest_payload)
+                    manifest_info.mode = 0o644
+                    artifact.addfile(manifest_info, io.BytesIO(manifest_payload))
+                    for component in PERSONAL_DEV_COMPONENTS:
+                        image_path, _manifest_digest = images[component]
+                        expected_digest, image_size, expected_identity = image_attestations[
+                            component
+                        ]
+                        info = tarfile.TarInfo(f"images/{component}.oci.tar")
+                        info.size = image_size
+                        info.mode = 0o644
+                        image_descriptor = os.open(
+                            image_path,
+                            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        )
+                        try:
+                            if (
+                                _regular_file_identity(os.fstat(image_descriptor))
+                                != expected_identity
+                            ):
+                                raise PersonalDevSandboxBuildError(
+                                    "native image archive changed during artifact creation"
+                                )
+                            with os.fdopen(os.dup(image_descriptor), "rb") as image:
+                                artifact.addfile(info, image)
+                        finally:
+                            os.close(image_descriptor)
+                        after_digest, after_size, after_identity = _hash_regular_file(
+                            image_path,
+                            max_bytes=contract.max_image_archive_bytes,
+                        )
+                        if (
+                            after_digest != expected_digest
+                            or after_size != image_size
+                            or after_identity != expected_identity
+                        ):
+                            raise PersonalDevSandboxBuildError(
+                                "native image archive changed during artifact creation"
+                            )
+                        if consume_image_archives:
+                            raw.flush()
+                            os.fsync(raw.fileno())
+                            _unlink_unchanged_regular_file(
+                                image_path,
+                                expected_identity=expected_identity,
+                            )
+                    raw.flush()
+                    os.fsync(raw.fileno())
+                metadata = os.fstat(descriptor)
+                if metadata.st_size > contract.max_artifact_bytes:
+                    raise PersonalDevSandboxBuildError("build artifact exceeds its byte envelope")
+            except Exception:
+                _unlink_failed_output(
+                    parent_descriptor=output_parent_descriptor,
+                    name=output_path.name,
+                    descriptor=descriptor,
                 )
-                info.size = image_size
-                info.mode = 0o644
-                image_descriptor = os.open(
-                    image_path,
-                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                )
-                with os.fdopen(image_descriptor, "rb") as image:
-                    artifact.addfile(info, image)
-                after_digest, after_size = _hash_regular_file(
-                    image_path,
-                    max_bytes=contract.max_image_archive_bytes,
-                )
-                if after_digest != _digest or after_size != image_size:
-                    raise PersonalDevSandboxBuildError(
-                        "native image archive changed during artifact creation"
-                    )
-            raw.flush()
-            os.fsync(raw.fileno())
-        metadata = os.fstat(descriptor)
+                raise
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
-    if metadata.st_size > contract.max_artifact_bytes:
-        output_path.unlink(missing_ok=True)
-        raise PersonalDevSandboxBuildError("build artifact exceeds its byte envelope")
+        os.close(output_parent_descriptor)
 
 
 def _upload_artifact(
@@ -730,7 +844,12 @@ def run_personal_dev_sandbox_build(
         buildctl_path=buildctl_path,
         buildkit_address=buildkit_address,
     )
-    create_personal_dev_build_artifact(contract, images, artifact)
+    create_personal_dev_build_artifact(
+        contract,
+        images,
+        artifact,
+        consume_image_archives=True,
+    )
     _upload_artifact(upload, artifact, expected_max_bytes=contract.max_artifact_bytes)
 
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import sys
 from pathlib import Path
 from stat import S_IMODE
 
 import pytest
 
-from loom_capacity_agent.secret_init import copy_projected_credentials
+from loom_capacity_agent.secret_init import copy_projected_credentials, main
 
 _FILES = (
     "ca.pem",
@@ -77,3 +79,55 @@ def test_failed_projected_copy_leaves_no_partial_destination(tmp_path: Path) -> 
 
     assert not destination.exists()
     assert not tuple(tmp_path.glob(".destination-*"))
+
+
+def test_configuration_pin_rejects_stale_projection_before_publishing_files(tmp_path: Path) -> None:
+    """Break caught: a pod copies stale cached ConfigMap data under the new template digest."""
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in _FILES:
+        (source / name).write_text(name)
+    destination = tmp_path / "destination"
+    expected = hashlib.sha256(b"current configuration").hexdigest()
+    with pytest.raises(ValueError, match="configuration digest"):
+        copy_projected_credentials(source, destination, configuration_sha256=expected)
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".destination-*"))
+    (source / "reporter-configuration.json").write_bytes(b"current configuration")
+    copy_projected_credentials(source, destination, configuration_sha256=expected)
+    assert (destination / "reporter-configuration.json").read_bytes() == b"current configuration"
+    copy_projected_credentials(source, destination, configuration_sha256=expected)
+
+
+@pytest.mark.parametrize("digest", ["", "0" * 64, "g" * 64, "a" * 63])
+def test_configuration_pin_rejects_invalid_digest(tmp_path: Path, digest: str) -> None:
+    """Break caught: malformed pins are treated as absent and disable verification."""
+    with pytest.raises(ValueError, match="configuration digest"):
+        copy_projected_credentials(
+            tmp_path / "source", tmp_path / "out", configuration_sha256=digest
+        )
+
+
+def test_cli_enforces_configuration_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Break caught: the pod's CLI pin is accepted but not forwarded to verification."""
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in _FILES:
+        (source / name).write_text(name)
+    destination = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "secret-init",
+            "--source",
+            str(source),
+            "--destination",
+            str(destination),
+            "--configuration-sha256",
+            "a" * 64,
+        ],
+    )
+    with pytest.raises(ValueError, match="configuration digest"):
+        main()
+    assert not destination.exists()

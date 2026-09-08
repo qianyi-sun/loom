@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from uuid import UUID
 
 
 class AttemptDeadlineExceededError(TimeoutError):
@@ -19,8 +20,8 @@ class AttemptDeadline:
     """An immutable absolute deadline measured on a monotonic clock.
 
     The clock is injectable so boundary behavior can be tested without using
-    wall-clock time. Only ``monotonic_deadline`` is part of the deadline's
-    identity; the clock itself is an observation mechanism.
+    wall-clock time. The optional UUID identifies an internal agent attempt;
+    clocks and the safe grant observer are observation mechanisms, not identity.
     """
 
     monotonic_deadline: float
@@ -32,6 +33,12 @@ class AttemptDeadline:
     )
     _wall_clock: Callable[[], float] = field(
         default=time.time,
+        repr=False,
+        compare=False,
+    )
+    agent_attempt_id: UUID | None = None
+    _grant_observer: Callable[[UUID, UUID], Awaitable[None]] | None = field(
+        default=None,
         repr=False,
         compare=False,
     )
@@ -55,6 +62,8 @@ class AttemptDeadline:
         *,
         clock: Callable[[], float] | None = None,
         wall_clock: Callable[[], float] = time.time,
+        agent_attempt_id: UUID | None = None,
+        grant_observer: Callable[[UUID, UUID], Awaitable[None]] | None = None,
     ) -> AttemptDeadline:
         """Create a deadline ``timeout_sec`` from one monotonic observation.
 
@@ -74,7 +83,24 @@ class AttemptDeadline:
             wall_deadline_epoch_sec=wall_clock() + timeout_sec,
             _clock=clock,
             _wall_clock=wall_clock,
+            agent_attempt_id=agent_attempt_id,
+            _grant_observer=grant_observer,
         )
+
+    async def record_step_token_grant(
+        self,
+        *,
+        agent_attempt_id: UUID | None,
+        step_jwt_id: UUID | None,
+    ) -> None:
+        """Record safe CP-returned identity before any agent provider dispatch."""
+        if self.agent_attempt_id is None:
+            return  # Legacy callers have no strong attempt join.
+        if agent_attempt_id != self.agent_attempt_id or step_jwt_id is None:
+            raise ValueError("step-token grant does not match the supervised agent attempt")
+        self.require_remaining()
+        if self._grant_observer is not None:
+            await self._grant_observer(self.agent_attempt_id, step_jwt_id)
 
     @classmethod
     def from_wall_deadline(
