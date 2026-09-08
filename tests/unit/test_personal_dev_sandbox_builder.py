@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from loom import personal_dev_sandbox_builder as sandbox_builder
-from loom.personal_dev_builder_artifact import verify_personal_dev_build_artifact
+from loom.personal_dev_builder_artifact import (
+    PersonalDevBuildArtifactError,
+    verify_personal_dev_build_artifact,
+)
 from loom.personal_dev_builder_manifest import (
     PersonalDevBuilderManifestConfig,
     personal_dev_builder_manifest_documents,
@@ -40,16 +45,22 @@ def _contract() -> PersonalDevSandboxBuildContract:
     )
 
 
+def _image_outputs(directory: Path) -> dict[str, tuple[Path, str]]:
+    directory.mkdir(parents=True, exist_ok=True)
+    image_payload, manifest_digest = _oci_archive(architecture="amd64")
+    images: dict[str, tuple[Path, str]] = {}
+    for component in PERSONAL_DEV_COMPONENTS:
+        path = directory / f"{component}.oci.tar"
+        path.write_bytes(image_payload)
+        images[component] = (path, manifest_digest)
+    return images
+
+
 def test_sandbox_contract_and_output_round_trip_through_trusted_verifier(
     tmp_path: Path,
 ) -> None:
     contract = _contract()
-    image_payload, manifest_digest = _oci_archive(architecture="amd64")
-    images: dict[str, tuple[Path, str]] = {}
-    for component in PERSONAL_DEV_COMPONENTS:
-        path = tmp_path / f"{component}.oci.tar"
-        path.write_bytes(image_payload)
-        images[component] = (path, manifest_digest)
+    images = _image_outputs(tmp_path)
     artifact = tmp_path / "artifacts.tar"
 
     create_personal_dev_build_artifact(contract, images, artifact)
@@ -65,6 +76,221 @@ def test_sandbox_contract_and_output_round_trip_through_trusted_verifier(
         max_image_archive_bytes=contract.max_image_archive_bytes,
     )
     assert set(verified.images) == set(PERSONAL_DEV_COMPONENTS)
+    assert all(path.is_file() for path, _digest in images.values())
+
+
+def test_consuming_artifact_creation_bounds_packaging_disk_peak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract()
+    images = _image_outputs(tmp_path)
+    artifact = tmp_path / "artifacts.tar"
+    total_image_bytes = sum(path.stat().st_size for path, _digest in images.values())
+    largest_image_bytes = max(path.stat().st_size for path, _digest in images.values())
+    observed_bytes = [total_image_bytes]
+    real_fsync = os.fsync
+
+    def measure_fsync(descriptor: int) -> None:
+        real_fsync(descriptor)
+        live_image_bytes = sum(
+            path.stat().st_size for path, _digest in images.values() if path.exists()
+        )
+        output_bytes = max(
+            os.fstat(descriptor).st_size,
+            os.lseek(descriptor, 0, os.SEEK_CUR),
+        )
+        observed_bytes.append(live_image_bytes + output_bytes)
+
+    monkeypatch.setattr(os, "fsync", measure_fsync)
+
+    create_personal_dev_build_artifact(
+        contract,
+        images,
+        artifact,
+        consume_image_archives=True,
+    )
+
+    assert all(not path.exists() for path, _digest in images.values())
+    assert artifact.is_file()
+    assert max(observed_bytes) <= (total_image_bytes + largest_image_bytes + 2 * tarfile.RECORDSIZE)
+    assert max(observed_bytes) < total_image_bytes + artifact.stat().st_size
+
+
+def test_sandbox_build_consumes_its_private_image_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract()
+    images = _image_outputs(tmp_path / "private-images")
+    contract_file = tmp_path / "contract.json"
+    contract_file.write_bytes(
+        json.dumps(dict(contract.raw), sort_keys=True, separators=(",", ":")).encode("ascii")
+    )
+    capabilities = tmp_path / "capabilities"
+    capabilities.mkdir()
+    (capabilities / "source-get-url").write_text(
+        "https://example.invalid/source.tar",
+        encoding="utf-8",
+    )
+    (capabilities / "artifact-upload.json").write_text(
+        json.dumps({"url": "https://example.invalid/upload"}),
+        encoding="utf-8",
+    )
+    uploaded: list[Path] = []
+
+    monkeypatch.setattr(sandbox_builder, "_verify_client_identity", lambda: None)
+    monkeypatch.setattr(
+        sandbox_builder,
+        "_download_source",
+        lambda _url, _destination, _contract: None,
+    )
+    monkeypatch.setattr(
+        sandbox_builder,
+        "_extract_verified_source",
+        lambda _archive, destination, _contract: destination.mkdir(),
+    )
+    monkeypatch.setattr(sandbox_builder, "_build_images", lambda *args, **kwargs: images)
+    monkeypatch.setattr(
+        sandbox_builder,
+        "_upload_artifact",
+        lambda _upload, artifact, **_kwargs: uploaded.append(artifact),
+    )
+    workspace = tmp_path / "workspace"
+
+    sandbox_builder.run_personal_dev_sandbox_build(
+        contract_file=contract_file,
+        capability_directory=capabilities,
+        workspace=workspace,
+    )
+
+    artifact = workspace / "artifacts.tar"
+    assert uploaded == [artifact]
+    assert artifact.is_file()
+    assert all(not path.exists() for path, _digest in images.values())
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "hardlink"])
+def test_consuming_artifact_rejects_replaced_image_without_deleting_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    contract = _contract()
+    images = _image_outputs(tmp_path)
+    target, _digest = images[PERSONAL_DEV_COMPONENTS[0]]
+    protected = tmp_path / "protected"
+    protected.write_bytes(b"must remain")
+    artifact = tmp_path / "artifacts.tar"
+    real_fsync = os.fsync
+    replaced = False
+
+    def replace_after_flush(descriptor: int) -> None:
+        nonlocal replaced
+        real_fsync(descriptor)
+        if replaced:
+            return
+        replaced = True
+        target.unlink()
+        if replacement_kind == "symlink":
+            target.symlink_to(protected)
+        else:
+            os.link(protected, target)
+
+    monkeypatch.setattr(os, "fsync", replace_after_flush)
+
+    with pytest.raises(PersonalDevSandboxBuildError, match="changed"):
+        create_personal_dev_build_artifact(
+            contract,
+            images,
+            artifact,
+            consume_image_archives=True,
+        )
+
+    assert protected.read_bytes() == b"must remain"
+    assert target.is_symlink() if replacement_kind == "symlink" else target.samefile(protected)
+    assert all(
+        path.exists()
+        for component, (path, _digest) in images.items()
+        if component != PERSONAL_DEV_COMPONENTS[0]
+    )
+    assert not artifact.exists()
+
+
+def test_failed_artifact_creation_does_not_unlink_replaced_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract()
+    images = _image_outputs(tmp_path)
+    artifact = tmp_path / "artifacts.tar"
+    displaced = tmp_path / "displaced-artifacts.tar"
+    real_fsync = os.fsync
+    replaced = False
+
+    def replace_output_then_fail(descriptor: int) -> None:
+        nonlocal replaced
+        real_fsync(descriptor)
+        if replaced:
+            return
+        replaced = True
+        artifact.rename(displaced)
+        artifact.write_bytes(b"unrelated output")
+        raise OSError("injected output failure")
+
+    monkeypatch.setattr(os, "fsync", replace_output_then_fail)
+
+    with pytest.raises(OSError, match="injected output failure"):
+        create_personal_dev_build_artifact(
+            contract,
+            images,
+            artifact,
+            consume_image_archives=True,
+        )
+
+    assert artifact.read_bytes() == b"unrelated output"
+    assert displaced.is_file()
+    assert all(path.exists() for path, _digest in images.values())
+
+
+def test_consuming_artifact_validates_every_image_before_creating_output(
+    tmp_path: Path,
+) -> None:
+    contract = _contract()
+    images = _image_outputs(tmp_path)
+    images[PERSONAL_DEV_COMPONENTS[-1]][0].write_bytes(b"not an OCI archive")
+    artifact = tmp_path / "artifacts.tar"
+
+    with pytest.raises(PersonalDevBuildArtifactError):
+        create_personal_dev_build_artifact(
+            contract,
+            images,
+            artifact,
+            consume_image_archives=True,
+        )
+
+    assert all(path.exists() for path, _digest in images.values())
+    assert not artifact.exists()
+
+
+def test_consuming_mode_preserves_canonical_artifact_bytes(tmp_path: Path) -> None:
+    contract = _contract()
+    retained_images = _image_outputs(tmp_path / "retained")
+    consumed_images = _image_outputs(tmp_path / "consumed")
+    retained_artifact = tmp_path / "retained.tar"
+    consumed_artifact = tmp_path / "consumed.tar"
+
+    create_personal_dev_build_artifact(contract, retained_images, retained_artifact)
+    create_personal_dev_build_artifact(
+        contract,
+        consumed_images,
+        consumed_artifact,
+        consume_image_archives=True,
+    )
+
+    assert consumed_artifact.read_bytes() == retained_artifact.read_bytes()
+    assert all(path.exists() for path, _digest in retained_images.values())
+    assert all(not path.exists() for path, _digest in consumed_images.values())
 
 
 def test_sandbox_contract_rejects_noncanonical_or_changed_authority() -> None:
