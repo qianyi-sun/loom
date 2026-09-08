@@ -125,6 +125,18 @@ func (m *SessionManager) ExpiresAt() time.Time {
 	return m.current.ExpiresAt
 }
 
+// Close destroys the owned current credential, including successors installed
+// by publication refresh rather than by the orchestrator's cached envelope.
+// Callers must stop and join work using the manager before terminal cleanup.
+func (m *SessionManager) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.Secret != nil {
+		m.current.Secret.Close()
+	}
+	m.current = nil
+}
+
 func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {
 	if buffer == nil || buffer.closed {
 		return nil, errors.New("session buffer unavailable")

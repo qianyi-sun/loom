@@ -604,7 +604,9 @@ func (s *orchestratorState) finish() error {
 }
 
 func (s *orchestratorState) closeSecrets() {
-	if s.session != nil && s.session.Secret != nil {
+	if s.sessionManager != nil {
+		s.sessionManager.Close()
+	} else if s.session != nil && s.session.Secret != nil {
 		s.session.Secret.Close()
 	}
 	if s.caps != nil && s.caps.Bootstrap != nil {

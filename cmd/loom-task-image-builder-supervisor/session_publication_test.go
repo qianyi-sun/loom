@@ -22,11 +22,17 @@ func TestOrchestratorClosesCurrentSessionAfterPublicationSourceRenewal(t *testin
 		currentBytes = secret.data
 		return nil
 	})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	state.closeSecrets()
-	if !successor.Secret.closed { t.Fatal("current publication session was not closed") }
+	if !successor.Secret.closed {
+		t.Fatal("current publication session was not closed")
+	}
 	for _, value := range currentBytes {
-		if value != 0 { t.Fatal("current publication session bytes were not erased") }
+		if value != 0 {
+			t.Fatal("current publication session bytes were not erased")
+		}
 	}
 	state.closeSecrets()
 	if err := manager.WithCurrent(func(*SecretBuffer) error { t.Fatal("closed session lent to caller"); return nil }); err == nil {
