@@ -104,6 +104,18 @@ from loom_capacity_manager.grant_store import (
     StaleCommandError,
     StaleExecutorError,
 )
+from loom_capacity_manager.membership_auth import authenticate_personal_subject_agent
+from loom_capacity_manager.membership_contracts import (
+    ExecutionPreparationV3,
+    PersonalApplicationMembershipMutationV1,
+    PersonalApplicationMembershipResponseV1,
+    PersonalMembershipCheckpointV1,
+    parse_execution_preparation,
+)
+from loom_capacity_manager.membership_store import (
+    CapacityMembershipStore,
+    PersonalMembershipRevisionConflictError,
+)
 from loom_capacity_manager.metrics import (
     FRESHNESS_STATES,
     POOL_SLOT_STATES,
@@ -228,6 +240,8 @@ def _bounded_limit(limit: int) -> int:
 
 
 def _store_error(exc: CapacityStoreError) -> HTTPException:
+    if isinstance(exc, PersonalMembershipRevisionConflictError):
+        return HTTPException(status_code=409, detail={"code": "membership_revision_conflict"})
     if isinstance(exc, UnknownReporterError):
         return HTTPException(status_code=403, detail="forbidden")
     if isinstance(
@@ -522,6 +536,46 @@ def create_app(
 
         return dependency
 
+    async def subject_agent_principal(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> CapacityPrincipal:
+        """Route-local identity fallback; work authorization stays in the store."""
+
+        try:
+            actor = resolved_verifier.verify_bearer(authorization)
+        except AuthorizationError:
+            try:
+                token_sha256 = bearer_token_sha256(authorization)
+                session_factory, store, _writer = runtime(request)
+                route = request.scope.get("route")
+                route_path = getattr(route, "path", None)
+                retained_subject_id = None
+                retained_closure_id = None
+                if route_path in {
+                    "/v2/subjects/{subject_id}/admission-work",
+                    "/v2/subjects/{subject_id}/admission-closures/{closure_id}/acknowledgements",
+                }:
+                    try:
+                        retained_subject_id = UUID(str(request.path_params["subject_id"]))
+                        if "closure_id" in request.path_params:
+                            retained_closure_id = UUID(str(request.path_params["closure_id"]))
+                    except ValueError:
+                        retained_subject_id = None
+                async with session_factory() as session:
+                    return await authenticate_personal_subject_agent(
+                        session,
+                        store,
+                        token_sha256=token_sha256,
+                        retained_closure_subject_id=retained_subject_id,
+                        retained_closure_id=retained_closure_id,
+                    )
+            except AuthorizationError as exc:
+                raise HTTPException(status_code=401, detail="invalid capacity credentials") from exc
+        if not actor.has_scope("capacity:report:demand"):
+            raise HTTPException(status_code=403, detail="forbidden")
+        return actor
+
     def contract_body(
         model: type[_ContractT],
     ) -> Callable[[Request], Awaitable[_ContractT]]:
@@ -538,6 +592,17 @@ def create_app(
     activation_body = contract_body(ConfigurationActivationV1)
     rollback_body = contract_body(ConfigurationRollbackV1)
     development_projection_body = contract_body(DynamicDevelopmentSubjectProjectionV1)
+    membership_mutation_body = contract_body(PersonalApplicationMembershipMutationV1)
+
+    async def execution_preparation_v3_body(request: Request) -> ExecutionPreparationV3:
+        try:
+            value = parse_execution_preparation(await request.body())
+            if not isinstance(value, ExecutionPreparationV3):
+                raise ValueError("delegated preparation requires schema version 3")
+            return value
+        except (ValidationError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="invalid capacity contract") from exc
+
     demand_body = contract_body(DemandSnapshotV1)
     pool_body = contract_body(PoolObservationV1)
     executor_registration_body = contract_body(DryRunExecutorRegistrationV1)
@@ -750,6 +815,53 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
+    @app.get("/v1/personal-memberships/checkpoint")
+    async def personal_membership_checkpoint(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:membership:manage")),
+    ) -> PersonalMembershipCheckpointV1:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                return await CapacityMembershipStore(store).checkpoint(
+                    session, actor=actor.principal_id
+                )
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v1/personal-memberships/{subject_id}")
+    async def mutate_personal_membership(
+        subject_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:membership:manage")),
+        value: PersonalApplicationMembershipMutationV1 = Depends(membership_mutation_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> PersonalApplicationMembershipResponseV1:
+        assert_unbound_execution_actor(actor)
+        if value.projection.subject_id != subject_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await CapacityMembershipStore(store).apply(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return PersonalApplicationMembershipResponseV1(
+                result=result,
+                checkpoint=PersonalMembershipCheckpointV1(
+                    execution=value.execution,
+                    namespace_id=value.namespace_id,
+                    revision=result.revision,
+                    head_sha256=result.head_sha256,
+                ),
+            )
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
     @app.put("/v1/reports/demand/{subject_id}")
     async def ingest_demand(
         subject_id: UUID,
@@ -915,6 +1027,27 @@ def create_app(
         request: Request,
         actor: CapacityPrincipal = Depends(require("capacity:execution:prepare")),
         value: ExecutionPreparationV2 = Depends(execution_preparation_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.prepare_execution_epoch(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v3/execution-preparations")
+    async def prepare_delegated_execution_epoch(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execution:prepare")),
+        value: ExecutionPreparationV3 = Depends(execution_preparation_v3_body),
         idempotency_key: UUID = Header(alias="Idempotency-Key"),
     ) -> Any:
         assert_unbound_execution_actor(actor)
@@ -1483,7 +1616,7 @@ def create_app(
     async def next_subject_bootstrap_work(
         subject_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
     ) -> Any:
         if (
             actor.subject_id != subject_id
@@ -1509,7 +1642,7 @@ def create_app(
         subject_id: UUID,
         intent_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
         value: ExecutableBootstrapAcknowledgementV2 = Depends(
             executable_bootstrap_acknowledgement_body
         ),
@@ -1545,7 +1678,7 @@ def create_app(
         subject_id: UUID,
         intent_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
     ) -> Response:
         if (
             actor.subject_id != subject_id
@@ -1577,7 +1710,7 @@ def create_app(
     async def next_subject_admission_work(
         subject_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
     ) -> Response:
         if (
             actor.subject_id != subject_id
@@ -1594,6 +1727,12 @@ def create_app(
                     subject_incarnation=actor.subject_incarnation,
                     reporter_incarnation=actor.demand_reporter_incarnation,
                 )
+            if not actor.has_scope("capacity:report:demand") and isinstance(
+                result, ExecutableAdmissionPlanProposalV2
+            ):
+                # A concurrent closure receipt cannot turn archive-only identity
+                # into permission to deliver a current admission proposal.
+                raise HTTPException(status_code=401, detail="invalid capacity credentials")
             payload = (
                 b"null" if result is None else canonical_executable_admission_work_bytes(result)
             )
@@ -1606,7 +1745,7 @@ def create_app(
         subject_id: UUID,
         proposal_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
         value: ExecutableAdmissionAcknowledgementV2 = Depends(
             executable_admission_acknowledgement_body
         ),
@@ -1638,7 +1777,7 @@ def create_app(
         subject_id: UUID,
         closure_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
         value: ExecutableAdmissionPlanClosureAcknowledgementV2 = Depends(
             executable_admission_closure_acknowledgement_body
         ),
@@ -1784,7 +1923,7 @@ def create_app(
         subject_id: UUID,
         shape_instance_id: str,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
         value: ExecutableProtectedReleaseV2 = Depends(executable_protected_release_body),
         idempotency_key: UUID = Header(alias="Idempotency-Key"),
     ) -> Any:

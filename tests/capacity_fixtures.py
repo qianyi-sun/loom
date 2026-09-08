@@ -265,6 +265,7 @@ def fleet_with_development_template(
     owner_max_slots: int = 8,
     owner_max_live_subjects: int = 2,
     max_slots_per_subject: int = 8,
+    owner_submission_rate_per_minute: int = 0,
 ) -> FleetManifestV1:
     base = fleet_manifest()
     owner_template = AccountPolicyV1(
@@ -277,6 +278,7 @@ def fleet_with_development_template(
         max_pending_slots=8,
         max_pending_jobs=8,
         max_live_subjects=owner_max_live_subjects,
+        submission_rate_per_minute=owner_submission_rate_per_minute,
     )
     template = DevelopmentSubjectTemplateV1(
         owner_account_template_id=owner_template.account_id,

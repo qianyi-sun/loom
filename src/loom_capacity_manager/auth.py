@@ -24,6 +24,7 @@ CapacityScope = Literal[
     "capacity:configure:activate",
     "capacity:configure:rollback",
     "capacity:project:development",
+    "capacity:membership:manage",
     "capacity:reconcile",
     "capacity:read",
     "capacity:report:demand",
@@ -112,6 +113,11 @@ class _PrincipalDocument(_StrictModel):
             )
         )
         has_execution_transition = bool(_EXECUTION_TRANSITION_SCOPES.intersection(self.scopes))
+        if "capacity:membership:manage" in self.scopes:
+            if has_subject or self.pool_id is not None:
+                raise ValueError("membership management principal must be unbound")
+            if len(self.scopes) != 1:
+                raise ValueError("membership management principal must be single-purpose")
         if has_execution_transition and (has_subject or self.pool_id is not None):
             raise ValueError("execution transition principal must be unbound")
         if has_execution_transition and len(self.scopes) != 1:

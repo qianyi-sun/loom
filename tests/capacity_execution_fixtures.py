@@ -10,7 +10,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_capacity_manager.contracts import StaticCandidateProvenanceV1
+from loom_capacity_manager.contracts import (
+    FleetManifestV1,
+    StaticCandidateProvenanceV1,
+    SubjectConfigurationV1,
+)
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableExecutorHeartbeatV2,
@@ -30,6 +34,11 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.grant_contracts import DryRunExecutorRegistrationV1
 from loom_capacity_manager.grant_store import CapacityGrantStore
+from loom_capacity_manager.membership_contracts import (
+    ExecutionPreparationPolicyV3,
+    ExecutionPreparationV3,
+    PersonalMembershipPolicyV1,
+)
 from loom_capacity_manager.models import (
     Base,
     CapacityAuthorityState,
@@ -84,15 +93,17 @@ def protected_candidate() -> CandidateBindingV2:
 
 def execution_acknowledgement(
     candidate: CandidateBindingV2 | None = None,
+    *,
+    subject: SubjectConfigurationV1 | None = None,
 ) -> SubjectExecutionAcknowledgementV2:
-    subject = subject_configuration(fleet_manifest())
+    resolved_subject = subject or subject_configuration(fleet_manifest())
     return SubjectExecutionAcknowledgementV2(
-        subject_id=subject.subject_id,
-        subject_incarnation=subject.subject_incarnation,
-        configuration_generation=subject.configuration_generation,
-        deployment_generation=subject.deployment_generation,
+        subject_id=resolved_subject.subject_id,
+        subject_incarnation=resolved_subject.subject_incarnation,
+        configuration_generation=resolved_subject.configuration_generation,
+        deployment_generation=resolved_subject.deployment_generation,
         candidate=source_candidate() if candidate is None else candidate,
-        reporter_incarnation=subject.demand_reporter_incarnation,
+        reporter_incarnation=resolved_subject.demand_reporter_incarnation,
         protected_admission_sha256="3" * 64,
         legacy_writer_high_water=0,
         acknowledgement_sha256="4" * 64,
@@ -125,6 +136,8 @@ def execution_policy(
     *,
     ceiling: int = 1,
     controller_digests: Mapping[str, str] | None = None,
+    subject_acknowledgements: tuple[SubjectExecutionAcknowledgementV2, ...] | None = None,
+    personal_membership: PersonalMembershipPolicyV1 | None = None,
 ) -> ExecutionPreparationPolicyV2:
     resolved_controller_digests = {
         pool_id: (
@@ -134,7 +147,12 @@ def execution_policy(
         )
         for pool_id in ("gb10", "oldlab")
     }
-    return ExecutionPreparationPolicyV2(
+    model = (
+        ExecutionPreparationPolicyV2
+        if personal_membership is None
+        else ExecutionPreparationPolicyV3
+    )
+    values = dict(
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
         executable_new_capacity_ceiling=ceiling,
         executable_new_capacity_rate_per_minute=1,
@@ -145,7 +163,11 @@ def execution_policy(
             )
             for pool_id in ("gb10", "oldlab")
         ),
-        subject_acknowledgements=(execution_acknowledgement(candidate),),
+        subject_acknowledgements=(
+            (execution_acknowledgement(candidate),)
+            if subject_acknowledgements is None
+            else subject_acknowledgements
+        ),
         rollback_evidence_sha256="6" * 64,
         controller_authorities=tuple(
             PoolControllerAuthorityV2(
@@ -166,6 +188,9 @@ def execution_policy(
             ),
         ),
     )
+    if personal_membership is not None:
+        values["personal_membership"] = personal_membership
+    return model(**values)
 
 
 async def setup_execution(
@@ -174,6 +199,8 @@ async def setup_execution(
     execution_policy: ExecutionPreparationPolicyV2 | None = None,
     candidate: CandidateBindingV2 | None = None,
     ceiling: int = 1,
+    fleet: FleetManifestV1 | None = None,
+    subjects: tuple[SubjectConfigurationV1, ...] | None = None,
 ) -> PreparedExecutionFixture:
     controller_digests = dict(CONTROLLER_DIGESTS)
     if execution_policy is not None:
@@ -220,35 +247,50 @@ async def setup_execution(
     )
 
     store = CapacityManagementStore(execution_policy=execution_policy)
-    fleet = fleet_manifest()
-    subject = subject_configuration(fleet)
+    resolved_fleet = fleet or fleet_manifest()
+    resolved_subjects = subjects or (subject_configuration(resolved_fleet),)
     fleet_proposal = await store.propose_fleet_configuration(
         session,
-        fleet,
+        resolved_fleet,
         actor="fleet-operator",
         idempotency_key=UUID(int=701),
     )
-    subject_proposal = await store.propose_subject_configuration(
-        session,
-        subject,
-        actor="environment-state",
-        idempotency_key=UUID(int=702),
+    subject_proposals = tuple(
+        [
+            await store.propose_subject_configuration(
+                session,
+                subject,
+                actor="environment-state",
+                idempotency_key=UUID(int=702 + index),
+            )
+            for index, subject in enumerate(resolved_subjects)
+        ]
     )
-    acknowledgement = execution_acknowledgement(candidate)
+    acknowledgements = (
+        tuple(execution_policy.subject_acknowledgements)
+        if execution_policy is not None
+        else tuple(
+            execution_acknowledgement(candidate, subject=subject) for subject in resolved_subjects
+        )
+    )
+    acknowledgement_by_subject = {item.subject_id: item for item in acknowledgements}
     active = await store.activate_configuration(
         session,
         configuration_activation(
             fleet=fleet_proposal,
-            subjects=(subject_proposal,),
-            static_candidate_provenance=(
+            subjects=subject_proposals,
+            static_candidate_provenance=tuple(
                 StaticCandidateProvenanceV1(
                     subject_id=subject.subject_id,
                     subject_incarnation=subject.subject_incarnation,
                     candidate_generation=subject.candidate_generation,
-                    algorithm=acknowledgement.candidate.algorithm,
-                    identity=acknowledgement.candidate.identity,
-                    publication_sha256=acknowledgement.candidate.publication_sha256,
-                ),
+                    algorithm=acknowledgement_by_subject[subject.subject_id].candidate.algorithm,
+                    identity=acknowledgement_by_subject[subject.subject_id].candidate.identity,
+                    publication_sha256=(
+                        acknowledgement_by_subject[subject.subject_id].candidate.publication_sha256
+                    ),
+                )
+                for subject in resolved_subjects
             ),
         ),
         actor="fleet-operator",
@@ -297,17 +339,22 @@ async def setup_execution(
             )
         )
 
-    request = ExecutionPreparationV2(
+    request_model = (
+        ExecutionPreparationV3
+        if isinstance(execution_policy, ExecutionPreparationPolicyV3)
+        else ExecutionPreparationV2
+    )
+    request_values = dict(
         authority_incarnation=AUTHORITY_ID,
         expected_writer_epoch=writer.writer_epoch,
         configuration_epoch=active.configuration_epoch,
-        fleet_generation=fleet.fleet_generation,
+        fleet_generation=resolved_fleet.fleet_generation,
         fleet_digest=fleet_proposal.digest,
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
         requested_ceiling=ceiling,
         requested_rate_per_minute=1,
         executors=tuple(executors),
-        subject_acknowledgements=(acknowledgement,),
+        subject_acknowledgements=acknowledgements,
         legacy_writer_fences=(
             LegacyWriterFenceV2(
                 writer_id="global-dev-supervisor",
@@ -321,6 +368,9 @@ async def setup_execution(
         ),
         rollback_evidence_sha256="6" * 64,
     )
+    if isinstance(execution_policy, ExecutionPreparationPolicyV3):
+        request_values["personal_membership"] = execution_policy.personal_membership
+    request = request_model(**request_values)
     return PreparedExecutionFixture(store=store, writer=writer, request=request)
 
 
