@@ -152,6 +152,23 @@ class LocalTrialRunner:
     slurm_allocated_gpus: int = -1
     slurm_gpu_device_ids: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        self._active_agent: AgentRuntime | None = None
+
+    async def interrupt_attempt(self) -> None:
+        """Best-effort stop of attempt-owned agent resources on ownership revoke.
+
+        Used by the cancellation watchdog (#1491) so blocked LLM / tmux work
+        cannot hold the RunnerPool seat after CP reclaim or cancel.
+        """
+        agent = self._active_agent
+        if agent is None:
+            return
+        close = getattr(agent, "aclose_attempt", None)
+        if close is None:
+            return
+        await close()
+
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
 
@@ -252,6 +269,7 @@ class LocalTrialRunner:
             self.trial_config.agent_model,
             self.trial_config.agent_name,
         )
+        self._active_agent = agent
         # #184: if the direct-completion runtime opts in, surface the task's
         # declared artifact paths so it can write the LLM's final
         # response somewhere the verifier can grade. Duck-typed so
@@ -420,6 +438,7 @@ class LocalTrialRunner:
                 return result
             raise
         finally:
+            self._active_agent = None
             if sidecar_runtime is not None:
                 try:
                     await sidecar_runtime.stop()
