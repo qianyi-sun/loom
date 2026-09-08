@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import replace
@@ -12,6 +13,7 @@ import yaml
 from sqlalchemy.engine import make_url
 
 from loom_capacity_agent.contracts import ReporterConfigurationV1
+from loom_capacity_agent.secret_init import copy_projected_credentials
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -123,7 +125,7 @@ class _Cluster:
         command = tuple(argv)
         self.calls.append((command, None))
         assert timeout_seconds in {30.0, 60.0}
-        if "secret,deployments,networkpolicies" in command:
+        if "secret,configmaps,deployments,networkpolicies" in command:
             return json.dumps(
                 {"apiVersion": "v1", "kind": "List", "items": list(self.objects.values())},
                 sort_keys=True,
@@ -133,11 +135,12 @@ class _Cluster:
                 item
                 for item in command
                 if "/" in item
-                and item.split("/", 1)[0] in {"secret", "deployment", "networkpolicy"}
+                and item.split("/", 1)[0] in {"secret", "configmap", "deployment", "networkpolicy"}
             )
             kind_text, name = requested.split("/", 1)
             kind = {
                 "secret": "Secret",
+                "configmap": "ConfigMap",
                 "deployment": "Deployment",
                 "networkpolicy": "NetworkPolicy",
             }[kind_text]
@@ -164,6 +167,11 @@ class _Cluster:
                             "metadata": {
                                 "name": "loom-capacity-agent-1",
                                 "namespace": "loom-staging",
+                                "annotations": deepcopy(
+                                    deployment["spec"]["template"]["metadata"].get(
+                                        "annotations", {}
+                                    )
+                                ),
                             },
                             "spec": {"containers": [{"name": "capacity-agent", "image": image}]},
                             "status": {
@@ -261,7 +269,9 @@ def test_new_generation_updates_configuration_without_changing_immutable_credent
     old = _plan(tmp_path)
     component.apply(old)
     credentials = deepcopy(cluster.objects[("Secret", "loom-capacity-agent")]["data"])
-    old_template = deepcopy(cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"])
+    old_template = deepcopy(
+        cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"]
+    )
     new = replace(old, starting_mutation_epoch=old.starting_mutation_epoch + 1)
 
     assert component.classify(new)[0] is ComponentState.READY
@@ -270,7 +280,9 @@ def test_new_generation_updates_configuration_without_changing_immutable_credent
     assert cluster.objects[("Secret", "loom-capacity-agent")]["data"] == credentials
     configuration = cluster.objects[("ConfigMap", "loom-capacity-agent")]["data"]
     assert json.loads(configuration["reporter-configuration.json"])["configuration_generation"] == 9
-    assert cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"] != old_template
+    assert (
+        cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"] != old_template
+    )
 
 
 def test_legacy_combined_secret_migrates_without_deletion_or_projecting_stale_configuration(
@@ -300,13 +312,113 @@ def test_legacy_combined_secret_migrates_without_deletion_or_projecting_stale_co
     assert component.classify(new)[0] is ComponentState.EXACT
     assert legacy["data"] == original_data
     assert cluster.objects[("Secret", "loom-capacity-agent")]["data"] == original_data
-    projected = cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"]["spec"]["volumes"][0]["projected"]
+    projected = cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"]["spec"][
+        "volumes"
+    ][0]["projected"]
     secret_keys = {item["key"] for item in projected["sources"][0]["secret"]["items"]}
     assert "reporter-configuration.json" not in secret_keys
     assert projected["sources"][1]["configMap"]["items"] == [
         {"key": "reporter-configuration.json", "path": "reporter-configuration.json"}
     ]
     assert not any("delete" in argv for argv, _ in cluster.calls)
+
+    # Exercise the real initializer with exactly the rendered projection. Old
+    # configuration remains in the immutable Secret but cannot reach runtime.
+    source = tmp_path / "projection"
+    source.mkdir()
+    for projection in projected["sources"]:
+        kind, entry = next(iter(projection.items()))
+        object_kind = "Secret" if kind == "secret" else "ConfigMap"
+        data = cluster.objects[(object_kind, entry["name"])]["data"]
+        for item in entry["items"]:
+            value = data[item["key"]]
+            payload = base64.b64decode(value) if kind == "secret" else value.encode("ascii")
+            (source / item["path"]).write_bytes(payload)
+    destination = tmp_path / "runtime-files"
+    init_command = cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"][
+        "spec"
+    ]["initContainers"][0]["command"]
+    expected_digest = init_command[init_command.index("--configuration-sha256") + 1]
+    copy_projected_credentials(source, destination, configuration_sha256=expected_digest)
+    loaded = json.loads((destination / "reporter-configuration.json").read_bytes())
+    assert loaded["configuration_generation"] == 9
+    assert loaded != json.loads(base64.b64decode(original_data["reporter-configuration.json"]))
+    assert (destination / "reporter-token").read_bytes() == str(_seed()["reporter_token"]).encode()
+    assert (destination / "reporter-token").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_rollover_keeps_credential_and_owner_drift_closed(tmp_path: Path, legacy: bool) -> None:
+    """Break caught: ignoring stale config also permits changed credentials or foreign config owners."""
+    cluster = _Cluster()
+    component = _component(cluster)
+    old = _plan(tmp_path)
+    component.apply(old)
+    secret = cluster.objects[("Secret", "loom-capacity-agent")]
+    if legacy:
+        secret["data"]["reporter-configuration.json"] = base64.b64encode(b"unused").decode()
+    original_token = secret["data"]["reporter-token"]
+    secret["data"]["reporter-token"] = base64.b64encode(b"foreign-token").decode()
+    new = replace(old, starting_mutation_epoch=old.starting_mutation_epoch + 1)
+    cluster.calls.clear()
+    assert component.classify(new)[0] is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="drifted"):
+        component.apply(new)
+    assert not any("apply" in command for command, _ in cluster.calls)
+    secret["data"]["reporter-token"] = original_token
+    configuration = cluster.objects[("ConfigMap", "loom-capacity-agent")]
+    configuration["metadata"]["managedFields"][0]["manager"] = "foreign-manager"
+    assert component.classify(new)[0] is ComponentState.DRIFTED
+
+
+def test_interrupted_rollover_recovers_after_configuration_applied(tmp_path: Path) -> None:
+    """Break caught: an interruption between config and deployment leaves an unrecoverable mix."""
+
+    class InterruptedCluster(_Cluster):
+        fail_deployment = False
+
+        def run_checked(self, argv, *, env, input_payload, timeout_seconds):
+            if self.fail_deployment and "apply" in argv and input_payload is not None:
+                documents = list(yaml.safe_load_all(input_payload))
+                if any(item["kind"] == "Deployment" for item in documents):
+                    raise RuntimeError("interrupted deployment")
+            return super().run_checked(
+                argv, env=env, input_payload=input_payload, timeout_seconds=timeout_seconds
+            )
+
+    cluster = InterruptedCluster()
+    component = _component(cluster)
+    old = _plan(tmp_path)
+    component.apply(old)
+    original_data = deepcopy(cluster.objects[("Secret", "loom-capacity-agent")]["data"])
+    new = replace(old, starting_mutation_epoch=old.starting_mutation_epoch + 1)
+    cluster.fail_deployment = True
+    with pytest.raises(RuntimeError, match="interrupted deployment"):
+        component.apply(new)
+    assert component.classify(new)[0] is ComponentState.READY
+    cluster.fail_deployment = False
+    component.apply(new)
+    assert component.classify(new)[0] is ComponentState.EXACT
+    assert cluster.objects[("Secret", "loom-capacity-agent")]["data"] == original_data
+
+
+@pytest.mark.parametrize(
+    "annotations", [{}, {"loom.carin.dev/reporter-configuration-sha256": "0" * 64}]
+)
+def test_ready_same_image_pod_must_load_current_configuration(tmp_path: Path, annotations) -> None:
+    """Break caught: image equality alone certifies a pod from the previous configuration."""
+
+    class StalePodCluster(_Cluster):
+        def capture_stdout(self, argv, *, env, timeout_seconds):
+            payload = super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
+            if "pods" in argv:
+                value = json.loads(payload)
+                value["items"][0]["metadata"]["annotations"] = annotations
+                return json.dumps(value).encode()
+            return payload
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(StalePodCluster()).apply(_plan(tmp_path))
 
 
 def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
@@ -323,6 +435,7 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
 
     assert set(cluster.objects) == {
         ("Secret", "loom-capacity-agent"),
+        ("ConfigMap", "loom-capacity-agent"),
         ("Deployment", "loom-capacity-agent"),
         ("NetworkPolicy", "loom-capacity-agent-egress"),
         ("NetworkPolicy", "loom-capacity-agent-postgres-ingress"),
@@ -334,9 +447,16 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
         "certificate.pem",
         "database-url",
         "private-key.pem",
-        "reporter-configuration.json",
         "reporter-token",
     }
+    configuration_map = cluster.objects[("ConfigMap", "loom-capacity-agent")]
+    assert set(configuration_map["data"]) == {"reporter-configuration.json"}
+    public_configuration = json.dumps(configuration_map)
+    for value in _runtime_secret_sources(
+        tls=_DEFAULT_REPORTER_TLS, postgres_ca=_DEFAULT_POSTGRES_CA
+    ).values():
+        assert value not in public_configuration
+        assert base64.b64encode(value.encode()).decode() not in public_configuration
     database_url = base64.b64decode(secret["data"]["database-url"]).decode("ascii")
     parsed_url = make_url(database_url)
     assert (parsed_url.username, parsed_url.host, parsed_url.port, parsed_url.database) == (
@@ -378,6 +498,10 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
         "/var/run/loom-capacity-projected",
         "--destination",
         "/run/loom-capacity/files",
+        "--configuration-sha256",
+        hashlib.sha256(
+            configuration_map["data"]["reporter-configuration.json"].encode()
+        ).hexdigest(),
     ]
     assert pod_spec["containers"][0]["readinessProbe"]["httpGet"] == {
         "path": "/ready",
@@ -401,7 +525,37 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
     assert pod_spec["volumes"] == [
         {
             "name": "projected",
-            "secret": {"secretName": "loom-capacity-agent", "defaultMode": 0o440},
+            "projected": {
+                "defaultMode": 0o440,
+                "sources": [
+                    {
+                        "secret": {
+                            "name": "loom-capacity-agent",
+                            "items": [
+                                {"key": key, "path": key}
+                                for key in (
+                                    "ca.pem",
+                                    "certificate.pem",
+                                    "database-url",
+                                    "private-key.pem",
+                                    "reporter-token",
+                                )
+                            ],
+                        }
+                    },
+                    {
+                        "configMap": {
+                            "name": "loom-capacity-agent",
+                            "items": [
+                                {
+                                    "key": "reporter-configuration.json",
+                                    "path": "reporter-configuration.json",
+                                }
+                            ],
+                        }
+                    },
+                ],
+            },
         },
         {"name": "runtime", "emptyDir": {"medium": "Memory"}},
         {
@@ -739,7 +893,7 @@ def test_rollout_and_readback_failures_are_closed_without_secret_disclosure(tmp_
             )
 
         def capture_stdout(self, argv, *, env, timeout_seconds):
-            if self.applied and "secret,deployments,networkpolicies" in argv:
+            if self.applied and "secret,configmaps,deployments,networkpolicies" in argv:
                 raise RuntimeError("readback unavailable")
             return super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
 
@@ -865,7 +1019,7 @@ def test_all_runtime_secret_sources_are_redacted_from_argv_errors_and_evidence(
             )
 
         def capture_stdout(self, command, *, env, timeout_seconds):
-            if self.applied and "secret,deployments,networkpolicies" in command:
+            if self.applied and "secret,configmaps,deployments,networkpolicies" in command:
                 raise RuntimeError("readback unavailable")
             return super().capture_stdout(command, env=env, timeout_seconds=timeout_seconds)
 
@@ -1021,14 +1175,14 @@ def test_agent_reuses_database_bootstrap_configuration_with_runtime_admission_va
         container_registry="registry.example.test/loom",
         seed_reader=_seed,
     )._manifest(plan, _seed())
-    agent_secret = next(
-        item for item in yaml.safe_load_all(agent_manifest) if item and item["kind"] == "Secret"
+    agent_configuration_map = next(
+        item for item in yaml.safe_load_all(agent_manifest) if item and item["kind"] == "ConfigMap"
     )
     database_secret = next(
         item for item in yaml.safe_load_all(database_manifest) if item and item["kind"] == "Secret"
     )
     agent_configuration = ReporterConfigurationV1.model_validate_json(
-        base64.b64decode(agent_secret["data"]["reporter-configuration.json"])
+        agent_configuration_map["data"]["reporter-configuration.json"]
     )
     database_configuration = ReporterConfigurationV1.model_validate_json(
         base64.b64decode(database_secret["data"]["reporter-configuration.json"])
@@ -1045,11 +1199,11 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
 ) -> None:
     """Break caught: the runtime serializes the bootstrap's null admission value."""
     manifest = _component(_Cluster())._sources(_plan(tmp_path)).manifest
-    secret = next(
-        item for item in yaml.safe_load_all(manifest) if item and item["kind"] == "Secret"
+    configuration_map = next(
+        item for item in yaml.safe_load_all(manifest) if item and item["kind"] == "ConfigMap"
     )
     configuration = ReporterConfigurationV1.model_validate_json(
-        base64.b64decode(secret["data"]["reporter-configuration.json"])
+        configuration_map["data"]["reporter-configuration.json"]
     )
 
     assert configuration.protected_admission_sha256 == (
