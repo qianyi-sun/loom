@@ -2000,7 +2000,10 @@ def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
 
     timeout_minutes = workflow["jobs"]["tests-root"]["timeout-minutes"]
 
-    assert 25 <= timeout_minutes <= 45
+    # Run 34264335621 passed its root tests in 29m02s, but the 30-minute
+    # whole-job limit expired during packaging/upload/cleanup. Keep bounded
+    # headroom for those required steps without removing test coverage.
+    assert 40 <= timeout_minutes <= 45
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:
