@@ -458,6 +458,24 @@ does not replace the task revision already supplied by a trial submission with
 the catalog's newer revision; full registration/reference retirement fencing is
 a separate pending contract.
 
+Benchmark sync, local publication, catalog copy, adapter import, manifest
+registration and taskset publication now ensure image prerequisites in their
+Task-publication transactions. Unchanged sync and exact manifest re-registration
+also recover retired prerequisites without replacing their identities. Sync
+dry-run remains read-only; prebuilt-only tasks and empty catalog placeholders
+do not gain image prerequisites. Updated Task rows are freshly returned before
+ensuring, so a cached previous config/checksum is not reused. Taskset publication
+retains its job/TaskSet lease fencing and atomically rolls back prerequisite or
+publication failures.
+
+Enqueuing is not rootless source admission. Before activation, source preparation
+must reconcile external versus bundle-local task identities, retained file-metadata
+digests, immutable object locations, and source retention for queued/historical
+image prerequisites. Legacy adapter imports still use mutable instance prefixes;
+taskset generation cleanup currently follows Task sources rather than image
+prerequisites. These unresolved source-lifecycle boundaries are not cleared by
+the registration tests or by a queued materialization alone.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency
