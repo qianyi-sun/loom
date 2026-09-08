@@ -33,6 +33,7 @@ from loom.personal_dev_environment import (
     PersonalDevReconciliationClaim,
 )
 from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
+from loom.personal_dev_membership_client import CapacityManagerPersonalDevMembershipClient
 from loom.personal_dev_membership_reconciler import (
     MembershipAdmissionGuard,
     MembershipClient,
@@ -59,6 +60,7 @@ from loom_capacity_agent.client import (
     build_reporter_tls_context,
     read_owner_only_bytes,
 )
+from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2
 from loom_service.config import LoomServiceSettings
 from loom_service.dev_instance_access import load_owner_access_snapshot_by_binding
 
@@ -87,6 +89,8 @@ class PersonalDevCapacityRuntime:
     status_reader: PersonalDevCapacityStatusReader
     acceptance_interlock: PersonalDevAcceptanceInterlock | None
     operational_interlock: PersonalDevOperationalInterlock | None
+    membership: PersonalDevMembershipRuntime | None = None
+    owned_membership_clients: tuple[CapacityManagerPersonalDevMembershipClient, ...] = ()
 
 
 def build_personal_dev_capacity_runtime(
@@ -122,6 +126,52 @@ def build_personal_dev_capacity_runtime(
             )
         except PersonalDevOperationalInterlockError as exc:
             raise RuntimeError("personal-dev operational binding is invalid") from exc
+    if (
+        settings.personal_dev_membership_binding_json != "{}"
+        or settings.personal_dev_membership_plan_sha256
+        or settings.personal_dev_membership_observer_principal_id
+    ):
+        raise RuntimeError("legacy personal-dev runtime cannot use membership bindings")
+    installer, kubectl, connection = build_personal_dev_capacity_installation(settings)
+    try:
+        projector = CapacityManagerPersonalDevProjector.from_files(connection)
+    except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
+        raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
+    return PersonalDevCapacityRuntime(
+        installer=installer,
+        projector=projector,
+        status_reader=PersonalDevCapacityStatusReader(
+            kubectl=kubectl,
+            database_admin_url=str(settings.dev_instance_database_admin_url),
+            projector=projector,
+        ),
+        acceptance_interlock=(
+            PersonalDevAcceptanceInterlock.from_binding(
+                projector=projector,
+                binding=acceptance_binding,
+            )
+            if acceptance_binding is not None
+            else None
+        ),
+        operational_interlock=(
+            PersonalDevOperationalInterlock.from_binding(
+                projector=projector,
+                binding=operational_binding,
+            )
+            if operational_binding is not None
+            else None
+        ),
+    )
+
+
+def build_personal_dev_capacity_installation(
+    settings: LoomServiceSettings,
+    *,
+    membership_execution: ExecutionAuthorityV2 | None = None,
+) -> tuple[
+    KubectlPersonalDevCapacityInstaller, KubectlClient, PersonalDevCapacityManagerConnection
+]:
+    """Validate common protected installation inputs before opening HTTP clients."""
     if settings.dev_instance_database_admin_url is None:
         raise RuntimeError(
             "LOOM_SVC_DEV_INSTANCE_DATABASE_ADMIN_URL is required when dev instances are enabled"
@@ -191,36 +241,9 @@ def build_personal_dev_capacity_runtime(
         kubectl=kubectl,
         database=PsycopgPersonalDevCapacityDatabase(str(settings.dev_instance_database_admin_url)),
         config=config,
+        membership_execution=membership_execution,
     )
-    try:
-        projector = CapacityManagerPersonalDevProjector.from_files(connection)
-    except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
-        raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
-    return PersonalDevCapacityRuntime(
-        installer=installer,
-        projector=projector,
-        status_reader=PersonalDevCapacityStatusReader(
-            kubectl=kubectl,
-            database_admin_url=str(settings.dev_instance_database_admin_url),
-            projector=projector,
-        ),
-        acceptance_interlock=(
-            PersonalDevAcceptanceInterlock.from_binding(
-                projector=projector,
-                binding=acceptance_binding,
-            )
-            if acceptance_binding is not None
-            else None
-        ),
-        operational_interlock=(
-            PersonalDevOperationalInterlock.from_binding(
-                projector=projector,
-                binding=operational_binding,
-            )
-            if operational_binding is not None
-            else None
-        ),
-    )
+    return installer, kubectl, connection
 
 
 class SessionPersonalDevReconciliationAuthority:

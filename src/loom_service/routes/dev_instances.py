@@ -72,6 +72,18 @@ ProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
 
 async def _assert_personal_dev_acceptance(request: Request) -> None:
     mode = getattr(request.app.state, "personal_dev_runtime_mode", None)
+    if mode == "membership-v1":
+        interlock = getattr(request.app.state, "personal_dev_membership_admission", None)
+        assert_admission = getattr(interlock, "assert_admission_ready", None)
+        if not callable(assert_admission):
+            raise HTTPException(status_code=503, detail="personal-dev membership admission unavailable")
+        try:
+            await assert_admission(now=datetime.now(UTC))
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="personal-dev membership admission unavailable"
+            ) from None
+        return
     enablement_required = getattr(
         request.app.state,
         "personal_dev_enablement_required",
@@ -706,6 +718,7 @@ async def apply_personal_dev_environment(
         )
     if payload.min_slots > payload.max_slots:
         raise HTTPException(status_code=400, detail="min_slots must not exceed max_slots")
+    await _assert_personal_dev_acceptance(request)
     try:
         reservation = await _personal_authority(request, session).apply(
             PersonalDevEnvironmentApplyRequest(
@@ -720,6 +733,11 @@ async def apply_personal_dev_environment(
                 idempotency_key=payload.idempotency_key,
             ),
             access_binding=access_binding_from_context(ctx),
+            capacity_mode=(
+                "membership-v1"
+                if getattr(request.app.state, "personal_dev_runtime_mode", None) == "membership-v1"
+                else "shadow-v1"
+            ),
         )
     except PersonalDevEnvironmentNotFoundError as exc:
         raise HTTPException(
@@ -1023,6 +1041,7 @@ async def delete_dev_instance(
                     keep_data=keep_data,
                 ),
                 access_binding=access_binding_from_context(ctx),
+                capacity_mode=visible.accepted_capacity_mode,
             )
         except PersonalDevEnvironmentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="personal-dev resource not found") from exc

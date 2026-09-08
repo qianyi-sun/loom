@@ -20,6 +20,12 @@ remains the only allocation authority across OLDLAB and GB10, and its
 executable new-capacity ceiling must remain exactly zero throughout the live
 personal-application acceptance and the initial durable operational mode.
 
+These are the historical zero-capacity deployment contracts. The separate
+[active membership service connection](personal-dev-active-membership.md#explicit-service-mode-and-recovery-boundary)
+does not relax them or add an active renderer. Its `membership-v1` service mode
+supports stored application recovery but deliberately leaves the legacy builder
+inert until the allocation-accounted provider and new adoption evidence exist.
+
 ## Current boundary
 
 The following repository capabilities already exist:

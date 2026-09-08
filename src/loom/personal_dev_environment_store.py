@@ -1091,6 +1091,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             subject_id = environment.subject_id
             subject_incarnation = environment.subject_incarnation
             if environment.status == "deleted":
+                if environment.keep_data and (
+                    capacity_mode == "membership-v1"
+                    or environment.accepted_capacity_mode == "membership-v1"
+                ):
+                    raise PersonalDevEnvironmentConflictError(
+                        "retained-data membership recreation requires a fresh storage binding"
+                    )
                 await self._assert_limits(requested, replacing_name=None)
                 identity = derive_identity(requested.name)
                 subject_incarnation = uuid4()

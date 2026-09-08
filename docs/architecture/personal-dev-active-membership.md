@@ -1,7 +1,8 @@
 # Personal development membership under active capacity authority
 
-Status: manager-side application membership implemented; integration validation
-in progress. Lifecycle/build connection and live acceptance remain incomplete.
+Status: manager-side application membership and durable lifecycle implemented;
+service connection under validation. Capacity-accounted builds, successor
+recovery/storage, operational enablement and live acceptance remain incomplete.
 
 ## Outcome
 
@@ -235,9 +236,44 @@ or turning an authorization outage into a failed candidate. Historical lookup an
 destroy release remain independent of new-admission availability. Stored accepted
 membership reports capacity preparation only, never observed worker availability.
 
-Configuration/startup/client-ownership wiring and active operational promotion
-evidence remain incomplete. The new loop connection does not enable this runtime
-or certify live acceptance by itself.
+### Explicit service mode and recovery boundary
+
+`LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE=membership-v1` selects the active membership
+driver explicitly; the default remains `shadow`. The separate
+`PERSONAL_DEV_MEMBERSHIP_BINDING_JSON` and `PERSONAL_DEV_MEMBERSHIP_PLAN_SHA256`
+settings carry the reviewed active acceptance document. These service settings
+use the `LOOM_SVC_` prefix. Mixed legacy acceptance/operational bindings are
+rejected before opening membership credentials.
+
+`PERSONAL_DEV_MEMBERSHIP_OBSERVER_PRINCIPAL_ID` pins an independent current
+read-only observer. `PERSONAL_DEV_CAPACITY_OBSERVER_{BEARER_TOKEN,CA,CERTIFICATE,PRIVATE_KEY}_FILE`
+provides its transport and bearer credentials, separate from the delegated
+lifecycle identity and installed capacity reporter. Admission authenticates the
+observer identity/authority and the delegate's full execution checkpoint, then
+rechecks the finite window across slow I/O. The legacy status identity alone is
+not a complete active-execution fence.
+
+Startup owns and closes all three HTTP clients, including partial-construction
+failure, and stops reconciliation before closing them. Valid expired admission
+does not prevent startup: historical lookup, stored-mode destroy and release
+cleanup must continue. New application requests use the trusted service mode;
+destroy uses the environment's persisted accepted mode, not the mode selected
+by a later service restart. Retained-data recreation involving membership is
+explicitly rejected until fresh incarnation storage and data transfer exist.
+
+The existing Kubernetes/native source builder is **inert in membership mode**:
+neither executor consumes an owner-charged membership allocation. Source intake
+and apply report builder unavailability; legacy native polling cannot claim a
+retained grant or issue new capabilities. Authenticated heartbeat/completion
+remain available for retained evidence. This is not a legacy-build migration:
+the old provider must be drained and reconciled before operational adoption.
+Stored application convergence and release recovery can run without admitting
+new source builds. Builder availability cannot be enabled by a caller flag.
+
+No operator renderer selects this mode yet. Active operational promotion evidence
+and the allocation-accounted build bridge must be delivered before live
+enablement. A service health response or these source tests do not certify
+multi-person readiness.
 
 ## Build service and runtime connection
 

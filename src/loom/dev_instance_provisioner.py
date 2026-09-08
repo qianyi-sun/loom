@@ -101,6 +101,7 @@ class DevInstanceRecord:
     candidate_id: UUID | None = None
     capacity_namespace: str | None = None
     capacity_database: str | None = None
+    accepted_capacity_mode: Literal["shadow-v1", "membership-v1"] = "shadow-v1"
 
 
 @dataclass(frozen=True)

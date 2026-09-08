@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -45,6 +45,9 @@ def _record(row: DevInstance) -> DevInstanceRecord:
         candidate_id=row.candidate_id,
         capacity_namespace=row.capacity_namespace,
         capacity_database=row.capacity_database,
+        accepted_capacity_mode=cast(
+            Literal["shadow-v1", "membership-v1"], row.accepted_capacity_mode
+        ),
     )
 
 

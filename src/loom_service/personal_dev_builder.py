@@ -475,6 +475,10 @@ def build_personal_dev_builder_runtime(
     """Build the inert-by-default restricted build and publication authority."""
     if not settings.personal_dev_builder_enabled:
         return None
+    if settings.personal_dev_runtime_mode == "membership-v1":
+        # Neither legacy executor consumes an owner-charged allocation grant.
+        # Leave recovery available without constructing an unaccounted builder.
+        return None
     if not settings.personal_dev_trusted_launcher_profile_sha256:
         raise RuntimeError("personal-dev trusted launcher profile digest is required")
     scanner_cache = settings.personal_dev_builder_scanner_cache_dir

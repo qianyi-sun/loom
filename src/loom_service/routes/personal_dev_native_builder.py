@@ -571,6 +571,14 @@ async def poll_native_builder(
     """Persist one authenticated inventory and return at most one capability."""
     now = datetime.now(UTC)
     signed = await _verify_poll(payload, request=request, signature=signature, now=now)
+    if getattr(request.app.state, "personal_dev_runtime_mode", None) == "membership-v1":
+        # A retained legacy grant is not an active membership allocation.
+        # Reject before claiming it or issuing source/publication capabilities;
+        # heartbeat/completion remain available for retained recovery evidence.
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev allocation-accounted native builder is not activated",
+        )
     session_factory = getattr(request.app.state, "session_factory", None)
     if session_factory is None or not callable(session_factory):
         raise HTTPException(
