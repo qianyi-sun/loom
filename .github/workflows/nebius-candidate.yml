@@ -20,7 +20,7 @@ jobs:
       github.repository == 'qianyi-sun/loom' &&
       github.ref == 'refs/heads/codex/nebius-main' &&
       vars.NEBIUS_RELEASE_ENABLED == 'true'
-    runs-on: loom-nebius-release
+    runs-on: ubuntu-24.04
     environment: nebius-integration
     timeout-minutes: 180
     steps:
@@ -38,9 +38,35 @@ jobs:
       - name: Install locked candidate tooling
         run: |
           uv sync --locked --no-dev --extra cluster
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
           test "$(dpkg-query -W -f='${Version}' skopeo)" = '1.13.3+ds1-2ubuntu0.24.04.3'
           skopeo --version
-          /opt/buildkit/buildctl --version
+      - name: Start pinned rootless BuildKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='docker.io/moby/buildkit:v0.33.0-rootless@sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef'
+          docker create --name nebius-candidate-buildkit --user 1000:1000 \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            --publish 127.0.0.1:1234:1234 "$image" \
+            --addr=tcp://0.0.0.0:1234 --oci-worker-no-process-sandbox
+          docker cp nebius-candidate-buildkit:/usr/bin/buildctl "$RUNNER_TEMP/buildctl"
+          chmod 0755 "$RUNNER_TEMP/buildctl"
+          docker start nebius-candidate-buildkit
+          export BUILDKIT_HOST=tcp://127.0.0.1:1234
+          "$RUNNER_TEMP/buildctl" --version
+          for _ in $(seq 1 30); do
+            if "$RUNNER_TEMP/buildctl" debug workers; then
+              echo "BUILDKIT_HOST=$BUILDKIT_HOST" >> "$GITHUB_ENV"
+              echo "BUILDKIT_CLIENT=$RUNNER_TEMP/buildctl" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Rootless BuildKit failed to become ready' >&2
+          exit 1
       - name: Build, scan, publish and sign the fixed candidate
         env:
           NEBIUS_REGISTRY_PREFIX: ${{ vars.NEBIUS_REGISTRY_PREFIX }}
@@ -85,6 +111,15 @@ jobs:
             --signing-key-id "$NEBIUS_SIGNING_KEY_ID" \
             --trusted-keyring "$work/keyring.json" \
             --output "$RUNNER_TEMP/nebius-candidate"
+      - name: Preserve builder state and stop ephemeral builder
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/nebius-candidate"
+          docker logs nebius-candidate-buildkit > "$RUNNER_TEMP/nebius-buildkit.log" 2>&1 || true
+          docker inspect --format '{"status":"{{.State.Status}}","exit_code":{{.State.ExitCode}}}' \
+            nebius-candidate-buildkit > "$RUNNER_TEMP/nebius-candidate/builder-state.json" || true
+          docker rm --force --volumes nebius-candidate-buildkit || true
       - name: Preserve candidate and partial scan evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -22,6 +22,5 @@ variable "integration_platform" {
     bucket_prefix       = string
     system_preset       = optional(string, "4vcpu-16gb")
     execution_max_nodes = optional(number, 2)
-    ci_max_nodes        = optional(number, 2)
   })
 }

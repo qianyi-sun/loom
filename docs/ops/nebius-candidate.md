@@ -7,20 +7,19 @@ It does not deploy, change `dev`/`main` authority, or prove live acceptance.
 
 ## Bootstrap
 
-Provision a clean, ephemeral Linux AMD64 ARC scale set on Nebius named
-`loom-nebius-release`, using the pinned rootless BuildKit sidecar and its matching
-`/opt/buildkit/buildctl` client. Build the runner derivative from
-`deploy/Dockerfile.nebius-runner`, publish it to Nebius and configure the resulting
-immutable digest as `release_runner_image`. It includes version-pinned Skopeo;
-runtime jobs need neither sudo nor a privileged Docker daemon. Register this scale set only to this repository, with ephemeral workspaces.
-Environment secrets are restricted to the integration branch; the runner itself
-has no publication credentials, cloud writer identity or Kubernetes API token.
-A runner label is routing, not workflow authorization. No runner fallback
-exists. Runner creation/registration and IAM provisioning are separate operator
-steps, not performed by this workflow.
+Publication runs on GitHub-hosted Ubuntu 24.04 AMD64. CI and publication require
+no Nebius runner node groups, ARC controller, runner registration credentials or
+custom runner image. The workflow installs version-pinned Skopeo from Ubuntu and
+starts the pinned rootless BuildKit container on the disposable hosted machine.
+Its client is copied from that same immutable image. The daemon's container port
+is published only on host loopback; no host network, host workspace mount, or
+Docker socket is passed into the builder. Workspaces and builder data disappear
+with the job, and an always-run cleanup retains only daemon status/exit code in the artifact before removal.
+Raw daemon logs stay job-local; failed publication commands retain the existing
+bounded sanitized diagnostic artifact.
 
 Create environment `nebius-integration`, allowing only `codex/nebius-main`.
-After the runner and trust configuration are verified, set repository variable
+After the environment and trust configuration are verified, set repository variable
 `NEBIUS_RELEASE_ENABLED=true` to enable publication on integration branch pushes.
 Configure variables `NEBIUS_REGISTRY_PREFIX` (a Nebius registry repository
 prefix), `NEBIUS_IMAGE_ADMISSION_SIGNING_KEY_ID` and
@@ -39,15 +38,16 @@ token is not a supported bootstrap credential. Rotate/revoke the authorized key
 through IAM as needed, without editing pipeline code. See the
 [Nebius service-account authentication contract](https://docs.nebius.com/grpc-api/auth).
 
-BuildKit comes from its verified sidecar image and Skopeo comes from the controlled
-runner derivative, pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3` (the
-[Noble package source](https://launchpad.net/ubuntu/noble/+source/skopeo)). Its package
-inventory is baked under `/opt/loom-runner`. Trivy uses the repository's
-version/hash-checked installer and controlled scan exceptions; Python tooling uses
-the frozen lockfile with the existing `cluster` extra for the Nebius SDK. Images
-are built to an OCI archive, scanned and copied with digest preservation; registry
-readback must match the scanned immutable image. Initial publication builds all six images once
-without another incremental-release controller or required CI gate.
+BuildKit is pinned to `v0.33.0-rootless` and its manifest digest in the workflow.
+Skopeo is pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3`; the explicit
+Ubuntu 24.04 runner label keeps that package source stable. Trivy uses the
+repository's version/hash-checked installer and controlled scan exceptions;
+Python tooling uses `uv sync --locked` with the existing `cluster` extra for the
+Nebius SDK. Images are built to an OCI archive, scanned and copied with digest
+preservation; registry readback must match the scanned immutable image. Initial
+publication builds all six images without an incremental-release controller or
+another required CI gate. The resulting platform images and all deployed
+platform resources use Nebius; the build job itself uses GitHub infrastructure.
 
 ## Publish and verify
 
@@ -89,14 +89,7 @@ claim that the image remains free of subsequently discovered vulnerabilities.
 Publication failures retain a bounded `failed-command.json` with operation,
 exit status and sanitized diagnostics alongside partial scan evidence.
 
-Required follow-up acceptance: provision the Nebius runner and environment/IAM
-bindings, publish an exact merged integration commit, verify registry readback,
-and deploy that signed bundle through the independent platform renderer/deployer.
-
-The release derivative retains the runner listener and Node 20/24 executables
-needed by JavaScript actions. It removes upstream's unused Docker daemon/CLI,
-containerd/runc/buildx and bundled npm/corepack distributions. Application package
-installation runs inside BuildKit's build stages, not in this release runner.
-This narrower tooling avoids inheriting vulnerable dependencies from software
-the publication job never uses. The complete remaining image is scanned under
-the unchanged critical-vulnerability policy.
+Required follow-up acceptance: provision the restricted GitHub environment and
+publisher IAM/trust bindings, publish an exact merged integration commit, verify
+registry readback, and deploy that signed bundle through the independent platform
+renderer/deployer. Publication requires no cluster bootstrap.

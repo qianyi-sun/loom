@@ -567,19 +567,6 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
-id = "nebius-runner"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.nebius-runner"
-build_context = "."
-source_paths = [".dockerignore", "deploy/Dockerfile.nebius-runner"]
-smoke_owner = "worker-runtime-conformance"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-nebius-runner"
-runtime_policy = "conformance"
-rollout_role = "none"
-
-[[components]]
 id = "pipeline-core-fixture"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.pipeline-core-fixture"

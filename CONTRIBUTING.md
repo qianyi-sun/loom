@@ -9,6 +9,9 @@
 > Do not promote the series into `dev` until pure Nebius acceptance passes and
 > the owner decides to integrate it. Follow the
 > [full Nebius contract](docs/architecture/nebius-primary-platform.md).
+> CI and candidate image builds remain on GitHub-hosted runners under the
+> owner's 2026-09-08 scope adjustment. Do not introduce Nebius runner
+> infrastructure; pure Nebius acceptance concerns the deployed Loom runtime.
 
 > **Canonical repository:** use
 > [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches,

@@ -1,6 +1,7 @@
 # Independent Nebius integration platform
 
-This lane targets `codex/nebius-main`. It creates an independent platform in
+This lane targets `codex/nebius-main`. CI and candidate publication use GitHub
+hosted runners; the platform needs no ARC controller or Nebius CI runner pool. It creates an independent platform in
 `loom-nebius-platform` and execution in `loom-nebius-platform-execution`.
 It never attaches to canonical staging or invokes its rollout broker. Existing
 infrastructure and data remain separate until the migration acceptance decision.
@@ -161,3 +162,37 @@ task and retrieve complete reward, trajectory, artifacts and usage; then test
 worker loss, cancellation/retry, repeated upgrade and restore. Neither a render,
 a green CI run, an available public port nor a successful schema migration
 establishes that acceptance.
+
+## First bounded ordinary-user acceptance
+
+After the signed candidate is deployed, authenticate an ordinary member through
+the public HTTPS origin. Confirm its session can read its own team and submit
+tasks, and cannot access admin actions. Build the candidate-bound CPU TaskSet
+with `scripts/ops/build_nebius_acceptance_taskset.py`. Use the existing acceptance
+CLI with an explicit logical target and a single four-Trial stage:
+
+```sh
+loom eval nebius-acceptance \
+  --taskset-dir /protected/nebius-acceptance-taskset \
+  --model MODEL_ID --candidate-sha MERGED_CANDIDATE_SHA \
+  --capacity-policy /protected/integration-acceptance-policy.json \
+  --environment development --target-id nebius-eu-north1-integration \
+  --stage 4 --output /protected/integration-acceptance
+```
+
+The acceptance policy uses `loom.nebius-development-capacity.v1`,
+`target_id=nebius-eu-north1-integration`, `accepted_concurrency=4`,
+`target_concurrency=4`, and enabled global `*` and pool `nebius-cpu` admission
+limits of four, matching the deployed policies. The explicit target is checked
+against that policy and every authenticated monitor snapshot, including later
+read-only cleanup verification. The monitor exposes only the logical target
+identifier; private cluster, node group and API bindings remain filtered.
+Omitting `--target-id` preserves the existing environment-derived behavior.
+
+A single `--stage 4` creates four CPU Trials total. Do not use larger/default
+staged concurrency profiles for this first bootstrap. Acceptance requires real
+node-backed overlap, canonical successes, authenticated complete bundles and
+checksums, both declared artifacts, trajectory, verifier output and usage, then
+scale-to-zero. Source retention may still be pending and must be reported
+separately; resume its existing read-only cleanup command with the original
+evidence. This does not prove worker-loss recovery, repeated upgrades or restore.

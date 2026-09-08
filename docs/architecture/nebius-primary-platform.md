@@ -54,9 +54,12 @@ Branch creation does not claim that this deployment wiring already exists.
 
 ## CI scope and remaining delivery work
 
-CI uses explicit GitHub-hosted runners temporarily; #1798 owns Nebius-hosted
-runner provisioning and immutable candidate publication/deployment. Hosted CI
-passing is not proof that all CI compute already runs on Nebius. PR validation
+The owner's 2026-09-08 scope adjustment keeps CI and candidate image builds on
+GitHub-hosted runners to avoid operating a separate runner platform. Nebius
+runner provisioning and ARC are outside the current scope; pure Nebius runtime
+acceptance does not require moving CI compute. #1798 owns immutable candidate
+publication and deployment to Nebius. Hosted CI passing does not prove runtime
+deployment or acceptance. PR validation
 has no OLDLAB/GB10 runner leases, localhost package mirrors, Slurm smoke,
 personal-dev builders, capacity-manager/executor images or legacy rollout
 checks. The image reusable workflow builds and scans; it cannot publish. Server image and Linux locked-install
@@ -102,12 +105,16 @@ public-endpoint acceptance remain separate work under #1798 and #1538.
 
 ## Terminal architecture
 
-All Loom-operated resources run on Nebius: web/API, control plane and
-schedulers, model Gateway, every supported worker pool, database, registry,
-object storage, backups, builders/CI runners, deployment executors, retention,
-credential maintenance, logs and monitoring. GitHub remains the source and CI
-orchestrator. User-selected external inference APIs remain supported; moving
-the platform does not require hosting every model on Nebius.
+Deployed Loom services and workload resources run on Nebius: web/API, control
+plane and schedulers, model Gateway, every supported worker pool, database,
+registry, object storage, backups, retention, logs and monitoring. CI and
+candidate image builds remain on GitHub-hosted runners under the current owner
+exception; this architecture does not require separate Nebius runner or builder
+infrastructure. Deployment commands may run from GitHub-hosted jobs or an
+explicitly authorized local operator environment, while the deployed resources
+and their steady-state operation remain on Nebius. User-selected external
+inference APIs remain supported; moving the platform does not require hosting
+every model on Nebius.
 
 Start with one region and the existing managed-cluster foundations. Separate
 system services from elastic execution node pools. Keep environment identities,
@@ -148,7 +155,7 @@ Loom success.
 | #1552 | Reuse capacity implementation; validate Nebius-only admission and actual capacity |
 | #1765 | Canonical data/output migration, integrity, retention and restore |
 | #1766 | Public web/API/CLI operation and complete result delivery |
-| #1798 | Exact-branch artifacts, independent deployment/CI route and acceptance runner |
+| #1798 | Exact-branch artifacts, GitHub-hosted builds and independent Nebius deployment |
 | #1538 | End-to-end pure Nebius acceptance and recovery evidence |
 | #1553 | Drain and retire all Loom OLDLAB/GB10 dependencies and obsolete paths |
 | #1547 | Keep outstanding retired-provider credential/resource retirement separate |
@@ -181,10 +188,14 @@ merely because its code merges to this branch.
 - From an external machine without private configuration: authenticate, access
   the catalog/upload inputs, submit, observe live progress, cancel/retry and
   download complete results through HTTPS browser and CLI/API surfaces.
-- Prove every platform component, active worker, builder, deployment executor,
-  database, object store and scheduled maintenance dependency is on Nebius.
-  Normal operation, upgrades and recovery must require no OLDLAB/GB10 route,
-  secret, SSH account, mount, broker, runner or scheduled process.
+- Prove deployed platform services, active workers, databases, object stores
+  and steady-state maintenance resources operate on Nebius. GitHub-hosted CI
+  and candidate image builds are explicitly permitted; deployment commands may
+  run from GitHub-hosted jobs or an explicitly authorized local operator
+  environment. Do not require Nebius runner or builder infrastructure for these
+  activities. Normal operation, upgrades and recovery must require no
+  OLDLAB/GB10 route, secret, SSH account, mount, broker, runner or scheduled
+  process.
 - Execute the agreed real workload inventory, including multi-step agent and
   verifier cases where part of the supported product. Record explicit gaps;
   do not substitute a direct-completion fixture for full workload parity.

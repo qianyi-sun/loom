@@ -80,7 +80,6 @@ NEBIUS_PLATFORM_EXACT = {
     "scripts/ops/nebius_candidate.py",
     "scripts/ops/nebius_registry_auth.py",
     "scripts/ops/render_nebius_platform.py",
-    "scripts/ops/render_nebius_runners.py",
 }
 NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 

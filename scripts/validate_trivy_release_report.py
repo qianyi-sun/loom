@@ -60,7 +60,6 @@ _PERL_BASE_COMPONENTS = (
     "worker",
 )
 _EMPTY_COMPONENTS = (
-    "nebius-runner",
     "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",

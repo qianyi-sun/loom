@@ -6,15 +6,13 @@ variable "integration_platform" {
     bucket_prefix       = string
     system_preset       = optional(string, "4vcpu-16gb")
     execution_max_nodes = optional(number, 2)
-    ci_max_nodes        = optional(number, 2)
   })
   default = null
   validation {
     condition = var.integration_platform == null ? true : (
       can(regex("^[a-z0-9][a-z0-9-]{5,45}$", var.integration_platform.bucket_prefix)) &&
       contains(["4vcpu-16gb", "8vcpu-32gb"], var.integration_platform.system_preset) &&
-      var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 8 &&
-      var.integration_platform.ci_max_nodes >= 1 && var.integration_platform.ci_max_nodes <= 4
+      var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 8
     )
     error_message = "Integration needs a unique bucket prefix and bounded CPU-only node groups."
   }
@@ -35,8 +33,6 @@ locals {
   integration_nodes = var.integration_platform == null ? {} : {
     system    = { preset = var.integration_platform.system_preset, minimum = 1, maximum = 1, disk = 80 }
     execution = { preset = "16vcpu-64gb", minimum = 0, maximum = var.integration_platform.execution_max_nodes, disk = 80 }
-    ci        = { preset = "8vcpu-32gb", minimum = 0, maximum = var.integration_platform.ci_max_nodes, disk = 160 }
-    release   = { preset = "8vcpu-32gb", minimum = 0, maximum = 1, disk = 160 }
   }
 }
 
@@ -112,9 +108,8 @@ resource "nebius_iam_v2_access_key" "integration_store" {
   secret_delivery_mode = "EXPLICIT"
 }
 
-# Isolate privileged CI build containers from application and execution nodes.
-# All nodes retain registry-read-only cloud identity. Release credentials are
-# job-scoped, never attached to a node or supplied to PR jobs.
+# All application and execution nodes retain registry-read-only cloud identity.
+# CI and publication run on GitHub-hosted machines, with no cloud runner pool.
 resource "nebius_mk8s_v1_node_group" "integration" {
   for_each         = local.integration_nodes
   parent_id        = var.cluster_id
@@ -146,9 +141,7 @@ resource "nebius_mk8s_v1_node_group" "integration" {
       { key = "loom.nebius/platform", value = "integration", effect = "NO_SCHEDULE" }
       ], each.key == "execution" ? [
       { key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" }
-      ] : each.key == "system" ? [] : [
-      { key = "loom.nebius/runner", value = each.key, effect = "NO_SCHEDULE" }
-    ])
+    ] : [])
     boot_disk          = { type = "NETWORK_SSD", size_gibibytes = each.value.disk }
     network_interfaces = [{ subnet_id = var.subnet_id }]
     resources          = { platform = "cpu-e2", preset = each.value.preset }

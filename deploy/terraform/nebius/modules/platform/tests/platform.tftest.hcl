@@ -24,15 +24,15 @@ run "independent_platform" {
     integration_platform = { bucket_prefix = "loom-platform-test" }
   }
   assert {
-    condition     = length(nebius_mk8s_v1_node_group.integration) == 4 && length(nebius_storage_v1_bucket.integration) == 4 && length(nebius_iam_v2_access_key.integration_store) == 3
-    error_message = "Exactly four isolated node roles and stores, three credential scopes."
+    condition     = length(nebius_mk8s_v1_node_group.integration) == 2 && length(nebius_storage_v1_bucket.integration) == 4 && length(nebius_iam_v2_access_key.integration_store) == 3
+    error_message = "Exactly system/execution node roles, four stores and three credential scopes."
   }
   assert {
     condition     = alltrue([for group in nebius_mk8s_v1_node_group.integration : group.parent_id == var.cluster_id && group.template.network_interfaces[0].subnet_id == var.subnet_id && group.template.service_account_id == var.node_registry_pull_service_account_id])
     error_message = "Reuse only bound private cluster and read-only node identity."
   }
   assert {
-    condition     = nebius_mk8s_v1_node_group.integration["system"].fixed_node_count == 1 && alltrue([for role in ["execution", "ci", "release"] : nebius_mk8s_v1_node_group.integration[role].autoscaling.min_node_count == 0])
+    condition     = nebius_mk8s_v1_node_group.integration["system"].fixed_node_count == 1 && alltrue([for role in ["execution"] : nebius_mk8s_v1_node_group.integration[role].autoscaling.min_node_count == 0])
     error_message = "Only the system node is persistent."
   }
   assert {
@@ -40,8 +40,8 @@ run "independent_platform" {
     error_message = "Source cleanup must release bytes; canonical and backups retain versions."
   }
   assert {
-    condition     = nebius_mk8s_v1_node_group.integration["ci"].template.taints[1].value == "ci" && nebius_mk8s_v1_node_group.integration["release"].template.taints[1].value == "release" && alltrue([for group in nebius_mk8s_v1_node_group.integration : group.template.metadata.labels["loom.nebius/platform"] == "integration"])
-    error_message = "Release, PR and platform workloads must use different nodes."
+    condition     = toset(keys(nebius_mk8s_v1_node_group.integration)) == toset(["system", "execution"]) && alltrue([for group in nebius_mk8s_v1_node_group.integration : group.template.metadata.labels["loom.nebius/platform"] == "integration"])
+    error_message = "CI and publication remain GitHub-hosted; no runner node groups may be provisioned."
   }
   assert {
     condition     = nebius_mk8s_v1_node_group.integration["execution"].template.metadata.labels["loom.nebius/node-role"] == "integration-execution"
