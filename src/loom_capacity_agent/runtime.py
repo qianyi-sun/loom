@@ -236,6 +236,7 @@ class CapacityAgentRuntime:
         authorize_admission_publication: AuthorizeAdmissionPublication = (
             authorize_executable_admission_publication
         ),
+        observation_changed: asyncio.Event | None = None,
     ) -> None:
         if not 1 <= max_attempts <= 10_000:
             raise ValueError("capacity capture bound must be between 1 and 10000")
@@ -253,6 +254,7 @@ class CapacityAgentRuntime:
         self._converge_admission = converge_admission
         self._abandon_admission = abandon_admission
         self._authorize_admission_publication = authorize_admission_publication
+        self._observation_changed = observation_changed
         self._high_water = 0
         self._pending: DemandSnapshotV1 | None = None
         self._pending_bootstrap: ProtectedExecutableBootstrapWork | None = None
@@ -302,6 +304,8 @@ class CapacityAgentRuntime:
             else None
         )
         self._initialized = True
+        if self._observation_changed is not None:
+            self._observation_changed.set()
 
     async def run_once(self) -> None:
         """Publish a recovered view or capture and publish exactly one new view."""
@@ -366,6 +370,8 @@ class CapacityAgentRuntime:
                     )
                 self._high_water = observation.sequence
                 self._latest_observation = observation
+                if self._observation_changed is not None:
+                    self._observation_changed.set()
                 self._pending = build_lifecycle_demand_snapshot(
                     observation,
                     self._configuration,
@@ -454,6 +460,7 @@ class ExecutableTerminalInventoryEvidenceRecoveryRuntime:
         publisher: DemandPublisher,
         observation_source: ObservationSource,
         import_evidence: ImportTerminalEvidence = (import_executable_terminal_inventory_evidence),
+        observation_changed: asyncio.Event | None = None,
     ) -> None:
         self._registration = AgentRegistrationV1.model_validate(
             {field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields}
@@ -462,6 +469,7 @@ class ExecutableTerminalInventoryEvidenceRecoveryRuntime:
         self._publisher = publisher
         self._observation_source = observation_source
         self._import_evidence = import_evidence
+        self._observation_changed = observation_changed
         self._attempt_cursor: UUID | None = None
         self._failed_attempts: set[UUID] = set()
         self._checked_sequence: int | None = None
@@ -537,6 +545,10 @@ class ExecutableTerminalInventoryEvidenceRecoveryRuntime:
         if not 0 < poll_interval_seconds <= 300:
             raise ValueError("capacity agent poll interval must be between 0 and 300 seconds")
         while True:
+            # Clear before capture so an update arriving during recovery remains
+            # pending. Readiness still requires the exact latest observation.
+            if self._observation_changed is not None:
+                self._observation_changed.clear()
             try:
                 await self.run_once()
             except asyncio.CancelledError:
@@ -546,7 +558,13 @@ class ExecutableTerminalInventoryEvidenceRecoveryRuntime:
                     "capacity_agent_terminal_inventory_recovery_iteration_failed",
                     extra={"error_type": type(exc).__name__},
                 )
-            await asyncio.sleep(poll_interval_seconds)
+            if self._observation_changed is None:
+                await asyncio.sleep(poll_interval_seconds)
+            else:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._observation_changed.wait(), timeout=poll_interval_seconds
+                    )
 
 
 class CapacityAgentServiceRuntime:
@@ -642,11 +660,13 @@ async def _main_async(arguments: argparse.Namespace) -> None:
         ),
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    observation_changed = asyncio.Event()
     demand_runtime = CapacityAgentRuntime(
         configuration=configuration,
         session_factory=session_factory,
         publisher=publisher,
         max_attempts=arguments.max_attempts,
+        observation_changed=observation_changed,
     )
     release_runtime = ExecutableProtectedReleaseReporterRuntime(
         configuration=configuration,
@@ -658,6 +678,7 @@ async def _main_async(arguments: argparse.Namespace) -> None:
         session_factory=session_factory,
         publisher=publisher,
         observation_source=lambda: demand_runtime.latest_observation,
+        observation_changed=observation_changed,
     )
     runtime = CapacityAgentServiceRuntime(
         demand_runtime=demand_runtime,
