@@ -64,10 +64,7 @@ from loom_capacity_manager.executable_contracts import (
     canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
-from loom_capacity_manager.membership_contracts import (
-    ExecutionPreparationV3,
-    parse_execution_preparation,
-)
+from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
 from loom_capacity_manager.membership_execution import parse_executable_epoch
 from loom_capacity_manager.membership_execution_store import (
     allocation_subject_is_current,
@@ -102,7 +99,11 @@ from loom_capacity_manager.models import (
     CapacityWorkerProfile,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
-from loom_capacity_manager.store import CapacityStoreError, ExecutionConflictError
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    CapacityStoreError,
+    ExecutionConflictError,
+)
 from loom_capacity_manager.topology import TopologyInfeasible, TopologySearchLimit, pack_topology
 
 _EXECUTION_NAMESPACE = UUID("82e6e16b-6c44-4af2-894b-af8fbb3fead2")
@@ -3963,7 +3964,7 @@ class CapacityExecutionStore:
             epoch is None
             or allocation is None
             or not isinstance(
-                parse_execution_preparation(json.dumps(epoch.manifest_payload)),
+                CapacityManagementStore._execution_preparation_from_row(epoch),
                 ExecutionPreparationV3,
             )
         ):
@@ -3994,7 +3995,7 @@ class CapacityExecutionStore:
         allocation: CapacityAllocation,
     ) -> CapacitySubject:
         if isinstance(
-            parse_execution_preparation(json.dumps(epoch.manifest_payload)), ExecutionPreparationV3
+            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
         ):
             allocation_epoch = await session.get(
                 CapacityAllocationEpoch, allocation.allocation_epoch
@@ -4053,7 +4054,7 @@ class CapacityExecutionStore:
         subject_id: UUID,
     ) -> bool:
         if not isinstance(
-            parse_execution_preparation(json.dumps(epoch.manifest_payload)), ExecutionPreparationV3
+            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
         ):
             return True
         if epoch.state != "active":
@@ -4128,7 +4129,7 @@ class CapacityExecutionStore:
             if epoch is None:
                 raise ExecutionConflictError(f"{operation} historical execution is unavailable")
             if isinstance(
-                parse_execution_preparation(json.dumps(epoch.manifest_payload)),
+                CapacityManagementStore._execution_preparation_from_row(epoch),
                 ExecutionPreparationV3,
             ):
                 allocation = await CapacityExecutionStore._allocation_for_binding(

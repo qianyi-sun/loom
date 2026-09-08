@@ -52,7 +52,7 @@ def parse_executable_epoch(payload: str | bytes) -> ExecutableEpochV2:
     version = document.get("schema_version")
     if version == 3 and type(version) is int:
         return ExecutableEpochV3.model_validate_json(payload)
-    if version == 2:
+    if version == 2 and type(version) is int:
         return ExecutableEpochV2.model_validate_json(payload)
     raise ValueError("unsupported executable allocation schema")
 
