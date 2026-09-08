@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -178,7 +177,6 @@ def resolved_subject_references(
         raise _invalid("managed base subject is absent from the immutable manifest")
 
     owners_by_subject: dict[UUID, UUID] = {}
-    resolved_configurations: dict[UUID, SubjectConfigurationV1] = {}
     for subject_id, original in managed_base.items():
         reference = base_references[subject_id]
         if (
@@ -191,7 +189,6 @@ def resolved_subject_references(
         owner_policy = _derived_owner_policy(owner_id, template_policy, accounts)
         _validate_personal_configuration(original, owner_id, template, owner_policy)
         owners_by_subject[subject_id] = owner_id
-        resolved_configurations[subject_id] = original
 
     members_by_subject = {item.configuration.subject_id: item for item in membership.members}
     if len(managed_ids | set(members_by_subject)) > policy.max_subjects:
@@ -217,7 +214,6 @@ def resolved_subject_references(
             raise _invalid("managed base subject identity changed")
         resolved[subject_id] = _member_reference(member)
         owners_by_subject[subject_id] = member.owner_id
-        resolved_configurations[subject_id] = member.configuration
 
     input_configurations = {
         item.configuration.subject_id: item.configuration for item in value.subjects
@@ -233,20 +229,27 @@ def resolved_subject_references(
         ):
             raise _invalid("resolved personal subject generation binding changed")
 
-    live_counts: defaultdict[UUID, int] = defaultdict(int)
-    minimums: defaultdict[UUID, list[int]] = defaultdict(list)
-    for subject_id, owner_id in owners_by_subject.items():
-        subject = resolved_configurations[subject_id]
-        if subject.lifecycle_state == "disabled":
-            continue
-        live_counts[owner_id] += 1
-        minimums[owner_id].append(subject.min_slots)
-    for owner_id in set(live_counts) | set(minimums):
+    for member in membership.members:
+        member_configuration = member.configuration
+        if any(
+            subject_id != member_configuration.subject_id
+            and supplied.display_name == member_configuration.display_name
+            for subject_id, supplied in input_configurations.items()
+        ):
+            raise _invalid("personal application name collides with resolved subject")
+
+    for owner_id in set(owners_by_subject.values()):
         owner_policy = _derived_owner_policy(owner_id, template_policy, accounts)
-        if live_counts[owner_id] > owner_policy.max_live_subjects:
+        owner_subjects = tuple(
+            supplied
+            for supplied in input_configurations.values()
+            if supplied.account_id == owner_policy.account_id
+            and supplied.lifecycle_state != "disabled"
+        )
+        if len(owner_subjects) > owner_policy.max_live_subjects:
             raise _invalid("personal owner exceeds max_live_subjects")
         try:
-            minimum = checked_sum(tuple(minimums[owner_id]))
+            minimum = checked_sum(tuple(subject.min_slots for subject in owner_subjects))
         except CapacityContractError as exc:
             raise _invalid("personal owner minimum aggregate is invalid") from exc
         if minimum > owner_policy.min_reservation_slots:

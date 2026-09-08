@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -201,15 +202,30 @@ _POLICY_ADAPTER = TypeAdapter(
 )
 
 
+def _require_exact_v3_tag(payload: str | bytes) -> None:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return
+    if (
+        isinstance(value, dict)
+        and value.get("schema_version") == 3
+        and type(value.get("schema_version")) is not int
+    ):
+        raise ValueError("schema version 3 must be an integer JSON value")
+
+
 def parse_execution_preparation(payload: str | bytes) -> ExecutionPreparationV2:
     """Strictly parse one supported execution-preparation schema."""
 
+    _require_exact_v3_tag(payload)
     return _PREPARATION_ADAPTER.validate_json(payload)
 
 
 def parse_execution_preparation_policy(payload: str | bytes) -> ExecutionPreparationPolicyV2:
     """Strictly parse one supported execution-preparation-policy schema."""
 
+    _require_exact_v3_tag(payload)
     return _POLICY_ADAPTER.validate_json(payload)
 
 

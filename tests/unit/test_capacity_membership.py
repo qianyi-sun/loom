@@ -32,7 +32,10 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 from loom_capacity_manager.execution_policy import load_execution_preparation_policy
-from loom_capacity_manager.membership import resolved_subject_references
+from loom_capacity_manager.membership import (
+    PersonalMembershipResolutionError,
+    resolved_subject_references,
+)
 from loom_capacity_manager.membership_contracts import (
     DelegatedAllocationInputV2,
     ExecutionPreparationPolicyV3,
@@ -251,10 +254,33 @@ def _replace_member(
 ) -> DelegatedAllocationInputV2:
     member = value.membership.members[0]
     configuration = member.configuration.model_copy(update=configuration_updates)
-    changed = member.model_copy(update={"configuration": configuration})
+    changed = _member(configuration, member.owner_id, revision=member.revision)
     return value.model_copy(
-        update={"membership": value.membership.model_copy(update={"members": (changed,)})}
+        update={
+            "membership": value.membership.model_copy(update={"members": (changed,)}),
+            "subjects": tuple(
+                subject.model_copy(update={"configuration": configuration})
+                if subject.configuration.subject_id == configuration.subject_id
+                else subject
+                for subject in value.subjects
+            ),
+        }
     )
+
+
+def _remove_managed_base_authority(
+    value: DelegatedAllocationInputV2,
+) -> DelegatedAllocationInputV2:
+    policy = value.preparation.personal_membership.model_copy(
+        update={"managed_base_subject_ids": ()}
+    )
+    changed = value.model_copy(
+        update={
+            "preparation": value.preparation.model_copy(update={"personal_membership": policy}),
+            "managed_base_subjects": (),
+        }
+    )
+    return DelegatedAllocationInputV2.model_validate_json(changed.model_dump_json())
 
 
 def _replace_base(
@@ -615,6 +641,39 @@ def test_v2_and_v3_execution_documents_dispatch_strictly_and_digest_differently(
             parse_execution_preparation_policy(json.dumps(payload))
 
 
+def test_v3_dispatch_requires_an_exact_integer_json_tag() -> None:
+    value = delegated_input_with_new_owner()
+    preparation_payload = value.preparation.model_dump(mode="json")
+    preparation_payload["schema_version"] = 3.0
+    v2 = execution_policy()
+    policy_payload = v2.model_dump(mode="json")
+    policy_payload["schema_version"] = 3.0
+    policy_payload["personal_membership"] = value.preparation.personal_membership.model_dump(
+        mode="json"
+    )
+
+    with pytest.raises(ValueError, match="schema version"):
+        parse_execution_preparation(json.dumps(preparation_payload))
+    with pytest.raises(ValueError, match="schema version"):
+        parse_execution_preparation_policy(json.dumps(policy_payload))
+
+
+def test_v2_dispatch_preserves_the_existing_numeric_literal_semantics() -> None:
+    value = delegated_input_with_new_owner()
+    preparation_payload = value.preparation.model_dump(mode="json")
+    preparation_payload.pop("personal_membership")
+    preparation_payload["schema_version"] = 2.0
+    policy = execution_policy()
+    policy_payload = policy.model_dump(mode="json")
+    policy_payload["schema_version"] = 2.0
+
+    preparation = parse_execution_preparation(json.dumps(preparation_payload))
+    parsed_policy = parse_execution_preparation_policy(json.dumps(policy_payload))
+
+    assert preparation.schema_version == 2
+    assert parsed_policy == policy
+
+
 def test_pinned_policy_loader_accepts_the_concrete_v3_policy(tmp_path: Path) -> None:
     value = delegated_input_with_new_owner()
     v2 = execution_policy()
@@ -765,12 +824,42 @@ def test_managed_base_overlay_cannot_substitute_protected_identity(substitution:
         update={
             "membership": value.membership.model_copy(
                 update={"revision": 2, "members": (*value.membership.members, base_member)}
-            )
+            ),
+            "subjects": (
+                value.subjects[0].model_copy(update={"configuration": changed}),
+                value.subjects[1],
+            ),
         }
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="managed base subject identity changed"):
         resolved_subject_references(value)
+
+
+def test_managed_base_overlay_can_change_unprotected_configuration() -> None:
+    value = delegated_input_with_new_owner()
+    base = value.managed_base_subjects[0]
+    changed = base.model_copy(update={"max_slots": 1})
+    base_member = _member(changed, OWNER_A, revision=2)
+    value = value.model_copy(
+        update={
+            "membership": value.membership.model_copy(
+                update={"revision": 2, "members": (*value.membership.members, base_member)}
+            ),
+            "subjects": (
+                value.subjects[0].model_copy(update={"configuration": changed}),
+                value.subjects[1],
+            ),
+        }
+    )
+
+    resolved = resolved_subject_references(value)
+    result = allocate_shadow(value)
+
+    assert next(item for item in resolved if item.subject_id == changed.subject_id).digest == (
+        canonical_digest(changed)
+    )
+    assert result.configuration is value.configuration
 
 
 @pytest.mark.parametrize(
@@ -791,24 +880,52 @@ def test_managed_base_payload_must_remain_a_canonical_personal_application(
 
 
 @pytest.mark.parametrize(
-    "configuration_updates",
+    "mutation,message",
     [
-        {"max_slots": 3},
-        {"profiles": ()},
-        {"lifecycle_state": "disabled", "max_slots": 1, "min_slots": 0},
-        {"lifecycle_state": "disabled", "max_slots": 0, "min_slots": 1},
-        {"submission_rate_per_minute": 2},
-        {"rollout_surge_slots": 0},
-        {"max_pending_jobs": 3},
-        {"display_name": "dev-development"},
+        ("maximum", "maximum exceeds"),
+        ("profiles", "profiles differ"),
+        ("disabled-maximum", "disabled personal application must have zero capacity"),
+        ("disabled-minimum", "disabled personal application must have zero capacity"),
+        ("rate", "rate differs"),
+        ("surge", "surge differs"),
+        ("pending", "pending jobs differ"),
+        ("name", "name is invalid"),
     ],
 )
 def test_personal_member_rejects_limits_profiles_and_disabled_capacity(
-    configuration_updates: dict[str, object],
+    mutation: str,
+    message: str,
 ) -> None:
-    value = _replace_member(delegated_input_with_new_owner(), **configuration_updates)
+    value = delegated_input_with_new_owner()
+    if mutation == "maximum":
+        updates: dict[str, object] = {"max_slots": 3}
+    elif mutation == "profiles":
+        profile = value.membership.members[0].configuration.profiles[0]
+        changed_profile = profile.model_copy(
+            update={
+                "profile_generation": profile.profile_generation + 1,
+                "profile_digest": "e" * 64,
+            }
+        )
+        updates = {
+            "profiles": (changed_profile, value.membership.members[0].configuration.profiles[1])
+        }
+    elif mutation == "disabled-maximum":
+        updates = {"lifecycle_state": "disabled", "max_slots": 1, "min_slots": 0}
+    elif mutation == "disabled-minimum":
+        updates = {"lifecycle_state": "disabled", "max_slots": 1, "min_slots": 1}
+    elif mutation == "rate":
+        updates = {"submission_rate_per_minute": 2}
+    elif mutation == "surge":
+        updates = {"rollout_surge_slots": 0}
+    elif mutation == "pending":
+        updates = {"max_pending_jobs": 3}
+    else:
+        updates = {"display_name": "dev-development"}
+    value = _replace_member(value, **updates)
+    value = DelegatedAllocationInputV2.model_validate_json(value.model_dump_json())
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         resolved_subject_references(value)
 
 
@@ -826,6 +943,62 @@ def test_owner_minimum_aggregate_counts_existing_managed_base() -> None:
 
     with pytest.raises(ValueError):
         resolved_subject_references(value)
+
+
+def test_owner_max_live_subjects_counts_unmanaged_resolved_base_in_allocator() -> None:
+    value = _move_new_member_to_owner_a(delegated_input_with_new_owner())
+    value = _replace_owner_template(value, max_live_subjects=1)
+    value = _remove_managed_base_authority(value)
+
+    with pytest.raises(ShadowAllocatorError, match="personal owner exceeds max_live_subjects"):
+        allocate_shadow(value)
+
+
+def test_owner_minimum_aggregate_counts_unmanaged_resolved_base_in_allocator() -> None:
+    value = _replace_base(delegated_input_with_new_owner(), min_slots=2)
+    value = _move_new_member_to_owner_a(value, min_slots=1)
+    value = _remove_managed_base_authority(value)
+
+    with pytest.raises(
+        ShadowAllocatorError,
+        match="personal owner minimum aggregate exceeds its reservation",
+    ):
+        allocate_shadow(value)
+
+
+def test_unmanaged_resolved_owner_subjects_pass_within_both_owner_limits() -> None:
+    value = _move_new_member_to_owner_a(delegated_input_with_new_owner())
+    value = _remove_managed_base_authority(value)
+
+    result = allocate_shadow(value)
+
+    assert {item.subject_id for item in result.allocations} == {
+        subject.configuration.subject_id for subject in value.subjects
+    }
+
+
+@pytest.mark.parametrize("base_kind", ["managed", "unmanaged", "disabled"])
+def test_logged_name_cannot_collide_with_any_resolved_base_identity(base_kind: str) -> None:
+    value = delegated_input_with_new_owner()
+    if base_kind == "disabled":
+        value = _replace_base(value, lifecycle_state="disabled", min_slots=0, max_slots=0)
+    base_name = value.subjects[0].configuration.display_name
+    value = _replace_member(value, display_name=base_name)
+    if base_kind == "unmanaged":
+        value = _remove_managed_base_authority(value)
+    else:
+        value = DelegatedAllocationInputV2.model_validate_json(value.model_dump_json())
+
+    with pytest.raises(
+        PersonalMembershipResolutionError,
+        match="personal application name collides with resolved subject",
+    ):
+        resolved_subject_references(value)
+    with pytest.raises(
+        ShadowAllocatorError,
+        match="personal application name collides with resolved subject",
+    ):
+        allocate_shadow(value)
 
 
 def test_disabled_tombstone_is_counted_and_required_in_the_full_input() -> None:
