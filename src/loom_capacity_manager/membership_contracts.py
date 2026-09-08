@@ -12,6 +12,7 @@ from loom_capacity_manager.contracts import (
     MAX_SUBJECTS,
     AllocationInputV1,
     Digest,
+    DynamicDevelopmentSubjectProjectionV1,
     Identifier,
     PositiveQuantity,
     Quantity,
@@ -19,6 +20,7 @@ from loom_capacity_manager.contracts import (
     SubjectConfigurationV1,
 )
 from loom_capacity_manager.executable_contracts import (
+    ExecutionAuthorityV2,
     ExecutionPreparationPolicyV2,
     ExecutionPreparationV2,
     SubjectExecutionAcknowledgementV2,
@@ -155,6 +157,27 @@ class PersonalMembershipSnapshotV1(StrictV1Model):
         return self
 
 
+class PersonalApplicationMembershipMutationV1(StrictV1Model):
+    """One fenced compare-and-swap against an active membership namespace."""
+
+    execution: ExecutionAuthorityV2
+    namespace_id: UUID
+    expected_revision: Quantity
+    projection: DynamicDevelopmentSubjectProjectionV1
+    acknowledgement: SubjectExecutionAcknowledgementV2
+
+    _namespace_is_nonzero = field_validator("namespace_id")(_nonzero_uuid)
+
+
+class PersonalApplicationMembershipResultV1(StrictV1Model):
+    """The immutable checkpoint appended for one membership mutation."""
+
+    revision: PositiveQuantity
+    head_sha256: Digest
+    member: PersonalApplicationMemberV1
+    replayed: bool
+
+
 class DelegatedAllocationInputV2(AllocationInputV1):
     """Allocator input overlaid with a bounded personal membership snapshot."""
 
@@ -234,6 +257,8 @@ __all__ = [
     "ExecutionPreparationPolicyV3",
     "ExecutionPreparationV3",
     "PersonalApplicationMemberV1",
+    "PersonalApplicationMembershipMutationV1",
+    "PersonalApplicationMembershipResultV1",
     "PersonalMembershipPolicyV1",
     "PersonalMembershipSnapshotV1",
     "parse_execution_preparation",

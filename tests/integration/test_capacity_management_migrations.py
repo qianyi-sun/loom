@@ -64,6 +64,7 @@ EXPECTED_TABLES = {
     "capacity_launch_permits",
     "capacity_launch_rate_buckets",
     "capacity_observed_commitments",
+    "capacity_personal_membership_events",
     "capacity_pool_observations",
     "capacity_pool_reporters",
     "capacity_pools",
@@ -2657,12 +2658,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0015")
+            ).scalar_one() == ("capacity_0016")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0015"
+            assert environment_revision != "capacity_0016"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -2684,14 +2685,14 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 15
+    assert await assert_capacity_schema_at_head(capacity_engine) == 16
 
 
 def test_capacity_0015_terminal_inventory_evidence_is_append_only_and_reversible(
     isolated_capacity_migration_url: str,
 ) -> None:
     cfg = _capacity_config(isolated_capacity_migration_url)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "capacity_0015")
     engine = create_engine(isolated_capacity_migration_url)
     table = "capacity_executable_terminal_inventory_evidence"
     signature = "public.capacity_executable_terminal_inventory_insert_guard()"
@@ -2764,6 +2765,75 @@ def test_capacity_0015_terminal_inventory_evidence_is_append_only_and_reversible
             ).scalar_one() is None
 
         command.upgrade(cfg, "head")
+    finally:
+        command.upgrade(cfg, "head")
+        engine.dispose()
+
+
+def test_capacity_0016_personal_membership_log_is_guarded_and_reversible_when_empty(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0015")
+    engine = create_engine(isolated_capacity_migration_url)
+    table = "capacity_personal_membership_events"
+    signature = "public.capacity_personal_membership_insert_guard()"
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "capacity_0015"
+            )
+            assert table not in inspect(connection).get_table_names()
+
+        command.upgrade(cfg, "capacity_0016")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "capacity_0016"
+            )
+            assert table in inspect(connection).get_table_names()
+            triggers = set(
+                connection.execute(
+                    text(
+                        "SELECT tgname FROM pg_trigger "
+                        "WHERE tgrelid = to_regclass(:table) AND NOT tgisinternal"
+                    ),
+                    {"table": f"public.{table}"},
+                ).scalars()
+            )
+            assert triggers == {
+                "capacity_personal_membership_insert_guard",
+                "capacity_personal_membership_append_only_guard",
+                "capacity_personal_membership_truncate_guard",
+            }
+            _assert_function_execute_acls_are_owner_only(
+                connection,
+                signatures=(signature,),
+            )
+
+        command.downgrade(cfg, "capacity_0015")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "capacity_0015"
+            )
+            assert (
+                connection.execute(
+                    text("SELECT to_regclass(:table)"),
+                    {"table": f"public.{table}"},
+                ).scalar_one()
+                is None
+            )
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:signature)"),
+                    {"signature": signature},
+                ).scalar_one()
+                is None
+            )
+
+        command.upgrade(cfg, "capacity_0016")
     finally:
         command.upgrade(cfg, "head")
         engine.dispose()

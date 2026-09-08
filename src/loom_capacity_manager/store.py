@@ -61,6 +61,12 @@ from loom_capacity_manager.fleet_state import (
     validate_fleet_manifest_digests,
     validate_profile_narrowing,
 )
+from loom_capacity_manager.membership_contracts import (
+    DelegatedAllocationInputV2,
+    ExecutionPreparationPolicyV3,
+    ExecutionPreparationV3,
+    parse_execution_preparation,
+)
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAllocation,
@@ -499,6 +505,40 @@ def _derive_owner_account(
             "kind": "owner",
             "owner_id": owner_id,
         }
+    )
+
+
+def _derive_development_subject(
+    fleet: FleetManifestV1,
+    request: DynamicDevelopmentSubjectProjectionV1,
+) -> SubjectConfigurationV1:
+    """Derive the canonical personal subject shared by both mutation protocols."""
+
+    template = fleet.development_subject_template
+    if template is None:
+        raise ConfigurationConflictError(
+            "active fleet does not permit dynamic development subjects"
+        )
+    retiring = request.operation_kind == "destroy"
+    account = _derive_owner_account(fleet, request.owner_id)
+    return SubjectConfigurationV1(
+        subject_id=request.subject_id,
+        subject_incarnation=request.subject_incarnation,
+        display_name=f"dev-{request.environment_name}",
+        account_id=account.account_id,
+        tier_id="development",
+        min_slots=0 if retiring else request.min_slots,
+        max_slots=0 if retiring else request.max_slots,
+        rollout_surge_slots=template.rollout_surge_slots,
+        max_pending_slots=template.max_pending_slots_per_subject,
+        max_pending_jobs=template.max_pending_jobs_per_subject,
+        submission_rate_per_minute=account.submission_rate_per_minute,
+        lifecycle_state="disabled" if retiring else "active",
+        candidate_generation=request.candidate_generation,
+        deployment_generation=request.deployment_generation,
+        configuration_generation=request.configuration_generation,
+        demand_reporter_incarnation=request.demand_reporter_incarnation,
+        profiles=template.profiles,
     )
 
 
@@ -1701,24 +1741,7 @@ class CapacityManagementStore:
                     "development owner minimum aggregate exceeds its reservation"
                 )
 
-            subject = SubjectConfigurationV1(
-                subject_id=request.subject_id,
-                subject_incarnation=request.subject_incarnation,
-                display_name=display_name,
-                account_id=account.account_id,
-                tier_id="development",
-                min_slots=0 if retiring else request.min_slots,
-                max_slots=0 if retiring else request.max_slots,
-                rollout_surge_slots=template.rollout_surge_slots,
-                max_pending_slots=template.max_pending_slots_per_subject,
-                max_pending_jobs=template.max_pending_jobs_per_subject,
-                lifecycle_state="disabled" if retiring else "active",
-                candidate_generation=request.candidate_generation,
-                deployment_generation=request.deployment_generation,
-                configuration_generation=request.configuration_generation,
-                demand_reporter_incarnation=request.demand_reporter_incarnation,
-                profiles=template.profiles,
-            )
+            subject = _derive_development_subject(fleet, request)
             next_subject_values = [
                 value
                 for _, value in active_subjects.values()
@@ -3291,7 +3314,7 @@ class CapacityManagementStore:
         row: CapacityExecutionEpoch,
     ) -> ExecutionPreparationV2:
         try:
-            preparation = ExecutionPreparationV2.model_validate_json(
+            preparation = parse_execution_preparation(
                 json.dumps(row.manifest_payload, sort_keys=True, separators=(",", ":"))
             )
         except ValueError as exc:
@@ -3422,6 +3445,14 @@ class CapacityManagementStore:
             raise ExecutionConflictError("execution configuration or fleet changed")
         if request.trusted_fleet_release_sha256 != policy.trusted_fleet_release_sha256:
             raise ExecutionConflictError("trusted fleet release is not configured exactly")
+        if isinstance(request, ExecutionPreparationV3) != isinstance(
+            policy, ExecutionPreparationPolicyV3
+        ) or (
+            isinstance(request, ExecutionPreparationV3)
+            and isinstance(policy, ExecutionPreparationPolicyV3)
+            and request.personal_membership != policy.personal_membership
+        ):
+            raise ExecutionConflictError("personal membership policy is not configured exactly")
         if (
             request.requested_ceiling != policy.executable_new_capacity_ceiling
             or request.requested_rate_per_minute != policy.executable_new_capacity_rate_per_minute
@@ -3472,35 +3503,47 @@ class CapacityManagementStore:
         if request.requested_ceiling > fleet_slots:
             raise ExecutionConflictError("configured fleet capacity is below requested ceiling")
 
-        subject_rows = (
-            (
+        references = tuple(
+            _parse_contract(ConfigurationGenerationRefV1, item)
+            for item in configuration.subject_generation_manifest
+        )
+        subject_rows: list[CapacityConfigGeneration] = []
+        subjects: list[SubjectConfigurationV1] = []
+        for reference in references:
+            row = (
                 await session.execute(
-                    select(CapacitySubject).where(
-                        CapacitySubject.configuration_epoch == request.configuration_epoch
+                    select(CapacityConfigGeneration).where(
+                        CapacityConfigGeneration.scope == "subject",
+                        CapacityConfigGeneration.subject_id == reference.subject_id,
+                        CapacityConfigGeneration.subject_incarnation
+                        == reference.subject_incarnation,
+                        CapacityConfigGeneration.scope_generation == reference.generation,
+                        CapacityConfigGeneration.digest == reference.digest,
                     )
                 )
-            )
-            .scalars()
-            .all()
-        )
+            ).scalar_one_or_none()
+            if row is None:
+                raise ExecutionConflictError("immutable base subject generation changed")
+            subject_rows.append(row)
+            subjects.append(_parse_contract(SubjectConfigurationV1, row.payload))
         acknowledgements = {item.subject_id: item for item in request.subject_acknowledgements}
-        if {row.subject_id for row in subject_rows} != set(acknowledgements):
+        if {subject.subject_id for subject in subjects} != set(acknowledgements):
             raise ExecutionConflictError("subject execution acknowledgements are incomplete")
-        for subject_row in subject_rows:
-            acknowledgement = acknowledgements[subject_row.subject_id]
+        for subject in subjects:
+            acknowledgement = acknowledgements[subject.subject_id]
             if (
-                acknowledgement.subject_incarnation != subject_row.subject_incarnation
-                or acknowledgement.configuration_generation != subject_row.configuration_generation
-                or acknowledgement.deployment_generation != subject_row.deployment_generation
-                or acknowledgement.reporter_incarnation != subject_row.demand_reporter_incarnation
+                acknowledgement.subject_incarnation != subject.subject_incarnation
+                or acknowledgement.configuration_generation != subject.configuration_generation
+                or acknowledgement.deployment_generation != subject.deployment_generation
+                or acknowledgement.reporter_incarnation != subject.demand_reporter_incarnation
             ):
                 raise ExecutionConflictError("subject execution acknowledgement changed")
             candidate = (
                 await session.execute(
                     select(CapacityCandidate).where(
-                        CapacityCandidate.subject_id == subject_row.subject_id,
-                        CapacityCandidate.subject_incarnation == subject_row.subject_incarnation,
-                        CapacityCandidate.candidate_generation == subject_row.candidate_generation,
+                        CapacityCandidate.subject_id == subject.subject_id,
+                        CapacityCandidate.subject_incarnation == subject.subject_incarnation,
+                        CapacityCandidate.candidate_generation == subject.candidate_generation,
                     )
                 )
             ).scalar_one_or_none()
@@ -3512,6 +3555,49 @@ class CapacityManagementStore:
                 != acknowledgement.candidate.publication_sha256
             ):
                 raise ExecutionConflictError("subject execution candidate provenance changed")
+
+        if authority.execution_state in {"shadow", "prepared"}:
+            materialized = (
+                (
+                    await session.execute(
+                        select(CapacitySubject).where(
+                            CapacitySubject.configuration_epoch == request.configuration_epoch
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if {row.subject_id for row in materialized} != {
+                subject.subject_id for subject in subjects
+            }:
+                raise ExecutionConflictError("prepared base subject materialization changed")
+        if isinstance(request, ExecutionPreparationV3):
+            subjects_by_id = {subject.subject_id: subject for subject in subjects}
+            for subject_id in request.personal_membership.managed_base_subject_ids:
+                subject = subjects_by_id.get(subject_id)
+                projection = (
+                    (
+                        await session.execute(
+                            select(CapacityDevelopmentProjection)
+                            .where(CapacityDevelopmentProjection.subject_id == subject_id)
+                            .order_by(CapacityDevelopmentProjection.configuration_generation.desc())
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if subject is None or projection is None:
+                    raise ExecutionConflictError(
+                        "managed base subject has no personal projection record"
+                    )
+                projected_subject = _parse_contract(
+                    SubjectConfigurationV1, projection.result_payload["subject"]
+                )
+                if projected_subject != subject:
+                    raise ExecutionConflictError(
+                        "managed base subject differs from its personal projection"
+                    )
 
         expected_legacy = {_legacy_writer_key(item) for item in policy.legacy_writer_fences}
         supplied_legacy = {_legacy_writer_key(item) for item in request.legacy_writer_fences}
@@ -3591,7 +3677,7 @@ class CapacityManagementStore:
         if epoch is None:
             raise AuthorityRecoveryError("active execution epoch row is missing")
         try:
-            preparation = ExecutionPreparationV2.model_validate_json(
+            preparation = parse_execution_preparation(
                 json.dumps(epoch.manifest_payload, sort_keys=True, separators=(",", ":"))
             )
         except ValueError as exc:
@@ -4128,7 +4214,7 @@ class CapacityManagementStore:
             )
         ).scalar_one()
         fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
-        subject_rows = (
+        base_subject_rows = (
             (
                 await session.execute(
                     select(CapacityConfigGeneration).where(
@@ -4140,9 +4226,89 @@ class CapacityManagementStore:
             .scalars()
             .all()
         )
-        subjects = tuple(
-            _parse_contract(SubjectConfigurationV1, row.payload) for row in subject_rows
+        base_subjects = tuple(
+            _parse_contract(SubjectConfigurationV1, row.payload) for row in base_subject_rows
         )
+        preparation: ExecutionPreparationV3 | None = None
+        membership = None
+        managed_base_subjects: tuple[SubjectConfigurationV1, ...] = ()
+        if authority.execution_epoch > 0:
+            execution_epoch_row = (
+                await session.execute(
+                    select(CapacityExecutionEpoch).where(
+                        CapacityExecutionEpoch.execution_epoch == authority.execution_epoch
+                    )
+                )
+            ).scalar_one_or_none()
+            if execution_epoch_row is None:
+                raise AuthorityRecoveryError("execution epoch row is missing")
+            parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
+            if isinstance(parsed_preparation, ExecutionPreparationV3):
+                preparation = parsed_preparation
+                from loom_capacity_manager.membership_store import CapacityMembershipStore
+
+                membership_store = CapacityMembershipStore(self)
+                membership = await membership_store.snapshot(session, execution_epoch_row)
+                materialized_rows = (
+                    (
+                        await session.execute(
+                            select(CapacitySubject)
+                            .where(
+                                CapacitySubject.configuration_epoch == active.configuration_epoch
+                            )
+                            .order_by(CapacitySubject.subject_id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                materialized: dict[UUID, SubjectConfigurationV1] = {}
+                for row in materialized_rows:
+                    value = _parse_contract(SubjectConfigurationV1, row.payload)
+                    if (
+                        value.subject_id != row.subject_id
+                        or value.subject_incarnation != row.subject_incarnation
+                        or value.display_name != row.display_name
+                        or value.account_id != row.account_id
+                        or value.tier_id != row.tier_id
+                        or value.min_slots != row.min_slots
+                        or value.max_slots != row.max_slots
+                        or value.rollout_surge_slots != row.rollout_surge_slots
+                        or value.max_pending_slots != row.max_pending_slots
+                        or value.max_pending_jobs != row.max_pending_jobs
+                        or value.submission_rate_per_minute != row.submission_rate_per_minute
+                        or value.lifecycle_state != row.lifecycle_state
+                        or value.candidate_generation != row.candidate_generation
+                        or value.deployment_generation != row.deployment_generation
+                        or value.configuration_generation != row.configuration_generation
+                        or value.demand_reporter_incarnation != row.demand_reporter_incarnation
+                    ):
+                        raise ConfigurationConflictError(
+                            "personal membership materialized subject changed"
+                        )
+                    materialized[value.subject_id] = value
+                expected = {value.subject_id: value for value in base_subjects}
+                expected.update(
+                    {
+                        member.configuration.subject_id: member.configuration
+                        for member in membership.members
+                    }
+                )
+                if materialized != expected:
+                    raise ConfigurationConflictError(
+                        "personal membership materialization differs from its event log"
+                    )
+                subjects = tuple(materialized.values())
+                managed_ids = set(preparation.personal_membership.managed_base_subject_ids)
+                managed_base_subjects = tuple(
+                    value for value in base_subjects if value.subject_id in managed_ids
+                )
+                if {value.subject_id for value in managed_base_subjects} != managed_ids:
+                    raise ConfigurationConflictError("managed base membership is incomplete")
+            else:
+                subjects = base_subjects
+        else:
+            subjects = base_subjects
         now = await _db_now(session)
         subject_inputs = tuple(
             [await self._subject_input(session, subject, now) for subject in subjects]
@@ -4268,6 +4434,35 @@ class CapacityManagementStore:
         effective_accounts = tuple(
             _parse_contract(AccountPolicyV1, row.payload) for row in account_rows
         )
+        for row, value in zip(account_rows, effective_accounts, strict=True):
+            if (
+                value.account_id != row.account_id
+                or value.kind != row.kind
+                or value.owner_id != row.owner_id
+                or value.min_reservation_slots != row.min_reservation_slots
+                or value.max_slots != row.max_slots
+                or value.max_surge_slots != row.max_surge_slots
+                or value.max_pending_slots != row.max_pending_slots
+                or value.max_pending_jobs != row.max_pending_jobs
+                or value.submission_rate_per_minute != row.submission_rate_per_minute
+                or value.max_live_subjects != row.max_live_subjects
+                or row.max_builds != 0
+                or row.max_artifact_bytes != 0
+            ):
+                raise ConfigurationConflictError("personal membership materialized account changed")
+        if preparation is not None and membership is not None:
+            accounts_by_id = {value.account_id: value for value in effective_accounts}
+            for member in membership.members:
+                expected_account = _derive_owner_account(fleet, member.owner_id)
+                if accounts_by_id.get(expected_account.account_id) != expected_account:
+                    raise ConfigurationConflictError(
+                        "personal membership materialized account changed"
+                    )
+            await membership_store.verify_snapshot_materialization(
+                session,
+                execution_epoch_row,
+                membership,
+            )
         snapshot = ConfigurationSnapshotV1(
             configuration_epoch=active.configuration_epoch,
             fleet=ConfigurationGenerationRefV1(
@@ -4283,10 +4478,10 @@ class CapacityManagementStore:
                     subject_id=row.subject_id,
                     subject_incarnation=row.subject_incarnation,
                 )
-                for row in subject_rows
+                for row in base_subject_rows
             ),
         )
-        return AllocationInputV1(
+        values = dict(
             configuration=snapshot,
             fleet=fleet,
             effective_account_policies=effective_accounts,
@@ -4298,6 +4493,14 @@ class CapacityManagementStore:
             existing_pending_slots=0,
             existing_pending_jobs=0,
         )
+        if preparation is not None and membership is not None:
+            return DelegatedAllocationInputV2(
+                **values,
+                preparation=preparation,
+                managed_base_subjects=managed_base_subjects,
+                membership=membership,
+            )
+        return AllocationInputV1(**values)
 
     async def _subject_input(
         self,
