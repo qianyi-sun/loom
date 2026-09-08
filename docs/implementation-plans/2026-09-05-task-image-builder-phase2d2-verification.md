@@ -225,7 +225,8 @@ The harness exposed and regression-tested fractional bootstrap timestamp loss;
 `ef4ece7d7` preserves the exact issuance instant and has independent scoped review.
 The composition uses explicit native/build/upload/signing and ASGI transport
 doubles; it does not substitute for native containment or production trust.
-Independent full composition review remains pending. No slice activates the provider.
+Independent full composition review of `525d1740f..eb4bdad16` passed with no
+material findings. No slice activates the provider.
 
 Upstream reconciliation `2171ed1b7` moves only the unpublished publication
 migration to `0133`, after unchanged public `0132`. Independent review approved
