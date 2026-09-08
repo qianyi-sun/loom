@@ -1,5 +1,13 @@
 # Contributing
 
+> **Nebius series override (2026-09-08):** branch from and target
+> `codex/nebius-main` for every full-Nebius work package. This replaces the
+> normal `dev` instructions below for that series only. The new branch retains
+> the same four strict app-bound PR checks and native squash auto-merge.
+> Do not promote the series into `dev` until pure Nebius acceptance passes and
+> the owner decides to integrate it. Follow the
+> [full Nebius contract](docs/architecture/nebius-primary-platform.md).
+
 > **Canonical repository:** use
 > [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches,
 > pull requests, and issues.

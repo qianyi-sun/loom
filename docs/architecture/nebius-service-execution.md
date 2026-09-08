@@ -1,5 +1,10 @@
 # Nebius service execution contract
 
+> **Branch target revision, 2026-09-08:** on `codex/nebius-main`, the
+> [full Nebius platform contract](nebius-primary-platform.md) supersedes the
+> permanent hybrid target below. Existing implementation details describe the
+> migration baseline; OLDLAB/GB10 are to be retired after pure Nebius acceptance.
+
 Status: accepted hybrid target architecture for issue #1548. The
 provider-neutral durable control plane, namespace-scoped Kubernetes Job
 adapter, read-only capacity collector, and evidence-gated resource forecast

@@ -15,18 +15,19 @@
 
 ## Target Branch
 
-- [ ] This PR targets `dev` for normal development.
-- [ ] For this normal `dev` PR, the trusted base-branch controller enables
-      squash auto-merge for every non-draft PR, regardless of author or
-      reviewer. GitHub keeps the candidate queued until
+- [ ] This full-Nebius series PR targets `codex/nebius-main` and follows
+      `docs/architecture/nebius-primary-platform.md`.
+- [ ] This unrelated normal-development PR targets `dev`.
+- [ ] For either integration branch, a trusted collaborator enables GitHub-native
+      squash auto-merge for a completed non-draft PR. GitHub waits until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
       `staging-smoke-gate` succeed on the current head SHA. These four strict,
-      app-bound checks are the only merge authority: `dev` requires no human
+      app-bound checks are the merge authority: neither integration branch requires human
       approval, no CODEOWNER approval, and no conversation resolution.
-- [ ] This PR targets `main` only for a production release promotion from `dev`;
-      the same author-neutral controller enables squash auto-merge after the
-      release evidence is attached. Human or CODEOWNER approval is not merge
-      authority; the current-head CI gates are.
+- [ ] This PR targets `main` only for production promotion from `dev`, under
+      its separate current promotion policy.
+- [ ] This PR does not promote `codex/nebius-main` into `dev` before pure
+      Nebius end-to-end acceptance and the subsequent owner integration decision.
 
 ## Scope
 

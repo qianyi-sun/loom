@@ -1,5 +1,12 @@
 # Loom
 
+> **Full Nebius integration branch:** this branch implements the Nebius-only
+> platform under [#1536](https://github.com/qianyi-sun/loom/issues/1536).
+> All series PRs target `codex/nebius-main`. Pure Nebius end-to-end acceptance
+> must pass before considering a merge into `dev`. See the
+> [branch and migration contract](docs/architecture/nebius-primary-platform.md).
+> Existing hosted routes below are not proof that this branch is deployed.
+
 Loom is a team platform for running model and agent evaluations. It lets
 researchers submit batches, monitor trials, inspect failures, download
 trajectories and artifacts, and audit provider usage without operating the
