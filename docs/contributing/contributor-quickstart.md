@@ -159,6 +159,10 @@ For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
 ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
 parallel jobs, then it combines their coverage artifacts, applies the 70%
 fast-tier gate, and writes the default fast-tier coverage summary.
+Each root shard has a bounded 40-minute whole-job budget, including environment
+setup, tests, wheel verification, coverage upload, and cleanup. This leaves
+headroom after the observed approximately 29-minute test phase; it does not
+relax per-test timeouts or remove any required checks.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op
