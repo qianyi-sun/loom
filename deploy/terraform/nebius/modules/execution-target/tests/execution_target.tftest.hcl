@@ -54,6 +54,16 @@ run "development_private_payg_plan" {
   }
 
   assert {
+    condition     = yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).users[0].sudo == ["ALL=(ALL) NOPASSWD:ALL"]
+    error_message = "The deployment gateway operator needs a reproducible guest administration path."
+  }
+
+  assert {
+    condition     = contains(yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).packages, "wireguard-tools") && yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).disable_root && !yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).ssh_pwauth
+    error_message = "Prepare private-link tooling without enabling root or password SSH."
+  }
+
+  assert {
     condition = toset([
       for block in nebius_vpc_v1_pool.target_private.cidrs : block.cidr
     ]) == toset([var.network_cidr, var.service_cidr])

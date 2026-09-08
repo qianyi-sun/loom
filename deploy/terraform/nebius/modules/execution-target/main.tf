@@ -359,10 +359,13 @@ resource "nebius_compute_v1_instance" "deployment_access" {
     #cloud-config
     users:
       - name: codex
-        sudo: false
+        sudo: ["ALL=(ALL) NOPASSWD:ALL"]
         shell: /bin/bash
         ssh_authorized_keys:
           - ${trimspace(var.deployment_access_ssh_public_key)}
+    packages:
+      - sudo
+      - wireguard-tools
     ssh_pwauth: false
     disable_root: true
   CLOUD_INIT

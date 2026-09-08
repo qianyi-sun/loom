@@ -177,6 +177,49 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get nodes -o wide
 kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 ```
 
+### Authorized gateway bootstrap repair
+
+The deployment gateway's cloud-init grants the configured SSH-key operator
+`codex` passwordless sudo and installs `sudo`/`wireguard-tools`. Password SSH
+and direct root SSH remain disabled. This is the dedicated infrastructure
+gateway, not an execution Pod: the operator needs a legitimate guest-admin path
+to install and recover its authorized private connection. Package installation
+does not configure a peer, start WireGuard, alter routes or expose database ports.
+
+Older gateways created with `sudo: false` cannot acquire guest administration
+merely by changing a Terraform file. Replacing one requires explicit owner
+authorization for that exact gateway and a deployment-access interruption:
+
+1. Save the remote state, exact instance/boot-disk identity, dedicated known-hosts
+   entry, tool versions/hashes and necessary operator-owned configuration in a
+   mode-0700 evidence directory. Recovery archives can contain credentials;
+   keep them mode 0600, outside Git, and never print their contents.
+2. Run a **full** saved plan with
+   `-replace=module.execution_target.nebius_compute_v1_instance.deployment_access`.
+   Require this to be the only non-no-op resource change. Do not use `-target`
+   to hide unrelated changes. The nested managed boot disk belongs to this VM;
+   compare its provider ID separately. Cluster, node groups, data disks,
+   storage, registry, IAM and the fixed public allocation must not change.
+3. Confirm the before/after allocation ID, instance service account, shape,
+   source image, boot-disk specification and absence of secondary disks agree.
+   Apply only that reviewed saved plan. Do not enable create-before-destroy
+   against an allocation already held by the old gateway.
+4. Read the new instance identity and fixed public allocation from the
+   authenticated provider API. Verify the new SSH host-key fingerprint against
+   that exact instance's authenticated provider serial logs before replacing
+   only the dedicated known-hosts entry. A keyscan alone is not this verification.
+5. Verify cloud-init, `sudo -n true`, `wg --version`, required CLI tools and
+   instance-identity access to the private Kubernetes API. Restore only required
+   operator configuration, never a stale kubeconfig as a substitute for renewed
+   service-identity credentials. Private IPs may change; re-read them before
+   preparing the private-link binding. Finish with a full no-change plan.
+
+This repair does not deploy the staging attachment, migrate historical data,
+change execution capacity or bypass the protected staging backup/rollout lane.
+The former gateway and its managed boot disk are replaced, so retain the scoped
+recovery archive until post-rebuild acceptance is complete. Private-link
+activation and its service-level checks remain the next step.
+
 ## Live smoke order
 
 Run live acceptance in this order; stop and clean up at the first failed gate.
