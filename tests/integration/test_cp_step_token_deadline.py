@@ -109,6 +109,39 @@ def test_endpoint_returns_signed_deadline_and_exact_expiry(deadline_app) -> None
     assert returned_expiry >= deadline + timedelta(seconds=300)
 
 
+def test_real_trial_mints_distinct_grants_for_same_agent_attempt(deadline_app) -> None:  # type: ignore[no-untyped-def]
+    app, raw_token, team_id, trial_id = deadline_app
+    deadline = datetime.now(UTC) + timedelta(seconds=60)
+    attempt_id = uuid4()
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/admin/step-tokens",
+                headers={"Authorization": f"Bearer {raw_token}"},
+                json={
+                    "team_id": str(team_id),
+                    "trial_id": str(trial_id),
+                    "step_id": "main",
+                    "ttl_sec": 600,
+                    "attempt_deadline_wall_clock": deadline.isoformat(),
+                    "agent_attempt_id": str(attempt_id),
+                },
+            )
+            for _ in range(2)
+        ]
+    for response in responses:
+        assert response.status_code == 201
+        body = response.json()
+        context = verify_step_jwt(
+            body["token"],
+            signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+        )
+        assert context.agent_attempt_id == attempt_id == UUID(body["agent_attempt_id"])
+        assert context.step_jwt_id == UUID(body["step_jwt_id"])
+        assert context.trial_id == trial_id
+    assert responses[0].json()["step_jwt_id"] != responses[1].json()["step_jwt_id"]
+
+
 def test_endpoint_rejects_numeric_monotonic_deadline(deadline_app) -> None:  # type: ignore[no-untyped-def]
     app, raw_token, team_id, trial_id = deadline_app
     with TestClient(app) as client:

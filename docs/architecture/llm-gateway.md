@@ -49,6 +49,71 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    Gateway denies a request if its `model` field isn't in the team's
    allowlist.
 
+## Deadline dispatch audit
+
+Ordinary Trial requests have a non-billing `gateway_dispatch_receipts` audit
+alongside, not in place of, `llm_calls` (#1858). After normal authentication,
+provider authorization and routing, the Gateway commits a receipt before each
+direct upstream send. It rechecks the signed attempt deadline after that commit
+and before transport. Audit admission failure returns a secret-free
+`503 / dispatch_audit_unavailable` and sends nothing upstream.
+
+The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
+The worker supervisor creates a new opaque attempt UUID for each real agent
+retry; CP returns a new signed grant UUID (`jti`) for each mint. The worker
+records `agent_attempt_start` and `agent_step_token_grant` in its audit spine
+before provider work. This is a mint-time binding under the existing CP
+authorization, **not** a new scheduler, an idempotent mint API, or perpetual
+claim/lease authority. The legacy worker lane still has its existing
+worker-scope and Trial/team checks; protected lanes retain their existing
+claim fencing. Older tokens without these UUIDs remain explicitly unjoined.
+Neither `Trial.attempt_count`, Gateway retry `attempt`, nor Harbor reclaim
+tenure is the internal agent-attempt identity. CLI local-only issuers do not
+invent CP grants.
+
+The rollout must migrate the application database and upgrade CP before new
+workers request the additive attempt-identity fields. A new worker against an
+old CP fails closed with request validation failure; it must not retry without
+identity. Older workers can use the new CP, but their missing attempt UUID is
+still legacy/unjoined and cannot satisfy the fixed-candidate canary contract.
+
+Receipts carry a server-generated request UUID and a unique per-request
+dispatch ordinal. Gateway-internal retries get separate receipts and retain
+their existing one-based retry counter. `purpose=capability_probe` separates
+Responses endpoint probing from model work. `purpose=adapter_call` identifies
+one LiteLLM invocation, not its opaque SDK-internal physical HTTP retries;
+direct httpx calls use `model_call`. Pipeline execution-attempt Responses
+keeps its existing budget reservation/dispatch/settlement authority and is not
+duplicated into this ordinary-Trial path. Non-step legacy body-attributed
+requests are not upgraded to trusted Trial identity from their payload.
+
+Two observations must be read independently:
+
+| Observation | Meaning |
+| --- | --- |
+| `provider_outcome=admitted` | Durable permission to try sending; completion is unknown, not proof the provider received bytes. |
+| `not_dispatched` | The deadline/cancellation prevented send after admission. |
+| `response_received` / `stream_completed` | A response or the complete stream was observed, not proof of task success. Later caller/accounting failure must not overwrite this fact. |
+| `deadline` / `cancelled` / `transport_error` | Transport ended without complete observation; provider completion and cost may remain unknown. |
+| `gateway_outcome`, `gateway_http_status` | Separate caller-side completion, error, cancellation or observed deadline. SSE headers can already be HTTP200 when the stream subsequently expires. |
+
+Terminal updates are conditional and use independent sessions with a one-second
+audit-write bound; provider executable time is never extended for persistence.
+There are no detached, indefinitely shielded finalizers. A process crash,
+commit-ack loss, database outage or repeated cancellation can leave an
+`admitted`/`pending` observation; a bounded, secret-free log identifies its
+request (and admission receipt where available). Operators must report it as
+unknown and retain that evidence, not infer zero cost or fabricate completion.
+Rows follow the existing authorized Trial/team deletion lifecycle.
+
+No JWT, request content, credentials, private endpoint or new content digest is
+stored in these receipts or forwarded to third-party providers. Existing
+successful `llm_calls` usage/cost writes remain the accounting authority;
+receipts do not become typed model/terminal execution events. They cannot
+repair the historical successful-provider-call/typed-event gap owned by #743.
+Local HTTP/Postgres regression evidence does not close #1748: #1857 still owns
+the formally isolated, installed Case A/B collection and live acceptance.
+
 ## Endpoint shape (dialects)
 
 | Route                    | Dialect             | Forwarded to                       |
