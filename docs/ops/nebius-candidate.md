@@ -64,8 +64,11 @@ The artifact contains `candidate.json`, `runtime-profile.json`, and per-image sc
 reports/SBOMs. Partial scan evidence is retained on failure; absence of the signed
 candidate means no complete release exists. Partial registry uploads are possible
 on failure and must not be deployed. Tag names aid discovery only: deployments
-consume the signed `@sha256:` references. Reruns build a new artifact/run identity;
-never resolve tags in an already accepted candidate or overwrite an evidence bundle.
+consume the signed `@sha256:` references. Artifact names are
+`nebius-candidate-<sha>-<run-id>-<run-attempt>` so retries retain earlier evidence
+without upload-name conflicts. GitHub retains the run ID when rerunning a job;
+download the exact attempt's artifact. Never resolve tags in an already accepted
+candidate or overwrite an evidence bundle.
 
 Verify with the environment-owned keyring, not a key supplied by the artifact:
 
