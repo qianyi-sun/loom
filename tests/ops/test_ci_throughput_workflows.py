@@ -223,7 +223,7 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
         "uv sync --locked --all-packages --extra dev --python 3.11"
     )
     assert step_by_name["Build Go V2 handoff test binary"]["run"] == (
-        'go test -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
+        'go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
         "./cmd/loom-task-image-builder-supervisor"
     )
     handoff = step_by_name["Python-Go V2 handoff"]
@@ -233,8 +233,8 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
     }
     assert handoff["run"] == (
         "uv run --no-sync pytest "
-        "tests/integration/test_task_image_builder_guard_local_flow.py::"
-        "test_go_v2_candidate_handoff_reaches_actual_python_service"
+        "tests/integration/test_task_image_builder_guard_local_flow.py "
+        "tests/integration/test_task_image_publication_full_flow.py"
     )
 
 
