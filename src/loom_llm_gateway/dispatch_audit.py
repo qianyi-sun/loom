@@ -11,6 +11,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
@@ -38,6 +39,21 @@ ProviderOutcome = Literal[
 ]
 GatewayOutcome = Literal["completed", "error", "cancelled", "deadline"]
 _STATE_KEY = "_loom_dispatch_audit"
+_ACTIVE_RECEIPT: ContextVar[UUID | None] = ContextVar("gateway_dispatch_receipt", default=None)
+
+
+def dispatch_request_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Attach only the opaque, committed HTTP dispatch ID, never execution claims.
+
+    Evaluate inside the actual transport callable: each retry has its own ID.
+    Incoming caller trace headers are not authority and are never used here.
+    """
+    receipt = _ACTIVE_RECEIPT.get()
+    if receipt is None:
+        return dict(headers)
+    return {**headers, "X-Request-ID": str(receipt)}
+
+
 # Audit cleanup never borrows the attempt's provider-execution budget. The
 # bounded inline await creates no detached task and cannot swallow cancellation.
 _AUDIT_TIMEOUT_SECONDS = 1.0
@@ -175,10 +191,14 @@ class DispatchAudit:
 
         async def invoke() -> T:
             nonlocal dispatched, returned, observed_response
-            dispatched = True
-            observed_response = await operation()
-            returned = True
-            return observed_response
+            token = _ACTIVE_RECEIPT.set(receipt_id)
+            try:
+                dispatched = True
+                observed_response = await operation()
+                returned = True
+                return observed_response
+            finally:
+                _ACTIVE_RECEIPT.reset(token)
 
         try:
             # Recheck after the durable commit. The timeout encloses only

@@ -308,30 +308,32 @@ not production-accepted.
 
 ### Case A: default no-retry timeout
 
-Submit one trial through `POST /api/v1/batches` with this decision-complete
+Submit one trial through `POST /api/v1/trials` with this decision-complete
 payload shape (replace angle-bracket placeholders; keep the timeout and retry
 values exact):
 
 ```json
 {
-  "name_suffix": "issue-1748-deadline-10s-no-retry",
-  "task_filter": {"task_ids": ["<dedicated-canary-task-id>"]},
-  "trial_config": {
+  "task_id": "<dedicated-canary-task-id>",
+  "idempotency_key": "<unique-case-A-idempotency-key>",
+  "required_worker_pool": "<authorized-exclusive-canary-pool>",
+  "config": {
     "agent_name": "terminus-2",
     "agent_model": {"provider": "<provider-type>", "name": "<model-id>"},
     "override_agent_timeout_sec": 10,
     "agent_timeout_multiplier": 1,
     "retry": {"max_attempts": 1, "retry_on": []}
   },
-  "n_per_task": 1,
   "provider_connection_id": "<dedicated-provider-connection-id>",
   "provider_model_id": "<model-id>"
 }
 ```
 
-Start the fault endpoint's hold before submission. Release it only after Loom
+Prepare the fault endpoint before submission; arm the returned trial identity
+and approve the exact durable dispatch receipt before allowing its hold.
+Release it only after Loom
 has reported the terminal trial or 40 seconds have elapsed. Then collect the
-batch/trial API response, canonical trajectory JSONL, ATIF artifact, output
+single-trial API response, canonical trajectory JSONL, ATIF artifact, output
 projection response, Gateway logs/metrics, fault-endpoint log, worker log, and
 post-run worker/pool read-back.
 
@@ -359,7 +361,7 @@ Case A passes only if all of these are true:
 
 ### Case B: explicit timeout retry
 
-Repeat with a new batch name, `retry.max_attempts=2`, and
+Repeat with a new single-trial idempotency key, `retry.max_attempts=2`, and
 `retry.retry_on=["agent_timeout"]`. Hold only attempt 1 across its 10-second
 deadline; allow attempt 2 to complete normally.
 
@@ -385,7 +387,7 @@ image_digests:
   worker: <digest>
   gateway: <digest>
   control_plane: <digest>
-batch_id: <uuid>
+batch_id: null # single-trial canary, not a batch coverage run
 trial_id: <uuid>
 step_id: <id>
 worker_id: <uuid>
@@ -393,7 +395,7 @@ worker_pool: <pool>
 task_id: <id>
 task_checksum: <sha256>
 terminus2_runtime_provenance: <event-reference>
-batch_submitted_at: <rfc3339>
+trial_submitted_at: <rfc3339>
 attempts:
   - attempt: 1
     agent_attempt_id: <supervisor-uuid>
@@ -437,6 +439,11 @@ Attach timestamps or immutable object/log references for every assertion. A
 healthy route, green CI, or matching image tag alone is not canary evidence.
 
 ### Checked-in local transport harness
+
+The separate [isolated fixture implementation](../runbooks/isolated-deadline-canary.md)
+adds OpenAI model discovery, receipt-authorized hold/reply and a bounded Job
+resource renderer. Its protected launcher and complete evidence collector are
+still pending under #1857; it is not a completed live acceptance path.
 
 `scripts/ops/issue_1748_deadline_canary.py` is a deliberately partial,
 loopback-only fault provider and evidence validator. It exercises real HTTP at
