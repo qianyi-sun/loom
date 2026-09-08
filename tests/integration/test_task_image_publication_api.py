@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,10 +11,10 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import TaskImageMaterialization, TaskImagePublicationJob
+from loom.db.schema import TaskImageBuildGrant, TaskImageMaterialization, TaskImagePublicationJob
 from loom_task_image_authority.api import create_app
 from loom_task_image_authority.contracts import TaskImageMaterializationOperationRequestV1
 from loom_task_image_authority.publication_receipts import (
@@ -31,7 +32,7 @@ from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
 )
 from tests.integration.test_task_image_publication_worker import _prepared as _prepared_worker
-from tests.integration.test_task_image_publication_worker import _worker
+from tests.integration.test_task_image_publication_worker import _wait_blocked_pids, _worker
 from tests.integration.test_task_image_registry_credentials import NOW
 from tests.integration.test_task_image_registry_credentials import (
     registry_issuer as registry_issuer,
@@ -221,6 +222,39 @@ async def test_expired_session_cannot_poll_or_replay_existing_job(
         assert job is not None and job.state == "queued"
         row = await session.get(TaskImageMaterialization, api.request.materialization_id)
         assert row is not None and row.ready_at is None and row.registry_images == {}
+
+
+@pytest.mark.parametrize("expires_while_waiting", [False, True])
+async def test_publication_lock_wait_is_bounded_and_rechecks_current_time(
+    publication_api: PublicationAPI, expires_while_waiting: bool
+) -> None:
+    api = publication_api
+    pending = None
+    try:
+        async with api.sessions() as blocker:
+            await blocker.scalar(select(TaskImageBuildGrant).with_for_update())
+            pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            pending = asyncio.create_task(
+                api.client.post(api.path("submit"), json=api.request.model_dump(mode="json"))
+            )
+            await _wait_blocked_pids(blocker, pid)
+            if expires_while_waiting:
+                api.now[0] = NOW + timedelta(seconds=55)
+                await blocker.rollback()
+            response = await asyncio.wait_for(pending, 7)
+            assert response.status_code == (403 if expires_while_waiting else 503)
+            assert len(response.content) < 128
+            # The timeout case must return while the unrelated lock is STILL
+            # held, cancel its DB wait, and roll back rather than enqueue later.
+            await blocker.rollback()
+        async with api.sessions() as session:
+            assert (
+                await session.scalar(select(func.count()).select_from(TaskImagePublicationJob)) == 0
+            )
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_real_worker_completed_poll_and_submit_replay_accept_cleared_lease(
