@@ -13,8 +13,11 @@ from loom_task_image_builder_guard.errors import GuardError
 from loom_task_image_builder_guard.publication import parse_publication_status
 
 VECTORS = json.loads(
-    (Path(__file__).resolve().parents[2] / "cmd/loom-task-image-builder-supervisor"
-     / "testdata/publication_status_vectors.json").read_text()
+    (
+        Path(__file__).resolve().parents[2]
+        / "cmd/loom-task-image-builder-supervisor"
+        / "testdata/publication_status_vectors.json"
+    ).read_text()
 )
 BINDING = {
     key: UUID(value) if key.endswith("_id") else value
@@ -50,7 +53,7 @@ def test_guard_accepts_exact_python_go_status_bytes_and_owns_them(vector: dict[s
 def test_guard_rejects_null_and_wrong_status_types(field: str, value: object) -> None:
     document = _document()
     document[field] = value
-    with pytest.raises(GuardError, match="^authority_publication_invalid$"):
+    with pytest.raises(GuardError, match=r"^authority_publication_invalid$"):
         parse_publication_status(_wire(document), **BINDING)
 
 
@@ -59,7 +62,7 @@ def test_guard_rejects_null_and_wrong_status_types(field: str, value: object) ->
 def test_guard_rejects_null_and_wrong_receipt_types(field: str, value: object) -> None:
     document = _document()
     document["receipt"][field] = value
-    with pytest.raises(GuardError, match="^authority_publication_invalid$"):
+    with pytest.raises(GuardError, match=r"^authority_publication_invalid$"):
         parse_publication_status(_wire(document), **BINDING)
 
 
@@ -86,52 +89,72 @@ def test_guard_rejects_wrong_request_binding(field: str) -> None:
         parse_publication_status(_wire(_document()), **binding)
 
 
-@pytest.mark.parametrize("field", [
-    "operation_id", "materialization_id", "attempt_id", "lease_epoch",
-    "snapshot_sha256", "candidate_set_sha256", "component_count",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "operation_id",
+        "materialization_id",
+        "attempt_id",
+        "lease_epoch",
+        "snapshot_sha256",
+        "candidate_set_sha256",
+        "component_count",
+    ],
+)
 def test_guard_rejects_receipt_internal_binding_change(field: str) -> None:
     document = _document()
     document["receipt"][field] = (
-        str(UUID(int=99)) if field.endswith("_id") else "b" * 64
-        if field.endswith("sha256") else 1
+        str(UUID(int=99)) if field.endswith("_id") else "b" * 64 if field.endswith("sha256") else 1
     )
     with pytest.raises(GuardError, match="authority_publication_invalid"):
         parse_publication_status(_wire(document), **BINDING)
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("schema", "loom.task-image-publication-status/v2"),
-    ("schema_name", "loom.task-image-publication-status/v1"),
-    ("private", "sentinel-private-registry-token"),
-    ("grant_id", str(UUID(int=0))),
-    ("grant_id", "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"),
-    ("grant_id", "000000000000000000000000000001f4"),
-    ("snapshot_sha256", "0" * 64), ("snapshot_sha256", "A" * 64),
-    ("snapshot_sha256", "a" * 64 + "\n"),
-    ("lease_epoch", 0), ("lease_epoch", -1),
-    ("lease_epoch", 9007199254740992), ("lease_epoch", 1.0),
-    ("component_count", 0), ("component_count", 129),
-    ("state", "ready"), ("failure_code", "integrity"),
-])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema", "loom.task-image-publication-status/v2"),
+        ("schema_name", "loom.task-image-publication-status/v1"),
+        ("private", "sentinel-private-registry-token"),
+        ("grant_id", str(UUID(int=0))),
+        ("grant_id", "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"),
+        ("grant_id", "000000000000000000000000000001f4"),
+        ("snapshot_sha256", "0" * 64),
+        ("snapshot_sha256", "A" * 64),
+        ("snapshot_sha256", "a" * 64 + "\n"),
+        ("lease_epoch", 0),
+        ("lease_epoch", -1),
+        ("lease_epoch", 9007199254740992),
+        ("lease_epoch", 1.0),
+        ("component_count", 0),
+        ("component_count", 129),
+        ("state", "ready"),
+        ("failure_code", "integrity"),
+    ],
+)
 def test_guard_rejects_status_schema_and_scalar_mutations(field: str, value: object) -> None:
     with pytest.raises(GuardError, match="authority_publication_invalid"):
         parse_publication_status(_wire(_document() | {field: value}), **BINDING)
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("schema", "loom.task-image-publication-receipt/v2"),
-    ("schema_name", "loom.task-image-publication-receipt/v1"),
-    ("private", "sentinel-private-registry-token"),
-    ("worker_generation", 0), ("worker_generation", 9007199254740992),
-    ("worker_generation", 1.0), ("publication_set_sha256", "0" * 64),
-    ("completed_at", "2026-09-08T12:34:56.0Z"),
-    ("completed_at", "2026-09-08T12:34:56+00:00"),
-    ("completed_at", "2026-09-08 12:34:56Z"),
-    ("completed_at", "2026-02-29T12:34:56Z"),
-    ("completed_at", "2026-09-08T12:34:60Z"),
-    ("completed_at", "0000-09-08T12:34:56Z"),
-])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema", "loom.task-image-publication-receipt/v2"),
+        ("schema_name", "loom.task-image-publication-receipt/v1"),
+        ("private", "sentinel-private-registry-token"),
+        ("worker_generation", 0),
+        ("worker_generation", 9007199254740992),
+        ("worker_generation", 1.0),
+        ("publication_set_sha256", "0" * 64),
+        ("completed_at", "2026-09-08T12:34:56.0Z"),
+        ("completed_at", "2026-09-08T12:34:56+00:00"),
+        ("completed_at", "2026-09-08 12:34:56Z"),
+        ("completed_at", "2026-02-29T12:34:56Z"),
+        ("completed_at", "2026-09-08T12:34:60Z"),
+        ("completed_at", "0000-09-08T12:34:56Z"),
+    ],
+)
 def test_guard_rejects_receipt_scalar_mutations(field: str, value: object) -> None:
     document = _document()
     document["receipt"][field] = value
@@ -158,17 +181,29 @@ def test_guard_rejects_unsafe_failure_vocabulary(code: object) -> None:
         parse_publication_status(_wire(_document("failed") | {"failure_code": code}), **BINDING)
 
 
-@pytest.mark.parametrize("payload", [
-    b"", b"{}", b"null", b"[]", b"\xff", b" " * 4097,
-    b"[" * 2000 + b"]" * 2000,
-    _wire(_document()) + b"\n",
-    _wire(_document()).replace(b'"state":', b'"state":"queued","state":'),
-    _wire(_document()).replace(b'"worker_generation":', b'"worker_generation":1,"worker_generation":'),
-    _wire(_document()).replace(b'"completed"', b'"\\u0063ompleted"'),
-    _wire(_document()).replace(b'"worker_generation":9007199254740991', b'"worker_generation":NaN'),
-    _wire(_document()).decode().encode("utf-16"),
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"{}",
+        b"null",
+        b"[]",
+        b"\xff",
+        b" " * 4097,
+        b"[" * 2000 + b"]" * 2000,
+        _wire(_document()) + b"\n",
+        _wire(_document()).replace(b'"state":', b'"state":"queued","state":'),
+        _wire(_document()).replace(
+            b'"worker_generation":', b'"worker_generation":1,"worker_generation":'
+        ),
+        _wire(_document()).replace(b'"completed"', b'"\\u0063ompleted"'),
+        _wire(_document()).replace(
+            b'"worker_generation":9007199254740991', b'"worker_generation":NaN'
+        ),
+        _wire(_document()).decode().encode("utf-16"),
+    ],
+)
 def test_guard_rejects_noncanonical_duplicate_encoding_and_oversized_bytes(payload: bytes) -> None:
-    with pytest.raises(GuardError, match="^authority_publication_invalid$") as caught:
+    with pytest.raises(GuardError, match=r"^authority_publication_invalid$") as caught:
         parse_publication_status(payload, **BINDING)
     assert "sentinel" not in str(caught.value)
