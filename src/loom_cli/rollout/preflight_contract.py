@@ -56,6 +56,32 @@ _EXTERNAL_SUPERVISOR_UNIT_DIRECTORIES = frozenset(
 )
 
 
+class DependencyExpiredError(ValueError):
+    """Bounded check identities for a refused stale-dependency execution."""
+
+    def __init__(
+        self, check_id: str, dependency_ids: tuple[str, ...], stage: StageCapability
+    ) -> None:
+        if (
+            not isinstance(check_id, str)
+            or _ID_RE.fullmatch(check_id) is None
+            or not isinstance(dependency_ids, tuple)
+            or not 1 <= len(dependency_ids) <= 64
+            or any(
+                not isinstance(item, str) or _ID_RE.fullmatch(item) is None
+                for item in dependency_ids
+            )
+            or len(set(dependency_ids)) != len(dependency_ids)
+            or not isinstance(stage, StageCapability)
+            or any(redact_rollout_text(item) != item for item in (check_id, *dependency_ids))
+        ):
+            raise ValueError("expired dependency identities are invalid")
+        self.check_id = check_id
+        self.dependency_ids = tuple(sorted(dependency_ids))
+        self.stage = stage
+        super().__init__("dependency execution expired before dependent execution")
+
+
 def external_supervisor_transition_digest(
     *,
     unit_directory: str,
@@ -215,23 +241,6 @@ class EvidenceClass(StrEnum):
 
     IDENTITY = "identity"
     OBSERVATION = "observation"
-
-
-class DependencyExpiredError(ValueError):
-    """Identify a consumer refused because its passing evidence expired."""
-
-    def __init__(
-        self,
-        check_id: str,
-        dependency_ids: tuple[str, ...],
-        stage: StageCapability,
-    ) -> None:
-        self.check_id = check_id
-        self.dependency_ids = dependency_ids
-        self.stage = stage
-        super().__init__(
-            "dependency execution expired before dependent execution: " + ",".join(dependency_ids)
-        )
 
 
 @dataclass(frozen=True, slots=True)

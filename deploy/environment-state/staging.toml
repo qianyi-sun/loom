@@ -83,6 +83,9 @@ cpu_per_slot = 2
 memory_mib_per_slot = 11500
 reserved_cpus = 1
 reserved_memory_mib = 0
+# #1801: approved cache-aware observation through a bounded candidate-bound
+# non-exclusive Slurm probe. Missing evidence remains zero new capacity.
+probe_mem_available = true
 max_concurrency_per_node = 10
 max_cpu_load_ratio = 1.0
 exclusive = false

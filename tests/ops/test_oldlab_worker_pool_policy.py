@@ -60,14 +60,19 @@ def test_oldlab_current_policy_defines_nonexclusive_container_caps() -> None:
     assert actuator["external_runner"] is True
 
 
-def test_oldlab_current_policy_opts_into_cache_aware_memory_admission_only() -> None:
+def test_staging_policies_opt_into_bounded_cache_aware_memory_admission() -> None:
     policies = {
         item["pool_name"]: item["actuator_config"]
         for item in _profile()["worker_pool_autoscaler_policies"]
     }
 
     assert policies["oldlab"]["probe_mem_available"] is True
-    assert policies["gb10"].get("probe_mem_available", False) is False
+    assert policies["gb10"]["probe_mem_available"] is True
+    assert policies["gb10"]["slurm_cluster_name"] == "trt-gb10"
+    assert policies["gb10"]["partition"] == "loom-staging"
+    assert policies["gb10"]["slurm_account"] == "loom-staging"
+    assert policies["gb10"]["qos_normal"] == "loom-staging"
+    assert not policies["gb10"].get("slurm_reservation")
 
 
 def test_oldlab_current_policy_uses_candidate_bound_shared_paths() -> None:

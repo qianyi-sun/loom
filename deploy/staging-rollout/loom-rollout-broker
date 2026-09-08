@@ -4,13 +4,13 @@ umask 077
 
 case "${SUDO_USER-}" in
   ""|*[!a-zA-Z0-9_-]*)
-    echo "error: authenticated sudo caller is unavailable" >&2
+    printf '%s\n' '{"passed":false,"assessment_complete":false,"failure_code":"preflight-authorization-rejected","stage":"authorization","diagnostic_recorded":false,"checks":[{"name":"preflight-authorization-rejected","passed":false}]}' >&2
     exit 1
     ;;
 esac
 case "${SUDO_UID-}:${SUDO_GID-}" in
   *[!0-9:]*|:*|*:|*:*:*)
-    echo "error: authenticated sudo caller ids are unavailable" >&2
+    printf '%s\n' '{"passed":false,"assessment_complete":false,"failure_code":"preflight-authorization-rejected","stage":"authorization","diagnostic_recorded":false,"checks":[{"name":"preflight-authorization-rejected","passed":false}]}' >&2
     exit 1
     ;;
 esac
