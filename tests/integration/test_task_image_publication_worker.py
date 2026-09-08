@@ -464,6 +464,8 @@ async def test_service_admission_precedes_second_durable_claim(
 async def _wait_blocked_pids(session, blocker_pid):
     async with asyncio.timeout(5):
         while True:
+            # pg_stat_activity snapshots otherwise hide newly opened renewal sessions.
+            await session.execute(text("SELECT pg_stat_clear_snapshot()"))
             pids = list(
                 await session.scalars(
                     text(
@@ -552,3 +554,36 @@ async def test_completion_wins_over_late_renewal_only_with_exact_receipt(
             await blocker.rollback()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_blocked_renewal_closes_stream_at_lease_expiry_not_database_timeout(
+    registry_authority_session, tls_registry, token_key
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    next(
+        response for path, response in tls_registry.routes.items() if "/manifests/" in path
+    ).wait_for_peer_close_before_response = True
+    worker = _worker(
+        registry_authority_session,
+        tls_registry,
+        values,
+        lease_seconds=0.5,
+        renewal_interval_seconds=0.08,
+        database_timeout_seconds=5,
+    )
+    task = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
+    try:
+        await asyncio.wait_for(tls_registry.request_received.wait(), 5)
+        async with registry_authority_session() as blocker:
+            await blocker.scalar(select(TaskImagePublicationJob).with_for_update())
+            pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            await _wait_blocked_pids(blocker, pid)
+            # The lease is .5 s, not the 5 s DB timeout. Wait for actual socket closure.
+            await asyncio.wait_for(tls_registry.peer_closed.wait(), 1.5)
+            await blocker.rollback()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(task, 5)
+        assert values[2].closed.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

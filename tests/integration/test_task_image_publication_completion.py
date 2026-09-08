@@ -27,13 +27,20 @@ from loom.db.schema import (
     TaskImagePublicationState,
     TaskImageRegistryCredentialGeneration,
 )
-from loom_task_image_authority.contracts import TaskImagePublicationCandidateRequestV2
-from loom_task_image_authority.materializations import claim_session_materialization
+from loom_task_image_authority.contracts import (
+    TaskImagePublicationCandidateRequestV2,
+    TaskImageSessionRenewalV1,
+)
+from loom_task_image_authority.materializations import (
+    claim_session_materialization,
+    heartbeat_session_materialization,
+)
 from loom_task_image_authority.publication_contracts import (
     PublicationEnvelope,
     PublicationUnsignedInput,
     canonical_publication_bytes,
 )
+from loom_task_image_authority.publication_receipts import canonical_receipt_bytes
 from loom_task_image_authority.publication_signing import (
     DistributedKeysetSnapshot,
     PublicationKeyRecord,
@@ -49,10 +56,15 @@ from loom_task_image_authority.registry_credentials import (
     issue_session_registry_credential,
     record_session_publication_candidate_v2,
 )
+from loom_task_image_authority.store import (
+    authorize_task_image_build_session,
+    renew_task_image_build_session,
+)
 from tests.integration.test_task_image_authority_materializations import (
     _active_authorization,
     _queued_materialization,
 )
+from tests.integration.test_task_image_projection_store import _attestation
 from tests.integration.test_task_image_publication_jobs import _blocked
 from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
@@ -172,7 +184,7 @@ async def _queued_job(
     )
 
 
-async def _signed_job(session, issuer, **options):
+async def _signed_job(session, issuer, *, worker_lease_seconds=60, binding_changes=None, **options):
     job = await _queued_job(session, issuer, **options)
     owner = uuid4()
     job = await claim_publication_job(
@@ -180,6 +192,7 @@ async def _signed_job(session, issuer, **options):
         operation_id=UUID(job.operation_id),
         owner_id=owner,
         clock=lambda: NOW + timedelta(seconds=14),
+        lease_seconds=worker_lease_seconds,
     )
     private = Ed25519PrivateKey.generate()
     key = PublicationKeyRecord("publication-1", private.public_key().public_bytes_raw(), NOW)
@@ -195,12 +208,13 @@ async def _signed_job(session, issuer, **options):
     await session.flush()
     distribution = DistributedKeysetSnapshot(1, 0, (key.key_id,), NOW, NOW + timedelta(minutes=10))
     publications = tuple(
-        _sign(job, component, private, key, distribution) for component in job.snapshot.components
+        _sign(job, component, private, key, distribution, binding_changes)
+        for component in job.snapshot.components
     )
     return job, owner, publications, distribution
 
 
-def _sign(job, component, private, key, distribution):
+def _sign(job, component, private, key, distribution, binding_changes=None):
     values = job.snapshot.model_dump(
         mode="json", by_alias=True, exclude={"components", "builder_id"}
     )
@@ -214,6 +228,7 @@ def _sign(job, component, private, key, distribution):
         layers=(),
         observed_base_digests=component.candidate.base_resolution.observed_base_digests,
     )
+    values.update(binding_changes or {})
     unsigned = PublicationUnsignedInput.model_validate(values)
     statement = prepare_publication_statement(
         unsigned,
@@ -300,7 +315,9 @@ async def test_post_flush_expiry_rolls_back_everything(
     registry_authority_session, registry_issuer, stage
 ):
     async with registry_authority_session() as session:
-        values = await _signed_job(session, registry_issuer, names=("task", "sidecar:db"))
+        values = await _signed_job(
+            session, registry_issuer, names=("task", "sidecar:db"), worker_lease_seconds=5
+        )
         await session.execute(
             text("""CREATE FUNCTION completion_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN PERFORM pg_advisory_xact_lock(4421); RETURN NEW; END $$""")
@@ -356,7 +373,7 @@ async def test_completion_expiry_after_real_lock_wait(
     registry_authority_session, registry_issuer, model
 ):
     async with registry_authority_session() as setup:
-        values = await _signed_job(setup, registry_issuer)
+        values = await _signed_job(setup, registry_issuer, worker_lease_seconds=5)
         await setup.commit()
     now = NOW + timedelta(seconds=14)
     async with registry_authority_session() as blocker, registry_authority_session() as worker:
@@ -592,9 +609,146 @@ async def test_atomic_completion_preserves_exact_microseconds_and_historical_rep
         assert (
             await c.replay_completed_publication(session, operation_id=job.operation_id) == receipt
         )
+
+
+async def test_valid_successor_and_heartbeat_during_lock_wait_complete_past_original_lease(
+    registry_authority_session, registry_issuer
+):
+    context = {}
+    async with registry_authority_session() as session:
+        values = await _signed_job(session, registry_issuer, lease_seconds=5, context=context)
+        await session.commit()
+    job = values[0]
+    async with registry_authority_session() as blocker, registry_authority_session() as worker:
+        await blocker.scalar(select(TaskImageBuildGrant).with_for_update())
+        pid = await worker.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(_complete(worker, values, instant=NOW + timedelta(seconds=16)))
+        try:
+            await _blocked(blocker, pid, task)
+            original = context["build_session"]
+            attestation = _attestation(context["proof"], generation=2)
+            successor = await renew_task_image_build_session(
+                blocker,
+                principal=context["principal"],
+                request=TaskImageSessionRenewalV1(
+                    renewal_id=uuid4(),
+                    grant_id=UUID(job.snapshot.grant_id),
+                    session_id=original.session_id,
+                    session_generation=1,
+                    session_token=original.session_token,
+                    attestation=attestation,
+                    observed_at=attestation.issued_at,
+                ),
+                now=NOW + timedelta(seconds=14),
+                secret_store=context["secrets"],
+                session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+                session_id_factory=uuid4,
+            )
+            current = await authorize_task_image_build_session(
+                blocker,
+                grant_id=UUID(job.snapshot.grant_id),
+                session_id=successor.session_id,
+                session_generation=2,
+                raw_session_token=successor.session_token,
+                now=NOW + timedelta(seconds=14),
+            )
+            assert current.attestation_sha256 != job.snapshot.containment_attestation_sha256
+            await heartbeat_session_materialization(
+                blocker,
+                authorization=current,
+                materialization_id=UUID(job.snapshot.materialization_id),
+                attempt_id=UUID(job.snapshot.attempt_id),
+                lease_epoch=job.snapshot.lease_epoch,
+                operation_id=uuid4(),
+                now=NOW + timedelta(seconds=14.5),
+            )
+            await blocker.commit()
+            receipt = await task
+            await worker.commit()
+            assert receipt.snapshot_sha256 == job.snapshot_sha256
+        finally:
+            await blocker.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("change", ["receipt", "signature", "candidate"])
+async def test_historical_replay_revalidates_immutable_evidence(
+    registry_authority_session, registry_issuer, change
+):
+    async with registry_authority_session() as session:
+        values = await _signed_job(session, registry_issuer)
+        await session.commit()
+        receipt = await _complete(session, values)
+        await session.commit()
+        # Fault injection only in the disposable DB: ordinary writes remain trigger-fenced.
+        table = {
+            "receipt": "task_image_publication_jobs",
+            "signature": "task_image_publication_envelopes",
+            "candidate": "task_image_publication_candidates",
+        }[change]
+        await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+        if change == "receipt":
+            encoded = canonical_receipt_bytes(
+                receipt.model_copy(update={"publication_set_sha256": "e" * 64})
+            )
+            await session.execute(
+                update(TaskImagePublicationJob).values(
+                    canonical_receipt=encoded, receipt_sha256=hashlib.sha256(encoded).hexdigest()
+                )
+            )
+        elif change == "signature":
+            await session.execute(update(TaskImagePublicationEnvelope).values(signature="A" * 86))
+        else:
+            # The set's IDs remain unchanged; identity-only hashing must not hide evidence drift.
+            await session.execute(
+                update(TaskImagePublicationCandidate).values(oci_file_sha256="e" * 64)
+            )
+        await session.commit()
+        with pytest.raises((RuntimeError, ValueError)):
+            await completion().replay_completed_publication(
+                session, operation_id=values[0].operation_id
+            )
+
+
+async def test_completed_receipt_constraints_and_terminal_retention(
+    registry_authority_session, registry_issuer
+):
+    async with registry_authority_session() as session:
+        values = await _signed_job(session, registry_issuer)
+        await session.commit()
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                update(TaskImagePublicationJob).values(
+                    state="completed", worker_id=None, worker_expires_at=None
+                )
+            )
+        await session.rollback()
+        receipt = await _complete(session, values)
+        await session.commit()
+        for changes in (
+            {"completed_at": NOW + timedelta(seconds=15)},
+            {"canonical_receipt": b"{}"},
+            {"receipt_sha256": "e" * 64},
+            {"state": "queued"},
+        ):
+            with pytest.raises(IntegrityError):
+                await session.execute(update(TaskImagePublicationJob).values(**changes))
+            await session.rollback()
+        assert (
+            await completion().replay_completed_publication(
+                session, operation_id=values[0].operation_id
+            )
+            == receipt
+        )
         # Subsequent materialization history must not overwrite the immutable job timestamp.
+        row = (await session.scalars(select(TaskImageMaterialization))).one()
         row.ready_at = NOW + timedelta(days=1)
         await session.commit()
         assert (
-            await c.replay_completed_publication(session, operation_id=job.operation_id) == receipt
+            await completion().replay_completed_publication(
+                session, operation_id=values[0].operation_id
+            )
+            == receipt
         )
