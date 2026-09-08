@@ -375,8 +375,10 @@ service/KMS implementation and its authenticated transport must be available
 and verified before composing the publication worker in production.
 
 The publication migration can downgrade only an empty, inactive installation:
-no keys or envelopes and zero keyset/revocation counters. A state-first locked
-check precedes any table removal. Used publication authority and its audit
+no keys, envelopes, jobs, registry credentials or candidates, and zero
+keyset/revocation counters. A state-first, nonwaiting table-lock set precedes
+any removal; a busy database refuses the downgrade and releases acquired locks
+instead of risking deadlock with normal publication. Used authority and audit
 history are retained during rollback; operational rollback is not schema reset.
 
 ## Failure, retention and compatibility
@@ -410,6 +412,16 @@ delete. Those guarantees belong to the pending locked retirement and host
 maintenance composition. Claim replay shares materialization-before-attempt
 locking with publication: its initial identity lookup is non-authoritative,
 and both rows are freshly reloaded and revalidated after acquiring the locks.
+
+The unpublished publication migration adds database immutability for retained
+credentials and candidates, including rows issued before the upgrade. Statement
+triggers reject UPDATE, DELETE and TRUNCATE, including no-op updates; issuance
+and read-only replay remain available. This protects the first-credential/no-
+candidate inventory gap without changing published migration `0131` or rewriting
+historical evidence. Application validation remains necessary; database-owner
+fault injection is not prevented by triggers that such an owner can disable.
+Retirement transactions still must load the complete inventory under their
+shared fence and separately prove references and registry quiescence.
 
 ## Completion and subsequent activation
 

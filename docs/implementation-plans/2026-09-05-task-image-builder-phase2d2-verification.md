@@ -265,8 +265,21 @@ An earlier 53-case migrated inventory/publication run passed before the narrow
 rotation/time-order relaxations. Claim replay's parent/child inversion is fixed
 in `85e63ccd2`, with three real PostgreSQL lock/rebinding/cache cases passing and
 independent review. These are prerequisites, not completed retention: database
-immutability, transactional reference/retirement fencing, authoritative Phase 1
+immutability composition, transactional reference/retirement fencing, authoritative Phase 1
 ownership separation and maintained registry quiescence remain separate gates.
+
+The database audit increment now prevents UPDATE/DELETE/TRUNCATE of credential
+and candidate records without changing published `0131`. Existing audit survives
+upgrade; used audit or busy tables refuse downgrade without blocking publication.
+Independent review found and cleared a downgrade table-lock inversion using a
+real contention regression and one nonwaiting lock set. Verification passed:
+11 final durability/signing-migration checks, 131 credential/candidate/publication/
+API cases, 14 Go/Python composed/inventory cases and 46 schema/deployment/package
+checks; Ruff and strict migration mypy passed. The 131-case run was collected
+before the added busy-downgrade regression, which is included in the final 11.
+Tests isolate committed audit in disposable databases; only explicit corruption
+tests temporarily disable exact guards. Transactional retirement/reference
+fencing and registry maintenance remain unimplemented, and activation stays closed.
 
 ## Task 7: Review, protected merge and continuation
 
