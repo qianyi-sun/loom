@@ -42,6 +42,8 @@ from .protected_execution_prerequisite_store import (
     ProtectedExecutionPrerequisiteStore,
 )
 
+_SUPPORTED_POST_APPLY_ATTESTED_DEPENDENCIES = frozenset({"runner.install"})
+
 
 class FinalGateRehearsalStore(Protocol):
     def read_preflight_rehearsal(self, request_id: str) -> PreflightRehearsal: ...
@@ -62,6 +64,7 @@ class FinalGateActionSource:
     now: Callable[[], datetime]
     post_apply_plan_factory: Callable[[CandidateBinding, int], CandidatePreflightPlan]
     execution_prerequisite_store: ProtectedExecutionPrerequisiteStore | None = None
+    post_apply_attested_dependencies: frozenset[str] = frozenset()
     executable: Path = FINAL_GATE_HELPER_PATH
     executable_owner_uid: int = 0
     post_apply_drift_attempts: int = 13
@@ -77,6 +80,9 @@ class FinalGateActionSource:
             or not callable(self.read_mutation_epoch)
             or not callable(self.now)
             or not callable(self.post_apply_plan_factory)
+            or not isinstance(self.post_apply_attested_dependencies, frozenset)
+            or not self.post_apply_attested_dependencies
+            <= _SUPPORTED_POST_APPLY_ATTESTED_DEPENDENCIES
             or not 1 <= self.post_apply_drift_attempts <= 61
             or not 0 < self.post_apply_drift_retry_interval_seconds <= 60
             or not callable(self.sleep)
@@ -201,6 +207,7 @@ class FinalGateActionSource:
                         plan=post_apply_plan,
                         current_mutation_epoch=current_mutation_epoch,
                         now=self.now(),
+                        attested_dependencies=self.post_apply_attested_dependencies,
                     )
                 # This validation is entirely read-only and blocks every later
                 # final gate.  Cross-host read-after-write windows can surface

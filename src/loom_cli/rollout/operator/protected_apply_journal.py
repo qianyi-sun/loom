@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_gate_plan import FinalGatePlan
@@ -45,6 +45,7 @@ _RECONCILIATION_COMPONENT_DIRECTORY_RE = re.compile(r"^\d{2}-external-supervisor
 _RECONCILIATION_OUTCOME_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
 _FAILURE_DIAGNOSTIC_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _RENAME_NOREPLACE = 1
@@ -115,6 +116,55 @@ class ComponentObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class ComponentTerminalRecoveryAuthority:
+    schema_version: int
+    component_id: str
+    source_authority_incarnation: str
+    target_authority_incarnation: str
+    authority_digest: str
+
+    def __post_init__(self) -> None:
+        payload = {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "source_authority_incarnation": self.source_authority_incarnation,
+            "target_authority_incarnation": self.target_authority_incarnation,
+        }
+        if (
+            self.schema_version != 1
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or not _canonical_nonzero_uuid(self.source_authority_incarnation)
+            or not _canonical_nonzero_uuid(self.target_authority_incarnation)
+            or self.source_authority_incarnation == self.target_authority_incarnation
+            or _SHA256_RE.fullmatch(self.authority_digest) is None
+            or _hash_json(payload) != self.authority_digest
+        ):
+            raise ValueError("protected component terminal recovery authority is invalid")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        component_id: str,
+        source_authority_incarnation: str,
+        target_authority_incarnation: str,
+    ) -> ComponentTerminalRecoveryAuthority:
+        payload = {
+            "schema_version": 1,
+            "component_id": component_id,
+            "source_authority_incarnation": source_authority_incarnation,
+            "target_authority_incarnation": target_authority_incarnation,
+        }
+        return cls(
+            schema_version=1,
+            component_id=component_id,
+            source_authority_incarnation=source_authority_incarnation,
+            target_authority_incarnation=target_authority_incarnation,
+            authority_digest=_hash_json(payload),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProtectedApplyComponent:
     component_id: str
     implementation_digest: str
@@ -123,6 +173,13 @@ class ProtectedApplyComponent:
     apply: Callable[[FinalGatePlan], None]
     preapply_group: str | None = None
     reconcile_before_apply: bool = False
+    terminal_recovery_authority: (
+        Callable[
+            [FinalGatePlan, ComponentTerminal, ComponentObservation],
+            ComponentTerminalRecoveryAuthority | None,
+        ]
+        | None
+    ) = None
 
     def __post_init__(self) -> None:
         if (
@@ -132,6 +189,10 @@ class ProtectedApplyComponent:
             or (
                 self.preapply_group is not None
                 and _COMPONENT_RE.fullmatch(self.preapply_group) is None
+            )
+            or (
+                self.terminal_recovery_authority is not None
+                and not callable(self.terminal_recovery_authority)
             )
             or self.reconcile_before_apply
             != (self.component_id == "external-supervisor-reconciliation")
@@ -566,6 +627,225 @@ class ComponentTerminal:
         return terminal
 
 
+@dataclass(frozen=True, slots=True)
+class ComponentTerminalRecoveryIntent:
+    schema_version: int
+    request_id: str
+    attempt_number: int
+    plan_digest: str
+    candidate_sha: str
+    candidate_tree: str
+    component_id: str
+    ordinal: int
+    component_intent_digest: str
+    prior_terminal_digest: str
+    prior_evidence_digest: str
+    source_authority_incarnation: str
+    target_authority_incarnation: str
+    observed_epoch: int
+    authority_digest: str
+    recovery_intent_digest: str
+
+    def __post_init__(self) -> None:
+        validate_safe_identifier(self.request_id, "request_id")
+        if (
+            self.schema_version != 1
+            or type(self.attempt_number) is not int
+            or self.attempt_number < 1
+            or _SHA256_RE.fullmatch(self.plan_digest) is None
+            or _GIT_SHA_RE.fullmatch(self.candidate_sha) is None
+            or _GIT_SHA_RE.fullmatch(self.candidate_tree) is None
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or type(self.ordinal) is not int
+            or not 0 <= self.ordinal < 32
+            or any(
+                _SHA256_RE.fullmatch(value) is None
+                for value in (
+                    self.component_intent_digest,
+                    self.prior_terminal_digest,
+                    self.prior_evidence_digest,
+                    self.authority_digest,
+                    self.recovery_intent_digest,
+                )
+            )
+            or not _canonical_nonzero_uuid(self.source_authority_incarnation)
+            or not _canonical_nonzero_uuid(self.target_authority_incarnation)
+            or self.source_authority_incarnation == self.target_authority_incarnation
+            or type(self.observed_epoch) is not int
+            or self.observed_epoch < 0
+        ):
+            raise ValueError("protected component terminal recovery intent is invalid")
+        try:
+            authority = ComponentTerminalRecoveryAuthority.build(
+                component_id=self.component_id,
+                source_authority_incarnation=self.source_authority_incarnation,
+                target_authority_incarnation=self.target_authority_incarnation,
+            )
+        except ValueError as exc:
+            raise ValueError("protected component terminal recovery intent is invalid") from exc
+        if authority.authority_digest != self.authority_digest:
+            raise ValueError("protected component terminal recovery intent is invalid")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        plan: FinalGatePlan,
+        intent: ComponentIntent,
+        terminal: ComponentTerminal,
+        authority: ComponentTerminalRecoveryAuthority,
+    ) -> ComponentTerminalRecoveryIntent:
+        if (
+            intent.request_id != plan.request_id
+            or intent.attempt_number != plan.attempt_number
+            or intent.plan_digest != plan.plan_digest
+            or terminal.intent_digest != intent.intent_digest
+            or terminal.component_id != intent.component_id
+            or terminal.observed_epoch != plan.starting_mutation_epoch + 1
+            or authority.component_id != intent.component_id
+            or authority.target_authority_incarnation != plan.manager_authority_incarnation
+        ):
+            raise ValueError("protected component terminal recovery identity is invalid")
+        payload = {
+            "schema_version": 1,
+            "request_id": plan.request_id,
+            "attempt_number": plan.attempt_number,
+            "plan_digest": plan.plan_digest,
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "component_id": intent.component_id,
+            "ordinal": intent.ordinal,
+            "component_intent_digest": intent.intent_digest,
+            "prior_terminal_digest": terminal.terminal_digest,
+            "prior_evidence_digest": terminal.evidence_digest,
+            "source_authority_incarnation": authority.source_authority_incarnation,
+            "target_authority_incarnation": authority.target_authority_incarnation,
+            "observed_epoch": terminal.observed_epoch,
+            "authority_digest": authority.authority_digest,
+        }
+        return cls.from_dict({**payload, "recovery_intent_digest": _hash_json(payload)})
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ComponentTerminalRecoveryIntent:
+        if set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("protected component terminal recovery intent fields are invalid")
+        recovery_intent = cls(
+            schema_version=_integer(value, "schema_version"),
+            request_id=_string(value, "request_id"),
+            attempt_number=_integer(value, "attempt_number"),
+            plan_digest=_string(value, "plan_digest"),
+            candidate_sha=_string(value, "candidate_sha"),
+            candidate_tree=_string(value, "candidate_tree"),
+            component_id=_string(value, "component_id"),
+            ordinal=_integer(value, "ordinal"),
+            component_intent_digest=_string(value, "component_intent_digest"),
+            prior_terminal_digest=_string(value, "prior_terminal_digest"),
+            prior_evidence_digest=_string(value, "prior_evidence_digest"),
+            source_authority_incarnation=_string(value, "source_authority_incarnation"),
+            target_authority_incarnation=_string(value, "target_authority_incarnation"),
+            observed_epoch=_integer(value, "observed_epoch"),
+            authority_digest=_string(value, "authority_digest"),
+            recovery_intent_digest=_string(value, "recovery_intent_digest"),
+        )
+        payload = {
+            key: item
+            for key, item in recovery_intent.to_dict().items()
+            if key != "recovery_intent_digest"
+        }
+        if _hash_json(payload) != recovery_intent.recovery_intent_digest:
+            raise ValueError("protected component terminal recovery intent content drifted")
+        return recovery_intent
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentTerminalRecovery:
+    schema_version: int
+    recovery_intent_digest: str
+    component_id: str
+    evidence_digest: str
+    observed_epoch: int
+    applied: bool
+    effective_terminal_digest: str
+    recovery_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or any(
+                _SHA256_RE.fullmatch(value) is None
+                for value in (
+                    self.recovery_intent_digest,
+                    self.evidence_digest,
+                    self.effective_terminal_digest,
+                    self.recovery_digest,
+                )
+            )
+            or type(self.observed_epoch) is not int
+            or self.observed_epoch < 0
+            or type(self.applied) is not bool
+        ):
+            raise ValueError("protected component terminal recovery is invalid")
+
+    @classmethod
+    def build(
+        cls,
+        recovery_intent: ComponentTerminalRecoveryIntent,
+        terminal: ComponentTerminal,
+    ) -> ComponentTerminalRecovery:
+        payload = {
+            "schema_version": 1,
+            "recovery_intent_digest": recovery_intent.recovery_intent_digest,
+            "component_id": recovery_intent.component_id,
+            "evidence_digest": terminal.evidence_digest,
+            "observed_epoch": terminal.observed_epoch,
+            "applied": terminal.applied,
+            "effective_terminal_digest": terminal.terminal_digest,
+        }
+        return cls.from_dict({**payload, "recovery_digest": _hash_json(payload)})
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ComponentTerminalRecovery:
+        if set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("protected component terminal recovery fields are invalid")
+        recovery = cls(
+            schema_version=_integer(value, "schema_version"),
+            recovery_intent_digest=_string(value, "recovery_intent_digest"),
+            component_id=_string(value, "component_id"),
+            evidence_digest=_string(value, "evidence_digest"),
+            observed_epoch=_integer(value, "observed_epoch"),
+            applied=_boolean(value, "applied"),
+            effective_terminal_digest=_string(value, "effective_terminal_digest"),
+            recovery_digest=_string(value, "recovery_digest"),
+        )
+        payload = {
+            key: item for key, item in recovery.to_dict().items() if key != "recovery_digest"
+        }
+        if _hash_json(payload) != recovery.recovery_digest:
+            raise ValueError("protected component terminal recovery content drifted")
+        return recovery
+
+    def effective_terminal(self, intent: ComponentIntent) -> ComponentTerminal:
+        terminal = ComponentTerminal.build(
+            intent,
+            ComponentObservation(
+                state=ComponentState.EXACT,
+                evidence_digest=self.evidence_digest,
+                observed_epoch=self.observed_epoch,
+            ),
+            applied=self.applied,
+        )
+        if terminal.terminal_digest != self.effective_terminal_digest:
+            raise ValueError("protected component effective terminal content drifted")
+        return terminal
+
+
 class ProtectedApplyJournal:
     """Serialize and recover one exact ordered protected component chain."""
 
@@ -801,8 +1081,14 @@ class ProtectedApplyJournal:
                 or observed.evidence_digest != terminal.evidence_digest
                 or observed.observed_epoch != terminal.observed_epoch
             ):
-                raise ProtectedApplyJournalError(
-                    f"protected component {component.component_id} terminal state drifted"
+                return self._recover_terminal_authority_forward(
+                    component_root=component_root,
+                    component=component,
+                    ordinal=ordinal,
+                    plan=plan,
+                    intent=intent,
+                    prior_terminal=terminal,
+                    observed=observed,
                 )
             if component.reconcile_before_apply:
                 self._append_reconciliation_outcome(
@@ -872,6 +1158,134 @@ class ProtectedApplyJournal:
             )
         else:
             self._publish_or_match(terminal_path, terminal.to_dict())
+        return terminal
+
+    def _recover_terminal_authority_forward(
+        self,
+        *,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        ordinal: int,
+        plan: FinalGatePlan,
+        intent: ComponentIntent,
+        prior_terminal: ComponentTerminal,
+        observed: ComponentObservation,
+    ) -> ComponentTerminal:
+        authority_resolver = component.terminal_recovery_authority
+        recovery_intent_path = component_root / "terminal-recovery-intent.json"
+        recovery_path = component_root / "terminal-recovery.json"
+        authority = (
+            None
+            if authority_resolver is None
+            else authority_resolver(plan, prior_terminal, observed)
+        )
+        if (
+            authority is None
+            or not isinstance(authority, ComponentTerminalRecoveryAuthority)
+            or authority.component_id != component.component_id
+            or prior_terminal.observed_epoch != plan.starting_mutation_epoch + 1
+        ):
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal state drifted"
+            )
+        recovery_intent = ComponentTerminalRecoveryIntent.build(
+            plan=plan,
+            intent=intent,
+            terminal=prior_terminal,
+            authority=authority,
+        )
+        try:
+            self._read(recovery_intent_path)
+        except FileNotFoundError:
+            recovery_intent_preexisted = False
+        else:
+            recovery_intent_preexisted = True
+
+        if not recovery_intent_preexisted:
+            try:
+                self._read(recovery_path)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ProtectedApplyJournalError(
+                    "protected component terminal recovery intent is missing"
+                )
+        if not recovery_intent_preexisted and observed.state is not ComponentState.READY:
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal state drifted"
+            )
+        self._publish_or_match(recovery_intent_path, recovery_intent.to_dict())
+
+        try:
+            recovery = ComponentTerminalRecovery.from_dict(self._read(recovery_path))
+        except FileNotFoundError:
+            recovery = None
+        except ValueError as exc:
+            raise ProtectedApplyJournalError(
+                "protected component terminal recovery is invalid"
+            ) from exc
+        if recovery is not None:
+            if (
+                not recovery_intent_preexisted
+                or recovery.recovery_intent_digest != recovery_intent.recovery_intent_digest
+                or recovery.component_id != component.component_id
+            ):
+                raise ProtectedApplyJournalError(
+                    "protected component terminal recovery identity drifted"
+                )
+            try:
+                terminal = recovery.effective_terminal(intent)
+            except ValueError as exc:
+                raise ProtectedApplyJournalError(
+                    "protected component terminal recovery is invalid"
+                ) from exc
+            if (
+                observed.state is not ComponentState.EXACT
+                or observed.evidence_digest != terminal.evidence_digest
+                or observed.observed_epoch != terminal.observed_epoch
+            ):
+                raise ProtectedApplyJournalError(
+                    f"protected component {component.component_id} recovered terminal state drifted"
+                )
+            return terminal
+
+        applied = False
+        if observed.state is ComponentState.READY:
+            self._apply_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+            )
+            applied = True
+            after = self._classify_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+                failure_code="post-classify-failed",
+            )
+        elif recovery_intent_preexisted and observed.state is ComponentState.EXACT:
+            after = observed
+        else:
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal recovery state drifted"
+            )
+        if after.state is not ComponentState.EXACT:
+            diagnostic = f"component classified {after.state.value} after terminal recovery"
+            self._publish_failure_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                failure_code="did-not-converge",
+                diagnostic=diagnostic,
+            )
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal recovery did not converge"
+            )
+        terminal = ComponentTerminal.build(intent, after, applied=applied)
+        recovery = ComponentTerminalRecovery.build(recovery_intent, terminal)
+        self._publish_or_match(recovery_path, recovery.to_dict())
         return terminal
 
     def _apply_with_diagnostic(
@@ -1481,6 +1895,14 @@ def _boolean(value: Mapping[str, object], key: str) -> bool:
     return item
 
 
+def _canonical_nonzero_uuid(value: str) -> bool:
+    try:
+        parsed = UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return parsed.int != 0 and str(parsed) == value
+
+
 def _write_all(fd: int, payload: bytes) -> None:
     offset = 0
     while offset < len(payload):
@@ -1736,6 +2158,9 @@ __all__ = [
     "ComponentObservation",
     "ComponentState",
     "ComponentTerminal",
+    "ComponentTerminalRecovery",
+    "ComponentTerminalRecoveryAuthority",
+    "ComponentTerminalRecoveryIntent",
     "ProtectedApplyComponent",
     "ProtectedApplyJournal",
     "ProtectedApplyJournalError",

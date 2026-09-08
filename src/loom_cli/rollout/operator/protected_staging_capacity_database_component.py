@@ -66,6 +66,7 @@ _PEER_PSQL_COMMAND = (
     "-ceu",
     "exec psql -U postgres -d loom -qAtX -v ON_ERROR_STOP=1",
 )
+_LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION = UUID("558afea6-2a37-55a1-9f7c-3399695da966")
 _REVISION_RE = re.compile(r"^guard_([0-9]{4})$")
 _REVISION_PRESENCE_SQL = single_line_sql(
     """
@@ -78,6 +79,210 @@ _REVISION_PRESENCE_SQL = single_line_sql(
 _REVISION_SQL = single_line_sql(
     "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
 )
+_AUTHORITY_REBIND_ACTIVITY_TABLES = (
+    "abandoned_admission_plans",
+    "atomic_trial_submissions",
+    "attempt_lifecycle_events",
+    "attempt_lifecycle_heads",
+    "attempt_lifecycle_projection_blockers",
+    "attempt_lifecycle_projection_resolutions",
+    "demand_observations",
+    "executable_admission_events",
+    "executable_claim_leases",
+    "executable_claim_state",
+    "executable_claim_terminal_events",
+    "executable_release_publication_events",
+    "executable_release_publication_state",
+    "executable_terminal_inventory_evidence",
+    "legacy_compatibility_freezes",
+    "legacy_compatibility_preparations",
+    "legacy_writer_cursors",
+    "never_converged_admission_plans",
+    "prepared_admission_plans",
+    "prepared_bootstrap_bindings",
+    "prepared_placement_allowances",
+    "prepared_worker_bindings",
+    "prepared_worker_shapes",
+    "protected_claim_leases",
+    "protected_executable_bootstrap_registrations",
+    "protected_release_acknowledgements",
+    "protected_runtime_trial_readiness",
+    "protected_runtime_trial_submissions",
+    "trial_attempts",
+    "trial_requirements",
+)
+_AUTHORITY_REBIND_ACTIVITY_UNION = " UNION ALL ".join(
+    f"SELECT 1 AS present FROM loom_capacity_guard.{table_name}"
+    for table_name in _AUTHORITY_REBIND_ACTIVITY_TABLES
+)
+_AUTHORITY_REBIND_LOCK_TABLES = tuple(
+    sorted(
+        {
+            *_AUTHORITY_REBIND_ACTIVITY_TABLES,
+            "agent_registrations",
+            "agent_reporter_state",
+            "agent_runtime_authority",
+            "audit_events",
+            "authority_state",
+            "capacity_guard_alembic_version",
+            "claim_guard_activation",
+            "executable_admission_authority",
+            "executable_observer_authority",
+            "staging_worker_runtime_authority",
+        }
+    )
+)
+_AUTHORITY_REBIND_LOCK_SQL = ", ".join(
+    f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
+)
+_AUTHORITY_REBIND_TRIGGER_PREDICATE = """
+    (
+      SELECT count(*) = 6
+        AND bool_and(
+          trigger.tgenabled = 'O'
+          AND trigger.tgnargs = 0
+          AND trigger.tgqual IS NULL
+          AND function_namespace.nspname = 'loom_capacity_guard'
+          AND (
+            (relation.relname = 'authority_state'
+             AND trigger.tgname = 'authority_state_monotonic_row'
+             AND function.proname = 'enforce_authority_reconfiguration'
+             AND trigger.tgtype = 27)
+            OR (relation.relname = 'authority_state'
+                AND trigger.tgname = 'authority_state_append_only_truncate'
+                AND function.proname = 'reject_append_only_mutation'
+                AND trigger.tgtype = 34)
+            OR (relation.relname = 'agent_registrations'
+                AND trigger.tgname = 'agent_registrations_monotonic_row'
+                AND function.proname = 'enforce_agent_registration_reconfiguration'
+                AND trigger.tgtype = 27)
+            OR (relation.relname = 'agent_registrations'
+                AND trigger.tgname = 'agent_registrations_append_only_truncate'
+                AND function.proname = 'reject_append_only_mutation'
+                AND trigger.tgtype = 34)
+            OR (relation.relname = 'audit_events'
+                AND trigger.tgname = 'audit_events_append_only_row'
+                AND function.proname = 'reject_append_only_mutation'
+                AND trigger.tgtype = 27)
+            OR (relation.relname = 'audit_events'
+                AND trigger.tgname = 'audit_events_append_only_truncate'
+                AND function.proname = 'reject_append_only_mutation'
+                AND trigger.tgtype = 34)
+          )
+        )
+      FROM pg_catalog.pg_trigger AS trigger
+      JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+      JOIN pg_catalog.pg_namespace AS relation_namespace
+        ON relation_namespace.oid = relation.relnamespace
+      JOIN pg_catalog.pg_proc AS function ON function.oid = trigger.tgfoid
+      JOIN pg_catalog.pg_namespace AS function_namespace
+        ON function_namespace.oid = function.pronamespace
+      WHERE relation_namespace.nspname = 'loom_capacity_guard'
+        AND relation.relname IN ('authority_state', 'agent_registrations', 'audit_events')
+        AND NOT trigger.tgisinternal
+    )
+"""
+_AUTHORITY_REBIND_TRIGGER_SQL = single_line_sql(
+    f"""
+    SELECT CASE WHEN {_AUTHORITY_REBIND_TRIGGER_PREDICATE}
+      THEN 'exact' ELSE 'drifted' END AS authority_rebind_trigger_state
+    """
+)
+_AUTHORITY_REBIND_AUDIT_AGGREGATE = """
+    COALESCE(
+      (
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'event_id', event_id,
+            'event_type', event_type,
+            'trial_id', trial_id,
+            'protected_attempt_id', protected_attempt_id,
+            'payload', payload,
+            'payload_digest', payload_digest
+          ) ORDER BY event_id
+        )
+        FROM loom_capacity_guard.audit_events
+      ),
+      '[]'::jsonb
+    )
+"""
+_AUTHORITY_REBIND_AUDIT_HISTORY_SQL = single_line_sql(
+    f"SELECT {_AUTHORITY_REBIND_AUDIT_AGGREGATE} AS authority_rebind_audit_history"
+)
+_AUTHORITY_BINDING_AUDIT_MODEL_TYPES: dict[str, type[GuardFenceV1] | type[AgentRegistrationV1]] = {
+    "authority_initialized.v1": GuardFenceV1,
+    "authority_reconfigured.v1": GuardFenceV1,
+    "agent_registered.v1": AgentRegistrationV1,
+    "agent_reconfigured.v1": AgentRegistrationV1,
+}
+_AUTHORITY_REBIND_FOUNDATION_PREDICATE = f"""
+    (SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version)
+      = 'guard_0029'
+    AND NOT EXISTS ({_AUTHORITY_REBIND_ACTIVITY_UNION})
+    AND (SELECT count(*) FROM loom_capacity_guard.agent_reporter_state) = 1
+    AND EXISTS (
+      SELECT 1
+      FROM loom_capacity_guard.agent_reporter_state AS reporter
+      JOIN loom_capacity_guard.agent_registrations AS registration
+        ON registration.agent_incarnation = reporter.agent_incarnation
+      WHERE reporter.high_water = 0
+        AND registration.singleton_id = 1
+        AND registration.registration_state = 'registered'
+    )
+    AND (SELECT count(*) FROM loom_capacity_guard.claim_guard_activation) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.claim_guard_activation
+      WHERE singleton_id = 1
+        AND activation_state = 'disabled'
+        AND authority_mode = 'disabled'
+        AND activation_epoch = 0
+        AND executable_new_capacity_ceiling = 0
+        AND live_claim_entry_enabled IS FALSE
+    )
+    AND (SELECT count(*) FROM loom_capacity_guard.agent_runtime_authority) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.agent_runtime_authority
+      WHERE singleton_id = 1 AND agent_role_name = 'loom_cap_staging_agent'
+    )
+    AND (SELECT count(*) FROM loom_capacity_guard.executable_admission_authority) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.executable_admission_authority
+      WHERE singleton_id = 1 AND executor_role_name = 'loom_cap_staging_executor'
+    )
+    AND (SELECT count(*) FROM loom_capacity_guard.executable_observer_authority) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.executable_observer_authority
+      WHERE singleton_id = 1 AND observer_role_name = 'loom_cap_staging_observer'
+    )
+    AND (SELECT count(*) FROM loom_capacity_guard.staging_worker_runtime_authority) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.staging_worker_runtime_authority
+      WHERE singleton_id = 1 AND runtime_role_name = 'loom_cap_staging_runtime'
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM loom_capacity_guard.audit_events
+      WHERE trial_id IS NOT NULL OR protected_attempt_id IS NOT NULL
+    )
+"""
+_AUTHORITY_REBIND_FOUNDATION_SQL = single_line_sql(
+    f"""
+    SELECT CASE WHEN {_AUTHORITY_REBIND_FOUNDATION_PREDICATE}
+      THEN 'exact' ELSE 'drifted' END AS authority_rebind_foundation_state
+    """
+)
+
+
+def _staging_authority_row_json_literal(value: GuardFenceV1) -> str:
+    if value.environment_id != "staging":
+        raise ValueError("protected staging capacity authority environment is invalid")
+    payload = value.model_dump(mode="json", exclude_none=False)
+    payload.update(
+        lifecycle_environment="staging",
+        lifecycle_namespace="loom-staging",
+    )
+    return sql.Literal(json.dumps(payload, sort_keys=True, separators=(",", ":"))).as_string()
+
+
 _DETAIL_SQL = single_line_sql(
     """
     WITH protected_roles AS (
@@ -319,6 +524,8 @@ class ProtectedStagingCapacityDatabaseCommandRunner(Protocol):
 
 class _DatabaseState(StrEnum):
     NEEDS_CONVERGENCE = "needs-convergence"
+    AUTHORITY_REBIND_REQUIRED = "authority-rebind-required"
+    AUTHORITY_REBIND_RECOVERY_REQUIRED = "authority-rebind-recovery-required"
     EXACT = "exact"
     DRIFTED = "drifted"
 
@@ -337,6 +544,17 @@ class _Snapshot:
     database: _DatabaseState
     resources: _ResourceState
     evidence_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CertifiedAuthorityRebindAuditHistory:
+    rows: tuple[dict[str, object], ...]
+
+    @property
+    def predicate(self) -> str:
+        payload = json.dumps(self.rows, sort_keys=True, separators=(",", ":"))
+        literal = sql.Literal(payload).as_string()
+        return f"({_AUTHORITY_REBIND_AUDIT_AGGREGATE}) IS NOT DISTINCT FROM {literal}::jsonb"
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,6 +767,14 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         if (
             snapshot.database is _DatabaseState.DRIFTED
             or snapshot.resources is _ResourceState.DRIFTED
+            or (
+                snapshot.database
+                in {
+                    _DatabaseState.AUTHORITY_REBIND_REQUIRED,
+                    _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED,
+                }
+                and snapshot.resources is not _ResourceState.ABSENT
+            )
         ):
             state = ComponentState.DRIFTED
         elif (
@@ -567,12 +793,54 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             }
         )
 
+    def classify_authority_forward(self, plan: FinalGatePlan) -> ComponentState:
+        """Narrow terminal recovery to an unused legacy database or its exact target."""
+        try:
+            snapshot = self._snapshot(plan)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return ComponentState.DRIFTED
+        if snapshot.resources is not _ResourceState.ABSENT:
+            return ComponentState.DRIFTED
+        if snapshot.database in {
+            _DatabaseState.AUTHORITY_REBIND_REQUIRED,
+            _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED,
+        }:
+            return ComponentState.READY
+        if snapshot.database is _DatabaseState.EXACT:
+            return ComponentState.EXACT
+        return ComponentState.DRIFTED
+
     def apply(self, plan: FinalGatePlan) -> None:
         seed = self.seed_reader()
         payload = self._manifest(plan, seed)
         before = self._snapshot(plan, seed=seed, manifest=payload)
         if before.database is _DatabaseState.DRIFTED or before.resources is _ResourceState.DRIFTED:
             raise RuntimeError("protected staging capacity database state drifted")
+        if before.database in {
+            _DatabaseState.AUTHORITY_REBIND_REQUIRED,
+            _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED,
+        }:
+            if before.resources is not _ResourceState.ABSENT:
+                raise RuntimeError("protected staging capacity authority repair state drifted")
+            try:
+                self._compensate_bootstrap(plan, payload)
+                if before.database is _DatabaseState.AUTHORITY_REBIND_REQUIRED:
+                    self._rebind_legacy_authority(plan, seed)
+                self._restore_runtime_credentials(plan, seed)
+                self._verify_transient_authority_sealed(
+                    preserve_runtime_credentials=True,
+                    durable_runtime_credentials=True,
+                )
+                after_rebind = self._snapshot(plan, seed=seed, manifest=payload)
+                if (
+                    after_rebind.database is not _DatabaseState.EXACT
+                    or after_rebind.resources is not _ResourceState.ABSENT
+                ):
+                    raise RuntimeError("protected staging capacity authority repair was not exact")
+            except Exception:
+                self._compensate_bootstrap(plan, payload)
+                raise
+            return
         cleanup_manifest = payload
         cleanup_certification: _CertifiedPreviousFailedBootstrap | None = None
         if before.resources is _ResourceState.PREVIOUS_FAILED:
@@ -916,6 +1184,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         sealed_details["active_protected_sessions"] = {name: 0 for name in protected_role_names}
         sealed_roles = _expected_roles(sealed=True)
         sealed_details["roles"] = sealed_roles
+        runtime: AgentRegistrationV1 | None = None
         if details.get("roles") == sealed_roles:
             if any(
                 details.get(field) != sealed_details[field]
@@ -928,6 +1197,14 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                 )
             ):
                 return _DatabaseState.DRIFTED
+            if self._authority_rebind_recovery_required(
+                plan,
+                details=details,
+                sealed_details=sealed_details,
+                expected_fence=expected_fence,
+                expected_registration=expected_registration,
+            ):
+                return _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED
         else:
             try:
                 runtime = AgentRegistrationV1.model_validate_json(self._query(_RUNTIME_SQL))
@@ -941,6 +1218,21 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         expected_registration_details = expected_details["registration"]
         assert isinstance(expected_authority, dict)
         assert isinstance(expected_registration_details, dict)
+        if self._legacy_authority_rebind_required(
+            plan,
+            details=details,
+            runtime=runtime,
+            expected_details=expected_details,
+            expected_fence=expected_fence,
+            expected_registration=expected_registration,
+        ):
+            return _DatabaseState.AUTHORITY_REBIND_REQUIRED
+        if details.get("roles") == sealed_roles and self._authority_rebind_target_footprint(
+            details=details,
+            expected_fence=expected_fence,
+            expected_registration=expected_registration,
+        ):
+            return _DatabaseState.DRIFTED
         if (
             not isinstance(authority, dict)
             or not isinstance(registration, dict)
@@ -975,6 +1267,393 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         ):
             return _DatabaseState.DRIFTED
         return _DatabaseState.NEEDS_CONVERGENCE
+
+    def _legacy_authority_rebind_required(
+        self,
+        plan: FinalGatePlan,
+        *,
+        details: object,
+        runtime: AgentRegistrationV1 | None,
+        expected_details: dict[str, object],
+        expected_fence: GuardFenceV1,
+        expected_registration: AgentRegistrationV1,
+    ) -> bool:
+        if not isinstance(details, dict):
+            return False
+        target_authority = expected_registration.authority_incarnation
+        if (
+            target_authority == _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            or str(target_authority) != plan.manager_authority_incarnation
+            or plan.schema_version not in {6, 7}
+            or plan.manager_execution_state != "shadow"
+            or plan.manager_execution_epoch != 0
+            or plan.manager_execution_manifest_sha256 is not None
+            or plan.manager_executable_new_capacity_ceiling != 0
+            or plan.manager_increase_freeze is not True
+            or (
+                runtime is not None
+                and runtime.authority_incarnation != _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            )
+        ):
+            return False
+        active_sessions = details.get("active_protected_sessions")
+        if not isinstance(active_sessions, dict) or any(active_sessions.values()):
+            return False
+        rebound = copy.deepcopy(details)
+        authority = rebound.get("authority")
+        registration = rebound.get("registration")
+        if not isinstance(authority, dict) or not isinstance(registration, dict):
+            return False
+        if authority.get("authority_incarnation") != str(
+            _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+        ) or registration.get("authority_incarnation") != str(
+            _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+        ):
+            return False
+        authority["authority_incarnation"] = str(target_authority)
+        registration["authority_incarnation"] = str(target_authority)
+        expected_state = expected_details
+        if runtime is None:
+            expected_state = dict(expected_details)
+            expected_state["active_protected_sessions"] = {
+                name: 0 for name in _expected_roles(sealed=True)
+            }
+            expected_state["roles"] = _expected_roles(sealed=True)
+        if rebound != expected_state:
+            return False
+        if (
+            runtime is not None
+            and runtime.model_copy(update={"authority_incarnation": target_authority})
+            != expected_registration
+        ):
+            return False
+        if (
+            not self._authority_rebind_foundation_exact()
+            or not self._authority_rebind_triggers_exact()
+        ):
+            return False
+        try:
+            self._certify_authority_rebind_audits(
+                expected_fence=expected_fence,
+                expected_registration=expected_registration,
+                committed=False,
+            )
+        except (RuntimeError, UnicodeError, ValueError):
+            return False
+        return True
+
+    def _authority_rebind_recovery_required(
+        self,
+        plan: FinalGatePlan,
+        *,
+        details: object,
+        sealed_details: dict[str, object],
+        expected_fence: GuardFenceV1,
+        expected_registration: AgentRegistrationV1,
+    ) -> bool:
+        target_authority = expected_registration.authority_incarnation
+        if (
+            details != sealed_details
+            or target_authority == _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            or str(target_authority) != plan.manager_authority_incarnation
+            or plan.schema_version not in {6, 7}
+            or plan.manager_execution_state != "shadow"
+            or plan.manager_execution_epoch != 0
+            or plan.manager_execution_manifest_sha256 is not None
+            or plan.manager_executable_new_capacity_ceiling != 0
+            or plan.manager_increase_freeze is not True
+        ):
+            return False
+        if (
+            not self._authority_rebind_foundation_exact()
+            or not self._authority_rebind_triggers_exact()
+        ):
+            return False
+        try:
+            self._certify_authority_rebind_audits(
+                expected_fence=expected_fence,
+                expected_registration=expected_registration,
+                committed=True,
+            )
+        except (RuntimeError, UnicodeError, ValueError):
+            return False
+        return True
+
+    def _authority_rebind_triggers_exact(self) -> bool:
+        return self._query(_AUTHORITY_REBIND_TRIGGER_SQL).decode("ascii").strip() == "exact"
+
+    def _authority_rebind_foundation_exact(self) -> bool:
+        return self._query(_AUTHORITY_REBIND_FOUNDATION_SQL).decode("ascii").strip() == "exact"
+
+    def _read_authority_rebind_audit_rows(self) -> tuple[dict[str, object], ...]:
+        try:
+            value = json.loads(
+                self._query(_AUTHORITY_REBIND_AUDIT_HISTORY_SQL),
+                object_pairs_hook=_reject_duplicate_keys,
+            )
+        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+            raise ValueError("protected staging authority audit history is invalid") from exc
+        if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+            raise ValueError("protected staging authority audit history is invalid")
+        return tuple(cast(dict[str, object], row) for row in value)
+
+    @staticmethod
+    def _parse_canonical_authority_binding_audits(
+        rows: Sequence[dict[str, object]],
+        *,
+        event_types: Sequence[str],
+        exact_initial_event_ids: int = 0,
+    ) -> tuple[tuple[int, ...], tuple[GuardFenceV1 | AgentRegistrationV1, ...]]:
+        if len(rows) != len(event_types):
+            raise ValueError("protected staging authority audit history is not exact")
+        required_fields = {
+            "event_id",
+            "event_type",
+            "trial_id",
+            "protected_attempt_id",
+            "payload",
+            "payload_digest",
+        }
+        event_ids: list[int] = []
+        parsed: list[GuardFenceV1 | AgentRegistrationV1] = []
+        for ordinal, (row, event_type) in enumerate(zip(rows, event_types, strict=True), start=1):
+            event_id = row.get("event_id")
+            model_type = _AUTHORITY_BINDING_AUDIT_MODEL_TYPES.get(event_type)
+            if (
+                set(row) != required_fields
+                or type(event_id) is not int
+                or event_id <= 0
+                or (event_ids and event_id <= event_ids[-1])
+                or (ordinal <= exact_initial_event_ids and event_id != ordinal)
+                or model_type is None
+                or row.get("event_type") != event_type
+                or row.get("trial_id") is not None
+                or row.get("protected_attempt_id") is not None
+                or not isinstance(row.get("payload"), dict)
+                or not isinstance(row.get("payload_digest"), str)
+            ):
+                raise ValueError("protected staging authority audit history is not exact")
+            event_ids.append(event_id)
+            payload = cast(dict[str, object], row["payload"])
+            try:
+                model = model_type.model_validate_json(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                )
+            except ValueError as exc:
+                raise ValueError("protected staging authority audit payload is invalid") from exc
+            if (
+                payload != model.model_dump(mode="json", exclude_none=False)
+                or row["payload_digest"] != hashlib.sha256(canonical_bytes(model)).hexdigest()
+            ):
+                raise ValueError("protected staging authority audit payload is not canonical")
+            parsed.append(model)
+        return tuple(event_ids), tuple(parsed)
+
+    def _certify_authority_rebind_audits(
+        self,
+        *,
+        expected_fence: GuardFenceV1,
+        expected_registration: AgentRegistrationV1,
+        committed: bool,
+    ) -> _CertifiedAuthorityRebindAuditHistory:
+        legacy_fence = expected_fence.model_copy(
+            update={"authority_incarnation": _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION}
+        )
+        legacy_registration = expected_registration.model_copy(
+            update={"authority_incarnation": _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION}
+        )
+        event_types = (
+            "authority_initialized.v1",
+            "agent_registered.v1",
+            "authority_reconfigured.v1",
+            "agent_reconfigured.v1",
+        ) + (("authority_reconfigured.v1", "agent_reconfigured.v1") if committed else ())
+        rows = self._read_authority_rebind_audit_rows()
+        event_ids, parsed = self._parse_canonical_authority_binding_audits(
+            rows,
+            event_types=event_types,
+            exact_initial_event_ids=4,
+        )
+
+        initial_fence = cast(GuardFenceV1, parsed[0])
+        initial_registration = cast(AgentRegistrationV1, parsed[1])
+        current_legacy_fence = cast(GuardFenceV1, parsed[2])
+        current_legacy_registration = cast(AgentRegistrationV1, parsed[3])
+        if (
+            self._fence_for_registration(initial_registration) != initial_fence
+            or current_legacy_fence != legacy_fence
+            or current_legacy_registration != legacy_registration
+            or initial_fence.authority_incarnation != _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            or initial_registration.agent_incarnation != expected_registration.agent_incarnation
+            or initial_fence.environment_id != legacy_fence.environment_id
+            or initial_fence.subject_id != legacy_fence.subject_id
+            or initial_fence.subject_incarnation != legacy_fence.subject_incarnation
+            or initial_fence.authority_mode != "disabled"
+            or initial_fence.allocation_epoch != 0
+            or initial_fence.configuration_generation >= legacy_fence.configuration_generation
+            or initial_fence.deployment_generation > legacy_fence.deployment_generation
+        ):
+            raise ValueError("protected staging legacy authority audit history is not exact")
+        if initial_fence.deployment_generation == legacy_fence.deployment_generation:
+            if (
+                initial_fence.reporter_incarnation != legacy_fence.reporter_incarnation
+                or initial_fence.candidate_digest != legacy_fence.candidate_digest
+            ):
+                raise ValueError("protected staging legacy authority audit history is not exact")
+        elif initial_fence.reporter_incarnation == legacy_fence.reporter_incarnation:
+            raise ValueError("protected staging legacy authority audit history is not exact")
+        if committed:
+            if (
+                event_ids[5] != event_ids[4] + 1
+                or parsed[4] != expected_fence
+                or parsed[5] != expected_registration
+            ):
+                raise ValueError("protected staging repaired authority audit history is not exact")
+        return _CertifiedAuthorityRebindAuditHistory(rows=rows)
+
+    @staticmethod
+    def _fence_for_registration(registration: AgentRegistrationV1) -> GuardFenceV1:
+        return GuardFenceV1(
+            environment_id=registration.environment_id,
+            subject_id=registration.subject_id,
+            subject_incarnation=registration.subject_incarnation,
+            authority_incarnation=registration.authority_incarnation,
+            reporter_incarnation=registration.reporter_incarnation,
+            candidate_digest=registration.candidate_digest,
+            deployment_generation=registration.deployment_generation,
+            configuration_generation=registration.configuration_generation,
+        )
+
+    def _certify_target_authority_audits(
+        self,
+        *,
+        details: Mapping[str, object],
+        expected_fence: GuardFenceV1,
+        expected_registration: AgentRegistrationV1,
+    ) -> None:
+        rows = self._read_authority_rebind_audit_rows()
+        if len(rows) < 2 or len(rows) % 2:
+            raise ValueError("protected staging target authority audit history is incomplete")
+        event_types = tuple(
+            event_type
+            for pair_index in range(len(rows) // 2)
+            for event_type in (
+                "authority_initialized.v1" if pair_index == 0 else "authority_reconfigured.v1",
+                "agent_registered.v1" if pair_index == 0 else "agent_reconfigured.v1",
+            )
+        )
+        _event_ids, parsed = self._parse_canonical_authority_binding_audits(
+            rows,
+            event_types=event_types,
+        )
+
+        authority_payload = details.get("authority")
+        registration_payload = details.get("registration")
+        if not isinstance(authority_payload, dict) or not isinstance(registration_payload, dict):
+            raise ValueError("protected staging target authority rows are invalid")
+        try:
+            observed_fence = GuardFenceV1.model_validate_json(
+                json.dumps(authority_payload, sort_keys=True, separators=(",", ":"))
+            )
+            observed_registration = AgentRegistrationV1.model_validate_json(
+                json.dumps(registration_payload, sort_keys=True, separators=(",", ":"))
+            )
+        except ValueError as exc:
+            raise ValueError("protected staging target authority rows are invalid") from exc
+        if authority_payload != observed_fence.model_dump(
+            mode="json", exclude_none=False
+        ) or registration_payload != observed_registration.model_dump(
+            mode="json", exclude_none=False
+        ):
+            raise ValueError("protected staging target authority rows are not canonical")
+
+        fence_identity_fields = (
+            "schema_version",
+            "environment_id",
+            "subject_id",
+            "subject_incarnation",
+            "authority_mode",
+            "authority_incarnation",
+            "reporter_high_water",
+            "allocation_epoch",
+        )
+        registration_identity_fields = (
+            *fence_identity_fields,
+            "agent_incarnation",
+        )
+        previous: AgentRegistrationV1 | None = None
+        for offset in range(0, len(parsed), 2):
+            fence = parsed[offset]
+            registration = parsed[offset + 1]
+            if not isinstance(fence, GuardFenceV1) or not isinstance(
+                registration, AgentRegistrationV1
+            ):
+                raise ValueError("protected staging target authority audit pairing is invalid")
+            if (
+                self._fence_for_registration(registration) != fence
+                or any(
+                    getattr(fence, field) != getattr(expected_fence, field)
+                    for field in fence_identity_fields
+                )
+                or any(
+                    getattr(registration, field) != getattr(expected_registration, field)
+                    for field in registration_identity_fields
+                )
+            ):
+                raise ValueError("protected staging target authority audit identity is invalid")
+            if previous is not None:
+                if (
+                    registration.configuration_generation <= previous.configuration_generation
+                    or registration.deployment_generation < previous.deployment_generation
+                ):
+                    raise ValueError(
+                        "protected staging target authority audit generations are invalid"
+                    )
+                if registration.deployment_generation == previous.deployment_generation:
+                    candidate_fields = (
+                        "reporter_incarnation",
+                        "candidate_digest",
+                        "candidate_identity_algorithm",
+                        "candidate_identity",
+                        "candidate_publication_sha256",
+                    )
+                    if any(
+                        getattr(registration, field) != getattr(previous, field)
+                        for field in candidate_fields
+                    ):
+                        raise ValueError(
+                            "protected staging target authority capacity-only audit is invalid"
+                        )
+                elif registration.reporter_incarnation == previous.reporter_incarnation:
+                    raise ValueError(
+                        "protected staging target authority deployment audit is invalid"
+                    )
+            previous = registration
+
+        if parsed[-2] != observed_fence or parsed[-1] != observed_registration:
+            raise ValueError("protected staging target authority audit tail is stale")
+
+    def _authority_rebind_target_footprint(
+        self,
+        *,
+        details: Mapping[str, object],
+        expected_fence: GuardFenceV1,
+        expected_registration: AgentRegistrationV1,
+    ) -> bool:
+        try:
+            if (
+                not self._authority_rebind_foundation_exact()
+                or not self._authority_rebind_triggers_exact()
+            ):
+                return True
+            self._certify_target_authority_audits(
+                details=details,
+                expected_fence=expected_fence,
+                expected_registration=expected_registration,
+            )
+        except (RuntimeError, UnicodeError, ValueError):
+            return True
+        return False
 
     def _resource_state(
         self,
@@ -1571,6 +2250,329 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             env=self.runner.environment,
             timeout_seconds=_QUERY_TIMEOUT_SECONDS,
         )
+
+    @staticmethod
+    def _authority_rebind_bindings(
+        plan: FinalGatePlan,
+        seed: Mapping[str, object],
+    ) -> tuple[GuardFenceV1, AgentRegistrationV1, GuardFenceV1, AgentRegistrationV1]:
+        configuration = build_staging_reporter_configuration(plan, seed)
+        target_fence = GuardFenceV1(
+            environment_id=configuration.environment_id,
+            subject_id=configuration.subject_id,
+            subject_incarnation=configuration.subject_incarnation,
+            authority_incarnation=configuration.authority_incarnation,
+            reporter_incarnation=configuration.reporter_incarnation,
+            candidate_digest=configuration.candidate_digest,
+            deployment_generation=configuration.deployment_generation,
+            configuration_generation=configuration.configuration_generation,
+        )
+        target_registration = AgentRegistrationV1.model_validate(
+            {field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields}
+        )
+        legacy_fence = target_fence.model_copy(
+            update={"authority_incarnation": _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION}
+        )
+        legacy_registration = target_registration.model_copy(
+            update={"authority_incarnation": _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION}
+        )
+        return target_fence, target_registration, legacy_fence, legacy_registration
+
+    @staticmethod
+    def _committed_authority_rebind_audit_predicate(
+        legacy: _CertifiedAuthorityRebindAuditHistory,
+        *,
+        target_fence: GuardFenceV1,
+        target_registration: AgentRegistrationV1,
+    ) -> str:
+        legacy_payload = json.dumps(legacy.rows, sort_keys=True, separators=(",", ":"))
+        legacy_literal = sql.Literal(legacy_payload).as_string()
+        tail_offset = len(legacy.rows)
+        last_legacy_id = legacy.rows[-1].get("event_id")
+        if type(last_legacy_id) is not int:
+            raise ValueError("protected staging authority audit history is not exact")
+        authority_event_id = (
+            "(SELECT event_id FROM loom_capacity_guard.audit_events "
+            f"ORDER BY event_id OFFSET {tail_offset} LIMIT 1)"
+        )
+        registration_event_id = (
+            "(SELECT event_id FROM loom_capacity_guard.audit_events "
+            f"ORDER BY event_id OFFSET {tail_offset + 1} LIMIT 1)"
+        )
+
+        def json_literal(value: GuardFenceV1 | AgentRegistrationV1) -> str:
+            return sql.Literal(canonical_bytes(value).decode("ascii")).as_string()
+
+        def digest_literal(value: GuardFenceV1 | AgentRegistrationV1) -> str:
+            return sql.Literal(hashlib.sha256(canonical_bytes(value)).hexdigest()).as_string()
+
+        return f"""
+        (SELECT count(*) FROM loom_capacity_guard.audit_events) = {tail_offset + 2}
+        AND {authority_event_id} > {last_legacy_id}
+        AND {registration_event_id} = {authority_event_id} + 1
+        AND ({_AUTHORITY_REBIND_AUDIT_AGGREGATE}) IS NOT DISTINCT FROM (
+          {legacy_literal}::jsonb || jsonb_build_array(
+            jsonb_build_object(
+              'event_id', {authority_event_id},
+              'event_type', 'authority_reconfigured.v1',
+              'trial_id', NULL,
+              'protected_attempt_id', NULL,
+              'payload', {json_literal(target_fence)}::jsonb,
+              'payload_digest', {digest_literal(target_fence)}
+            ),
+            jsonb_build_object(
+              'event_id', {registration_event_id},
+              'event_type', 'agent_reconfigured.v1',
+              'trial_id', NULL,
+              'protected_attempt_id', NULL,
+              'payload', {json_literal(target_registration)}::jsonb,
+              'payload_digest', {digest_literal(target_registration)}
+            )
+          )
+        )
+        """
+
+    def _rebind_legacy_authority(
+        self,
+        plan: FinalGatePlan,
+        seed: Mapping[str, object],
+    ) -> None:
+        target_fence, target_registration, legacy_fence, legacy_registration = (
+            self._authority_rebind_bindings(plan, seed)
+        )
+        target_authority = target_fence.authority_incarnation
+        if (
+            target_authority == _LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION
+            or str(target_authority) != plan.manager_authority_incarnation
+        ):
+            raise ValueError("protected staging capacity authority repair target is invalid")
+        if not self._authority_rebind_triggers_exact():
+            raise RuntimeError("protected staging capacity authority repair triggers drifted")
+        legacy_audits = self._certify_authority_rebind_audits(
+            expected_fence=target_fence,
+            expected_registration=target_registration,
+            committed=False,
+        )
+        committed_audit_predicate = self._committed_authority_rebind_audit_predicate(
+            legacy_audits,
+            target_fence=target_fence,
+            target_registration=target_registration,
+        )
+
+        def json_literal(value: GuardFenceV1 | AgentRegistrationV1) -> str:
+            return sql.Literal(canonical_bytes(value).decode("ascii")).as_string()
+
+        def digest_literal(value: GuardFenceV1 | AgentRegistrationV1) -> str:
+            return sql.Literal(hashlib.sha256(canonical_bytes(value)).hexdigest()).as_string()
+
+        legacy_authority_row_json = _staging_authority_row_json_literal(legacy_fence)
+        legacy_registration_json = json_literal(legacy_registration)
+        target_authority_json = json_literal(target_fence)
+        target_authority_row_json = _staging_authority_row_json_literal(target_fence)
+        target_authority_digest = digest_literal(target_fence)
+        target_registration_json = json_literal(target_registration)
+        target_registration_digest = digest_literal(target_registration)
+        legacy_authority = sql.Literal(str(_LEGACY_DETERMINISTIC_AUTHORITY_INCARNATION)).as_string()
+        repaired_authority = sql.Literal(str(target_authority)).as_string()
+        payload = f"""\
+BEGIN;
+LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE;
+DO $loom$
+BEGIN
+    IF current_user <> 'postgres'
+       OR NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_roles
+           WHERE rolname = current_user AND rolsuper
+       )
+       OR NOT ({_AUTHORITY_REBIND_FOUNDATION_PREDICATE})
+       OR NOT ({_AUTHORITY_REBIND_TRIGGER_PREDICATE})
+       OR NOT ({legacy_audits.predicate})
+       OR (SELECT count(*) FROM loom_capacity_guard.authority_state) <> 1
+       OR (SELECT count(*) FROM loom_capacity_guard.agent_registrations) <> 1
+       OR (SELECT to_jsonb(authority) - 'singleton_id' - 'created_at' - 'updated_at'
+           FROM loom_capacity_guard.authority_state AS authority
+           WHERE singleton_id = 1) IS DISTINCT FROM {legacy_authority_row_json}::jsonb
+       OR (SELECT (to_jsonb(registration) - 'singleton_id' - 'registration_state' - 'created_at')
+                         || jsonb_build_object('reporter_high_water', 0)
+           FROM loom_capacity_guard.agent_registrations AS registration
+           WHERE singleton_id = 1 AND registration_state = 'registered')
+          IS DISTINCT FROM {legacy_registration_json}::jsonb THEN
+        RAISE EXCEPTION 'protected staging capacity authority rebind precondition failed';
+    END IF;
+END
+$loom$;
+ALTER TABLE loom_capacity_guard.authority_state
+  DISABLE TRIGGER authority_state_monotonic_row;
+ALTER TABLE loom_capacity_guard.agent_registrations
+  DISABLE TRIGGER agent_registrations_monotonic_row;
+UPDATE loom_capacity_guard.authority_state
+SET authority_incarnation = {repaired_authority}::uuid
+WHERE singleton_id = 1 AND authority_incarnation = {legacy_authority}::uuid;
+UPDATE loom_capacity_guard.agent_registrations
+SET authority_incarnation = {repaired_authority}::uuid
+WHERE singleton_id = 1
+  AND registration_state = 'registered'
+  AND authority_incarnation = {legacy_authority}::uuid;
+ALTER TABLE loom_capacity_guard.agent_registrations
+  ENABLE TRIGGER agent_registrations_monotonic_row;
+ALTER TABLE loom_capacity_guard.authority_state
+  ENABLE TRIGGER authority_state_monotonic_row;
+INSERT INTO loom_capacity_guard.audit_events (event_type, payload, payload_digest)
+VALUES
+  ('authority_reconfigured.v1', {target_authority_json}::jsonb, {target_authority_digest}),
+  ('agent_reconfigured.v1', {target_registration_json}::jsonb, {target_registration_digest});
+DO $loom$
+BEGIN
+    IF NOT ({_AUTHORITY_REBIND_FOUNDATION_PREDICATE})
+       OR NOT ({_AUTHORITY_REBIND_TRIGGER_PREDICATE})
+       OR NOT ({committed_audit_predicate})
+       OR (SELECT to_jsonb(authority) - 'singleton_id' - 'created_at' - 'updated_at'
+        FROM loom_capacity_guard.authority_state AS authority
+        WHERE singleton_id = 1) IS DISTINCT FROM {target_authority_row_json}::jsonb
+       OR (SELECT (to_jsonb(registration) - 'singleton_id' - 'registration_state' - 'created_at')
+                      || jsonb_build_object('reporter_high_water', 0)
+           FROM loom_capacity_guard.agent_registrations AS registration
+           WHERE singleton_id = 1 AND registration_state = 'registered')
+          IS DISTINCT FROM {target_registration_json}::jsonb
+       OR (SELECT payload FROM loom_capacity_guard.audit_events
+           WHERE event_type IN ('authority_initialized.v1', 'authority_reconfigured.v1')
+           ORDER BY event_id DESC LIMIT 1) IS DISTINCT FROM {target_authority_json}::jsonb
+       OR (SELECT payload_digest FROM loom_capacity_guard.audit_events
+           WHERE event_type IN ('authority_initialized.v1', 'authority_reconfigured.v1')
+           ORDER BY event_id DESC LIMIT 1) IS DISTINCT FROM {target_authority_digest}
+       OR (SELECT payload FROM loom_capacity_guard.audit_events
+           WHERE event_type IN ('agent_registered.v1', 'agent_reconfigured.v1')
+           ORDER BY event_id DESC LIMIT 1) IS DISTINCT FROM {target_registration_json}::jsonb
+       OR (SELECT payload_digest FROM loom_capacity_guard.audit_events
+           WHERE event_type IN ('agent_registered.v1', 'agent_reconfigured.v1')
+           ORDER BY event_id DESC LIMIT 1) IS DISTINCT FROM {target_registration_digest} THEN
+        RAISE EXCEPTION 'protected staging capacity authority rebind did not converge';
+    END IF;
+END
+$loom$;
+COMMIT;
+""".encode("ascii")
+        self._run_peer_payload(payload)
+
+    def _restore_runtime_credentials(
+        self,
+        plan: FinalGatePlan,
+        seed: Mapping[str, object],
+    ) -> None:
+        target_fence, target_registration, _legacy_fence, _legacy_registration = (
+            self._authority_rebind_bindings(plan, seed)
+        )
+        if not self._authority_rebind_triggers_exact():
+            raise RuntimeError("protected staging capacity authority restore triggers drifted")
+        committed_audits = self._certify_authority_rebind_audits(
+            expected_fence=target_fence,
+            expected_registration=target_registration,
+            committed=True,
+        )
+
+        def json_literal(value: GuardFenceV1 | AgentRegistrationV1) -> str:
+            return sql.Literal(canonical_bytes(value).decode("ascii")).as_string()
+
+        target_authority_json = _staging_authority_row_json_literal(target_fence)
+        target_registration_json = json_literal(target_registration)
+        agent_password = sql.Literal(_seed_credential(seed, "agent_database_password")).as_string()
+        observer_password = sql.Literal(
+            _seed_credential(seed, "observer_database_password")
+        ).as_string()
+        runtime_password = sql.Literal(
+            _seed_credential(seed, "runtime_database_password")
+        ).as_string()
+        payload = f"""\
+BEGIN;
+-- protected staging capacity authority runtime restore
+LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE;
+DO $loom$
+BEGIN
+    IF current_user <> 'postgres'
+       OR NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_roles
+           WHERE rolname = current_user AND rolsuper
+       )
+       OR NOT ({_AUTHORITY_REBIND_FOUNDATION_PREDICATE})
+       OR NOT ({_AUTHORITY_REBIND_TRIGGER_PREDICATE})
+       OR NOT ({committed_audits.predicate})
+       OR (SELECT count(*) FROM loom_capacity_guard.authority_state) <> 1
+       OR (SELECT count(*) FROM loom_capacity_guard.agent_registrations) <> 1
+       OR (SELECT to_jsonb(authority) - 'singleton_id' - 'created_at' - 'updated_at'
+           FROM loom_capacity_guard.authority_state AS authority
+           WHERE singleton_id = 1) IS DISTINCT FROM {target_authority_json}::jsonb
+       OR (SELECT (to_jsonb(registration) - 'singleton_id' - 'registration_state' - 'created_at')
+                         || jsonb_build_object('reporter_high_water', 0)
+           FROM loom_capacity_guard.agent_registrations AS registration
+           WHERE singleton_id = 1 AND registration_state = 'registered')
+          IS DISTINCT FROM {target_registration_json}::jsonb
+       OR (SELECT count(*) FROM pg_catalog.pg_roles
+           WHERE rolname = ANY(ARRAY[
+             'loom_cap_staging_owner',
+             'loom_cap_staging_migrator',
+             'loom_cap_staging_agent',
+             'loom_cap_staging_executor',
+             'loom_cap_staging_observer',
+             'loom_cap_staging_runtime'
+           ])) <> 6
+       OR EXISTS (
+           SELECT 1 FROM pg_catalog.pg_authid
+           WHERE rolname = ANY(ARRAY[
+             'loom_cap_staging_agent',
+             'loom_cap_staging_observer',
+             'loom_cap_staging_runtime'
+           ])
+             AND (rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb
+                  OR rolcreaterole OR rolreplication OR rolbypassrls
+                  OR rolpassword IS NOT NULL
+                  OR rolvaliduntil IS DISTINCT FROM 'infinity'::timestamptz)
+       )
+       OR EXISTS (
+           SELECT 1 FROM pg_catalog.pg_stat_activity
+           WHERE usename = ANY(ARRAY[
+             'loom_cap_staging_owner',
+             'loom_cap_staging_migrator',
+             'loom_cap_staging_agent',
+             'loom_cap_staging_executor',
+             'loom_cap_staging_observer',
+             'loom_cap_staging_runtime'
+           ])
+             AND pid <> pg_catalog.pg_backend_pid()
+       ) THEN
+        RAISE EXCEPTION 'protected staging capacity authority restore committed-state precondition failed';
+    END IF;
+END
+$loom$;
+ALTER ROLE loom_cap_staging_agent LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+  NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {agent_password} VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_observer LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+  NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {observer_password} VALID UNTIL 'infinity';
+ALTER ROLE loom_cap_staging_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+  NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {runtime_password} VALID UNTIL 'infinity';
+DO $loom$
+BEGIN
+    IF NOT ({_AUTHORITY_REBIND_FOUNDATION_PREDICATE})
+       OR NOT ({_AUTHORITY_REBIND_TRIGGER_PREDICATE})
+       OR NOT ({committed_audits.predicate})
+       OR EXISTS (
+           SELECT 1 FROM pg_catalog.pg_authid
+           WHERE rolname = ANY(ARRAY[
+             'loom_cap_staging_agent',
+             'loom_cap_staging_observer',
+             'loom_cap_staging_runtime'
+           ])
+             AND (NOT rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb
+                  OR rolcreaterole OR rolreplication OR rolbypassrls
+                  OR rolpassword IS NULL
+                  OR rolvaliduntil IS DISTINCT FROM 'infinity'::timestamptz)
+       ) THEN
+        RAISE EXCEPTION 'protected staging capacity authority credential restore was not exact';
+    END IF;
+END
+$loom$;
+COMMIT;
+""".encode("ascii")
+        self._run_peer_payload(payload)
 
     def _arm_transient_migrator(self, seed: Mapping[str, object]) -> None:
         migrator_password = sql.Literal(

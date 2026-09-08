@@ -1015,6 +1015,31 @@ def _postgres_statefulset(profile: CapacityControlPlaneProfile) -> dict[str, Any
     }
 
 
+def _migration_container(
+    profile: CapacityControlPlaneProfile,
+    *,
+    name: str,
+    manager_image: str,
+    authority_incarnation: UUID,
+    volume_mounts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "image": manager_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["python", "-m", "loom_capacity_manager.migrate"],
+        "args": [
+            "--db-url-file",
+            f"{_CREDENTIALS}/database-url",
+            "--expected-authority-incarnation",
+            str(authority_incarnation),
+        ],
+        "securityContext": _container_security(read_only_root=True),
+        "resources": profile.migration_resources.kubernetes(),
+        "volumeMounts": volume_mounts,
+    }
+
+
 def _migration_job(
     profile: CapacityControlPlaneProfile,
     *,
@@ -1041,21 +1066,13 @@ def _migration_job(
                 "securityContext": _pod_security(65532),
                 "initContainers": init,
                 "containers": [
-                    {
-                        "name": "migration",
-                        "image": manager_image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["python", "-m", "loom_capacity_manager.migrate"],
-                        "args": [
-                            "--db-url-file",
-                            f"{_CREDENTIALS}/database-url",
-                            "--expected-authority-incarnation",
-                            str(authority_incarnation),
-                        ],
-                        "securityContext": _container_security(read_only_root=True),
-                        "resources": profile.migration_resources.kubernetes(),
-                        "volumeMounts": mounts,
-                    }
+                    _migration_container(
+                        profile,
+                        name="migration",
+                        manager_image=manager_image,
+                        authority_incarnation=authority_incarnation,
+                        volume_mounts=mounts,
+                    )
                 ],
                 "volumes": volumes,
             },
@@ -1481,6 +1498,42 @@ def _manager_deployment(
     }
 
 
+def _manager_deployment_with_migration_init(
+    profile: CapacityControlPlaneProfile,
+    *,
+    manager_image: str,
+    authority_incarnation: UUID,
+    execution_policy_config_map: str | None = None,
+    execution_policy_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Render a manager that reaches capacity schema head before it starts."""
+
+    deployment = _manager_deployment(
+        profile,
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        execution_policy_config_map=execution_policy_config_map,
+        execution_policy_sha256=execution_policy_sha256,
+    )
+    migration = _migration_container(
+        profile,
+        name="migrate-capacity-schema",
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        volume_mounts=[
+            {
+                "name": "runtime",
+                "mountPath": f"{_CREDENTIALS}/database-url",
+                "subPath": "credentials/database-url",
+                "readOnly": True,
+            }
+        ],
+    )
+    init_containers = deployment["spec"]["template"]["spec"]["initContainers"]
+    init_containers.insert(1, migration)
+    return deployment
+
+
 def _witness_publication_documents() -> list[dict[str, Any]]:
     return [
         {
@@ -1785,6 +1838,27 @@ def render_capacity_control_plane_manifests(
 ) -> str:
     """Render one exact, zero-execution authority release."""
 
+    return _render_capacity_control_plane_manifests(
+        profile,
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        execution_policy=execution_policy,
+        execution_policy_sha256=execution_policy_sha256,
+        external_manager_client_cidrs=external_manager_client_cidrs,
+        include_migration_job=True,
+    )
+
+
+def _render_capacity_control_plane_manifests(
+    profile: CapacityControlPlaneProfile,
+    *,
+    manager_image: str,
+    authority_incarnation: UUID,
+    execution_policy: ExecutionPreparationPolicyV2 | None,
+    execution_policy_sha256: str | None,
+    external_manager_client_cidrs: tuple[str, ...],
+    include_migration_job: bool,
+) -> str:
     if not isinstance(profile, CapacityControlPlaneProfile):
         raise TypeError("capacity control-plane profile is invalid")
     if not _is_immutable_oci_reference(manager_image):
@@ -1858,8 +1932,6 @@ def render_capacity_control_plane_manifests(
             "immutable": True,
             "data": {_EXECUTION_POLICY_FILENAME: policy_payload},
         }
-    image_digest = manager_image.rsplit("@sha256:", 1)[1]
-    migration_head = _capacity_head()
     router_enabled = execution_policy_document is not None
     documents = [
         {
@@ -1884,12 +1956,18 @@ def render_capacity_control_plane_manifests(
         *(() if execution_policy_document is None else (execution_policy_document,)),
         _postgres_service(),
         _postgres_statefulset(profile),
-        _migration_job(
-            profile,
-            manager_image=manager_image,
-            authority_incarnation=authority_incarnation,
-            migration_head=migration_head,
-            image_digest=image_digest,
+        *(
+            (
+                _migration_job(
+                    profile,
+                    manager_image=manager_image,
+                    authority_incarnation=authority_incarnation,
+                    migration_head=_capacity_head(),
+                    image_digest=manager_image.rsplit("@sha256:", 1)[1],
+                ),
+            )
+            if include_migration_job
+            else ()
         ),
         _manager_service(),
         _manager_deployment(

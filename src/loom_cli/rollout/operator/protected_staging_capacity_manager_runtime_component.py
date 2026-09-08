@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from loom_capacity_manager.auth import _RegistryDocument
 from loom_cli.capacity_control_plane import (
-    _manager_deployment,
+    _manager_deployment_with_migration_init,
     load_capacity_control_plane_profile,
 )
 
@@ -509,7 +509,7 @@ class KubernetesProtectedStagingCapacityManagerRuntimeComponent:
         digest = plan.image_digests["loom-capacity-manager"]
         manager_image = f"{self.container_registry}/loom-capacity-manager@{digest}"
         profile = load_capacity_control_plane_profile(self.candidate_root / _PROFILE_PATH)
-        desired = _manager_deployment(
+        desired = _manager_deployment_with_migration_init(
             profile,
             manager_image=manager_image,
             authority_incarnation=authority_incarnation,

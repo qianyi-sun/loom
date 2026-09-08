@@ -1316,6 +1316,7 @@ class FrozenProtectedAutoscalingHarness:
     ) -> FrozenProtectedAutoscalingHarness:
         candidate = _candidate(tmp_path)
         state_root = tmp_path / "state"
+        base_plan = _plan(tmp_path)
 
         class _BootstrapRunner:
             environment = _FrozenKubernetes.environment
@@ -1329,7 +1330,7 @@ class FrozenProtectedAutoscalingHarness:
             container_registry=_CONTAINER_REGISTRY,
         )
         _write_bootstrap(bootstrap_runtime)
-        bootstrap_runtime._create_credential_seed()
+        bootstrap_runtime._create_credential_seed(UUID(base_plan.manager_authority_incarnation))
         seed = bootstrap_runtime.read_credential_seed()
         bundle = bootstrap_runtime.read_execution_credential_bundle()
         authority_incarnation = UUID(str(seed["authority_incarnation"]))
@@ -1416,7 +1417,6 @@ class FrozenProtectedAutoscalingHarness:
             coexistence_witness_sha256={"gb10": "5" * 64, "oldlab": "6" * 64},
             legacy_writer_fences=(fence,),
         )
-        base_plan = _plan(tmp_path)
         lease = _lease(plan=base_plan, desired=desired)
         prerequisite_store = ProtectedExecutionPrerequisiteStore(
             state_root,
