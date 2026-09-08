@@ -139,14 +139,36 @@ may change the materialization's current ready state. Wire timestamps never
 replace unrounded expiry checks. Receipt parsing alone does not prove completion,
 current readiness or execution authorization.
 
-The later fixed submit/poll API projects a closed
+The fixed submit/poll API projects a closed
 `loom.task-image-publication-status/v1` object, bounded to 4 KiB. It contains grant,
 operation, materialization and attempt IDs, lease epoch, state, snapshot and
 candidate-set hashes, and component count. Completed status requires its exact
 receipt; failed status requires one bounded failure code. Queued/running statuses
 contain neither. The full durable snapshot, worker lease and registry inputs are
-not poll payloads. The API must authenticate the current session and exact job
-binding, and validate completed history before producing this projection.
+not poll payloads. The API authenticates the current session and exact job
+binding, and validates completed history before producing this projection.
+
+The two fixed POST operations are `publication-submit` and `publication-poll`
+under `/v1/projections/{grant_id}/materializations/{materialization_id}/`.
+Both accept only the existing current-session operation request: session
+credentials, operation/materialization/attempt IDs and lease epoch. Registry
+origin comes from trusted service configuration. Polling an unknown operation
+does not enqueue it. Submission and active polling revalidate the complete frozen
+input under the established lock order; a nonlocking state observation never
+takes the job lock before materialization/candidate locks. Completed replay
+still requires current guard/session/attestation authority, but not the lease
+completion cleared. Valid successor sessions do not rewrite original provenance.
+Historical signature verification does not acquire epoch/key locks after the
+request's grant/job locks and is not execution-start authorization.
+
+Each operation has a five-second transaction deadline, including lock waits
+and commit; timeout cancels database work, rolls back when uncommitted and returns
+the same bounded unavailable response as other infrastructure errors. An uncertain
+commit can be confirmed using the same operation ID. Traffic ceilings are shared
+with the existing API operations. Responses contain only canonical compact status;
+request bodies and private failure details do not enter logs or metric labels.
+No HTTP request starts verification tasks, calls the registry/signer, or adds
+production worker scheduling; those dependencies remain explicit and inactive.
 
 ## Statement and signer
 

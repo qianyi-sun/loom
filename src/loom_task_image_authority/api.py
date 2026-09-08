@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
 from loom.db.schema import (
     TaskImageMaterializationAttempt,
     TaskImageMaterializationOperationEvent,
+    TaskImagePublicationJob,
 )
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import LocalEncryptedSecretStore
@@ -87,6 +88,20 @@ from loom_task_image_authority.materializations import (
     release_session_materialization,
     start_session_materialization,
 )
+from loom_task_image_authority.publication_completion import replay_completed_publication
+from loom_task_image_authority.publication_jobs import (
+    PublicationJobAuthorizationError,
+    PublicationJobConflictError,
+)
+from loom_task_image_authority.publication_status import (
+    canonical_status_bytes,
+    project_publication_status,
+)
+from loom_task_image_authority.publication_store import (
+    lock_publication_input,
+    read_publication_job,
+    submit_publication_job,
+)
 from loom_task_image_authority.registry_credentials import (
     issue_session_registry_credential,
     record_session_publication_candidate,
@@ -108,10 +123,12 @@ from loom_task_image_authority.store import (
     renew_task_image_build_session,
     request_task_image_projection,
     revoke_task_image_projection,
+    validate_current_task_image_build_session,
 )
 
 _ContractT = TypeVar("_ContractT", bound=BaseModel)
 _TransitionT = TypeVar("_TransitionT")
+_PUBLICATION_OPERATION_TIMEOUT_SECONDS = 5.0
 
 
 class RequestBodyLimitMiddleware:
@@ -298,6 +315,16 @@ class AuthorityMetricsMiddleware:
                 "exchange": "exchange",
                 "revocation": "revocation",
             }.get(parts[3])
+        if (
+            method == "POST"
+            and len(parts) == 6
+            and parts[:2] == ["v1", "projections"]
+            and parts[3] == "materializations"
+        ):
+            return {
+                "publication-submit": "publication_submit",
+                "publication-poll": "publication_poll",
+            }.get(parts[5])
         if (
             method == "PUT"
             and len(parts) == 5
@@ -546,9 +573,7 @@ def create_app(
     failure_body = contract_body(TaskImageMaterializationFailureRequestV1)
     registry_credential_body = contract_body(TaskImageRegistryCredentialRequestV1)
     publication_candidate_body = contract_body(TaskImagePublicationCandidateRequestV1)
-    publication_candidate_v2_body = contract_body(
-        TaskImagePublicationCandidateRequestV2
-    )
+    publication_candidate_v2_body = contract_body(TaskImagePublicationCandidateRequestV2)
 
     async def transition(
         operation: Callable[
@@ -589,7 +614,7 @@ def create_app(
                     status_code=409,
                     detail="task-image authority conflict",
                 ) from None
-            except TaskImageSessionMaterializationConflictError:
+            except (TaskImageSessionMaterializationConflictError, PublicationJobConflictError):
                 await session.rollback()
                 raise HTTPException(
                     status_code=409,
@@ -601,7 +626,10 @@ def create_app(
                     status_code=403,
                     detail="task-image authority rejected",
                 ) from None
-            except TaskImageSessionMaterializationAuthorizationError:
+            except (
+                TaskImageSessionMaterializationAuthorizationError,
+                PublicationJobAuthorizationError,
+            ):
                 await session.rollback()
                 raise HTTPException(
                     status_code=403,
@@ -765,6 +793,131 @@ def create_app(
             raw_session_token=body.session_token,
             now=now,
         )
+
+    async def publication_operation(
+        *,
+        guard: TaskImageGuardPrincipalV1,
+        body: TaskImageMaterializationOperationRequestV1,
+        submit: bool,
+    ) -> Response:
+        async def publication_transition(
+            session: AsyncSession, secret_store: LocalEncryptedSecretStore
+        ) -> bytes:
+            del secret_store
+            authenticated = await authorize_materialization_request(
+                session, guard=guard, body=body, now=resolved_now()
+            )
+            # This internal validator refreshes time after lock waits. It never
+            # replaces the preceding principal + current bearer authentication.
+            live = await validate_current_task_image_build_session(
+                session, grant_id=body.grant_id, clock=resolved_now
+            )
+            if (
+                live.authority_version != 2
+                or live.purpose != "production"
+                or (live.grant_id, live.session_id, live.session_generation)
+                != (
+                    authenticated.grant_id,
+                    authenticated.session_id,
+                    authenticated.session_generation,
+                )
+            ):
+                raise PublicationJobAuthorizationError("publication session unavailable")
+            if resolved_registry_token_issuer is None:
+                raise RuntimeError("publication registry unavailable")
+            origin = resolved_registry_token_issuer.registry_origin
+            # This routing observation intentionally takes NO job lock. Active
+            # input takes materialization/candidate locks before the job lock.
+            # Completion cannot race our held grant lock; worker-only changes
+            # are reread under the final job lock below.
+            existing_state = await session.scalar(
+                select(TaskImagePublicationJob.state).where(
+                    TaskImagePublicationJob.operation_id == body.operation_id
+                )
+            )
+            if existing_state is None:
+                if not submit:
+                    raise PublicationJobConflictError("publication operation unavailable")
+                job = await submit_publication_job(
+                    session,
+                    authorization=live,
+                    operation_id=body.operation_id,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    registry_origin=origin,
+                    clock=resolved_now,
+                )
+            else:
+                if existing_state not in {"completed", "failed"}:
+                    await lock_publication_input(
+                        session,
+                        authorization=live,
+                        grant_id=body.grant_id,
+                        operation_id=body.operation_id,
+                        materialization_id=body.materialization_id,
+                        attempt_id=body.attempt_id,
+                        lease_epoch=body.lease_epoch,
+                        registry_origin=origin,
+                        clock=resolved_now,
+                    )
+                job = await read_publication_job(session, operation_id=body.operation_id)
+            snapshot = job.snapshot
+            if (
+                job.operation_id != str(body.operation_id)
+                or snapshot.grant_id != str(body.grant_id)
+                or snapshot.materialization_id != str(body.materialization_id)
+                or snapshot.attempt_id != str(body.attempt_id)
+                or snapshot.lease_epoch != body.lease_epoch
+                or snapshot.registry_origin != origin
+            ):
+                raise PublicationJobConflictError("publication operation binding changed")
+            # Historical verification takes no epoch/key locks and does not
+            # require the materialization lease that atomic completion cleared.
+            receipt = (
+                await replay_completed_publication(session, operation_id=body.operation_id)
+                if job.state == "completed"
+                else None
+            )
+            payload = canonical_status_bytes(project_publication_status(job, receipt=receipt))
+            # All mutable authority remains locked; only wall-clock expiry can
+            # change while we read bounded historical evidence and serialize it.
+            if resolved_now() >= min(
+                live.grant_expires_at, live.session_expires_at, live.attestation_expires_at
+            ):
+                raise PublicationJobAuthorizationError("publication session expired")
+            return payload
+
+        try:
+            async with asyncio.timeout(_PUBLICATION_OPERATION_TIMEOUT_SECONDS):
+                payload = await transition(publication_transition)
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503, detail="task-image authority unavailable"
+            ) from None
+        return Response(content=payload, media_type="application/json")
+
+    @app.post("/v1/projections/{grant_id}/materializations/{materialization_id}/publication-submit")
+    async def publication_submit(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        if grant_id != body.grant_id or materialization_id != body.materialization_id:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+        return await publication_operation(guard=guard, body=body, submit=True)
+
+    @app.post("/v1/projections/{grant_id}/materializations/{materialization_id}/publication-poll")
+    async def publication_poll(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        if grant_id != body.grant_id or materialization_id != body.materialization_id:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+        return await publication_operation(guard=guard, body=body, submit=False)
 
     @app.post("/v1/projections/{grant_id}/materializations/claim")
     async def claim_materialization(
@@ -1067,9 +1220,7 @@ def create_app(
             maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
         )
 
-    @app.put(
-        "/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential"
-    )
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential")
     async def registry_credential(
         grant_id: UUID,
         materialization_id: UUID,
@@ -1117,9 +1268,7 @@ def create_app(
         grant_id: UUID,
         materialization_id: UUID,
         guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
-        body: TaskImagePublicationCandidateRequestV1 = Depends(
-            publication_candidate_body
-        ),
+        body: TaskImagePublicationCandidateRequestV1 = Depends(publication_candidate_body),
     ) -> Response:
         require_operation_path(
             grant_id=grant_id,
@@ -1156,9 +1305,7 @@ def create_app(
         grant_id: UUID,
         materialization_id: UUID,
         guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
-        body: TaskImagePublicationCandidateRequestV2 = Depends(
-            publication_candidate_v2_body
-        ),
+        body: TaskImagePublicationCandidateRequestV2 = Depends(publication_candidate_v2_body),
     ) -> Response:
         require_operation_path(
             grant_id=grant_id,
