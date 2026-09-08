@@ -421,6 +421,29 @@ def test_ready_same_image_pod_must_load_current_configuration(tmp_path: Path, an
         _component(StalePodCluster()).apply(_plan(tmp_path))
 
 
+def test_resume_cannot_certify_exact_resources_with_a_stale_configuration_pod(tmp_path: Path) -> None:
+    """Break caught: failed final readback is bypassed by EXACT resource-only classification."""
+    class StalePodCluster(_Cluster):
+        stale = True
+
+        def capture_stdout(self, argv, *, env, timeout_seconds):
+            payload = super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
+            if self.stale and "pods" in argv:
+                value = json.loads(payload)
+                value["items"][0]["metadata"]["annotations"] = {}
+                return json.dumps(value).encode()
+            return payload
+
+    cluster = StalePodCluster()
+    component = _component(cluster)
+    plan = _plan(tmp_path)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        component.apply(plan)
+    assert component.classify(plan)[0] is ComponentState.READY
+    cluster.stale = False
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+
 def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
     tmp_path: Path,
 ) -> None:
