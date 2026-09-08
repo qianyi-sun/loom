@@ -27,9 +27,13 @@ import httpx
 from pydantic import ValidationError
 
 from loom_capacity_manager.executable_contracts import (
+    ExecutionActivationV2,
+    ExecutionAuthorityV2,
     ExecutionContextV2,
+    ExecutionDrainV2,
     ExecutionPreparationAbortV2,
     ExecutionPreparationV2,
+    ExecutionRetirementV2,
 )
 from loom_capacity_manager.membership_contracts import parse_execution_preparation
 from loom_capacity_manager.preparation_readiness import (
@@ -72,8 +76,11 @@ _CREDENTIAL_NAMES = frozenset(
         "configuration-subject",
         "configuration-activate",
         "manager-abort",
+        "manager-activate",
+        "manager-drain",
         "manager-prepare",
         "manager-read",
+        "manager-retire",
     }
 )
 _CREDENTIAL_FILES = frozenset(
@@ -297,11 +304,17 @@ class ProtectedExecutionPreparationStatus:
 
 
 @dataclass(frozen=True, slots=True)
-class ProtectedExecutionPreparationAbortResult:
+class ProtectedExecutionRetirementResult:
+    """Canonical result shared by prepared abort and drained-epoch retirement."""
+
     execution_epoch: int
     execution_manifest_sha256: str
     retired_at: datetime
     replayed: bool
+
+
+# Preserve the existing preparation component's public result type.
+ProtectedExecutionPreparationAbortResult = ProtectedExecutionRetirementResult
 
 
 class _BoundedChildOutputCapture:
@@ -603,9 +616,9 @@ def _execution_preparation_status(
     )
 
 
-def _execution_preparation_abort_result(
+def _execution_retirement_result(
     value: Mapping[str, object],
-) -> ProtectedExecutionPreparationAbortResult:
+) -> ProtectedExecutionRetirementResult:
     copied = dict(value)
     if set(copied) != {
         "execution_epoch",
@@ -613,7 +626,7 @@ def _execution_preparation_abort_result(
         "replayed",
         "retired_at",
     }:
-        raise ValueError("capacity manager execution preparation abort result is invalid")
+        raise ValueError("capacity manager execution retirement result is invalid")
     execution_epoch = copied["execution_epoch"]
     execution_manifest_sha256 = copied["execution_manifest_sha256"]
     replayed = copied["replayed"]
@@ -627,22 +640,60 @@ def _execution_preparation_abort_result(
         or type(replayed) is not bool
         or not isinstance(retired_at_value, str)
     ):
-        raise ValueError("capacity manager execution preparation abort result is invalid")
+        raise ValueError("capacity manager execution retirement result is invalid")
     timestamp = (
         f"{retired_at_value[:-1]}+00:00" if retired_at_value.endswith("Z") else retired_at_value
     )
     try:
         retired_at = datetime.fromisoformat(timestamp)
     except ValueError as exc:
-        raise ValueError("capacity manager execution preparation abort time is invalid") from exc
+        raise ValueError("capacity manager execution retirement time is invalid") from exc
     if retired_at.tzinfo is None or retired_at.utcoffset() is None:
-        raise ValueError("capacity manager execution preparation abort time is invalid")
-    return ProtectedExecutionPreparationAbortResult(
+        raise ValueError("capacity manager execution retirement time is invalid")
+    return ProtectedExecutionRetirementResult(
         execution_epoch=execution_epoch,
         execution_manifest_sha256=execution_manifest_sha256,
         retired_at=retired_at.astimezone(UTC),
         replayed=replayed,
     )
+
+
+def _execution_transition_authority(
+    value: Mapping[str, object],
+    request: ExecutionActivationV2 | ExecutionDrainV2,
+) -> ExecutionAuthorityV2:
+    try:
+        authority = ExecutionAuthorityV2.model_validate_json(
+            json.dumps(dict(value), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        )
+    except (TypeError, ValueError, ValidationError):
+        raise ValueError("capacity manager execution authority is invalid") from None
+    if isinstance(request, ExecutionActivationV2):
+        expected_state = "active"
+        expected_ceiling = request.executable_new_capacity_ceiling
+        expected_rate = request.executable_new_capacity_rate_per_minute
+    else:
+        expected_state = "drain-only"
+        expected_ceiling = 0
+        expected_rate = 0
+    if (
+        authority.authority_incarnation != request.authority_incarnation
+        or authority.writer_epoch != request.expected_writer_epoch
+        or authority.execution_epoch != request.execution_epoch
+        or authority.execution_manifest_sha256 != request.execution_manifest_sha256
+        or authority.execution_manifest_sha256 == "0" * 64
+        or authority.trusted_fleet_release_sha256 == "0" * 64
+        or authority.execution_state != expected_state
+        or authority.executable_new_capacity_ceiling != expected_ceiling
+        or authority.executable_new_capacity_rate_per_minute != expected_rate
+    ):
+        raise ValueError("capacity manager execution authority differs from the request")
+    return authority
+
+
+def _require_execution_idempotency_key(value: UUID) -> None:
+    if not isinstance(value, UUID) or value.int == 0:
+        raise ValueError("capacity manager execution idempotency key is invalid")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1257,12 +1308,78 @@ class ProtectedCapacityManagerClient:
             idempotency_key=idempotency_key,
         )
         try:
-            result = _execution_preparation_abort_result(response)
+            result = _execution_retirement_result(response)
         except ValueError as exc:
             raise ProtectedCapacityManagerClientError("unexpected") from exc
         if (
             result.execution_epoch != abort.execution_epoch
             or result.execution_manifest_sha256 != abort.execution_manifest_sha256
+        ):
+            raise ProtectedCapacityManagerClientError("unexpected")
+        return result
+
+    def activate_execution(
+        self,
+        activation: ExecutionActivationV2,
+        idempotency_key: UUID,
+    ) -> ExecutionAuthorityV2:
+        if not isinstance(activation, ExecutionActivationV2):
+            raise TypeError("capacity manager execution activation is invalid")
+        _require_execution_idempotency_key(idempotency_key)
+        response = self._request(
+            "POST",
+            f"/v2/execution-preparations/{activation.execution_epoch}/activate",
+            "manager-activate",
+            payload=activation.model_dump(mode="json", exclude_none=False),
+            idempotency_key=idempotency_key,
+        )
+        try:
+            return _execution_transition_authority(response, activation)
+        except ValueError:
+            raise ProtectedCapacityManagerClientError("unexpected") from None
+
+    def drain_execution(
+        self,
+        drain: ExecutionDrainV2,
+        idempotency_key: UUID,
+    ) -> ExecutionAuthorityV2:
+        if not isinstance(drain, ExecutionDrainV2):
+            raise TypeError("capacity manager execution drain is invalid")
+        _require_execution_idempotency_key(idempotency_key)
+        response = self._request(
+            "POST",
+            f"/v2/execution-epochs/{drain.execution_epoch}/drain",
+            "manager-drain",
+            payload=drain.model_dump(mode="json", exclude_none=False),
+            idempotency_key=idempotency_key,
+        )
+        try:
+            return _execution_transition_authority(response, drain)
+        except ValueError:
+            raise ProtectedCapacityManagerClientError("unexpected") from None
+
+    def retire_execution(
+        self,
+        retirement: ExecutionRetirementV2,
+        idempotency_key: UUID,
+    ) -> ProtectedExecutionRetirementResult:
+        if not isinstance(retirement, ExecutionRetirementV2):
+            raise TypeError("capacity manager execution retirement is invalid")
+        _require_execution_idempotency_key(idempotency_key)
+        response = self._request(
+            "POST",
+            f"/v2/execution-epochs/{retirement.execution_epoch}/retire",
+            "manager-retire",
+            payload=retirement.model_dump(mode="json", exclude_none=False),
+            idempotency_key=idempotency_key,
+        )
+        try:
+            result = _execution_retirement_result(response)
+        except ValueError:
+            raise ProtectedCapacityManagerClientError("unexpected") from None
+        if (
+            result.execution_epoch != retirement.execution_epoch
+            or result.execution_manifest_sha256 != retirement.execution_manifest_sha256
         ):
             raise ProtectedCapacityManagerClientError("unexpected")
         return result
@@ -1605,5 +1722,6 @@ __all__ = [
     "ProtectedCapacityManagerClientError",
     "ProtectedExecutionPreparationAbortResult",
     "ProtectedExecutionPreparationStatus",
+    "ProtectedExecutionRetirementResult",
     "open_protected_capacity_manager_client",
 ]

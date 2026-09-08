@@ -142,6 +142,7 @@ def test_execution_transitions_use_exact_contracts_and_distinct_credentials(tmp_
         {"writer_epoch": 999},
         {"execution_epoch": 999},
         {"execution_manifest_sha256": "e" * 64},
+        {"trusted_fleet_release_sha256": "0" * 64},
         {
             "execution_state": "prepared",
             "executable_new_capacity_ceiling": 0,
@@ -208,3 +209,35 @@ def test_execution_transition_requires_nonzero_idempotency_key(
     with pytest.raises(ValueError, match="idempotency"):
         getattr(client, f"{operation}_execution")(requests[index], key)
     assert not http.calls
+
+
+@pytest.mark.parametrize("operation,index", [("activate", 0), ("drain", 1), ("retire", 2)])
+@pytest.mark.parametrize("status", [401, 403, 409, 500])
+def test_execution_transition_does_not_retry_rejection_or_ambiguous_failure(
+    tmp_path: Path, operation, index, status
+):
+    requests, _responses = _transitions()
+    client, http, _credentials_root = _client(tmp_path, [])
+    http.responses.append(_Response(b'{"detail":"private diagnostic"}', status_code=status))
+    with pytest.raises(ProtectedCapacityManagerClientError, match="unexpected") as error:
+        getattr(client, f"{operation}_execution")(requests[index], _KEYS[0])
+    assert "private diagnostic" not in str(error.value)
+    assert len(http.calls) == 1
+    assert http.closed
+
+
+def test_retirement_replay_keeps_exact_request_and_idempotency_key(tmp_path: Path):
+    requests, responses = _transitions()
+    client, http, _credentials_root = _client(
+        tmp_path, [responses[2], responses[2] | {"replayed": True}]
+    )
+    first = client.retire_execution(requests[2], _KEYS[0])
+    replay = client.retire_execution(requests[2], _KEYS[0])
+    assert first.replayed is False and replay.replayed is True
+    assert first.execution_epoch == replay.execution_epoch
+    assert first.execution_manifest_sha256 == replay.execution_manifest_sha256
+    assert first.retired_at == replay.retired_at
+    assert len(http.calls) == 2
+    assert http.calls[0]["content"] == http.calls[1]["content"]
+    assert http.calls[0]["headers"]["Idempotency-Key"] == str(_KEYS[0])
+    assert http.calls[1]["headers"]["Idempotency-Key"] == str(_KEYS[0])
