@@ -46,13 +46,14 @@ locks contain both `darwin_arm64` and `linux_amd64` checksums.
 python3 scripts/check_nebius_iac.py
 terraform fmt -check -recursive deploy/terraform/nebius
 terraform -chdir=deploy/terraform/nebius/modules/execution-target init -backend=false
-terraform -chdir=deploy/terraform/nebius/modules/execution-target validate
 terraform -chdir=deploy/terraform/nebius/modules/execution-target test
 terraform -chdir=deploy/terraform/nebius/stack init -backend=false
 terraform -chdir=deploy/terraform/nebius/stack validate
 ```
 
 These checks exercise repository structure and mocked Terraform plans only.
+Validate the root `stack`, not the reusable child module in isolation: the
+root supplies the child module's `nebius.no_default_labels` provider alias.
 They do not prove Nebius credentials, quota, capacity, price, creation,
 convergence, Kubernetes access, pod execution, autoscaling, isolation, disaster
 recovery, or destruction.
@@ -64,6 +65,26 @@ collector and accounting work. Account-level budget enforcement is separately
 configurable; cluster health must never be treated as cost or alert evidence.
 
 ## Plan shape
+
+The deployment gateway now has a separately reserved private `/32` allocation
+attached through the mutable `network_interfaces[].aliases` field. The
+replacement-only primary `ip_address` and fixed public allocation are unchanged.
+The output retains `deployment_access.private_address` for its original DHCP
+meaning; private service consumers must instead use
+`private_service_allocation` and `private_service_cidr`. The latter survives
+a VM replacement while the allocation is retained.
+
+Fresh stacks wait for Kubernetes to reserve its Service CIDR first. A
+postcondition requires the resulting service alias to be a `/32` in the node
+network; if this check fails, the allocation may already exist, but attachment
+is blocked. Investigate and clean up only that exact new allocation.
+
+An existing-stack plan should add this one allocation and update only the
+gateway in place, with no VM/disk replacement. Cloud assignment does not prove
+the guest owns the address: the scoped gateway proxy installer in the
+[runbook](../../../docs/runbooks/nebius-infrastructure.md) persistently configures
+the approved alias without changing DHCP/default routes. Neither planning nor
+this output activates the staging link or provisions application credentials.
 
 After the runbook gates are satisfied, prepare the one shared state anchor:
 

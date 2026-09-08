@@ -16,6 +16,10 @@ import yaml  # type: ignore[import-untyped]
 _NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,253}\Z")
 _IMAGE = re.compile(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}\Z")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_RFC1918 = tuple(
+    ipaddress.IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 _NETWORKS = frozenset(
     {
         "database",
@@ -94,7 +98,8 @@ def validate_staging_attachment(
             "gateway_secret",
             "collector",
             "network",
-        },
+        }
+        | ({"private_entry"} if isinstance(value, dict) and "private_entry" in value else set()),
         "staging attachment",
     )
     if (
@@ -189,6 +194,57 @@ def validate_staging_attachment(
             if item["port"] == (parsed.port or 443)
         ):
             raise StagingAttachmentError(f"network {name} does not contain its endpoint address")
+    if "private_entry" in value:
+        _validate_private_entry(value)
+
+
+def _validate_private_entry(value: dict[str, Any]) -> None:
+    entry = _object(value["private_entry"], {"hostname", "address"}, "private entry")
+    hostname = entry["hostname"]
+    if (
+        not isinstance(hostname, str)
+        or len(hostname) > 253
+        or "." not in hostname
+        or not all(_DNS_LABEL.fullmatch(label) for label in hostname.split("."))
+    ):
+        raise StagingAttachmentError("private entry hostname must be a DNS name")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        raise StagingAttachmentError("private entry hostname must not be an IP literal")
+    try:
+        if not isinstance(entry["address"], str):
+            raise ValueError
+        address = ipaddress.IPv4Address(entry["address"])
+        if not any(address in subnet for subnet in _RFC1918):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise StagingAttachmentError(
+            "private entry address must be an RFC1918 IPv4 literal"
+        ) from None
+    for endpoint, port in (
+        (value["canonical"]["endpoint"], 19443),
+        (value["collector"]["control_plane_url"], 18443),
+    ):
+        parsed = urlsplit(endpoint)
+        if parsed.hostname != hostname or parsed.port != port:
+            raise StagingAttachmentError(
+                "private entry must match the canonical and control-plane TLS origins"
+            )
+    if urlsplit(value["source"]["endpoint"]).hostname == hostname:
+        raise StagingAttachmentError("private entry must not override the independent spool host")
+    # The Secret DSNs are not read or rewritten here. Deployment preflight must
+    # separately verify that both DB references use this hostname on port 15432.
+    for name, port in (("database", 15432), ("canonical_store", 19443), ("control_plane", 18443)):
+        if not any(
+            item["port"] == port and address in ipaddress.ip_network(item["cidr"])
+            for item in value["network"][name]
+        ):
+            raise StagingAttachmentError(
+                f"private entry network {name} must allow its address and port"
+            )
 
 
 def _env(name: str, value: str) -> dict[str, Any]:
@@ -435,6 +491,16 @@ def render_staging_attachment(
             egress=[dns, *destinations("control_plane", "kubernetes_api", "provider_api")],
         ),
     ]
+    if "private_entry" in value:
+        entry = value["private_entry"]
+        for doc in [*actuator_docs, *collector_docs, *gateway_docs]:
+            if doc["kind"] == "Deployment":
+                pod = doc["spec"]["template"]["spec"]
+            elif doc["kind"] == "CronJob":
+                pod = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+            else:
+                continue
+            pod["hostAliases"] = [{"ip": entry["address"], "hostnames": [entry["hostname"]]}]
     return {
         name: yaml.safe_dump_all(documents, sort_keys=False).encode()
         for name, documents in (

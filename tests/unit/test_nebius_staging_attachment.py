@@ -77,6 +77,16 @@ def binding() -> dict:
     }
 
 
+def private_binding() -> dict:
+    payload = binding()
+    payload["private_entry"] = {"hostname": "staging.example", "address": "10.42.0.8"}
+    payload["canonical"]["endpoint"] = "https://staging.example:19443"
+    payload["collector"]["control_plane_url"] = "https://staging.example:18443"
+    for name, port in (("database", 15432), ("canonical_store", 19443), ("control_plane", 18443)):
+        payload["network"][name] = [{"cidr": "10.42.0.8/32", "port": port}]
+    return payload
+
+
 def render(tmp_path: Path, payload: dict, environment: str = "staging") -> tuple[dict, list[dict]]:
     attachment = tmp_path / "attachment.json"
     attachment.write_text(json.dumps(payload))
@@ -396,3 +406,206 @@ def test_cli_attachment_render_and_rejection_are_offline(tmp_path: Path, capsys)
     stderr = capsys.readouterr().err
     assert "must-not-leak" not in stderr
     assert not (tmp_path / "rejected").exists()
+
+
+def test_private_entry_cli_persists_all_consumer_aliases_without_rewriting_identity(
+    tmp_path: Path, capsys
+) -> None:
+    payload = private_binding()
+    manifest, _ = render(tmp_path, payload)
+    output = tmp_path / "cli"
+    assert (
+        render_main(
+            [
+                "--environment",
+                "staging",
+                "--image",
+                IMAGE,
+                "--capacity-policy",
+                str(tmp_path / "capacity.json"),
+                "--staging-attachment",
+                str(tmp_path / "attachment.json"),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert "target: nebius-eu-north1-staging" in capsys.readouterr().out
+    assert manifest["source_sha256"]["staging_attachment"]
+    docs = [doc for path in output.glob("*.yaml") for doc in yaml.safe_load_all(path.read_text())]
+    consumers = [doc for doc in docs if doc["kind"] in {"Deployment", "CronJob"}]
+    assert len(consumers) == 3
+    for doc in consumers:
+        template = (
+            doc["spec"] if doc["kind"] == "Deployment" else doc["spec"]["jobTemplate"]["spec"]
+        )
+        assert template["template"]["spec"]["hostAliases"] == [
+            {"ip": "10.42.0.8", "hostnames": ["staging.example"]}
+        ]
+        if doc["kind"] == "Deployment":
+            env = {
+                item["name"]: item for item in template["template"]["spec"]["containers"][0]["env"]
+            }
+            db = next(item for name, item in env.items() if name.endswith("DB_URL"))
+            assert "value" not in db
+            assert db["valueFrom"]["secretKeyRef"]["name"] == "staging-db"
+            if doc["metadata"]["name"] == "loom-llm-gateway":
+                assert env["LOOM_GW_MINIO_ENDPOINT"]["value"] == payload["canonical"]["endpoint"]
+                assert (
+                    env["LOOM_GW_SERVICE_EXECUTION_SOURCE_ENDPOINT"]["value"]
+                    == payload["source"]["endpoint"]
+                )
+    collector = next(doc for doc in docs if doc["kind"] == "ConfigMap")
+    assert (
+        collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_CONTROL_PLANE_URL"]
+        == payload["collector"]["control_plane_url"]
+    )
+
+
+def test_private_entry_omission_keeps_legacy_render_without_aliases(tmp_path: Path) -> None:
+    _, docs = render(tmp_path, binding())
+    assert "hostAliases" not in yaml.safe_dump_all(docs)
+
+
+def test_private_entry_does_not_redirect_independent_spool(tmp_path: Path) -> None:
+    payload = private_binding()
+    payload["source"]["endpoint"] = "https://staging.example:9443"
+    payload["network"]["source_store"] = [{"cidr": "192.0.2.3/32", "port": 9443}]
+    with pytest.raises(NebiusRuntimeRenderError, match="independent spool host"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "8.8.8.8",
+        "192.0.2.8",
+        "127.0.0.1",
+        "169.254.1.1",
+        "100.64.0.1",
+        "::1",
+        "fd00::1",
+        "10.42.0.8/32",
+        "010.42.0.8",
+        "staging.example",
+        "",
+        None,
+    ],
+)
+def test_private_entry_rejects_non_rfc1918_ipv4(tmp_path: Path, address: object) -> None:
+    payload = private_binding()
+    payload["private_entry"]["address"] = address
+    with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "10.42.0.8",
+        "127.0.0.1",
+        "::1",
+        "localhost",
+        "staging.example.",
+        "bad..example",
+        "-bad.example",
+        "bad-.example",
+        "bad_name.example",
+        "https://staging.example",
+        "staging.example:19443",
+        "*.example",
+        "x" * 64 + ".example",
+        "staging.example\n",
+        "",
+        None,
+    ],
+)
+def test_private_entry_rejects_invalid_dns_hostname(tmp_path: Path, hostname: object) -> None:
+    payload = private_binding()
+    payload["private_entry"]["hostname"] = hostname
+    with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "section,field,endpoint",
+    [
+        ("canonical", "endpoint", "https://other.example:19443"),
+        ("canonical", "endpoint", "https://10.42.0.8:19443"),
+        ("canonical", "endpoint", "https://staging.example:9443"),
+        ("collector", "control_plane_url", "https://other.example:18443"),
+        ("collector", "control_plane_url", "https://10.42.0.8:18443"),
+        ("collector", "control_plane_url", "https://staging.example"),
+    ],
+)
+def test_private_entry_requires_exact_tls_origins(
+    tmp_path: Path, section: str, field: str, endpoint: str
+) -> None:
+    payload = private_binding()
+    payload[section][field] = endpoint
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize("name", ["database", "canonical_store", "control_plane"])
+@pytest.mark.parametrize("change", ["address", "port", "uncoupled", "ipv6"])
+def test_private_entry_requires_matching_address_and_port_rule(
+    tmp_path: Path, name: str, change: str
+) -> None:
+    payload = private_binding()
+    port = payload["network"][name][0]["port"]
+    payload["network"][name] = {
+        "address": [{"cidr": "10.42.0.9/32", "port": port}],
+        "port": [{"cidr": "10.42.0.8/32", "port": port + 1}],
+        "uncoupled": [
+            {"cidr": "10.42.0.8/32", "port": port + 1},
+            {"cidr": "10.42.0.9/32", "port": port},
+        ],
+        "ipv6": [{"cidr": "fd00::/64", "port": port}],
+    }[change]
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "cidr,address",
+    [
+        ("10.42.0.0/24", "10.42.0.8"),
+        ("172.16.0.0/12", "172.31.255.254"),
+        ("192.168.0.0/16", "192.168.42.8"),
+    ],
+)
+def test_private_entry_accepts_rfc1918_routed_ranges(
+    tmp_path: Path, cidr: str, address: str
+) -> None:
+    payload = private_binding()
+    payload["private_entry"]["address"] = address
+    for name in ("database", "canonical_store", "control_plane"):
+        payload["network"][name][0]["cidr"] = cidr
+    render(tmp_path, payload)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        None,
+        {},
+        [],
+        {"hostname": "staging.example"},
+        {"hostname": "staging.example", "address": "10.42.0.8", "aliases": ["other.example"]},
+    ],
+)
+def test_private_entry_rejects_incomplete_or_generic_dns_override(
+    tmp_path: Path, entry: object
+) -> None:
+    payload = private_binding()
+    payload["private_entry"] = entry
+    with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()

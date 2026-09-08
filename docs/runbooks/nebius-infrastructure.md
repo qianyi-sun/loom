@@ -590,6 +590,66 @@ Preserve the shared TLS Secret, canonical databases/buckets, other routers and
 WireGuard identity. Verify resource removal rather than assuming an omitted
 rendered document is automatically pruned.
 
+#### Nebius gateway: reserved service address and persistent TCP forwarding
+
+The Terraform gateway output now separately exposes
+`private_service_allocation` and `private_service_cidr`. Use that reserved
+`/32`, **not** the existing dynamic `private_address`, for Pod-facing service
+routes and policy allowlists. The new allocation attaches using the
+[mutable secondary alias](https://docs.nebius.com/compute/virtual-machines/network#how-to-assign-a-secondary-private-ip-address-to-a-vm);
+it does not change the replacement-only primary IP or the fixed public
+WireGuard/SSH allocation.
+
+Before applying an authorized saved plan, require exactly one new private
+allocation plus an in-place gateway update; reject unexpected replacements,
+disk changes or unrelated resources. Fresh-stack ordering lets Kubernetes
+reserve its Service CIDR first, and an allocation postcondition rejects addresses
+outside the node network. A failed postcondition can leave a newly reserved
+allocation in state; investigate and recover only that resource. After apply,
+read back allocation/instance/subnet identity and the actual `/32` before
+configuring a guest listener. A validated input IP is not ownership proof.
+
+`scripts/ops/nebius_gateway_proxy.py` installs seven dedicated units through
+the authorized root path: one address unit and three socket/service pairs.
+It configures the reserved address on loopback with the `lo:loom-nb` label,
+without editing DHCP, netplan or default routes. Native
+[systemd-socket-proxyd](https://www.freedesktop.org/software/systemd/man/latest/systemd-socket-proxyd.html)
+forwards TCP bytes from only that private IP's `15432/18443/19443` to the
+same ports on the sole staging WireGuard peer. No extra proxy daemon dependency,
+public listener, NAT/firewall rule or full-cluster route is introduced.
+
+```bash
+sudo python3 nebius_gateway_proxy.py install \
+  --listen-address "$GATEWAY_RESERVED_PRIVATE_IPV4" \
+  --peer-address "$STAGING_WIREGUARD_IPV4"
+```
+
+The existing `wg-loom-nb` peer and peer-only route must already be configured.
+Installation rejects addresses assigned outside its managed loopback label,
+unmanaged units/drop-ins and unsafe files. A local lock covers preflight and
+reconciliation. The same configuration does not restart listeners; failed
+updates restore the prior managed files and active/enabled state. Installer
+success reports ports/status, not addresses or credentials. The offline
+`render` action emits unit contents for private review; do not publish its
+actual address-bearing output in logs or issue comments.
+
+Sockets are pulled at boot and by the WireGuard service, with restart/stop
+propagation. Explicit socket dependency ordering avoids a cycle with the
+default early `sockets.target`. Validate actual PID 1 behavior after protected
+installation: restart only `wg-quick@wg-loom-nb.service`, then confirm the
+address unit, three sockets, new connections and canonical endpoints recover.
+Unit parsing and a local socket-activation fixture are not that live proof.
+Reinstall from the approved persisted binding when replacing the gateway;
+retain the allocation and restore/reconcile the WireGuard identity separately.
+
+To disable only these forwards, disable/stop
+`loom-nebius-forward-15432.socket`, `loom-nebius-forward-18443.socket` and
+`loom-nebius-forward-19443.socket`, then stop
+`loom-nebius-private-address.service`. Paired forwarder services stop with their
+sockets. Keep unit files and the reserved allocation for recovery. Do not remove
+the primary address, stop the gateway VM, flush firewall rules or affect other
+resources as part of this rollback.
+
 #### Canonical render configuration
 
 The canonical render profile is
@@ -705,6 +765,34 @@ bindings, unpinned Gateway images, incomplete Secret references and unscoped rou
 before output is written. JSON Secret references are shape-checked only; actual
 Secret existence/content and network DNS resolution remain deployment checks.
 
+For the reserved gateway entry above, the v1 attachment accepts an optional
+non-secret declaration:
+
+```json
+"private_entry": {
+  "hostname": "staging.example",
+  "address": "10.20.30.40"
+}
+```
+
+Replace both example values with the approved TLS hostname and Terraform
+`private_service_cidr` address (without `/32`). Set the canonical store origin
+to `https://staging.example:19443` and collector origin to
+`https://staging.example:18443`. The hostname must match both origins and the
+actual existing certificate. The independent spool must use a different
+hostname: a Pod hosts entry applies to all ports of a name.
+
+The renderer persists Kubernetes-native `hostAliases` on all three consumers:
+Gateway, actuator and collector. No hand-edited Pod hosts file, global cluster
+DNS override or changed TLS URL is required; recreated Pods inherit the mapping.
+It requires address-and-port policy permits for database `15432`, canonical
+store `19443` and Control Plane `18443`. Keep both DB URLs in Secret references,
+and verify separately that their DSNs use this same hostname on `15432` with
+the approved database/TLS settings; the renderer never reads or rewrites them.
+Omitting `private_entry` preserves the previous rendered files byte-for-byte.
+This mapping is desired configuration, not proof that the reserved alias,
+forwarders, certificate trust or credentials have been installed.
+
 Use the same `configuration_revision` on both sides of the attachment. The
 Nebius renderer stamps it on Gateway/actuator Pod templates and collector Job
 and Pod templates. Rotating values under an unchanged Secret name requires a
@@ -728,8 +816,9 @@ advance the shared deployment revision. Gateway rollout preserves the existing
 ### Activation and acceptance boundary
 
 Before any activation, read the current protected broker status and coordinate
-its request owner. Resolve the mandatory-backup failure tracked by #1807 through
-its owning lane; do not skip backup, resume another initiator's request, or
+its request owner. Resolve the current reported failure through its owning lane
+(including backup or final-attestation failures); do not assume the historical
+#1807 backup failure is still the current blocker. Do not skip backup, resume another initiator's request, or
 substitute the development gateway helper for protected staging deployment.
 This render work does not transfer rollout ownership or authorize production.
 

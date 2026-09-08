@@ -46,6 +46,19 @@ variables {
   EOT
 }
 
+override_resource {
+  target          = nebius_vpc_v1_allocation.deployment_access_private
+  override_during = plan
+  values = {
+    id = "vpcallocation-private-service-test"
+    status = {
+      details = {
+        allocated_cidr = "10.0.23.1/32"
+      }
+    }
+  }
+}
+
 run "development_private_payg_plan" {
   command = plan
   providers = {
@@ -56,6 +69,21 @@ run "development_private_payg_plan" {
   assert {
     condition     = yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).users[0].sudo == ["ALL=(ALL) NOPASSWD:ALL"]
     error_message = "The deployment gateway operator needs a reproducible guest administration path."
+  }
+
+  assert {
+    condition     = nebius_vpc_v1_allocation.deployment_access_private.ipv4_private.cidr == "/32" && nebius_vpc_v1_allocation.deployment_access_private.ipv4_public == null
+    error_message = "The durable service address must be a private single-host allocation."
+  }
+
+  assert {
+    condition     = nebius_compute_v1_instance.deployment_access.network_interfaces[0].aliases[0].allocation_id == "vpcallocation-private-service-test" && nebius_compute_v1_instance.deployment_access.network_interfaces[0].ip_address.allocation_id == null
+    error_message = "Attach the reserved alias without changing the replacement-only primary IP."
+  }
+
+  assert {
+    condition     = output.deployment_access.private_service_cidr == "10.0.23.1/32"
+    error_message = "Consumers must receive the reserved service endpoint, not a dynamic VM address."
   }
 
   assert {
@@ -112,6 +140,27 @@ run "development_private_payg_plan" {
     condition     = nebius_iam_v1_auth_public_key.capacity_observer.expires_at == null
     error_message = "The recurring capacity observer key must not acquire a calendar expiry."
   }
+}
+
+run "gateway_alias_rejects_service_cidr" {
+  command = plan
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
+  override_resource {
+    target          = nebius_vpc_v1_allocation.deployment_access_private
+    override_during = plan
+    values = {
+      id = "vpcallocation-outside-node-network"
+      status = {
+        details = {
+          allocated_cidr = "172.20.23.1/32"
+        }
+      }
+    }
+  }
+  expect_failures = [nebius_vpc_v1_allocation.deployment_access_private]
 }
 
 run "public_control_plane_is_cidr_bounded" {
