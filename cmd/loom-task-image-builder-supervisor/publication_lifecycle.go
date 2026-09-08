@@ -36,7 +36,16 @@ func (p *publicationLifecycle) run(parent context.Context) (*publicationReceipt,
 	set := p.set
 	set.Components = append([]BuiltComponent(nil), p.set.Components...)
 	now := p.clock.Now()
-	expiry := p.session.ExpiresAt()
+	var expiry time.Time
+	if err := p.session.WithCurrentEnvelope(func(envelope *SessionEnvelope, _ *SecretBuffer) error {
+		if envelope.GrantID != set.GrantID || p.session.grantID != set.GrantID {
+			return invalid
+		}
+		expiry = envelope.ExpiresAt
+		return nil
+	}); err != nil {
+		return nil, invalid
+	}
 	if !expiry.After(now) || !p.leaseExpiresAt.After(now) || parent.Err() != nil {
 		return nil, invalid
 	}
