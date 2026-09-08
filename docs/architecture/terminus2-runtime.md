@@ -433,6 +433,67 @@ worker_restart_evidence: <required-when-unhealthy>
 Attach timestamps or immutable object/log references for every assertion. A
 healthy route, green CI, or matching image tag alone is not canary evidence.
 
+### Checked-in local transport harness
+
+`scripts/ops/issue_1748_deadline_canary.py` is a deliberately partial,
+loopback-only fault provider and evidence validator. It exercises real HTTP at
+the Gateway-to-provider boundary without a live provider, worker pool, or Loom
+batch. Case A accepts and holds one request. Case B holds request 1, permits one
+separately signed deadline grant to complete, and rejects any later request.
+Both cases count wrong-capability and over-limit requests so an unexpected
+dispatch cannot be hidden by the one-shot boundary. Request bodies and graceful
+shutdown are independently wall-time bounded.
+
+Run the real-HTTP regression with:
+
+```bash
+uv run --extra dev pytest -q \
+  tests/ops/test_issue_1748_deadline_canary.py \
+  tests/integration/test_issue_1748_deadline_canary.py
+```
+
+The integration test uses two loopback Uvicorn servers and a disposable
+PostgreSQL schema. It proves the Gateway returns the stable `504` /
+`agent_timeout` / `attempt_deadline_reached` result for the held request, sends
+no extra request when the same expired grant is explicitly replayed, and lets a
+separately minted Case B deadline-bearing grant reach the provider and complete.
+That local observation does not prove that Control Plane retry authority created
+a new execution attempt. It does not exercise Control Plane
+terminal persistence, worker supervision/retry, canonical trajectory or ATIF
+publication, deployed image/route read-back, or post-run pool health.
+Its candidate strings are test fixtures; candidate provenance is enforced only
+by the separate manual CLI checkout binding described below.
+
+The provider can also be started manually for loopback development. The
+capability is accepted only through an environment variable and is never
+written to its evidence file:
+
+```bash
+export LOOM_1748_CANARY_NONCE="$(${PYTHON:-python3} -c \
+  'import secrets; print(secrets.token_urlsafe(32))')"
+candidate_sha="$(git rev-parse HEAD)"
+candidate_tree="$(git rev-parse 'HEAD^{tree}')"
+
+uv run python scripts/ops/issue_1748_deadline_canary.py serve \
+  --case A \
+  --candidate-sha "$candidate_sha" \
+  --candidate-tree "$candidate_tree" \
+  --trial-id '<local-trial-uuid>' \
+  --step-id main \
+  --deadline-budget-sec 10 \
+  --hold-sec 15 \
+  --output /tmp/issue-1748-fault-provider.json
+```
+
+The manual command refuses a dirty or candidate-mismatched checkout and any
+non-loopback bind. Its output is only a provider observation; a combined local
+transport document must additionally contain the Gateway outcomes and can be
+checked with `... issue_1748_deadline_canary.py validate --input <path>`.
+Every local document is forced to `full_canary_passed: false` and enumerates
+the missing acceptance layers. Do not substitute it for the authorized
+post-install Case A/B manifest above, and do not use this local command to
+configure a staging provider connection, worker pool, or deployment.
+
 ## Export
 
 | Mode | Status | Source |
