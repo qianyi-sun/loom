@@ -30,17 +30,17 @@ type publicationLifecycleTestGuard struct {
 	renewals     int
 	heartbeats   int
 	mutate       func(*publicationStatus)
+	statusHook   func()
 }
 
 func (g *publicationLifecycleTestGuard) Renew(_ context.Context, _ string, _ string, current *SecretBuffer) (*SessionEnvelope, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	parsed, err := parseSessionEnvelope(current)
-	if err != nil {
-		return nil, err
+	if current == nil || current.closed {
+		return nil, errors.New("missing session")
 	}
 	g.renewals++
-	return testSession(parsed.Generation+1, g.clock.Now().Add(time.Minute)), nil
+	return testSession(g.renewals+1, g.clock.Now().Add(time.Minute)), nil
 }
 
 func (g *publicationLifecycleTestGuard) Heartbeat(_ context.Context, grant, operation, materialization, attempt string, epoch int, _ *SecretBuffer) (*LeaseResponse, error) {
@@ -63,6 +63,9 @@ func (g *publicationLifecycleTestGuard) PublicationPoll(_ context.Context, bindi
 func (g *publicationLifecycleTestGuard) status(operation string, binding publicationStatusBinding) (*publicationStatus, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.statusHook != nil {
+		g.statusHook()
+	}
 	g.bindings = append(g.bindings, binding)
 	g.operations = append(g.operations, operation)
 	state := "completed"
@@ -87,6 +90,157 @@ func (g *publicationLifecycleTestGuard) status(operation string, binding publica
 		g.mutate(status)
 	}
 	return status, nil
+}
+
+func TestPublicationLifecycleMaintainsLivenessWhileUploadAndVerificationAreSlow(t *testing.T) {
+	for _, phase := range []string{"upload", "verification"} {
+		t.Run(phase, func(t *testing.T) {
+			p, guard, clock := publicationLifecycleFixture(t)
+			if phase == "verification" {
+				guard.states = make([]string, 80)
+				for i := range guard.states {
+					guard.states[i] = "running"
+				}
+			} else {
+				original := p.upload
+				p.upload = func(ctx context.Context) ([]PublicationCandidateV2Acknowledgement, error) {
+					timer := clock.NewTimer(80 * time.Second)
+					defer timer.Stop()
+					select {
+					case <-timer.C():
+						return original(ctx)
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+			}
+			done := make(chan error, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				receipt, err := p.run(ctx)
+				if err == nil && receipt == nil {
+					err = errors.New("missing receipt")
+				}
+				done <- err
+			}()
+			for {
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+					if guard.renewals < 3 || guard.heartbeats < 3 {
+						t.Fatalf("liveness absent: renewals=%d heartbeats=%d", guard.renewals, guard.heartbeats)
+					}
+					return
+				case d := <-clock.armed:
+					if d <= 20*time.Second {
+						clock.advance(d)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("slow phase stalled")
+				}
+			}
+		})
+	}
+}
+
+func TestPublicationLifecycleHeartbeatConflictRequiresExactCompletedPoll(t *testing.T) {
+	for _, terminal := range []string{"completed", "running", "transport", "wrong-receipt"} {
+		t.Run(terminal, func(t *testing.T) {
+			p, guard, clock := publicationLifecycleFixture(t)
+			guard.heartbeatErr = errors.New("lease cleared or authority unavailable")
+			guard.states = []string{"queued", terminal}
+			guard.statusHook = func() {
+				if len(guard.bindings) == 1 {
+					return
+				}
+				clock.advance(20 * time.Second)
+			}
+			if terminal == "wrong-receipt" {
+				guard.states[1] = "completed"
+				guard.mutate = func(s *publicationStatus) {
+					if s.Receipt != nil {
+						s.Receipt.AttemptID = uuidWithTail(999)
+					}
+				}
+			}
+			receipt, err := drivePublication(t, p, clock)
+			if (err == nil && receipt != nil) != (terminal == "completed") {
+				t.Fatalf("terminal=%s receipt=%v err=%v", terminal, receipt, err)
+			}
+			if guard.heartbeats != 1 || len(guard.bindings) != 2 || guard.operations[1] != "poll" {
+				t.Fatalf("completion race not exercised: heartbeats=%d operations=%v", guard.heartbeats, guard.operations)
+			}
+		})
+	}
+}
+
+func TestPublicationLifecycleCancellationAndDeadlineJoinUpload(t *testing.T) {
+	for _, condition := range []string{"cancel", "deadline"} {
+		t.Run(condition, func(t *testing.T) {
+			p, guard, clock := publicationLifecycleFixture(t)
+			started, cancelled, allowExit := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			p.upload = func(ctx context.Context) ([]PublicationCandidateV2Acknowledgement, error) {
+				close(started)
+				<-ctx.Done()
+				close(cancelled)
+				<-allowExit
+				return nil, ctx.Err()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := p.run(ctx); done <- err }()
+			<-started
+			if condition == "cancel" {
+				cancel()
+			} else {
+				clock.advance(time.Hour)
+			}
+			select {
+			case <-cancelled:
+			case <-time.After(2 * time.Second):
+				close(allowExit)
+				t.Fatal("upload not cancelled")
+			}
+			select {
+			case <-done:
+				close(allowExit)
+				t.Fatal("returned before upload joined")
+			default:
+			}
+			close(allowExit)
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("cancelled upload succeeded")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("upload did not join")
+			}
+			if len(guard.bindings) != 0 {
+				t.Fatal("cancelled upload submitted")
+			}
+		})
+	}
+}
+
+func TestPublicationLifecycleRejectsWrongManagerGrantBeforeUpload(t *testing.T) {
+	p, guard, clock := publicationLifecycleFixture(t)
+	other := testSession(1, testNow.Add(time.Minute))
+	other.GrantID = uuidWithTail(999)
+	p.session = NewSessionManager(other.GrantID, other, guard)
+	defer p.session.Close()
+	uploaded := false
+	p.upload = func(context.Context) ([]PublicationCandidateV2Acknowledgement, error) {
+		uploaded = true
+		return nil, errors.New("should not upload")
+	}
+	if receipt, err := drivePublication(t, p, clock); err == nil || receipt != nil || uploaded {
+		t.Fatal("wrong current grant reached upload")
+	}
 }
 
 func publicationLifecycleFixture(t *testing.T) (*publicationLifecycle, *publicationLifecycleTestGuard, *publicationTestClock) {
