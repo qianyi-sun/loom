@@ -158,9 +158,24 @@ reproduced and fixed in `f850e1b48`. The fresh full supervisor suite and race su
 passed after that fix; independent scoped re-review cleared the finding with no
 new breakage. Contained capture is complete for its bounded scope. The native
 scratch fixture now checks real metadata emission but was explicitly skipped
-without its native runtime prerequisite. Versioned candidate evidence persistence,
-guard/API transport, polling and publication composition remain pending. No slice
-grants readiness or activates the provider.
+without its native runtime prerequisite.
+
+Versioned candidate persistence and strict stored-V2 parsing are independently
+reviewed through `5588c6415`. The explicit Python guard/API V2 transport is
+implemented in `48a8c1543`, with review fixes in `eb21b10d8`: both API versions
+share traffic limits, and real invalid-V2 requests prove response/log/metric
+redaction and no persistence. The final covering API/guard run passed 219 tests;
+scoped independent re-review cleared both material findings. Maximum-evidence
+tests use 32768-byte packets; matching release configuration and checked source
+digests remain Task 6 gates. Go candidate handoff, polling and publication
+composition remain pending. No slice grants readiness or activates the provider.
+
+Upstream reconciliation `2171ed1b7` moves only the unpublished publication
+migration to `0133`, after unchanged public `0132`. Independent review approved
+the single-head graph and current-head fixture changes. PostgreSQL coverage
+passed 32 tests with one historical-migration setup timeout; the isolated
+round-trip/ORM-parity retry passed with the unchanged timeout. No production
+migration was applied.
 
 ## Task 6: Retention and release integration
 
