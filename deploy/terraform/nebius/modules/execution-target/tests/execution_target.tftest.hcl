@@ -46,11 +46,49 @@ variables {
   EOT
 }
 
+override_resource {
+  target          = nebius_vpc_v1_allocation.deployment_access_private
+  override_during = plan
+  values = {
+    id = "vpcallocation-private-service-test"
+    status = {
+      details = {
+        allocated_cidr = "10.0.23.1/32"
+      }
+    }
+  }
+}
+
 run "development_private_payg_plan" {
   command = plan
   providers = {
     nebius                   = nebius
     nebius.no_default_labels = nebius.no_default_labels
+  }
+
+  assert {
+    condition     = yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).users[0].sudo == ["ALL=(ALL) NOPASSWD:ALL"]
+    error_message = "The deployment gateway operator needs a reproducible guest administration path."
+  }
+
+  assert {
+    condition     = nebius_vpc_v1_allocation.deployment_access_private.ipv4_private.cidr == "/32" && nebius_vpc_v1_allocation.deployment_access_private.ipv4_public == null
+    error_message = "The durable service address must be a private single-host allocation."
+  }
+
+  assert {
+    condition     = nebius_compute_v1_instance.deployment_access.network_interfaces[0].aliases[0].allocation_id == "vpcallocation-private-service-test" && nebius_compute_v1_instance.deployment_access.network_interfaces[0].ip_address.allocation_id == null
+    error_message = "Attach the reserved alias without changing the replacement-only primary IP."
+  }
+
+  assert {
+    condition     = output.deployment_access.private_service_cidr == "10.0.23.1/32"
+    error_message = "Consumers must receive the reserved service endpoint, not a dynamic VM address."
+  }
+
+  assert {
+    condition     = contains(yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).packages, "wireguard-tools") && yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).disable_root && !yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).ssh_pwauth
+    error_message = "Prepare private-link tooling without enabling root or password SSH."
   }
 
   assert {
@@ -102,6 +140,100 @@ run "development_private_payg_plan" {
     condition     = nebius_iam_v1_auth_public_key.capacity_observer.expires_at == null
     error_message = "The recurring capacity observer key must not acquire a calendar expiry."
   }
+
+  assert {
+    condition     = output.staging_spool == null && length(nebius_storage_v1_bucket.staging_spool) == 0 && length(nebius_iam_v1_service_account.staging_spool) == 0 && length(nebius_iam_v1_group.staging_spool) == 0 && length(nebius_iam_v1_group_membership.staging_spool) == 0 && length(nebius_iam_v2_access_key.staging_spool) == 0
+    error_message = "Omitted staging spool must create no bucket, identity, membership, or credential."
+  }
+}
+
+run "dedicated_staging_spool" {
+  command = plan
+  variables {
+    staging_spool = { bucket_name = "loom-eu-north1-test-staging-spool" }
+  }
+  override_resource {
+    target          = nebius_iam_v1_service_account.staging_spool["staging"]
+    override_during = plan
+    values          = { id = "serviceaccount-staging-spool" }
+  }
+  override_resource {
+    target          = nebius_iam_v1_group.staging_spool["staging"]
+    override_during = plan
+    values          = { id = "group-staging-spool" }
+  }
+  override_resource {
+    target          = nebius_iam_v2_access_key.staging_spool["staging"]
+    override_during = plan
+    values = {
+      id = "accesskey-staging-spool"
+      status = {
+        aws_access_key_id = "test-aws-id"
+      }
+    }
+  }
+  assert {
+    condition     = length(nebius_storage_v1_bucket.staging_spool) == 1 && length(nebius_iam_v1_service_account.staging_spool) == 1 && length(nebius_iam_v1_group.staging_spool) == 1 && length(nebius_iam_v1_group_membership.staging_spool) == 1 && length(nebius_iam_v2_access_key.staging_spool) == 1
+    error_message = "Opt-in must provision exactly one dedicated bucket and one identity/key chain."
+  }
+  assert {
+    condition     = nebius_iam_v1_group_membership.staging_spool["staging"].member_id == "serviceaccount-staging-spool" && nebius_iam_v1_group_membership.staging_spool["staging"].parent_id == "group-staging-spool" && nebius_iam_v2_access_key.staging_spool["staging"].account.service_account.id == "serviceaccount-staging-spool"
+    error_message = "The spool key and membership must use only the dedicated service account."
+  }
+  assert {
+    condition     = nebius_iam_v2_access_key.staging_spool["staging"].expires_at == null && nebius_iam_v2_access_key.staging_spool["staging"].secret_delivery_mode == "EXPLICIT"
+    error_message = "No calendar expiry or one-time INLINE secret dependency is permitted."
+  }
+  assert {
+    condition     = length(nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules) == 1 && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].group_id == "group-staging-spool" && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].paths == tolist(["*"]) && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].roles == tolist(["storage.object-editor"]) && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].anonymous == null
+    error_message = "The dedicated bucket alone must grant object operations, not bucket administration or anonymous access."
+  }
+  assert {
+    condition     = nebius_storage_v1_bucket.staging_spool["staging"].versioning_policy == "DISABLED" && nebius_storage_v1_bucket.staging_spool["staging"].max_size_bytes == 0 && length(nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules) == 1 && nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules[0].expiration == null && nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules[0].noncurrent_version_expiration == null && nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules[0].abort_incomplete_multipart_upload.days_after_initiation == 7
+    error_message = "Only unfinished multipart uploads expire; completed objects await acknowledged materialization GC with no added budget ceiling."
+  }
+  assert {
+    condition     = output.staging_spool.endpoint == "https://storage.eu-north1.nebius.cloud" && output.staging_spool.target_id == "nebius-eu-north1-staging" && output.staging_spool.access_key_resource_id == "accesskey-staging-spool" && output.staging_spool.aws_access_key_id == "test-aws-id" && !contains(keys(output.staging_spool), "secret") && !contains(keys(output.staging_spool), "secret_access_key")
+    error_message = "Output must identify the native HTTPS endpoint and protected credential reference, never secret bytes."
+  }
+}
+
+run "staging_spool_rejects_evidence_reuse" {
+  command = plan
+  variables {
+    evidence_bucket_name = "loom-eu-north1-test-staging-spool"
+    staging_spool        = { bucket_name = "loom-eu-north1-test-staging-spool" }
+  }
+  expect_failures = [var.staging_spool]
+}
+
+run "staging_spool_rejects_state_bucket_name" {
+  command = plan
+  variables {
+    staging_spool = { bucket_name = "loom-nebius-terraform-state" }
+  }
+  expect_failures = [var.staging_spool]
+}
+
+run "gateway_alias_rejects_service_cidr" {
+  command = plan
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
+  override_resource {
+    target          = nebius_vpc_v1_allocation.deployment_access_private
+    override_during = plan
+    values = {
+      id = "vpcallocation-outside-node-network"
+      status = {
+        details = {
+          allocated_cidr = "172.20.23.1/32"
+        }
+      }
+    }
+  }
+  expect_failures = [nebius_vpc_v1_allocation.deployment_access_private]
 }
 
 run "public_control_plane_is_cidr_bounded" {

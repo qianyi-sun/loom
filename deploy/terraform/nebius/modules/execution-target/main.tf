@@ -283,6 +283,30 @@ resource "nebius_vpc_v1_allocation" "deployment_access" {
   }
 }
 
+# Reserved independently of the VM so its private service endpoint survives a
+# gateway replacement. Attach as a mutable alias, never replace the primary IP.
+resource "nebius_vpc_v1_allocation" "deployment_access_private" {
+  parent_id = var.project_id
+  name      = "${local.resource_prefix}-deployment-access-private"
+  labels    = local.common_labels
+
+  ipv4_private = {
+    subnet_id = nebius_vpc_v1_subnet.deployment_access.id
+    cidr      = "/32"
+  }
+
+  # The shared pool also contains the Kubernetes Service CIDR. On a fresh
+  # stack, let Kubernetes reserve that block before requesting another /32.
+  depends_on = [nebius_mk8s_v1_cluster.target]
+
+  lifecycle {
+    postcondition {
+      condition     = endswith(self.status.details.allocated_cidr, "/32") && cidrhost("${split("/", self.status.details.allocated_cidr)[0]}/${split("/", var.network_cidr)[1]}", 0) == cidrhost(var.network_cidr, 0)
+      error_message = "The gateway service alias must be allocated from the routable node network."
+    }
+  }
+}
+
 resource "nebius_iam_v1_service_account" "deployment_access" {
   parent_id   = var.project_id
   name        = "${local.resource_prefix}-deployment-access"
@@ -351,6 +375,9 @@ resource "nebius_compute_v1_instance" "deployment_access" {
     name       = "eth0"
     subnet_id  = nebius_vpc_v1_subnet.deployment_access.id
     ip_address = {}
+    aliases = [{
+      allocation_id = nebius_vpc_v1_allocation.deployment_access_private.id
+    }]
     public_ip_address = {
       allocation_id = nebius_vpc_v1_allocation.deployment_access.id
     }
@@ -359,10 +386,13 @@ resource "nebius_compute_v1_instance" "deployment_access" {
     #cloud-config
     users:
       - name: codex
-        sudo: false
+        sudo: ["ALL=(ALL) NOPASSWD:ALL"]
         shell: /bin/bash
         ssh_authorized_keys:
           - ${trimspace(var.deployment_access_ssh_public_key)}
+    packages:
+      - sudo
+      - wireguard-tools
     ssh_pwauth: false
     disable_root: true
   CLOUD_INIT
