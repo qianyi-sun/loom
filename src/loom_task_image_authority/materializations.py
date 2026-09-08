@@ -264,29 +264,59 @@ async def _claim_replay(
     authorization: TaskImageBuildSessionAuthorization,
     claim_id: UUID,
 ) -> tuple[TaskImageMaterialization, TaskImageBuildPlanV1] | None:
-    attempt = await session.scalar(
-        select(TaskImageMaterializationAttempt)
-        .where(TaskImageMaterializationAttempt.claim_id == claim_id)
-        .with_for_update()
-    )
-    if attempt is None:
+    # Discover identity without taking the child lock. Normal lease operations
+    # and retirement acquire materialization -> attempt; child-first replay would
+    # deadlock with either parent owner. The observation is not authority and is
+    # reloaded and revalidated after acquiring both locks in that shared order.
+    observed = (
+        await session.execute(
+            select(
+                TaskImageMaterializationAttempt.id,
+                TaskImageMaterializationAttempt.materialization_id,
+                TaskImageMaterializationAttempt.grant_id,
+                TaskImageMaterializationAttempt.session_id,
+                TaskImageMaterializationAttempt.session_generation,
+            ).where(TaskImageMaterializationAttempt.claim_id == claim_id)
+        )
+    ).one_or_none()
+    if observed is None:
         return None
     if (
-        attempt.grant_id != authorization.grant_id
-        or attempt.session_id != authorization.session_id
-        or attempt.session_generation != authorization.session_generation
+        observed.grant_id != authorization.grant_id
+        or observed.session_id != authorization.session_id
+        or observed.session_generation != authorization.session_generation
     ):
         raise TaskImageSessionMaterializationConflictError(
             "task-image claim identity was already used"
         )
     row = await session.scalar(
         select(TaskImageMaterialization)
-        .where(TaskImageMaterialization.id == attempt.materialization_id)
+        .where(TaskImageMaterialization.id == observed.materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if row is None:
         raise TaskImageSessionMaterializationConflictError(
             "task-image claim replay materialization is unavailable"
+        )
+    attempt = await session.scalar(
+        select(TaskImageMaterializationAttempt)
+        .where(
+            TaskImageMaterializationAttempt.id == observed.id,
+            TaskImageMaterializationAttempt.claim_id == claim_id,
+        )
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if (
+        attempt is None
+        or attempt.materialization_id != row.id
+        or attempt.grant_id != authorization.grant_id
+        or attempt.session_id != authorization.session_id
+        or attempt.session_generation != authorization.session_generation
+    ):
+        raise TaskImageSessionMaterializationConflictError(
+            "task-image claim replay identity changed"
         )
     return row, _stored_claim_plan(
         attempt,
