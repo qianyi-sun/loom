@@ -292,6 +292,16 @@ attempt identities, prepared bindings, lifecycle observations, protected
 release fences, legacy-writer inventory, and audit records under append-only
 and serializable constraints.
 
+Guard migration 0030 supplies schema `USAGE` to the verified definers of the
+existing public terminal-closure and requeue triggers. Those definers already
+have `EXECUTE` on their two specific guarded callees; PostgreSQL also requires
+schema resolution permission, including for ordinary trials when the guard is
+installed but inactive. This grants neither protected-table access nor general
+claim/admission authority. The migration rejects missing or changed trigger
+security bindings. Downgrade retains schema resolution because it may predate
+the migration and is shared by the earlier trigger contracts; their specific
+function permissions remain controlled by their owning migrations.
+
 The base guard remains disabled at allocation epoch zero. Its ordinary
 prepared bindings are non-executable, and normal submission and claim routes
 do not use it to authorize work.

@@ -48,10 +48,11 @@ def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
 
 def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     script = _script("capacity_guard_migrations")
-    assert tuple(script.get_heads()) == ("guard_0029",)
+    assert tuple(script.get_heads()) == ("guard_0030",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0029")
+        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0030")
     ) == (
+        "guard_0030",
         "guard_0029",
         "guard_0028",
         "guard_0027",
