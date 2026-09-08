@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -36,7 +36,6 @@ from loom.execution_image_admission import (
     ImageAdmissionKeyring,
     ImageAdmissionStatementV1,
     SignedImageAdmissionV1,
-    verify_execution_image_admission,
 )
 from loom.pipeline.keys import canonical_document
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
@@ -121,7 +120,6 @@ def validate_identity(document: dict[str, Any]) -> None:
         or document.get("source_ref") != SOURCE_REF
         or document.get("workflow_path") != WORKFLOW
         or SHA.fullmatch(str(document.get("candidate_sha"))) is None
-        or SHA.fullmatch(str(document.get("source_tree"))) is None
         or type(document.get("run_id")) is not int
         or document["run_id"] <= 0
         or REGISTRY.fullmatch(str(document.get("registry_prefix"))) is None
@@ -135,84 +133,10 @@ def validate_identity(document: dict[str, Any]) -> None:
         prefix = f"{document['registry_prefix']}/{name}@"
         if (
             not isinstance(row, dict)
-            or row.get("source_sha") != document["candidate_sha"]
-            or row.get("platform") != "linux/amd64"
             or not str(row.get("image_ref", "")).startswith(prefix)
             or DIGEST.fullmatch(str(row.get("image_ref", ""))[len(prefix) :]) is None
         ):
             raise ValueError(f"candidate image identity is invalid: {component}")
-        for field in ("sbom_sha256", "vulnerability_report_sha256"):
-            if DIGEST.fullmatch(str(row.get(field))) is None:
-                raise ValueError(f"candidate image evidence is invalid: {component}")
-        if row.get("highest_vulnerability_severity") not in {
-            "none",
-            "negligible",
-            "low",
-            "medium",
-            "high",
-            "unknown",
-        }:
-            raise ValueError(f"candidate image scan is not admissible: {component}")
-    if DIGEST.fullmatch(str(document.get("runtime_binary_sha256"))) is None:
-        raise ValueError("runtime binary digest is invalid")
-    if DIGEST.fullmatch(str(document.get("policy_sha256"))) is None:
-        raise ValueError("scan policy digest is invalid")
-
-
-def validate_candidate(
-    document: dict[str, Any],
-    profile: dict[str, Any],
-    keyring_json: str,
-) -> dict[str, Any]:
-    """Verify with environment-owned trust, never trust a candidate-supplied key."""
-    validate_identity(document)
-    keyring = ImageAdmissionKeyring.from_json(keyring_json)
-    signature = document.get("signature")
-    if not isinstance(signature, dict) or set(signature) != {"signing_key_id", "signature_base64"}:
-        raise ValueError("candidate signature is missing")
-    public_keys = json.loads(keyring_json)["keys"]
-    matching = [row for row in public_keys if row["signing_key_id"] == signature["signing_key_id"]]
-    if len(matching) != 1:
-        raise ValueError("candidate signer is not trusted")
-    public_key = Ed25519PublicKey.from_public_bytes(
-        base64.b64decode(matching[0]["public_key_base64"])
-    )
-    unsigned = {key: value for key, value in document.items() if key != "signature"}
-    public_key.verify(
-        base64.b64decode(signature["signature_base64"], validate=True), canonical_document(unsigned)
-    )
-    if document.get("profile_sha256") != sha256(encoded(profile)):
-        raise ValueError("runtime profile digest does not match candidate")
-    parsed = ServiceExecutionRuntimeProfileV1.model_validate(profile)
-    if (
-        parsed.candidate_sha != document["candidate_sha"]
-        or parsed.task_image_ref != document["images"]["service"]["image_ref"]
-        or parsed.runtime_image_ref != document["images"]["execution_runtime"]["image_ref"]
-        or parsed.runtime_binary_sha256 != document["runtime_binary_sha256"]
-        or parsed.execution_class_id != "linux-amd64-cpu-pod-v1"
-    ):
-        raise ValueError("runtime profile does not match candidate images")
-    verify_execution_image_admission(
-        parsed.image_admission,
-        required_image_refs=(parsed.task_image_ref, parsed.runtime_image_ref),
-        keyring=keyring,
-    )
-    provenance = {
-        key: value for key, value in document.items() if key not in {"signature", "profile_sha256"}
-    }
-    by_ref = {row["image_ref"]: row for row in document["images"].values()}
-    for admission in parsed.image_admission.admissions:
-        statement = admission.statement
-        row = by_ref[statement.image_ref]
-        if (
-            statement.sbom_sha256 != row["sbom_sha256"]
-            or statement.vulnerability_report_sha256 != row["vulnerability_report_sha256"]
-            or statement.highest_vulnerability_severity != row["highest_vulnerability_severity"]
-            or statement.policy_sha256 != document["policy_sha256"]
-            or statement.provenance_sha256 != sha256(encoded(provenance))
-        ):
-            raise ValueError("runtime admission does not match candidate evidence")
-    return document
 
 
 def create_candidate(
@@ -223,9 +147,23 @@ def create_candidate(
     keyring_json: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_identity(document)
-    if "signature" in document or "profile_sha256" in document:
-        raise ValueError("candidate inputs are already signed")
     key = _trusted_signer(signing_key, signing_key_id, keyring_json)
+    result = {
+        name: document[name]
+        for name in (
+            "schema_version",
+            "repository",
+            "source_ref",
+            "candidate_sha",
+            "workflow_path",
+            "run_id",
+            "registry_prefix",
+        )
+    }
+    result["images"] = {
+        component: {"image_ref": row["image_ref"]} for component, row in document["images"].items()
+    }
+    provenance = sha256(encoded(result))
     now = datetime.now(UTC)
     admissions = []
     for component in ("service", "execution_runtime"):
@@ -236,7 +174,7 @@ def create_candidate(
             platform="linux/x86_64",
             sbom_sha256=row["sbom_sha256"],
             vulnerability_report_sha256=row["vulnerability_report_sha256"],
-            provenance_sha256=sha256(encoded(document)),
+            provenance_sha256=provenance,
             policy_sha256=document["policy_sha256"],
             highest_vulnerability_severity=row["highest_vulnerability_severity"],
             issued_at=now,
@@ -262,13 +200,28 @@ def create_candidate(
             admissions=tuple(admissions),
         ),
     ).model_dump(mode="json")
-    result = {**document, "profile_sha256": sha256(encoded(profile))}
-    result["signature"] = {
-        "signing_key_id": signing_key_id,
-        "signature_base64": base64.b64encode(key.sign(canonical_document(result))).decode(),
-    }
-    validate_candidate(result, profile, keyring_json)
     return result, profile
+
+
+def sanitize_diagnostic(text: str) -> str:
+    """Bound and redact subprocess evidence before publishing it."""
+    text = text[-16_384:]
+    for name, value in os.environ.items():
+        if len(value) >= 8 and re.search(r"TOKEN|PASSWORD|SECRET|PRIVATE_KEY|API_KEY", name):
+            text = text.replace(value, "[redacted]")
+    text = re.sub(r"https?://[^\s]+", "[url]", text)
+    text = re.sub(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[ip]", text)
+    text = "\n".join(
+        "[redacted credential-related diagnostic]"
+        if re.search(
+            r"password|authorization|credential|private.key|api.key|bearer|access.token",
+            line,
+            re.IGNORECASE,
+        )
+        else line
+        for line in text.splitlines()
+    )
+    return text[-16_384:]
 
 
 def _run(*command: str) -> str:
@@ -276,22 +229,7 @@ def _run(*command: str) -> str:
     print(f"Nebius publication: {operation}", flush=True)
     result = subprocess.run(command, cwd=ROOT, check=False, capture_output=True, text=True)
     if result.returncode:
-        text = (result.stderr or result.stdout)[-16_384:]
-        for name, value in os.environ.items():
-            if len(value) >= 8 and re.search(r"TOKEN|PASSWORD|SECRET|PRIVATE_KEY|API_KEY", name):
-                text = text.replace(value, "[redacted]")
-        text = re.sub(r"https?://[^\s]+", "[url]", text)
-        text = re.sub(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[ip]", text)
-        text = "\n".join(
-            "[redacted credential-related diagnostic]"
-            if re.search(
-                r"password|authorization|credential|private.key|api.key|bearer|access.token",
-                line,
-                re.IGNORECASE,
-            )
-            else line
-            for line in text.splitlines()
-        )
+        text = sanitize_diagnostic(result.stderr or result.stdout)
         if _diagnostic_dir is not None:
             write_json(
                 _diagnostic_dir / "failed-command.json",
@@ -377,7 +315,6 @@ def build(args: argparse.Namespace) -> None:
         or os.environ.get("GITHUB_WORKFLOW_REF") != f"{REPOSITORY}/{WORKFLOW}@{SOURCE_REF}"
         or SHA.fullmatch(candidate) is None
         or _run("git", "rev-parse", "HEAD") != candidate
-        or _run("git", "status", "--porcelain", "--untracked-files=normal")
         or REGISTRY.fullmatch(args.registry_prefix) is None
     ):
         raise ValueError("build must run from the fixed protected Nebius workflow checkout")
@@ -393,7 +330,6 @@ def build(args: argparse.Namespace) -> None:
         "repository": REPOSITORY,
         "source_ref": SOURCE_REF,
         "candidate_sha": candidate,
-        "source_tree": _run("git", "rev-parse", "HEAD^{tree}"),
         "workflow_path": WORKFLOW,
         "run_id": int(os.environ["GITHUB_RUN_ID"]),
         "registry_prefix": args.registry_prefix,
@@ -497,12 +433,15 @@ def build(args: argparse.Namespace) -> None:
                 raise ValueError("published manifest differs from the scanned OCI bytes")
             document["images"][component] = {
                 "image_ref": f"{args.registry_prefix}/{name}@{scanned_digest}",
-                "source_sha": candidate,
-                "platform": "linux/amd64",
-                "sbom_sha256": sha256(sbom.read_bytes()),
-                "vulnerability_report_sha256": sha256(report.read_bytes()),
-                "highest_vulnerability_severity": _severity(report.read_bytes()),
             }
+            if component in {"service", "execution_runtime"}:
+                document["images"][component].update(
+                    {
+                        "sbom_sha256": sha256(sbom.read_bytes()),
+                        "vulnerability_report_sha256": sha256(report.read_bytes()),
+                        "highest_vulnerability_severity": _severity(report.read_bytes()),
+                    }
+                )
             archive.unlink()
         manifest, profile = create_candidate(
             document,
@@ -517,9 +456,8 @@ def build(args: argparse.Namespace) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    verify = commands.add_parser("verify")
-    verify.add_argument("--candidate", type=Path, required=True)
-    verify.add_argument("--runtime-profile", type=Path, required=True)
+    inspect = commands.add_parser("check-shape")
+    inspect.add_argument("--candidate", type=Path, required=True)
     create = commands.add_parser("create")
     create.add_argument("--build-record", type=Path, required=True)
     builder = commands.add_parser("build")
@@ -528,16 +466,12 @@ def main() -> int:
         command.add_argument("--signing-key", type=Path, required=True)
         command.add_argument("--signing-key-id", required=True)
         command.add_argument("--output", type=Path, required=True)
-    for command in (verify, create, builder):
+    for command in (create, builder):
         command.add_argument("--trusted-keyring", type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.command == "verify":
-            validate_candidate(
-                read_json(args.candidate),
-                read_json(args.runtime_profile),
-                args.trusted_keyring.read_text(),
-            )
+        if args.command == "check-shape":
+            validate_identity(read_json(args.candidate))
         elif args.command == "create":
             manifest, profile = create_candidate(
                 read_json(args.build_record),

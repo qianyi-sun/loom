@@ -39,6 +39,14 @@ Nebius acceptance passes. Passing acceptance makes that merge eligible for an
 owner decision; it does not automatically authorize or perform the merge.
 Any later approved PR into `dev` must satisfy its then-current admission policy.
 
+Development publication records the Git commit and six immutable image references
+once. Rendering and deployment reuse that record without an additional candidate
+signature envelope, rendered-file hash inventory, byte-for-byte regeneration, or
+exact clean operator checkout. The existing control-plane runtime admissions
+remain verified at their owning boundary; backup and transfer integrity checks
+retain their distinct purpose. A configuration fingerprint triggers changed Pods
+and configuration Jobs, but does not gate deployment.
+
 ## Superseded design
 
 This decision replaces the earlier terminal architecture of permanent

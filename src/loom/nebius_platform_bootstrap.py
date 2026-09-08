@@ -350,9 +350,15 @@ def upload_backup(config: dict[str, Any]) -> None:
         str(path), config["buckets"]["backup"], key, ExtraArgs={"Metadata": {"sha256": checksum}}
     )
     observed = client.head_object(Bucket=config["buckets"]["backup"], Key=key)
+    # S3 user metadata names are case-insensitive. Nebius returns "Sha256"
+    # through boto3; require one unambiguous, exact digest regardless of case.
+    checksums = [
+        value for name, value in observed.get("Metadata", {}).items()
+        if name.lower() == "sha256"
+    ]
     if (
         observed["ContentLength"] != path.stat().st_size
-        or observed.get("Metadata", {}).get("sha256") != checksum
+        or checksums != [checksum]
     ):
         raise ValueError("database backup upload readback mismatch")
     print(json.dumps({"backup_key": key, "sha256": checksum, "bytes": path.stat().st_size}))

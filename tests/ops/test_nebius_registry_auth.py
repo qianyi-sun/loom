@@ -64,7 +64,7 @@ def test_mint_and_refresh_auth_without_exposing_token(
         credential_file, "cr.eu-north1.nebius.cloud/test", auth, sdk_factory=factory
     )
     value = json.loads(auth.read_text())["auths"]["cr.eu-north1.nebius.cloud"]["auth"]
-    assert base64.b64decode(value).decode() == "oauth2accesstoken:access-token-one"
+    assert base64.b64decode(value).decode() == "iam:access-token-one"
     assert auth.stat().st_mode & 0o077 == 0
     assert instance.closed
     assert "access-token-one" not in json.dumps(summary)

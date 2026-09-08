@@ -42,16 +42,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
           test "$(dpkg-query -W -f='${Version}' skopeo)" = '1.13.3+ds1-2ubuntu0.24.04.3'
           skopeo --version
-      - name: Start pinned rootless BuildKit
+      - name: Start pinned BuildKit
         shell: bash
         run: |
           set -euo pipefail
-          image='docker.io/moby/buildkit:v0.33.0-rootless@sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef'
-          docker create --name nebius-candidate-buildkit --user 1000:1000 \
-            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-            --security-opt systempaths=unconfined \
+          exec 2> >(tee "$RUNNER_TEMP/nebius-buildkit-startup.stderr" >&2)
+          image='docker.io/moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3'
+          docker create --name nebius-candidate-buildkit --privileged \
             --publish 127.0.0.1:1234:1234 "$image" \
-            --addr=tcp://0.0.0.0:1234 --oci-worker-no-process-sandbox
+            --addr=tcp://0.0.0.0:1234
           docker cp nebius-candidate-buildkit:/usr/bin/buildctl "$RUNNER_TEMP/buildctl"
           chmod 0755 "$RUNNER_TEMP/buildctl"
           docker start nebius-candidate-buildkit
@@ -65,9 +64,9 @@ jobs:
             fi
             sleep 2
           done
-          echo 'Rootless BuildKit failed to become ready' >&2
+          echo 'BuildKit failed to become ready' >&2
           exit 1
-      - name: Build, scan, publish and sign the fixed candidate
+      - name: Build and publish the fixed candidate
         env:
           NEBIUS_REGISTRY_PREFIX: ${{ vars.NEBIUS_REGISTRY_PREFIX }}
           NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON: ${{ secrets.NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON }}
@@ -116,10 +115,35 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/nebius-candidate"
-          docker logs nebius-candidate-buildkit > "$RUNNER_TEMP/nebius-buildkit.log" 2>&1 || true
-          docker inspect --format '{"status":"{{.State.Status}}","exit_code":{{.State.ExitCode}}}' \
-            nebius-candidate-buildkit > "$RUNNER_TEMP/nebius-candidate/builder-state.json" || true
-          docker rm --force --volumes nebius-candidate-buildkit || true
+          trap 'docker rm --force --volumes nebius-candidate-buildkit || true' EXIT
+          if [[ -x .venv/bin/python ]]; then
+            .venv/bin/python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          from scripts.ops.nebius_candidate import sanitize_diagnostic, write_json
+          result = subprocess.run(
+              ["docker", "logs", "--tail", "200", "nebius-candidate-buildkit"],
+              capture_output=True, text=True, check=False,
+          )
+          state_result = subprocess.run(
+              ["docker", "inspect", "--format", "{{json .State}}", "nebius-candidate-buildkit"],
+              capture_output=True, text=True, check=False,
+          )
+          state = json.loads(state_result.stdout) if state_result.returncode == 0 else {}
+          startup = Path(os.environ["RUNNER_TEMP"]) / "nebius-buildkit-startup.stderr"
+          write_json(Path(os.environ["RUNNER_TEMP"]) / "nebius-candidate" / "builder-diagnostic.json", {
+              "operation": "buildkit daemon logs",
+              "returncode": result.returncode,
+              "status": state.get("Status", "not-created"),
+              "exit_code": state.get("ExitCode"),
+              "error": sanitize_diagnostic(state.get("Error", "") + state_result.stderr),
+              "diagnostic": sanitize_diagnostic(result.stdout + result.stderr),
+              "startup": sanitize_diagnostic(startup.read_text() if startup.exists() else ""),
+          })
+          PY
+          fi
       - name: Preserve candidate and partial scan evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

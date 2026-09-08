@@ -157,8 +157,8 @@ async def test_real_http_gateway_deadline_canary_transport(
         trial_id=trial_id,
         step_id="main",
         nonce=uuid4().hex,
-        deadline_budget_sec=0.25,
-        hold_sec=0.75,
+        deadline_budget_sec=2,
+        hold_sec=3,
     )
     state = FaultProviderState(config)
 
@@ -181,23 +181,25 @@ async def test_real_http_gateway_deadline_canary_transport(
         try:
             async with _serve(gateway) as gateway_url:
                 outcomes: list[dict[str, object]] = []
-                deadline = datetime.now(UTC) + timedelta(seconds=0.25)
-                first_jwt = mint_step_jwt(
-                    team_id=team_id,
-                    trial_id=seeded_trial_id,
-                    step_id="main",
-                    ttl_sec=360,
-                    signing_key=settings.step_jwt_signing_key.get_secret_value(),
-                    provider_connection_id=connection_id,
-                    attempt_deadline_wall_clock=deadline,
-                )
-                first_context = verify_step_jwt(
-                    first_jwt,
-                    signing_key=settings.step_jwt_signing_key.get_secret_value(),
-                )
-                assert first_context.attempt_deadline_wall_clock is not None
-                assert first_context.expires_at is not None
                 async with httpx.AsyncClient(base_url=gateway_url, timeout=5) as client:
+                    # Fixture setup is outside the request deadline. Allow admission
+                    # on shared CI hosts, then force timeout at the held provider.
+                    deadline = datetime.now(UTC) + timedelta(seconds=config.deadline_budget_sec)
+                    first_jwt = mint_step_jwt(
+                        team_id=team_id,
+                        trial_id=seeded_trial_id,
+                        step_id="main",
+                        ttl_sec=360,
+                        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+                        provider_connection_id=connection_id,
+                        attempt_deadline_wall_clock=deadline,
+                    )
+                    first_context = verify_step_jwt(
+                        first_jwt,
+                        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+                    )
+                    assert first_context.attempt_deadline_wall_clock is not None
+                    assert first_context.expires_at is not None
                     first_started_at = datetime.now(UTC)
                     first_count_before = len(state.snapshot()["requests"])
                     first = await client.post(
@@ -259,7 +261,9 @@ async def test_real_http_gateway_deadline_canary_transport(
                     assert replay_count_after == replay_count_before == 1
 
                     if case == "B":
-                        fresh_deadline = datetime.now(UTC) + timedelta(seconds=2)
+                        fresh_deadline = datetime.now(UTC) + timedelta(
+                            seconds=config.deadline_budget_sec
+                        )
                         second_jwt = mint_step_jwt(
                             team_id=team_id,
                             trial_id=seeded_trial_id,

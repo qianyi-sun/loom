@@ -141,3 +141,62 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
     assert bootstrap.main() == 1
     diagnostic = json.loads(capsys.readouterr().err)
     assert diagnostic == {"phase": "database", "error_type": "UndefinedTable", "sqlstate": "42P01"}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "size_delta", "accepted"),
+    [
+        ({"sha256": "match"}, 0, True),
+        ({"Sha256": "match"}, 0, True),
+        ({"SHA256": "match"}, 0, True),
+        ({"Sha256": "mismatch"}, 0, False),
+        ({}, 0, False),
+        ({"Sha256": "match"}, 1, False),
+        ({"sha256": "match", "Sha256": "mismatch"}, 0, False),
+    ],
+)
+def test_backup_native_s3_metadata_case_preserves_hash_and_size_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    metadata: dict[str, str],
+    size_delta: int,
+    accepted: bool,
+) -> None:
+    dump = tmp_path / "loom.dump"
+    dump.write_bytes(b"bounded backup payload")
+    checksum = hashlib.sha256(dump.read_bytes()).hexdigest()
+
+    class Storage:
+        def upload_file(self, filename: str, bucket: str, key: str, **kwargs: dict) -> None:
+            assert filename == str(dump)
+            assert bucket == "dedicated-backups"
+            assert key.startswith("loom-nebius-platform/")
+            assert kwargs["ExtraArgs"] == {"Metadata": {"sha256": checksum}}
+
+        def head_object(self, **_kwargs: str) -> dict:
+            return {
+                "ContentLength": dump.stat().st_size + size_delta,
+                "Metadata": {
+                    key: checksum if value == "match" else "wrong"
+                    for key, value in metadata.items()
+                },
+            }
+
+    monkeypatch.setattr(bootstrap, "Path", lambda _path: dump)
+    monkeypatch.setattr(bootstrap.boto3, "client", lambda *_args, **_kwargs: Storage())
+    monkeypatch.setenv("LOOM_BACKUP_ACCESS_KEY", "fixture-access-key")
+    monkeypatch.setenv("LOOM_BACKUP_SECRET_KEY", "fixture-secret-key")
+    config = {
+        "namespace": "loom-nebius-platform",
+        "storage_endpoint": "https://storage.eu-north1.nebius.cloud",
+        "region": "eu-north1",
+        "buckets": {"backup": "dedicated-backups"},
+    }
+    if accepted:
+        bootstrap.upload_backup(config)
+        assert json.loads(capsys.readouterr().out)["sha256"] == checksum
+    else:
+        with pytest.raises(ValueError, match="readback mismatch"):
+            bootstrap.upload_backup(config)
+        assert not capsys.readouterr().out

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import copy
 import json
 import os
 import subprocess
@@ -10,7 +9,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import nebius_candidate as candidate
@@ -47,7 +45,6 @@ def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
         "repository": candidate.REPOSITORY,
         "source_ref": candidate.SOURCE_REF,
         "candidate_sha": "a" * 40,
-        "source_tree": "b" * 40,
         "workflow_path": candidate.WORKFLOW,
         "run_id": 123,
         "registry_prefix": "cr.eu-north1.nebius.cloud/e00example",
@@ -58,8 +55,6 @@ def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
     for index, (component, name) in enumerate(candidate.COMPONENTS.items()):
         document["images"][component] = {
             "image_ref": f"{document['registry_prefix']}/{name}@sha256:{str(index) * 64}",
-            "source_sha": document["candidate_sha"],
-            "platform": "linux/amd64",
             "sbom_sha256": "sha256:" + "e" * 64,
             "vulnerability_report_sha256": "sha256:" + "f" * 64,
             "highest_vulnerability_severity": "high",
@@ -67,7 +62,7 @@ def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
     return document, private, keyring
 
 
-def test_cli_create_and_verify_then_reject_tampered_platform_image(tmp_path: Path) -> None:
+def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path) -> None:
     document, private, keyring = inputs(tmp_path)
     record, trust = tmp_path / "build.json", tmp_path / "trust.json"
     record.write_text(json.dumps(document))
@@ -97,29 +92,25 @@ def test_cli_create_and_verify_then_reject_tampered_platform_image(tmp_path: Pat
     assert create.returncode == 0, create.stderr
     verify = [
         *command,
-        "verify",
+        "check-shape",
         "--candidate",
         str(output / "candidate.json"),
-        "--runtime-profile",
-        str(output / "runtime-profile.json"),
-        "--trusted-keyring",
-        str(trust),
     ]
     assert subprocess.run(verify, capture_output=True, env=environment).returncode == 0
     manifest = json.loads((output / "candidate.json").read_text())
-    manifest["images"]["web"]["image_ref"] = (
-        manifest["images"]["web"]["image_ref"].split("@")[0] + "@sha256:" + "9" * 64
-    )
+    assert "signature" not in manifest and "profile_sha256" not in manifest
+    assert "source_tree" not in manifest
+    assert all(set(row) == {"image_ref"} for row in manifest["images"].values())
+    manifest["images"]["web"]["image_ref"] = "image:mutable"
     (output / "candidate.json").write_text(json.dumps(manifest))
     result = subprocess.run(verify, capture_output=True, text=True, env=environment)
     assert result.returncode == 1
-    assert "InvalidSignature" in result.stderr
     assert private.read_text() not in result.stderr
 
 
 @pytest.mark.parametrize(
     "change",
-    ["dev", "foreign_registry", "mixed_sha", "missing_image", "critical", "bool_run", "mutable"],
+    ["dev", "foreign_registry", "missing_image", "bool_run", "mutable"],
 )
 def test_reject_invalid_build_binding(tmp_path: Path, change: str) -> None:
     document, private, keyring = inputs(tmp_path)
@@ -127,12 +118,8 @@ def test_reject_invalid_build_binding(tmp_path: Path, change: str) -> None:
         document["source_ref"] = "refs/heads/dev"
     elif change == "foreign_registry":
         document["registry_prefix"] = "ghcr.io/qianyi-sun"
-    elif change == "mixed_sha":
-        document["images"]["service"]["source_sha"] = "0" * 40
     elif change == "missing_image":
         del document["images"]["gateway"]
-    elif change == "critical":
-        document["images"]["service"]["highest_vulnerability_severity"] = "critical"
     elif change == "bool_run":
         document["run_id"] = True
     else:
@@ -150,16 +137,28 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
     manifest, profile = candidate.create_candidate(
         document, signing_key=private, signing_key_id="publisher", keyring_json=trust
     )
-    assert candidate.validate_candidate(manifest, profile, trust) == manifest
+    from loom.execution_image_admission import (
+        ImageAdmissionKeyring,
+        verify_execution_image_admission,
+    )
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    parsed = ServiceExecutionRuntimeProfileV1.model_validate(profile)
+    assert parsed.candidate_sha == manifest["candidate_sha"]
+    assert parsed.task_image_ref == manifest["images"]["service"]["image_ref"]
+    assert parsed.runtime_image_ref == manifest["images"]["execution_runtime"]["image_ref"]
+    verify_execution_image_admission(
+        parsed.image_admission,
+        required_image_refs=(parsed.task_image_ref, parsed.runtime_image_ref),
+        keyring=ImageAdmissionKeyring.from_json(trust),
+    )
     other = tmp_path / "other"
     other.mkdir()
     _, _, wrong_trust = inputs(other)
-    with pytest.raises(InvalidSignature):
-        candidate.validate_candidate(manifest, profile, wrong_trust)
-    changed_profile = copy.deepcopy(profile)
-    changed_profile["candidate_sha"] = "0" * 40
-    with pytest.raises(ValueError, match="profile digest"):
-        candidate.validate_candidate(manifest, changed_profile, trust)
+    with pytest.raises(ValueError, match="does not match"):
+        candidate.create_candidate(
+            document, signing_key=private, signing_key_id="publisher", keyring_json=wrong_trust
+        )
     private.chmod(0o644)
     with pytest.raises(ValueError, match="owner-only"):
         candidate.create_candidate(
@@ -249,3 +248,23 @@ def test_oci_inspection_rejects_other_source_and_corrupt_blobs(
     archive = oci_fixture(tmp_path, revision="b" * 40, corrupt=corrupt)
     with pytest.raises(ValueError, match=r"checksum|source/platform"):
         candidate.inspect_oci_archive(archive, candidate="a" * 40, runtime=True)
+
+
+def test_builder_diagnostics_bound_output_and_remove_credentials(monkeypatch):
+    monkeypatch.setenv("NEBIUS_SECRET", "secret-material-123")
+    raw = (
+        "old-output\n" * 3000
+        + "failed to mount worker storage\n"
+        + "secret-material-123\n"
+        + "authorization: Bearer token-value\n"
+        + "endpoint https://registry.invalid/path?token=value 192.0.2.123\n"
+    )
+    result = candidate.sanitize_diagnostic(raw)
+    assert len(result) <= 16_384
+    assert "failed to mount worker storage" in result
+    for secret in ("secret-material-123", "token-value", "registry.invalid", "192.0.2.123"):
+        assert secret not in result
+
+
+def test_builder_diagnostics_remain_bounded_after_redaction_expands_lines():
+    assert len(candidate.sanitize_diagnostic("password\n" * 3000)) <= 16_384

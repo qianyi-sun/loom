@@ -17,15 +17,15 @@ for the configured hostname and a private PostgreSQL certificate/CA for the exac
 service hostname. Configure access to Nebius Registry and the independent backup
 bucket. A renderer success does not prove these dependencies exist.
 
-Render with a verified candidate and the environment-owned keyring, then run from
-the exact candidate checkout:
+Render the published image references, review the Kubernetes output, then deploy
+from an operator checkout. The deployment machine does not need the image source
+commit checked out:
 
 ```sh
 uv run --frozen python scripts/ops/deploy_nebius_platform.py \
   --render-dir /secure/nebius-render \
   --kubeconfig /secure/nebius-kubeconfig \
   --expected-cluster-id mk8scluster-EXACT_ID \
-  --trusted-keyring /secure/nebius-image-admission-keyring.json \
   --evidence-dir /secure/nebius-deployment-evidence
 ```
 
@@ -36,9 +36,14 @@ does not introduce another lock broker or silently steal an active deployment.
 
 ## Validation and phases
 
-Before any apply, deployment checks all file hashes, the candidate signature and
-runtime profile, then regenerates the manifests and compares the exact bytes.
-Rehashing an edited manifest cannot authorize changed namespaces or commands.
+The deployer reads the known phase YAML once, taking environment settings from
+the application ConfigMap. It checks
+that resources belong to the two integration namespaces (plus their dedicated
+collector RBAC). Reviewed replica/resource tuning and operator notes beside the
+rendered files do not require re-signing, rehashing or a fresh Git checkout.
+There is no hash inventory, candidate signature wrapper or deterministic rerender
+gate. The existing control plane verifies runtime image admission at its own
+boundary; the deployment scripts only transport that configuration.
 The kubeconfig server must equal the separately configured API endpoint, its
 cluster name must identify the expected Nebius cluster, TLS verification must use
 the cluster CA, and provisioned integration nodes must have Nebius provider IDs.
@@ -63,8 +68,8 @@ Jobs belonging to this rendered candidate can then be replaced. The deployer nev
 deletes namespaces, PVCs, healthy Jobs, or unrelated resources. A retained database
 PVC without its StatefulSet blocks application and requires an explicit restore.
 
-Every attempt leaves a separate sanitized JSON phase record, including the exact
-candidate/configuration and failed phase. Evidence excludes kubeconfig material,
+Every attempt leaves a separate sanitized JSON phase record, including the candidate version, target
+and failed phase. Evidence excludes kubeconfig material,
 API endpoint details and secret values. A failed attempt is not automatically
 rolled back: restore and database-version compatibility must be reviewed against
 the retained backup before a downgrade. Reapplying a known candidate is not proof
