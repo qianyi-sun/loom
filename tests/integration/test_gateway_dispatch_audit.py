@@ -83,6 +83,33 @@ async def _rows(audit: DispatchAudit) -> list[GatewayDispatchReceipt]:
         )
 
 
+async def test_wire_trace_id_is_committed_per_dispatch_and_context_is_reset(
+    audit_setup: tuple,
+) -> None:
+    audit, _ = audit_setup
+    headers = {"Authorization": "Bearer test-provider-only"}
+    observed = []
+
+    async def operation() -> httpx.Response:
+        outgoing = dispatch_audit.dispatch_request_headers(headers)
+        receipt_id = outgoing["X-Request-ID"]
+        assert receipt_id in {str(row.id) for row in await _rows(audit)}
+        observed.append(receipt_id)
+        return httpx.Response(200)
+
+    await asyncio.gather(audit.send(operation, deadline=None), audit.send(operation, deadline=None))
+    assert len(set(observed)) == 2
+    assert dispatch_audit.dispatch_request_headers(headers) == headers
+
+    async def broken() -> httpx.Response:
+        assert "X-Request-ID" in dispatch_audit.dispatch_request_headers(headers)
+        raise RuntimeError("disposable transport failure")
+
+    with pytest.raises(RuntimeError):
+        await audit.send(broken, deadline=None)
+    assert dispatch_audit.dispatch_request_headers(headers) == headers
+
+
 def _deadline(seconds: float) -> GatewayAttemptDeadline:
     return GatewayAttemptDeadline(time.monotonic() + seconds)
 
