@@ -33,6 +33,16 @@ def upgrade() -> None:
           worker_generation BIGINT NOT NULL,
           worker_expires_at TIMESTAMPTZ,
           failure_code VARCHAR(32),
+          completed_at TIMESTAMPTZ,
+          canonical_receipt BYTEA,
+          receipt_sha256 VARCHAR(64),
+          CONSTRAINT task_image_publication_jobs_completion_check CHECK (
+            (state = 'completed' AND completed_at IS NOT NULL AND canonical_receipt IS NOT NULL
+              AND receipt_sha256 IS NOT NULL AND isfinite(completed_at)
+              AND completed_at >= created_at AND completed_at < deadline
+              AND octet_length(canonical_receipt) BETWEEN 1 AND 2048
+              AND receipt_sha256 = encode(sha256(canonical_receipt), 'hex')) OR
+            (state <> 'completed' AND completed_at IS NULL AND canonical_receipt IS NULL AND receipt_sha256 IS NULL)),
           CONSTRAINT task_image_publication_jobs_attempt_uidx UNIQUE (materialization_attempt_id),
           CONSTRAINT task_image_publication_jobs_attempt_fkey FOREIGN KEY
             (materialization_attempt_id, materialization_id, attempt_number, lease_epoch, builder_id, grant_id)

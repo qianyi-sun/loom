@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -43,6 +44,10 @@ from loom_task_image_authority.publication_jobs import (
     PublicationWorkerLease,
     canonical_snapshot_bytes,
     decode_publication_snapshot,
+)
+from loom_task_image_authority.publication_receipts import (
+    canonical_receipt_bytes,
+    decode_publication_receipt,
 )
 from loom_task_image_authority.registry_credentials import parse_stored_publication_candidate_v2
 from loom_task_image_authority.registry_token import publication_repository
@@ -155,6 +160,33 @@ def _result(row: TaskImagePublicationJob) -> PublicationJob:
             values["lease"] = lease
         if row.failure_code is not None:
             values["failure_code"] = row.failure_code
+        if row.state == "completed":
+            if (
+                row.completed_at is None
+                or row.canonical_receipt is None
+                or row.receipt_sha256 is None
+            ):
+                raise ValueError("publication completion receipt missing")
+            receipt = decode_publication_receipt(row.canonical_receipt)
+            if (
+                canonical_receipt_bytes(receipt) != row.canonical_receipt
+                or hashlib.sha256(row.canonical_receipt).hexdigest() != row.receipt_sha256
+                or receipt.operation_id != str(row.operation_id)
+                or receipt.materialization_id != str(row.materialization_id)
+                or receipt.attempt_id != str(row.materialization_attempt_id)
+                or receipt.lease_epoch != row.lease_epoch
+                or receipt.worker_generation != row.worker_generation
+                or receipt.snapshot_sha256 != row.snapshot_sha256
+                or receipt.component_count != len(snapshot.components)
+                or receipt.completed_at != row.completed_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                or not row.created_at <= row.completed_at < row.deadline
+            ):
+                raise ValueError("publication completion binding changed")
+        elif any(
+            value is not None
+            for value in (row.completed_at, row.canonical_receipt, row.receipt_sha256)
+        ):
+            raise ValueError("unexpected publication completion receipt")
         return PublicationJob.model_validate(values)
     except (ValueError, TypeError, OverflowError) as exc:
         raise PublicationJobConflictError("stored publication job changed") from exc
@@ -284,35 +316,49 @@ def _credential(
             raise PublicationJobConflictError("credential candidate binding changed")
 
 
-async def submit_publication_job(
+@dataclass(frozen=True)
+class LockedPublicationInput:
+    materialization: TaskImageMaterialization
+    attempt: TaskImageMaterializationAttempt
+    authorization: TaskImageBuildSessionAuthorization
+    snapshot: PublicationSnapshot
+    existing: TaskImagePublicationJob | None
+    checked_at: datetime
+
+
+async def lock_publication_input(
     session: AsyncSession,
     *,
-    authorization: TaskImageBuildSessionAuthorization,
+    grant_id: UUID,
     operation_id: UUID,
     materialization_id: UUID,
     attempt_id: UUID,
     lease_epoch: int,
     registry_origin: str,
     clock: Clock,
-    lifetime_seconds: float = 3600,
-) -> PublicationJob:
-    """Bind authenticated current session to database-derived immutable input.
+    authorization: TaskImageBuildSessionAuthorization | None = None,
+) -> LockedPublicationInput:
+    """Lock the live current chain and derive its immutable publication input.
 
     The caller owns commit/rollback. No network authentication occurs here.
+    Optional authorization binds an independently authenticated caller to the
+    current generation. Omitting it is for trusted completion, not HTTP callers.
     Grant -> projection/current session/attestation -> materialization -> attempt
     -> credentials -> candidates -> job. No earlier lock is acquired afterward.
     """
-    for value in (operation_id, materialization_id, attempt_id):
+    for value in (operation_id, materialization_id, attempt_id, grant_id):
         _uuid(value)
     _counter(lease_epoch)
-    lifetime = _duration(lifetime_seconds, 7200)
     await _fresh(session)
     live = await validate_current_task_image_build_session(
-        session, grant_id=authorization.grant_id, clock=lambda: _now(clock)
+        session, grant_id=grant_id, clock=lambda: _now(clock)
     )
     if (
-        (authorization.grant_id, authorization.session_id, authorization.session_generation)
-        != (live.grant_id, live.session_id, live.session_generation)
+        (
+            authorization is not None
+            and (authorization.grant_id, authorization.session_id, authorization.session_generation)
+            != (live.grant_id, live.session_id, live.session_generation)
+        )
         or live.authority_version != 2
         or live.purpose != "production"
     ):
@@ -468,14 +514,49 @@ async def submit_publication_job(
             components=tuple(components),
         )
     )
-    encoded = canonical_snapshot_bytes(snapshot)
-    digest = hashlib.sha256(encoded).hexdigest()
     now = _now(clock)
     _live_at(live, row, now)
     if previous is not None:
         if previous.operation_id != str(operation_id) or previous.snapshot != snapshot:
             raise PublicationJobConflictError("publication operation binding conflict")
-        return previous  # terminal failures remain terminal; deadline never resets
+    return LockedPublicationInput(row, attempt, live, snapshot, existing, now)
+
+
+async def submit_publication_job(
+    session: AsyncSession,
+    *,
+    authorization: TaskImageBuildSessionAuthorization,
+    operation_id: UUID,
+    materialization_id: UUID,
+    attempt_id: UUID,
+    lease_epoch: int,
+    registry_origin: str,
+    clock: Clock,
+    lifetime_seconds: float = 3600,
+) -> PublicationJob:
+    """Submit/replay database-derived input for an already authenticated caller."""
+    lifetime = _duration(lifetime_seconds, 7200)
+    locked = await lock_publication_input(
+        session,
+        grant_id=authorization.grant_id,
+        authorization=authorization,
+        operation_id=operation_id,
+        materialization_id=materialization_id,
+        attempt_id=attempt_id,
+        lease_epoch=lease_epoch,
+        registry_origin=registry_origin,
+        clock=clock,
+    )
+    if locked.existing is not None:
+        return _result(locked.existing)
+    row, attempt, live, now = (
+        locked.materialization,
+        locked.attempt,
+        locked.authorization,
+        locked.checked_at,
+    )
+    encoded = canonical_snapshot_bytes(locked.snapshot)
+    digest = hashlib.sha256(encoded).hexdigest()
     # Different attempts can race on the globally unique operation ID. DO NOTHING
     # waits on its unique-index owner without aborting the caller's transaction.
     inserted = await session.scalar(
@@ -616,5 +697,23 @@ async def fail_publication_job(
     _owner(row, owner_id, generation, _now(clock))
     row.state, row.worker_id, row.worker_expires_at = "failed", None, None
     row.failure_code = failure_code
+    await session.flush([row])
+    return _result(row)
+
+
+async def expire_publication_job(
+    session: AsyncSession, *, operation_id: UUID, clock: Clock
+) -> PublicationJob:
+    """Job-only terminalization after its immutable total deadline, never readiness.
+
+    Trusted worker/recovery composition may expire queued or running work without
+    a live owner. Every generation shares this deadline, so there is no surviving
+    successor authority to revoke. Completed/failed evidence remains immutable.
+    """
+    row = await _locked_job(session, operation_id)
+    if row.state not in ("queued", "running") or _now(clock) < row.deadline:
+        raise PublicationJobOwnershipError("publication total deadline not eligible")
+    row.state, row.worker_id, row.worker_expires_at = "failed", None, None
+    row.failure_code = "deadline"
     await session.flush([row])
     return _result(row)

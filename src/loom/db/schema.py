@@ -3378,6 +3378,15 @@ class TaskImagePublicationJob(Base):
             name="task_image_publication_jobs_state_check",
         ),
         Index("task_image_publication_jobs_work_idx", "state", "available_at", "deadline"),
+        CheckConstraint(
+            "(state = 'completed' AND completed_at IS NOT NULL AND canonical_receipt IS NOT NULL "
+            "AND receipt_sha256 IS NOT NULL AND isfinite(completed_at) "
+            "AND completed_at >= created_at AND completed_at < deadline "
+            "AND octet_length(canonical_receipt) BETWEEN 1 AND 2048 "
+            "AND receipt_sha256 = encode(sha256(canonical_receipt), 'hex')) OR "
+            "(state <> 'completed' AND completed_at IS NULL AND canonical_receipt IS NULL AND receipt_sha256 IS NULL)",
+            name="task_image_publication_jobs_completion_check",
+        ),
     )
 
     operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
@@ -3399,6 +3408,9 @@ class TaskImagePublicationJob(Base):
         TIMESTAMP(timezone=True), nullable=True
     )
     failure_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    canonical_receipt: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class TaskImagePublicationCandidate(Base):
