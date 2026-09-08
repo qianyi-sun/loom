@@ -100,6 +100,45 @@ transactions. No registry request or signer call occurs while these locks are
 held. Completion replay validates its stored canonical receipt and cannot
 rewrite ready images, re-sign a statement or resurrect revoked authority.
 
+### Compact completion receipt
+
+The closed canonical receipt uses schema
+`loom.task-image-publication-receipt/v1`, with operation, materialization and
+attempt UUIDs, lease epoch, completing worker generation, frozen snapshot SHA-256,
+candidate-set SHA-256, publication-set SHA-256, component count and whole-second
+UTC `completed_at`. Its maximum encoded size is 2 KiB, independent of component
+count; full envelopes never enter the 32 KiB guard polling packet.
+
+Both set hashes are SHA-256 over RFC 8785 objects containing `schema` and
+`components`. Candidate-set schema is
+`loom.task-image-publication-candidate-set/v1`; each member contains exactly
+`candidate_id` and `component`, obtainable from validated V2 acknowledgements.
+Publication-set schema is `loom.task-image-publication-envelope-set/v1`; each
+member additionally contains `envelope_sha256`, hashing the entire canonical
+publication envelope including its signature. Members follow the frozen plan's
+order: task first **when present**, then lexical sidecars. Component names and
+candidate IDs are unique, with one through 128 members. Sidecar-only plans remain
+valid; the receipt contract does not invent a primary Dockerfile requirement.
+
+The candidate-set hash binds identities only, allowing the supervisor to compare
+its complete acknowledged set. Full V2 acknowledgement evidence is bound by
+`snapshot_sha256` and must be revalidated through that frozen snapshot; the
+identity hash cannot replace it. Together with the full-envelope publication-set
+hash, these receipt bindings cover the complete stored evidence. They neither
+authenticate callers nor verify signatures by themselves. Completion and replay
+must derive them from exact validated rows, not accept caller assertions.
+
+Completion samples one unrounded UTC instant after acquiring all required locks
+and uses it for the final authority checks. Persist that same instant as both the
+materialization's `ready_at` and the terminal job's immutable completion timestamp.
+Derive receipt `completed_at` by truncating that instant to whole seconds, never
+rounding it or sampling a separate clock. Recheck expiry after any subsequent
+potentially blocking flush; a rejection rolls back the whole transition. Replay
+compares the receipt against the retained job timestamp, since a later attempt
+may change the materialization's current ready state. Wire timestamps never
+replace unrounded expiry checks. Receipt parsing alone does not prove completion,
+current readiness or execution authorization.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
