@@ -140,3 +140,37 @@ func TestBaseResolutionAcceptsBoundaryRefAndIndentedBuildctlRecord(t *testing.T)
 		t.Fatalf("valid indented boundary record rejected: %v", err)
 	}
 }
+
+// Break caught: acknowledgement parsing drifts from exporter parsing and
+// accepts an inexact or mutable evidence record.
+func TestParseBaseResolutionRecordOwnsExactNormalizedEvidence(t *testing.T) {
+	payload := []byte(`{"observed_base_digests":["` + baseResolutionTestImage + `"],"output_digest":"` + baseResolutionTestRoot + `","platform":"linux/amd64","solve_ref":"solve_1-abc","schema":"loom.task-image-base-resolution/v1"}`)
+	evidence, err := parseBaseResolutionRecord(payload)
+	if err != nil {
+		t.Fatalf("parseBaseResolutionRecord() error = %v", err)
+	}
+	want := `{"schema":"loom.task-image-base-resolution/v1","solve_ref":"solve_1-abc","platform":"linux/amd64","output_digest":"` + baseResolutionTestRoot + `","observed_base_digests":["` + baseResolutionTestImage + `"]}`
+	if evidence.JSON() != want {
+		t.Fatalf("evidence = %s, want %s", evidence.JSON(), want)
+	}
+	payload[2] = 'x'
+	if evidence.JSON() != want {
+		t.Fatal("parsed evidence retained mutable record bytes")
+	}
+
+	for name, invalid := range map[string]string{
+		"missing":          strings.Replace(want, `,"solve_ref":"solve_1-abc"`, ``, 1),
+		"null":             `null`,
+		"unknown":          strings.Replace(want, `}`, `,"unknown":true}`, 1),
+		"duplicate":        strings.Replace(want, `"solve_ref":`, `"solve_ref":"old","solve_ref":`, 1),
+		"trailing":         want + `{}`,
+		"invalid solve":    strings.Replace(want, `solve_1-abc`, `-solve`, 1),
+		"invalid platform": strings.Replace(want, `linux/amd64`, `darwin/amd64`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseBaseResolutionRecord([]byte(invalid)); err == nil {
+				t.Fatal("invalid exact record accepted")
+			}
+		})
+	}
+}

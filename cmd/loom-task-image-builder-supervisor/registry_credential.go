@@ -358,7 +358,7 @@ type PublicationAttemptBinding struct {
 
 type publicationCredentialGuard interface {
 	RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error)
-	PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error)
+	PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error)
 	Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 }
 
@@ -480,7 +480,7 @@ func (s *PublicationCredentialSource) Next(ctx context.Context, set BuiltCompone
 	return parsed, nil
 }
 
-func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltComponentSet, credential *RegistryCredential, component BuiltComponent) (*PublicationCandidateAcknowledgement, error) {
+func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltComponentSet, credential *RegistryCredential, component BuiltComponent) (*PublicationCandidateV2Acknowledgement, error) {
 	if s == nil {
 		return nil, errors.New("publication candidate source invalid")
 	}
@@ -500,8 +500,12 @@ func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltCompo
 		component.Output.OS+"/"+component.Output.Architecture != s.binding.Platform {
 		return nil, errors.New("publication candidate evidence invalid")
 	}
-	var ack *PublicationCandidateAcknowledgement
-	var request PublicationCandidateRequest
+	if !baseResolutionMatchesComponent(component, s.binding.Platform) {
+		return nil, errors.New("publication candidate evidence invalid")
+	}
+	evidence := component.BaseResolution
+	var ack *PublicationCandidateV2Acknowledgement
+	var request PublicationCandidateV2Request
 	err := s.session.WithCurrentEnvelope(func(session *SessionEnvelope, current *SecretBuffer) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -510,18 +514,21 @@ func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltCompo
 		if err != nil {
 			return err
 		}
-		request = PublicationCandidateRequest{
-			GrantID: s.binding.GrantID, OperationID: operationID,
-			CredentialID: credential.ID, CredentialGeneration: credential.Generation,
-			SessionID: session.SessionID, SessionGeneration: session.Generation,
-			MaterializationID: s.binding.MaterializationID, AttemptID: s.binding.AttemptID,
-			AttemptNumber: s.attemptNumber, LeaseEpoch: s.binding.LeaseEpoch, BuilderID: s.binding.BuilderID,
-			Component: component.Name, ManifestDigest: component.Output.TopLevelDigest, ManifestSize: component.Output.ManifestSize,
-			OCIFileSHA256: component.Output.FileSHA256, OCIFileSize: component.Output.SizeBytes, Platform: s.binding.Platform,
+		request = PublicationCandidateV2Request{
+			PublicationCandidateRequest: PublicationCandidateRequest{
+				GrantID: s.binding.GrantID, OperationID: operationID,
+				CredentialID: credential.ID, CredentialGeneration: credential.Generation,
+				SessionID: session.SessionID, SessionGeneration: session.Generation,
+				MaterializationID: s.binding.MaterializationID, AttemptID: s.binding.AttemptID,
+				AttemptNumber: s.attemptNumber, LeaseEpoch: s.binding.LeaseEpoch, BuilderID: s.binding.BuilderID,
+				Component: component.Name, ManifestDigest: component.Output.TopLevelDigest, ManifestSize: component.Output.ManifestSize,
+				OCIFileSHA256: component.Output.FileSHA256, OCIFileSize: component.Output.SizeBytes, Platform: s.binding.Platform,
+			},
+			BaseResolution: evidence,
 		}
 		var candidateErr error
 		for attempt := 0; attempt < publicationCandidateReplayAttempts; attempt++ {
-			ack, candidateErr = s.guard.PublicationCandidate(ctx, request, current)
+			ack, candidateErr = s.guard.PublicationCandidateV2(ctx, request, current)
 			if candidateErr == nil {
 				return nil
 			}
@@ -534,7 +541,7 @@ func (s *PublicationCredentialSource) Record(ctx context.Context, set BuiltCompo
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCandidateAcknowledgement(ack, request); err != nil {
+	if err := validateCandidateV2Acknowledgement(ack, request); err != nil {
 		return nil, err
 	}
 	return ack, nil
@@ -587,6 +594,11 @@ func (s *PublicationCredentialSource) setMatches(set BuiltComponentSet) bool {
 	if set.GrantID != s.binding.GrantID || set.MaterializationID != s.binding.MaterializationID || set.AttemptID != s.binding.AttemptID || set.LeaseEpoch != s.binding.LeaseEpoch {
 		return false
 	}
+	for _, component := range set.Components {
+		if !baseResolutionMatchesComponent(component, s.binding.Platform) {
+			return false
+		}
+	}
 	if s.frozen != nil {
 		if len(s.frozen) != len(set.Components) {
 			return false
@@ -598,6 +610,16 @@ func (s *PublicationCredentialSource) setMatches(set BuiltComponentSet) bool {
 		}
 	}
 	return true
+}
+
+func baseResolutionMatchesComponent(component BuiltComponent, platform string) bool {
+	evidence, err := parseBaseResolutionRecord([]byte(component.BaseResolution.JSON()))
+	if err != nil || evidence != component.BaseResolution {
+		return false
+	}
+	var record baseResolutionRecord
+	return json.Unmarshal([]byte(evidence.JSON()), &record) == nil &&
+		record.Platform == platform && record.OutputDigest == component.Output.TopLevelDigest
 }
 
 func publicationRepository(cpuArch string, attemptID string, component string) (string, error) {
@@ -683,6 +705,14 @@ func validateCandidateAcknowledgement(ack *PublicationCandidateAcknowledgement, 
 		!isCanonicalNonZeroUUID(ack.SessionID) ||
 		ack.SessionGeneration <= 0 ||
 		!isDigest(ack.AuthorityResponseSHA256) {
+		return errors.New("publication candidate acknowledgement invalid")
+	}
+	return nil
+}
+
+func validateCandidateV2Acknowledgement(ack *PublicationCandidateV2Acknowledgement, request PublicationCandidateV2Request) error {
+	if ack == nil || ack.BaseResolution != request.BaseResolution ||
+		validateCandidateAcknowledgement(&ack.PublicationCandidateAcknowledgement, request.PublicationCandidateRequest) != nil {
 		return errors.New("publication candidate acknowledgement invalid")
 	}
 	return nil

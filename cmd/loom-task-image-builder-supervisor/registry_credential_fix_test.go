@@ -87,12 +87,13 @@ type fixGuard struct {
 	renewErr, heartbeatFailure, transportErr error
 	mutate                                   func(*registryCredentialMutation)
 	ackMutate                                func(*PublicationCandidateAcknowledgement)
+	v2AckMutate                              func(*PublicationCandidateV2Acknowledgement)
 	renewMutate                              func(*SessionEnvelope)
 	heartbeatHook                            func(*SecretBuffer)
 	credentialHook                           func(*SecretBuffer)
 	predecessor                              *RegistryCredential
 	lastSecret                               *SecretBuffer
-	request                                  PublicationCandidateRequest
+	request                                  PublicationCandidateV2Request
 	generation                               int
 }
 
@@ -149,11 +150,14 @@ func (g *fixGuard) RegistryCredential(_ context.Context, r RegistryCredentialReq
 	g.lastSecret = &SecretBuffer{data: []byte(validRegistryCredentialJSON(m))}
 	return g.lastSecret, nil
 }
-func (g *fixGuard) PublicationCandidate(ctx context.Context, r PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+func (g *fixGuard) PublicationCandidateV2(ctx context.Context, r PublicationCandidateV2Request, current *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
 	g.request = r
-	ack, err := g.credentialSourceGuard.PublicationCandidate(ctx, r, current)
+	ack, err := g.credentialSourceGuard.PublicationCandidateV2(ctx, r, current)
 	if g.ackMutate != nil {
-		g.ackMutate(ack)
+		g.ackMutate(&ack.PublicationCandidateAcknowledgement)
+	}
+	if g.v2AckMutate != nil {
+		g.v2AckMutate(ack)
 	}
 	return ack, err
 }
@@ -344,6 +348,17 @@ func TestPublicationCredentialSourceFixCandidateRequest(t *testing.T) {
 				t.Fatal("ack drift accepted")
 			}
 		})
+	}
+}
+
+func TestPublicationCredentialSourceRejectsSubstitutedBaseResolutionAcknowledgement(t *testing.T) {
+	s, g, set := fixSource(t)
+	c := firstCredential(t, s, set)
+	g.v2AckMutate = func(ack *PublicationCandidateV2Acknowledgement) {
+		ack.BaseResolution = testBaseResolutionEvidence("other-solve", "linux/arm64", set.Components[0].Output.TopLevelDigest)
+	}
+	if ack, err := s.Record(context.Background(), set, c, set.Components[0]); err == nil || ack != nil {
+		t.Fatalf("ack=%#v err=%v, want substituted evidence rejection", ack, err)
 	}
 }
 func TestPublicationCredentialSourceFixSessionCriticalSection(t *testing.T) {

@@ -25,6 +25,7 @@ type TaskImageGuard interface {
 	Bundle(context.Context, string, string, string, string, int, *SecretBuffer) (*SecretBuffer, error)
 	RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error)
 	PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error)
+	PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error)
 	Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Release(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)

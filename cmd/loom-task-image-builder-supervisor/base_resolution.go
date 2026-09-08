@@ -34,6 +34,44 @@ type baseResolutionRecord struct {
 	ObservedBaseDigests []string `json:"observed_base_digests"`
 }
 
+// parseBaseResolutionRecord is the single exact-record boundary used for both
+// exporter capture and guard acknowledgement evidence. It returns an owned,
+// normalized representation so callers never retain mutable JSON aliases.
+func parseBaseResolutionRecord(payload []byte) (BaseResolutionEvidence, error) {
+	invalid := BaseResolutionEvidence{}
+	if len(payload) == 0 || len(payload) > maxBaseResolutionBytes || !utf8.Valid(payload) {
+		return invalid, errBaseResolutionInvalid
+	}
+	fields, err := scanJSONObjectFields(payload)
+	if err != nil || len(fields) != 5 {
+		return invalid, errBaseResolutionInvalid
+	}
+	for _, key := range []string{"schema", "solve_ref", "platform", "output_digest", "observed_base_digests"} {
+		if _, exists := fields[key]; !exists {
+			return invalid, errBaseResolutionInvalid
+		}
+	}
+	var record baseResolutionRecord
+	if err := json.Unmarshal(payload, &record); err != nil ||
+		record.Schema != "loom.task-image-base-resolution/v1" ||
+		!baseResolutionSolveRef.MatchString(record.SolveRef) ||
+		(record.Platform != "linux/amd64" && record.Platform != "linux/arm64") ||
+		parsePublicationManifestDigest(record.OutputDigest) != nil ||
+		record.ObservedBaseDigests == nil || len(record.ObservedBaseDigests) > maxObservedBaseImages {
+		return invalid, errBaseResolutionInvalid
+	}
+	for i, digest := range record.ObservedBaseDigests {
+		if parsePublicationManifestDigest(digest) != nil || (i > 0 && record.ObservedBaseDigests[i-1] >= digest) {
+			return invalid, errBaseResolutionInvalid
+		}
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil || len(encoded) > maxBaseResolutionBytes {
+		return invalid, errBaseResolutionInvalid
+	}
+	return BaseResolutionEvidence{json: string(encoded)}, nil
+}
+
 // parseBaseResolutionMetadata consumes buildctl's decoded --metadata-file
 // response. Expected bindings come from the supervisor's own ref-file, frozen
 // platform, and independently validated OCI output, never from this payload.
@@ -58,32 +96,14 @@ func parseBaseResolutionMetadata(payload []byte, solveRef, platform, outputDiges
 	if len(raw) == 0 || len(raw) > maxBaseResolutionBytes {
 		return invalid, errBaseResolutionInvalid
 	}
-	recordFields, err := scanJSONObjectFields(raw)
-	if err != nil || len(recordFields) != 5 {
+	evidence, err := parseBaseResolutionRecord(raw)
+	if err != nil {
 		return invalid, errBaseResolutionInvalid
-	}
-	for _, key := range []string{"schema", "solve_ref", "platform", "output_digest", "observed_base_digests"} {
-		if _, exists := recordFields[key]; !exists {
-			return invalid, errBaseResolutionInvalid
-		}
 	}
 	var record baseResolutionRecord
-	if err := json.Unmarshal(raw, &record); err != nil ||
-		record.Schema != "loom.task-image-base-resolution/v1" ||
-		record.SolveRef != solveRef || record.Platform != platform || record.OutputDigest != outputDigest ||
-		record.ObservedBaseDigests == nil || len(record.ObservedBaseDigests) > maxObservedBaseImages {
+	if err := json.Unmarshal([]byte(evidence.JSON()), &record); err != nil ||
+		record.SolveRef != solveRef || record.Platform != platform || record.OutputDigest != outputDigest {
 		return invalid, errBaseResolutionInvalid
 	}
-	for i, digest := range record.ObservedBaseDigests {
-		if parsePublicationManifestDigest(digest) != nil || (i > 0 && record.ObservedBaseDigests[i-1] >= digest) {
-			return invalid, errBaseResolutionInvalid
-		}
-	}
-	// Normalize only the evidence record; OCI bytes/digests remain untouched.
-	// This stable JSON is not the RFC 8785 signed-publication representation.
-	encoded, err := json.Marshal(record)
-	if err != nil || len(encoded) > maxBaseResolutionBytes {
-		return invalid, errBaseResolutionInvalid
-	}
-	return BaseResolutionEvidence{json: string(encoded)}, nil
+	return evidence, nil
 }

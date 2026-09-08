@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 from pathlib import Path
 from threading import Event, Thread
 from uuid import UUID
+
+import pytest
 
 from loom_task_image_builder_guard.protocol import (
     LOCAL_SCHEMA,
@@ -22,6 +25,7 @@ from tests.unit.test_task_image_builder_guard_service import (
     GRANT,
     LEASE_OPERATION,
     MATERIALIZATION,
+    SESSION_TOKEN,
     _establish_session,
     _json,
     _receive_projected_secret,
@@ -189,4 +193,89 @@ def test_real_unix_seqpacket_registry_publication_keeps_authority_inert(
     assert failure == []
     assert ledger.get(GRANT).raw == ledger_before  # type: ignore[union-attr]
     assert b"sentinel-private-registry-token" not in ledger_before
+    ledger.close()
+
+
+def test_go_v2_candidate_handoff_reaches_actual_python_service(
+    tmp_path: Path,
+) -> None:
+    helper_value = os.environ.get("LOOM_GO_V2_TEST_BINARY")
+    if helper_value is None:
+        pytest.skip("LOOM_GO_V2_TEST_BINARY not configured")
+    helper = Path(helper_value)
+    assert helper.is_file()
+
+    ready = Event()
+    service, ledger, _peer, _slurm, _events = _service(
+        tmp_path,
+        ready=ready.set,
+        max_packet_bytes=32768,
+    )
+    current_wire = _establish_session(service, ledger)
+    service._uuid = iter(
+        (
+            UUID("abababab-abab-4bab-8bab-abababababab"),
+            UUID("acacacac-acac-4cac-8cac-acacacacacac"),
+        )
+    ).__next__
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            service.start()
+        except BaseException as exc:
+            failure.append(exc)
+
+    thread = Thread(target=run)
+    thread.start()
+    assert ready.wait(timeout=3)
+    session_fd = create_sealed_memfd(
+        "go-v2-current-session",
+        current_wire,
+        maximum=65536,
+    )
+    try:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "LOOM_GO_V2_HELPER": "1",
+                "LOOM_GO_V2_SOCKET": str(service.config.protocol.socket_path),
+                "LOOM_GO_V2_SESSION_FD": str(session_fd),
+            }
+        )
+        completed = subprocess.run(
+            [
+                str(helper),
+                "-test.v",
+                "-test.run=^TestGoPublicationCandidateV2PythonHandoffHelper$",
+            ],
+            check=False,
+            capture_output=True,
+            env=environment,
+            pass_fds=(session_fd,),
+            text=True,
+            timeout=10,
+        )
+    finally:
+        os.close(session_fd)
+        service.stop()
+        thread.join(timeout=3)
+        service.close()
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert not thread.is_alive()
+    assert failure == []
+    assert SESSION_TOKEN not in completed.stdout
+    assert SESSION_TOKEN not in completed.stderr
+    operation, authority_request = service.authority.requests[-1]  # type: ignore[attr-defined]
+    assert operation == "publication-candidate-v2"
+    assert authority_request["schema_version"] == 2
+    assert authority_request["base_resolution"] == {
+        "schema": "loom.task-image-base-resolution/v1",
+        "solve_ref": "solve-python-handoff",
+        "platform": "linux/arm64",
+        "output_digest": "sha256:" + "1" * 64,
+        "observed_base_digests": ["sha256:" + "3" * 64],
+    }
+    assert ledger.get(GRANT) is not None
     ledger.close()

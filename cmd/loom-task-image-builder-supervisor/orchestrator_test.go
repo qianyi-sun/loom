@@ -1128,6 +1128,10 @@ func (g *fakeOrchestratorGuard) PublicationCandidate(context.Context, Publicatio
 	return nil, errors.New("publication candidate not configured")
 }
 
+func (g *fakeOrchestratorGuard) PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
+	return nil, errors.New("publication candidate V2 not configured")
+}
+
 func (g *fakeOrchestratorGuard) Start(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {
 	g.h.events = append(g.h.events, "start")
 	return testLease("start", operationID, g.leaseExpires), nil
@@ -1476,6 +1480,7 @@ func handoffBuiltSet() BuiltComponentSet {
 					OS:                "linux",
 					Architecture:      "arm64",
 				},
+				BaseResolution: testBaseResolutionEvidence("solve-task", "linux/arm64", "sha256:"+strings.Repeat("a", 64)),
 			},
 			{
 				Name: "sidecar:db",
@@ -1489,6 +1494,7 @@ func handoffBuiltSet() BuiltComponentSet {
 					OS:                "linux",
 					Architecture:      "arm64",
 				},
+				BaseResolution: testBaseResolutionEvidence("solve-sidecar-db", "linux/arm64", "sha256:"+strings.Repeat("c", 64), "sha256:"+strings.Repeat("a", 64)),
 			},
 		},
 	}
@@ -1502,7 +1508,7 @@ type handoffCredentialGuard struct {
 	secrets            []*SecretBuffer
 	lastHeartbeat      string
 	failFirstCandidate error
-	candidateRequests  []PublicationCandidateRequest
+	candidateRequests  []PublicationCandidateV2Request
 }
 
 func newHandoffCredentialGuard(t *testing.T, events *[]string) *handoffCredentialGuard {
@@ -1561,6 +1567,10 @@ func (g *handoffCredentialGuard) RegistryCredential(ctx context.Context, request
 }
 
 func (g *handoffCredentialGuard) PublicationCandidate(ctx context.Context, request PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	return nil, errors.New("legacy publication candidate unexpectedly selected")
+}
+
+func (g *handoffCredentialGuard) PublicationCandidateV2(ctx context.Context, request PublicationCandidateV2Request, current *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1569,27 +1579,30 @@ func (g *handoffCredentialGuard) PublicationCandidate(ctx context.Context, reque
 	if g.failFirstCandidate != nil && len(g.candidateRequests) == 1 {
 		return nil, g.failFirstCandidate
 	}
-	return &PublicationCandidateAcknowledgement{
-		CandidateID:             uuidWithTail(0x9000 + len(g.candidateRequests)),
-		OperationID:             request.OperationID,
-		CredentialID:            request.CredentialID,
-		CredentialGeneration:    request.CredentialGeneration,
-		GrantID:                 request.GrantID,
-		SessionID:               request.SessionID,
-		SessionGeneration:       request.SessionGeneration,
-		MaterializationID:       request.MaterializationID,
-		AttemptID:               request.AttemptID,
-		AttemptNumber:           request.AttemptNumber,
-		LeaseEpoch:              request.LeaseEpoch,
-		BuilderID:               request.BuilderID,
-		Component:               request.Component,
-		ManifestDigest:          request.ManifestDigest,
-		ManifestSize:            request.ManifestSize,
-		OCIFileSHA256:           request.OCIFileSHA256,
-		OCIFileSize:             request.OCIFileSize,
-		Platform:                request.Platform,
-		RecordedAt:              testNow,
-		AuthorityResponseSHA256: strings.Repeat("c", 64),
+	return &PublicationCandidateV2Acknowledgement{
+		PublicationCandidateAcknowledgement: PublicationCandidateAcknowledgement{
+			CandidateID:             uuidWithTail(0x9000 + len(g.candidateRequests)),
+			OperationID:             request.OperationID,
+			CredentialID:            request.CredentialID,
+			CredentialGeneration:    request.CredentialGeneration,
+			GrantID:                 request.GrantID,
+			SessionID:               request.SessionID,
+			SessionGeneration:       request.SessionGeneration,
+			MaterializationID:       request.MaterializationID,
+			AttemptID:               request.AttemptID,
+			AttemptNumber:           request.AttemptNumber,
+			LeaseEpoch:              request.LeaseEpoch,
+			BuilderID:               request.BuilderID,
+			Component:               request.Component,
+			ManifestDigest:          request.ManifestDigest,
+			ManifestSize:            request.ManifestSize,
+			OCIFileSHA256:           request.OCIFileSHA256,
+			OCIFileSize:             request.OCIFileSize,
+			Platform:                request.Platform,
+			RecordedAt:              testNow,
+			AuthorityResponseSHA256: strings.Repeat("c", 64),
+		},
+		BaseResolution: request.BaseResolution,
 	}, nil
 }
 

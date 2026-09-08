@@ -27,7 +27,7 @@ func TestGuardClientFixAckFailureDoesNotCloseReusedFD(t *testing.T) {
 			if name == "invalid response id" {
 				id = "invalid"
 			}
-			err = (&GuardClient{}).ackPacket(packet, id)
+			err = (&GuardClient{maxPacketBytes: 4096}).ackPacket(packet, id)
 			if (err == nil) != (name == "success") {
 				t.Fatalf("ACK error=%v", err)
 			}

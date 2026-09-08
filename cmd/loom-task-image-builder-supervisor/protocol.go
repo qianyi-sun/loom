@@ -139,6 +139,43 @@ type PublicationCandidateAcknowledgement struct {
 	AuthorityResponseSHA256 string
 }
 
+type PublicationCandidateV2Request struct {
+	PublicationCandidateRequest
+	BaseResolution BaseResolutionEvidence
+}
+
+type PublicationCandidateV2Acknowledgement struct {
+	PublicationCandidateAcknowledgement
+	BaseResolution BaseResolutionEvidence
+}
+
+type publicationCandidateResponse struct {
+	Schema                  string          `json:"schema"`
+	Operation               string          `json:"operation"`
+	ResponseID              string          `json:"response_id"`
+	GrantID                 string          `json:"grant_id"`
+	CandidateID             string          `json:"candidate_id"`
+	OperationID             string          `json:"operation_id"`
+	CredentialID            string          `json:"credential_id"`
+	CredentialGeneration    int             `json:"credential_generation"`
+	SessionID               string          `json:"session_id"`
+	SessionGeneration       int             `json:"session_generation"`
+	MaterializationID       string          `json:"materialization_id"`
+	AttemptID               string          `json:"attempt_id"`
+	AttemptNumber           int             `json:"attempt_number"`
+	LeaseEpoch              int             `json:"lease_epoch"`
+	BuilderID               string          `json:"builder_id"`
+	Component               string          `json:"component"`
+	ManifestDigest          string          `json:"manifest_digest"`
+	ManifestSize            int64           `json:"manifest_size"`
+	OCIFileSHA256           string          `json:"oci_file_sha256"`
+	OCIFileSize             int64           `json:"oci_file_size"`
+	Platform                string          `json:"platform"`
+	RecordedAt              string          `json:"recorded_at"`
+	AuthorityResponseSHA256 string          `json:"authority_response_sha256"`
+	BaseResolution          json.RawMessage `json:"base_resolution"`
+}
+
 func NewGuardClient(socketPath string, maxPacketBytes int, ackTimeout time.Duration) *GuardClient {
 	return &GuardClient{
 		socketPath:     socketPath,
@@ -367,9 +404,34 @@ func (c *GuardClient) RegistryCredential(ctx context.Context, request RegistryCr
 }
 
 func (c *GuardClient) PublicationCandidate(ctx context.Context, request PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	ack, _, err := c.publicationCandidate(ctx, "publication-candidate", request, BaseResolutionEvidence{}, current)
+	return ack, err
+}
+
+func (c *GuardClient) PublicationCandidateV2(ctx context.Context, request PublicationCandidateV2Request, current *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
+	evidence, err := parseBaseResolutionRecord([]byte(request.BaseResolution.JSON()))
+	if err != nil {
+		return nil, errors.New("publication candidate evidence invalid")
+	}
+	var record baseResolutionRecord
+	if err := json.Unmarshal([]byte(evidence.JSON()), &record); err != nil ||
+		record.Platform != request.Platform || record.OutputDigest != request.ManifestDigest {
+		return nil, errors.New("publication candidate evidence invalid")
+	}
+	ack, acknowledgedEvidence, err := c.publicationCandidate(ctx, "publication-candidate-v2", request.PublicationCandidateRequest, evidence, current)
+	if err != nil {
+		return nil, err
+	}
+	return &PublicationCandidateV2Acknowledgement{
+		PublicationCandidateAcknowledgement: *ack,
+		BaseResolution:                      acknowledgedEvidence,
+	}, nil
+}
+
+func (c *GuardClient) publicationCandidate(ctx context.Context, operation string, request PublicationCandidateRequest, expectedEvidence BaseResolutionEvidence, current *SecretBuffer) (*PublicationCandidateAcknowledgement, BaseResolutionEvidence, error) {
 	localRequest := map[string]any{
 		"schema":                localSchema,
-		"operation":             "publication-candidate",
+		"operation":             operation,
 		"grant_id":              request.GrantID,
 		"operation_id":          request.OperationID,
 		"materialization_id":    request.MaterializationID,
@@ -384,54 +446,33 @@ func (c *GuardClient) PublicationCandidate(ctx context.Context, request Publicat
 		"oci_file_size":         request.OCIFileSize,
 		"platform":              request.Platform,
 	}
+	if expectedEvidence.JSON() != "" {
+		localRequest["base_resolution"] = json.RawMessage(expectedEvidence.JSON())
+	}
 	fd, err := current.cloneSealedMemfd("session-publication-candidate", maxSecretBytes)
 	if err != nil {
-		return nil, err
+		return nil, BaseResolutionEvidence{}, err
 	}
 	packet, rights, err := c.roundTrip(ctx, localRequest, []int{fd})
 	syscall.Close(fd)
 	if err != nil {
-		return nil, err
+		return nil, BaseResolutionEvidence{}, err
 	}
 	defer closeRights(rights)
 	defer packet.Close()
 	if len(rights) != 0 {
-		return nil, errors.New("publication candidate response should not carry rights")
+		return nil, BaseResolutionEvidence{}, errors.New("publication candidate response should not carry rights")
 	}
-	var response struct {
-		Schema                  string `json:"schema"`
-		Operation               string `json:"operation"`
-		ResponseID              string `json:"response_id"`
-		GrantID                 string `json:"grant_id"`
-		CandidateID             string `json:"candidate_id"`
-		OperationID             string `json:"operation_id"`
-		CredentialID            string `json:"credential_id"`
-		CredentialGeneration    int    `json:"credential_generation"`
-		SessionID               string `json:"session_id"`
-		SessionGeneration       int    `json:"session_generation"`
-		MaterializationID       string `json:"materialization_id"`
-		AttemptID               string `json:"attempt_id"`
-		AttemptNumber           int    `json:"attempt_number"`
-		LeaseEpoch              int    `json:"lease_epoch"`
-		BuilderID               string `json:"builder_id"`
-		Component               string `json:"component"`
-		ManifestDigest          string `json:"manifest_digest"`
-		ManifestSize            int64  `json:"manifest_size"`
-		OCIFileSHA256           string `json:"oci_file_sha256"`
-		OCIFileSize             int64  `json:"oci_file_size"`
-		Platform                string `json:"platform"`
-		RecordedAt              string `json:"recorded_at"`
-		AuthorityResponseSHA256 string `json:"authority_response_sha256"`
-	}
+	var response publicationCandidateResponse
 	if err := decodeStrictJSON(packet.payload, &response); err != nil {
-		return nil, err
+		return nil, BaseResolutionEvidence{}, err
 	}
 	recordedAt, err := time.Parse(time.RFC3339, response.RecordedAt)
 	if err != nil {
-		return nil, err
+		return nil, BaseResolutionEvidence{}, err
 	}
 	if response.Schema != localSchema ||
-		response.Operation != "publication-candidate" ||
+		response.Operation != operation ||
 		response.GrantID != request.GrantID ||
 		response.OperationID != request.OperationID ||
 		response.CredentialID != request.CredentialID ||
@@ -469,10 +510,21 @@ func (c *GuardClient) PublicationCandidate(ctx context.Context, request Publicat
 		!isDigest(response.OCIFileSHA256) ||
 		(response.Platform != "linux/amd64" && response.Platform != "linux/arm64") ||
 		!isDigest(response.AuthorityResponseSHA256) {
-		return nil, errors.New("publication candidate response invalid")
+		return nil, BaseResolutionEvidence{}, errors.New("publication candidate response invalid")
+	}
+	acknowledgedEvidence := BaseResolutionEvidence{}
+	if expectedEvidence.JSON() == "" {
+		if len(response.BaseResolution) != 0 {
+			return nil, BaseResolutionEvidence{}, errors.New("publication candidate response invalid")
+		}
+	} else {
+		acknowledgedEvidence, err = parseBaseResolutionRecord(response.BaseResolution)
+		if err != nil || acknowledgedEvidence != expectedEvidence {
+			return nil, BaseResolutionEvidence{}, errors.New("publication candidate response invalid")
+		}
 	}
 	if err := c.ackPacket(packet, response.ResponseID); err != nil {
-		return nil, err
+		return nil, BaseResolutionEvidence{}, err
 	}
 	return &PublicationCandidateAcknowledgement{
 		CandidateID:             response.CandidateID,
@@ -495,7 +547,7 @@ func (c *GuardClient) PublicationCandidate(ctx context.Context, request Publicat
 		Platform:                response.Platform,
 		RecordedAt:              recordedAt,
 		AuthorityResponseSHA256: response.AuthorityResponseSHA256,
-	}, nil
+	}, acknowledgedEvidence, nil
 }
 
 func (c *GuardClient) Start(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {
@@ -606,11 +658,15 @@ func (p *responsePacket) Close() {
 }
 
 func (c *GuardClient) roundTrip(ctx context.Context, request map[string]any, rights []int) (*responsePacket, []int, error) {
+	payload, err := encodeBoundedLocalPacket(request, c.maxPacketBytes)
+	if err != nil {
+		return nil, nil, err
+	}
 	fd, deadline, err := c.connect(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := sendLocalPacket(fd, deadline, request, rights); err != nil {
+	if err := sendLocalPayload(fd, deadline, payload, rights); err != nil {
 		syscall.Close(fd)
 		return nil, nil, wrapDeadline(ctx, err)
 	}
@@ -676,11 +732,15 @@ func (c *GuardClient) sendAck(fd int, responseID string, deadline time.Time) err
 	if !isCanonicalNonZeroUUID(responseID) {
 		return errors.New("ack response id invalid")
 	}
-	return sendLocalPacket(fd, deadline, map[string]any{
+	payload, err := encodeBoundedLocalPacket(map[string]any{
 		"schema":      localSchema,
 		"operation":   "ack",
 		"response_id": responseID,
-	}, nil)
+	}, c.maxPacketBytes)
+	if err != nil {
+		return err
+	}
+	return sendLocalPayload(fd, deadline, payload, nil)
 }
 
 func (c *GuardClient) secretOperation(ctx context.Context, request map[string]any, current *SecretBuffer) (*SecretBuffer, bool, error) {
@@ -845,11 +905,18 @@ func (c *GuardClient) leaseOperation(ctx context.Context, operation string, gran
 	return &response, nil
 }
 
-func sendLocalPacket(fd int, deadline time.Time, request map[string]any, rights []int) error {
+func encodeBoundedLocalPacket(request map[string]any, maximum int) ([]byte, error) {
 	payload, err := encodeCanonicalJSON(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	if maximum <= 0 || len(payload) > maximum {
+		return nil, errors.New("local packet exceeds configured maximum")
+	}
+	return payload, nil
+}
+
+func sendLocalPayload(fd int, deadline time.Time, payload []byte, rights []int) error {
 	var oob []byte
 	if len(rights) > 0 {
 		oob = append(oob, syscall.UnixRights(rights...)...)

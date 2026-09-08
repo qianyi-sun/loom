@@ -175,6 +175,10 @@ func (fn supervisorProjectClientFunc) PublicationCandidate(context.Context, Publ
 	return nil, nil
 }
 
+func (fn supervisorProjectClientFunc) PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
+	return nil, nil
+}
+
 func (fn supervisorProjectClientFunc) Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error) {
 	return nil, nil
 }

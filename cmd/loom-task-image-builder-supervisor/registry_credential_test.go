@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -181,11 +182,42 @@ func TestPublicationCredentialSourceRecordValidatesCandidateBinding(t *testing.T
 	if err != nil {
 		t.Fatalf("Record() error = %v", err)
 	}
-	if ack == nil || ack.AttemptNumber != 11 || ack.BuilderID != "rootless:22222222222242228222222222222222" {
+	if ack == nil || ack.AttemptNumber != 11 || ack.BuilderID != "rootless:22222222222242228222222222222222" || ack.BaseResolution != testBuiltSet().Components[0].BaseResolution {
 		t.Fatalf("ack = %#v, want frozen attempt binding", ack)
 	}
-	if got := strings.Join(guard.events, ","); got != "publication-candidate" {
-		t.Fatalf("events = %s, want publication-candidate", got)
+	if got := strings.Join(guard.events, ","); got != "publication-candidate-v2" {
+		t.Fatalf("events = %s, want publication-candidate-v2", got)
+	}
+	if guard.v2Request.BaseResolution != testBuiltSet().Components[0].BaseResolution {
+		t.Fatalf("V2 evidence = %s, want frozen %s", guard.v2Request.BaseResolution.JSON(), testBuiltSet().Components[0].BaseResolution.JSON())
+	}
+}
+
+// Break caught: missing or substituted build evidence reaches credential
+// issuance before publication state is frozen.
+func TestPublicationCredentialSourceRejectsInvalidBaseResolutionBeforeCredentialTransport(t *testing.T) {
+	for name, mutate := range map[string]func(*BuiltComponent){
+		"zero": func(component *BuiltComponent) { component.BaseResolution = BaseResolutionEvidence{} },
+		"substituted root": func(component *BuiltComponent) {
+			component.BaseResolution = testBaseResolutionEvidence("solve-task", "linux/arm64", "sha256:"+strings.Repeat("d", 64))
+		},
+		"substituted platform": func(component *BuiltComponent) {
+			component.BaseResolution = testBaseResolutionEvidence("solve-task", "linux/amd64", component.Output.TopLevelDigest)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			guard := &credentialSourceGuard{}
+			source := NewPublicationCredentialSource(NewSessionManager(testGrantID, testSession(1, testNow.Add(10*time.Minute)), guard), guard, validPublicationAttemptBinding())
+			set := testBuiltSet()
+			mutate(&set.Components[0])
+			credential, err := source.Next(context.Background(), set, "task", nil)
+			if credential != nil {
+				credential.Close()
+			}
+			if err == nil || len(guard.events) != 0 {
+				t.Fatalf("credential=%#v err=%v events=%v, want pre-transport rejection", credential, err, guard.events)
+			}
+		})
 	}
 }
 
@@ -372,8 +404,30 @@ func testBuiltSet() BuiltComponentSet {
 		MaterializationID: testMaterializationID,
 		AttemptID:         testAttemptID,
 		LeaseEpoch:        1,
-		Components:        []BuiltComponent{{Name: "task", Output: OCIOutput{TopLevelDigest: "sha256:" + strings.Repeat("a", 64), ManifestSize: 321, FileSHA256: strings.Repeat("b", 64), SizeBytes: 5678, OS: "linux", Architecture: "arm64"}}},
+		Components: []BuiltComponent{{
+			Name:           "task",
+			Output:         OCIOutput{TopLevelDigest: "sha256:" + strings.Repeat("a", 64), ManifestSize: 321, FileSHA256: strings.Repeat("b", 64), SizeBytes: 5678, OS: "linux", Architecture: "arm64"},
+			BaseResolution: testBaseResolutionEvidence("solve-task", "linux/arm64", "sha256:"+strings.Repeat("a", 64)),
+		}},
 	}
+}
+
+func testBaseResolutionEvidence(solveRef, platform, outputDigest string, bases ...string) BaseResolutionEvidence {
+	encoded, err := json.Marshal(baseResolutionRecord{
+		Schema:              "loom.task-image-base-resolution/v1",
+		SolveRef:            solveRef,
+		Platform:            platform,
+		OutputDigest:        outputDigest,
+		ObservedBaseDigests: append([]string{}, bases...),
+	})
+	if err != nil {
+		panic(err)
+	}
+	evidence, err := parseBaseResolutionRecord(encoded)
+	if err != nil {
+		panic(err)
+	}
+	return evidence
 }
 
 type credentialSourceGuard struct {
@@ -382,6 +436,7 @@ type credentialSourceGuard struct {
 	credentialErr      error
 	lastHeartbeat      string
 	sawNullPredecessor bool
+	v2Request          PublicationCandidateV2Request
 }
 
 func (g *credentialSourceGuard) Renew(context.Context, string, string, *SecretBuffer) (*SessionEnvelope, error) {
@@ -432,6 +487,19 @@ func (g *credentialSourceGuard) RegistryCredential(ctx context.Context, request 
 
 func (g *credentialSourceGuard) PublicationCandidate(ctx context.Context, request PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
 	g.events = append(g.events, "publication-candidate")
+	return candidateAcknowledgement(request), nil
+}
+
+func (g *credentialSourceGuard) PublicationCandidateV2(_ context.Context, request PublicationCandidateV2Request, _ *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
+	g.events = append(g.events, "publication-candidate-v2")
+	g.v2Request = request
+	return &PublicationCandidateV2Acknowledgement{
+		PublicationCandidateAcknowledgement: *candidateAcknowledgement(request.PublicationCandidateRequest),
+		BaseResolution:                      request.BaseResolution,
+	}, nil
+}
+
+func candidateAcknowledgement(request PublicationCandidateRequest) *PublicationCandidateAcknowledgement {
 	return &PublicationCandidateAcknowledgement{
 		CandidateID:             "99999999-9999-4999-8999-999999999999",
 		OperationID:             request.OperationID,
@@ -453,5 +521,5 @@ func (g *credentialSourceGuard) PublicationCandidate(ctx context.Context, reques
 		Platform:                request.Platform,
 		RecordedAt:              testNow,
 		AuthorityResponseSHA256: strings.Repeat("c", 64),
-	}, nil
+	}
 }
