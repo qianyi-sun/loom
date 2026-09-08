@@ -84,6 +84,14 @@ image_admission_secret_name = ""
 configuration_revision = ""
 source_egress_allowlist = []
 execution_ingress_cidrs = []
+# Optional staging-only private service entry on an existing WireGuard peer node. Binds three host ports exclusively to the peer address, reuses the renewable ingress TLS Secret, and creates no public ingress or credentials.
+
+[nebius_private_entry]
+enabled = false
+node_name = ""
+wireguard_address = ""
+peer_address = ""
+proxy_image = ""
 # PgBouncer transaction-mode connection multiplexer. When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Disable it, re-render, and redeploy to make services fall back to db_url (direct). See docs/architecture/pgbouncer.md.
 
 [pgbouncer]

@@ -56,6 +56,31 @@ spec:
   superuserSecret:
     name: loom-postgres-cnpg-credentials
 
+{% if nebius_execution.enabled %}
+  # CNPG reconciles the two staging attachment identities, including changes
+  # to their basic-auth Secrets. The credential reconciler persists those
+  # Secrets with cnpg.io/reload=true; rendering must never emit passwords.
+  # Inherit the existing app role so future migrations keep the same access
+  # contract, without adding another database or privileged SQL bootstrap.
+  managed:
+    roles:
+{% for component in ("gateway", "actuator") %}
+      - name: loom_nebius_staging_{{ component }}
+        ensure: present
+        login: true
+        inherit: true
+        superuser: false
+        createdb: false
+        createrole: false
+        replication: false
+        bypassrls: false
+        inRoles: [loom]
+        passwordSecret:
+          name: loom-nebius-staging-db-{{ component }}
+        # Omitted validUntil is non-expiring; no operator calendar renewal.
+{% endfor %}
+{% endif %}
+
   storage:
     size: {{ postgres_storage_gi }}Gi
 {% if topology.storage_backend == "longhorn" %}

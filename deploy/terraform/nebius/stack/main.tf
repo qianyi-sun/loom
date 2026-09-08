@@ -34,4 +34,5 @@ module "execution_target" {
   deployment_access_image_id       = var.deployment_access_image_id
   deployment_access_preset         = var.deployment_access_preset
   deployment_access_disk_gib       = var.deployment_access_disk_gib
+  staging_spool                    = var.staging_spool
 }

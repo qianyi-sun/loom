@@ -1,14 +1,33 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 from scripts.check_nebius_iac import ContractError, check_nebius_iac
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPO_ROOT / "deploy" / "terraform" / "nebius"
+
+
+def test_gateway_bootstrap_has_operator_recovery_without_public_database() -> None:
+    module = (SOURCE_ROOT / "modules/execution-target/main.tf").read_text()
+    match = re.search(r"cloud_init_user_data = <<-CLOUD_INIT\n(.*?)\n  CLOUD_INIT", module, re.S)
+    assert match is not None
+    config = yaml.safe_load(match.group(1))
+    operator = next(user for user in config["users"] if user["name"] == "codex")
+    assert operator["sudo"] == ["ALL=(ALL) NOPASSWD:ALL"]
+    assert "wireguard-tools" in config["packages"]
+    assert "sudo" in config["packages"]
+    assert config["ssh_pwauth"] is False
+    assert config["disable_root"] is True
+    assert len(operator["ssh_authorized_keys"]) == 1
+    assert "var.deployment_access_ssh_public_key" in operator["ssh_authorized_keys"][0]
+    assert "runcmd" not in config
+    assert "write_files" not in config
 
 
 def _copy_contract(tmp_path: Path) -> tuple[Path, Path]:

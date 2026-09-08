@@ -119,6 +119,21 @@ def test_incomplete_attachment_fails_before_render(tmp_path: Path, overrides: di
 
 
 @pytest.mark.parametrize(
+    "replacement", ['namespace = "other-staging"', 'namespace = "loom-staging"\n']
+)
+def test_canonical_credential_roles_require_exact_namespace_and_cnpg(
+    tmp_path: Path, replacement: str
+) -> None:
+    content = _PROFILE.read_text().replace('namespace = "loom-staging"', replacement)
+    if replacement.endswith("\n"):
+        content = content.replace("multi_node = true", "multi_node = false")
+    path = tmp_path / "cluster.toml"
+    path.write_text(content + "\n" + _attachment())
+    with pytest.raises(ValueError, match="nebius_execution"):
+        render_manifests(load_cluster_config(path))
+
+
+@pytest.mark.parametrize(
     ("original", "replacement"),
     [
         ('runtime_environment = "staging"', 'runtime_environment = "development"'),
