@@ -108,7 +108,9 @@ integration tests passed, including ordinary Phase 1 completion. Durable snapsho
 jobs are implemented and reviewed through `b9adc814c`: the covering suite passed
 387 tests, and the contention-review amendment passed 154 affected tests. Real
 cross-grant INSERT contention and mutation-tested post-wait expiry checks are
-covered. The verifier worker and signed atomic readiness remain in progress.
+covered. The verifier worker and signed atomic readiness are implemented through
+`3a5a0f8e5`, with the reviewed slow-commit lease gap corrected in `6ab046dce` and
+real claim/renewal deferred-commit regressions completed in `730ae26ba`.
 
 The internal current-session prerequisite is independently reviewed and complete.
 It shares strict validation with bearer authentication, accepts valid successors,
@@ -119,14 +121,14 @@ passed. No durable publication worker or readiness transition is implied.
 
 - [x] Test snapshot creation/replay, unique complete candidate sets and leased
   worker generation claims under real concurrent transactions.
-- [ ] Implement snapshot/read/commit using existing session/lease lock helpers.
+- [x] Implement snapshot/read/commit using existing session/lease lock helpers.
   A clock sampled after network work controls final expiry checks.
-- [ ] Exercise session renewal, lease takeover, job termination, guard expiry,
+- [x] Exercise session renewal, lease takeover, job termination, guard expiry,
   key rotation/revocation and two completing workers during the unlocked read.
   Each stale path must leave registry_images and ready_at untouched.
-- [ ] Store canonical envelopes and readiness atomically only for the complete
+- [x] Store canonical envelopes and readiness atomically only for the complete
   frozen attempt. Validate replay without signing or rewriting rows.
-- [ ] Fence the legacy completion path against rootless attempts and prove
+- [x] Fence the legacy completion path against rootless attempts and prove
   accepted Phase 1 completion remains unchanged. Review the complete lock graph.
 
 The compact receipt contract is implemented and independently reviewed through
@@ -134,6 +136,15 @@ The compact receipt contract is implemented and independently reviewed through
 frozen snapshot, candidate identities and signed-envelope set in at most 2 KiB.
 Precise stored completion time and whole-second wire time have one defined
 relationship. This pure contract does not itself verify database completion.
+
+Task 4c evidence: 232 affected PostgreSQL integration tests and 371 pure/boundary
+checks passed. Independent review found one worker lease scheduling defect after
+slow commits; a controller-scoped correction passed the full 21-test affected
+worker run and four real deferred-commit cases (initial claim and later renewal,
+expired and nearly expired returned leases). Expired claims start no external
+I/O; remaining live leases renew promptly, with both sleep and transaction bounded
+by the last committed expiry. Controller re-review cleared the finding. No
+production signer/distribution adapter or worker scheduler is composed.
 
 ## Task 5: Fixed API and supervisor completion
 
@@ -180,8 +191,15 @@ digests remain Task 6 gates. Go V2 candidate handoff is implemented and reviewed
 through `6ab2c99c8`, including mandatory actual Go/Python handoff CI. A subsequent
 sidecar-only compatibility fix (`10720a4cc`) passes full Go normal/race suites.
 The pure bounded status projection (`1e503fcce`) passes 62 status/receipt/job
-checks plus six package checks; HTTP/guard submit/poll, publication liveness and
-terminal completion handling remain pending. No slice activates the provider.
+checks plus six package checks. Go receipt (`6735c24fd`) and status (`dfd2f5440`)
+parsers pass cross-language vectors and full normal/race verification; receipt
+has independent review and status has focused controller review. The authenticated
+HTTP submit/poll slice (`cf3e925d9`) passes eight real API tests plus six package
+checks, including actual worker completion after lease clearing, successor sessions,
+revocation, redaction and a five-second transaction deadline. Existing authority
+API/deployment/package checks passed 51 tests. Guard transport, supervisor publication
+liveness, terminal completion handling and independent composition review remain
+pending. No slice activates the provider.
 
 Upstream reconciliation `2171ed1b7` moves only the unpublished publication
 migration to `0133`, after unchanged public `0132`. Independent review approved
