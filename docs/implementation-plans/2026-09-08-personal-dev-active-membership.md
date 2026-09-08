@@ -140,6 +140,10 @@ def test_new_owner_allocation_keeps_base_configuration():
 - Create the next numbered migration under `capacity_migrations/versions`.
 - Create `tests/integration/test_capacity_membership.py`.
 - Extend `tests/capacity_execution_fixtures.py` with optional fleet/subject inputs.
+- Update current-head expectations in the capacity migration/reintegration tests
+  and `tests/loom_cli/test_capacity_control_plane.py`, and the installed migration
+  inventory in `tests/loom_cli/test_capacity_control_plane_packaging.py`. Preserve
+  historical migration ranges and verify the affected tests after the new migration.
 
 **Interfaces:**
 
