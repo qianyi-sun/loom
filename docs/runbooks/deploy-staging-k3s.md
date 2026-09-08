@@ -101,6 +101,25 @@ upstream key to the worker or sandbox.
 
 ## Rollback and recovery
 
+The protected staging capacity-agent keeps credentials in the immutable
+`loom-capacity-agent` Secret and its non-secret, rollout-bound reporter
+configuration in the same-named ConfigMap. The protected component verifies
+ownership of both resources. A configuration digest in the pod template forces
+`Recreate` even when the image is unchanged; final readback requires a ready pod
+with that exact configuration digest. Configuration is copied with credentials
+into owner-only runtime files at initialization, not hot-reloaded by an old pod.
+The initializer checks the configuration bytes against the pinned digest before
+publishing those files, so stale node-cache projections cannot become ready.
+
+Upgrading a legacy combined Secret preserves its existing data without deletion.
+Its old `reporter-configuration.json` entry is explicitly excluded from the
+Secret projection; only the current ConfigMap supplies configuration. Credential
+changes, unexpected Secret keys, and foreign ownership still fail closed.
+An interruption after ConfigMap apply but before Deployment apply is recoverable
+through the protected rollout, without editing or deleting the Secret manually.
+These agent readiness checks do not activate global capacity: schema-7 execution
+authority and the bounded workload proofs remain separate requirements.
+
 Redeploy a previously admitted candidate image identity through the protected
 rollout path. Database migrations are forward-only, so an incompatible schema
 requires the recorded database/object-store restore procedure rather than only
