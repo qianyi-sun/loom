@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from loom.db.schema import TaskImageBuildGrant, TaskImageMaterialization, TaskImagePublicationJob
 from loom_task_image_authority.api import create_app
-from loom_task_image_authority.contracts import TaskImageMaterializationOperationRequestV1
+from loom_task_image_authority.contracts import (
+    TaskImageBuildSessionV2,
+    TaskImageMaterializationOperationRequestV1,
+    TaskImageSessionRenewalV1,
+)
 from loom_task_image_authority.publication_receipts import (
     PublicationCandidateIdentity,
     candidate_set_sha256,
@@ -28,6 +32,7 @@ from loom_task_image_authority.publication_status import (
 from loom_task_image_authority.registry_token import DistributionRegistryTokenIssuer
 from tests.integration.test_task_image_authority_api import _HEADERS, _SESSION, _settings
 from tests.integration.test_task_image_candidate_v2 import _prepared, _record
+from tests.integration.test_task_image_projection_store import _attestation, _proof, _revocation
 from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
 )
@@ -222,6 +227,52 @@ async def test_expired_session_cannot_poll_or_replay_existing_job(
         assert job is not None and job.state == "queued"
         row = await session.get(TaskImageMaterialization, api.request.materialization_id)
         assert row is not None and row.ready_at is None and row.registry_images == {}
+
+
+async def test_publication_accepts_real_successor_and_rejects_revoked_projection(
+    publication_api: PublicationAPI,
+) -> None:
+    api = publication_api
+    original = api.request.model_dump(mode="json")
+    submitted = await api.client.post(api.path("submit"), json=original)
+    assert submitted.status_code == 200
+    api.now[0] = NOW + timedelta(seconds=16)
+    renewal = TaskImageSessionRenewalV1(
+        renewal_id=uuid4(),
+        grant_id=api.request.grant_id,
+        session_id=api.request.session_id,
+        session_generation=api.request.session_generation,
+        session_token=api.request.session_token,
+        attestation=_attestation(_proof(), generation=2, issued_at=NOW + timedelta(seconds=15)),
+        observed_at=NOW + timedelta(seconds=15),
+    )
+    renewed = await api.client.put(
+        f"/v1/projections/{api.request.grant_id}/sessions/{api.request.session_generation}/renew",
+        json=renewal.model_dump(mode="json"),
+    )
+    assert renewed.status_code == 200, renewed.text
+    successor = TaskImageBuildSessionV2.model_validate_json(renewed.content)
+    current = original | {
+        "session_id": str(successor.session_id),
+        "session_generation": successor.generation,
+        "session_token": successor.session_token,
+    }
+    for operation in ("submit", "poll"):
+        assert (await api.client.post(api.path(operation), json=original)).status_code == 403
+        response = await api.client.post(api.path(operation), json=current)
+        assert response.status_code == 200, response.text
+        assert response.content == submitted.content
+    revoked = await api.client.put(
+        f"/v1/projections/{api.request.grant_id}/revocation",
+        json=_revocation(observed_at=api.now[0]).model_dump(mode="json"),
+    )
+    assert revoked.status_code == 204, revoked.text
+    for operation in ("submit", "poll"):
+        response = await api.client.post(api.path(operation), json=current)
+        assert response.status_code == 403, response.text
+    async with api.sessions() as session:
+        job = await session.get(TaskImagePublicationJob, api.request.operation_id)
+        assert job is not None and job.state == "queued"
 
 
 @pytest.mark.parametrize("expires_while_waiting", [False, True])
