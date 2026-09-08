@@ -68,6 +68,7 @@ _REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
     "loom-gateway-router",
     "loom-worker-router",
     "loom-minio-router",
+    "loom-nebius-private-entry",
 })
 
 # Workloads that legitimately need a hostPort. The cluster-deploy
@@ -302,9 +303,42 @@ def _audit_pod_template(
     # use cases) skip the hostPort check entirely.
     if name in _HOSTPORT_ALLOWLIST:
         return out
-    pod_spec = (
-        doc.get("spec", {}).get("template", {}).get("spec", {})
-    )
+    pod_spec = doc.get("spec", {}).get("template", {}).get("spec", {})
+    if name == "loom-nebius-private-entry":
+        # Unlike legacy routers, this exception is not name-only: the new
+        # entry may bind exactly three ports on one explicitly private address.
+        from loom_cli.nebius_private_entry import PRIVATE_ENTRY_PORTS, private_ipv4
+
+        ports = [
+            port
+            for key in ("containers", "initContainers")
+            for container in pod_spec.get(key) or []
+            for port in container.get("ports") or []
+            if "hostPort" in port
+        ]
+        if (
+            kind == "Deployment"
+            and not pod_spec.get("hostNetwork")
+            and pod_spec.get("nodeSelector", {}).get("kubernetes.io/hostname")
+            and len(ports) == len(PRIVATE_ENTRY_PORTS)
+            and {port["hostPort"] for port in ports} == PRIVATE_ENTRY_PORTS
+            and len({port.get("hostIP") for port in ports}) == 1
+            and all(
+                private_ipv4(port.get("hostIP"))
+                and port.get("containerPort") == port["hostPort"]
+                and port.get("protocol", "TCP") == "TCP"
+                for port in ports
+            )
+        ):
+            return out
+        return [
+            BoundaryViolation(
+                kind="host-port",
+                object_kind=kind,
+                object_name=name,
+                detail="Private entry requires a selected node, one RFC1918 hostIP and exact TCP ports.",
+            )
+        ]
     # initContainers are scheduled BEFORE containers and run in the
     # same pod network namespace — a hostPort declared there binds
     # the node interface just like in a regular container, but is

@@ -37,10 +37,12 @@ def nebius_canonical_context(config: ClusterConfig) -> dict[str, Any]:
         return context
     if (
         config.runtime_environment != "staging"
+        or config.namespace != "loom-staging"
+        or not config.topology.multi_node
         or config.artifacts_bucket != "loom-staging-artifacts"
         or config.trajectories_bucket != "loom-staging-trajectories"
     ):
-        raise ValueError("nebius_execution requires the canonical staging environment and buckets")
+        raise ValueError("nebius_execution requires canonical staging, multi-node CNPG and buckets")
     for field in (
         "source_secret_name",
         "runtime_profile_secret_name",

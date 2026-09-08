@@ -5,8 +5,8 @@ import hashlib
 import importlib
 import json
 import subprocess
-from collections.abc import Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -53,9 +53,7 @@ _NATIVE_PUBLIC_KEY_SHA256 = "c" * 64
 _NATIVE_RUNTIME_PROFILE_SHA256 = "d" * 64
 _NATIVE_PUBLIC_STORE_ORIGIN = "https://minio.dev.yylx.world"
 _NATIVE_PUBLIC_STORE_ENDPOINT_CIDRS = ("207.35.188.227/32",)
-_NATIVE_AGENT_IMAGE = (
-    "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
-)
+_NATIVE_AGENT_IMAGE = "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
 
 _CONTEXT = ("config", "current-context")
 _NAMESPACES = ("get", "namespaces", "--output=json")
@@ -158,6 +156,105 @@ _DEPLOYMENTS = (
     "--output=json",
 )
 
+_FixtureRenderer = Callable[..., RenderedPersonalDevControlPlane]
+_FIXTURE_RENDER_CACHE: dict[
+    tuple[
+        str,
+        _FixtureRenderer,
+        bytes,
+        object,
+        bytes,
+        object,
+        bytes | None,
+        object | None,
+        datetime | None,
+    ],
+    RenderedPersonalDevControlPlane,
+] = {}
+_FIXTURE_DOCUMENT_CACHE: dict[tuple[object, str], tuple[dict[str, Any], ...]] = {}
+_FIXTURE_CACHE_MAX_ENTRIES = 32
+
+
+def _remember_bounded(cache: dict[Any, Any], key: Any, value: Any) -> None:
+    if len(cache) >= _FIXTURE_CACHE_MAX_ENTRIES:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _fixture_input_fingerprint(value: Any) -> object:
+    """Retain every typed field, including fields omitted by old canonical schemas."""
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value),
+            tuple(
+                (field.name, _fixture_input_fingerprint(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    if isinstance(value, Mapping):
+        return (
+            type(value),
+            tuple(
+                (
+                    _fixture_input_fingerprint(key),
+                    _fixture_input_fingerprint(item),
+                )
+                for key, item in sorted(value.items(), key=lambda pair: repr(pair[0]))
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        return type(value), tuple(_fixture_input_fingerprint(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return type(value), frozenset(_fixture_input_fingerprint(item) for item in value)
+    hash(value)
+    return type(value), value
+
+
+def _cached_fixture_render(
+    mode: str,
+    renderer: _FixtureRenderer,
+    profile: Any,
+    release: Any,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan | None = None,
+    *,
+    now: datetime | None = None,
+) -> RenderedPersonalDevControlPlane:
+    """Cache only deterministic test setup renders, never the subject observer."""
+
+    key = (
+        mode,
+        renderer,
+        profile.canonical_bytes(),
+        _fixture_input_fingerprint(profile),
+        release.canonical_bytes(),
+        _fixture_input_fingerprint(release),
+        None if plan is None else plan.canonical_bytes(),
+        None if plan is None else _fixture_input_fingerprint(plan),
+        now,
+    )
+    cached = _FIXTURE_RENDER_CACHE.get(key)
+    if cached is None:
+        if plan is None:
+            cached = renderer(profile, release)
+        else:
+            assert now is not None
+            cached = renderer(profile, release, plan, now=now)
+        _remember_bounded(_FIXTURE_RENDER_CACHE, key, copy.deepcopy(cached))
+    return copy.deepcopy(cached)
+
+
+def _fixture_documents(yaml_text: str) -> list[dict[str, Any]]:
+    """Return isolated documents from a cache bound to the current YAML loader."""
+
+    loader = yaml.safe_load_all
+    key = (loader, yaml_text)
+    cached = _FIXTURE_DOCUMENT_CACHE.get(key)
+    if cached is None:
+        cached = tuple(loader(yaml_text))
+        _remember_bounded(_FIXTURE_DOCUMENT_CACHE, key, copy.deepcopy(cached))
+    return copy.deepcopy(list(cached))
+
 
 def _release_value() -> dict[str, object]:
     return {
@@ -212,7 +309,9 @@ def _expected_render(tmp_path: Path) -> RenderedPersonalDevControlPlane:
         release_path,
         hashlib.sha256(payload).hexdigest(),
     )
-    return render_shadow_personal_dev_control_plane(
+    return _cached_fixture_render(
+        "shadow",
+        render_shadow_personal_dev_control_plane,
         load_personal_dev_control_plane_profile(_PROFILE),
         release,
     )
@@ -366,7 +465,7 @@ def _healthy_fixture(
     tmp_path: Path,
 ) -> tuple[RenderedPersonalDevControlPlane, _FakeRunner]:
     expected = _expected_render(tmp_path)
-    documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
+    documents = _fixture_documents(expected.yaml_text)
     namespace = next(item for item in documents if item["kind"] == "Namespace")
     cluster = [item for item in documents if "namespace" not in item["metadata"]]
     cluster.remove(namespace)
@@ -527,7 +626,12 @@ def _acceptance_inputs(
         hashlib.sha256(payload).hexdigest(),
     )
     profile = _prepared_profile()
-    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    shadow = _cached_fixture_render(
+        "shadow",
+        render_shadow_personal_dev_control_plane,
+        profile,
+        release,
+    )
     protocol_sha256 = hashlib.sha256(
         json.dumps(
             dict(profile.protocol_versions),
@@ -587,9 +691,7 @@ def _acceptance_inputs(
             "provider": "gb10-gvisor-docker-v1",
             "public_key_sha256": _NATIVE_PUBLIC_KEY_SHA256,
             "public_store_origin": _NATIVE_PUBLIC_STORE_ORIGIN,
-            "public_store_endpoint_cidrs": list(
-                _NATIVE_PUBLIC_STORE_ENDPOINT_CIDRS
-            ),
+            "public_store_endpoint_cidrs": list(_NATIVE_PUBLIC_STORE_ENDPOINT_CIDRS),
             "runtime_profile_sha256": _NATIVE_RUNTIME_PROFILE_SHA256,
         },
         "principals": {
@@ -624,7 +726,9 @@ def _acceptance_inputs(
         hashlib.sha256(plan_payload).hexdigest(),
     )
     return (
-        render_acceptance_personal_dev_control_plane(
+        _cached_fixture_render(
+            "acceptance",
+            render_acceptance_personal_dev_control_plane,
             profile,
             release,
             plan,
@@ -663,7 +767,9 @@ def _operational_inputs(
     )
     profile = _prepared_profile()
     return (
-        render_operational_personal_dev_control_plane(
+        _cached_fixture_render(
+            "operational",
+            render_operational_personal_dev_control_plane,
             profile,
             release,
             plan,
@@ -677,7 +783,7 @@ def _enabled_healthy_runner(
     expected: RenderedPersonalDevControlPlane,
     plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
 ) -> _FakeRunner:
-    documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
+    documents = _fixture_documents(expected.yaml_text)
     namespace = next(item for item in documents if item["kind"] == "Namespace")
     cluster = [item for item in documents if "namespace" not in item["metadata"]]
     cluster.remove(namespace)
@@ -806,9 +912,10 @@ def _native_builder_status(
             "host_architecture": "aarch64",
             "host_boot_id": str(native.host_boot_id),
             "host_name": native.host_name,
-            "last_seen_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-                "+00:00", "Z"
-            ),
+            "last_seen_at": datetime.now(UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "managed_grant_ids": [],
             "max_concurrency": native.max_concurrency,
             "platform": native.platform,
@@ -876,7 +983,7 @@ def _with_statefulset_ordinals(
     replicas: int,
     start: int,
 ) -> RenderedPersonalDevControlPlane:
-    documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
+    documents = _fixture_documents(expected.yaml_text)
     statefulset = next(
         item for item in documents if _identity(item) == ("StatefulSet", statefulset_name)
     )
@@ -897,7 +1004,7 @@ def _with_extra_statefulset_claim_template(
     statefulset_name: str,
     claim_name: str,
 ) -> RenderedPersonalDevControlPlane:
-    documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
+    documents = _fixture_documents(expected.yaml_text)
     statefulset = next(
         item for item in documents if _identity(item) == ("StatefulSet", statefulset_name)
     )
@@ -949,6 +1056,109 @@ def _observe_operational(
         plan=plan,
         namespace="loom-dev",
     )
+
+
+def test_fixture_caches_are_input_bound_bounded_and_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FIXTURE_RENDER_CACHE.clear()
+    _FIXTURE_DOCUMENT_CACHE.clear()
+    actual_renderer = render_shadow_personal_dev_control_plane
+    render_calls = 0
+
+    first = _expected_render(tmp_path)
+
+    def counted_renderer(*args: Any, **kwargs: Any) -> RenderedPersonalDevControlPlane:
+        nonlocal render_calls
+        render_calls += 1
+        return actual_renderer(*args, **kwargs)
+
+    monkeypatch.setitem(globals(), "render_shadow_personal_dev_control_plane", counted_renderer)
+    second = _expected_render(tmp_path)
+    assert first == second
+    assert first is not second
+    assert render_calls == 1
+
+    changed_release = _release_value()
+    changed_release["source_sha"] = "9" * 40
+    monkeypatch.setitem(globals(), "_release_value", lambda: changed_release)
+    changed = _expected_render(tmp_path)
+    assert changed != first
+    assert render_calls == 2
+
+    first_documents = _fixture_documents(first.yaml_text)
+    first_documents[0]["metadata"]["name"] = "mutated-in-one-consumer"
+    second_documents = _fixture_documents(first.yaml_text)
+    assert second_documents[0]["metadata"]["name"] != "mutated-in-one-consumer"
+
+    for index in range(_FIXTURE_CACHE_MAX_ENTRIES + 1):
+        _fixture_documents(f"kind: ConfigMap\nmetadata:\n  name: fixture-{index}\n")
+    assert len(_FIXTURE_DOCUMENT_CACHE) == _FIXTURE_CACHE_MAX_ENTRIES
+
+
+def test_fixture_render_cache_distinguishes_fields_omitted_by_old_schema(
+    tmp_path: Path,
+) -> None:
+    _FIXTURE_RENDER_CACHE.clear()
+    first_profile = replace(_prepared_profile(), schema_version=2)
+    assert first_profile.native_builder is not None
+    second_profile = replace(
+        first_profile,
+        native_builder=replace(first_profile.native_builder, prepared=False),
+    )
+    assert first_profile != second_profile
+    assert first_profile.canonical_bytes() == second_profile.canonical_bytes()
+    payload = json.dumps(
+        _release_value(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    release_path = tmp_path / "trusted-release.json"
+    release_path.write_bytes(payload)
+    release_path.chmod(0o600)
+    release = load_personal_dev_trusted_release(
+        release_path,
+        hashlib.sha256(payload).hexdigest(),
+    )
+
+    first = _cached_fixture_render(
+        "shadow",
+        render_shadow_personal_dev_control_plane,
+        first_profile,
+        release,
+    )
+    second = _cached_fixture_render(
+        "shadow",
+        render_shadow_personal_dev_control_plane,
+        second_profile,
+        release,
+    )
+
+    assert first != second
+
+
+def test_fixture_cache_never_caches_production_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actual_observer = observe_personal_dev_shadow_status
+    observer_calls = 0
+
+    def counted_observer(*args: Any, **kwargs: Any):
+        nonlocal observer_calls
+        observer_calls += 1
+        return actual_observer(*args, **kwargs)
+
+    monkeypatch.setitem(globals(), "observe_personal_dev_shadow_status", counted_observer)
+    expected, runner = _healthy_fixture(tmp_path)
+
+    first = _observe(expected, runner)
+    second = _observe(expected, runner)
+
+    assert first == second
+    assert observer_calls == 2
 
 
 def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
@@ -1048,8 +1258,8 @@ def test_acceptance_status_rejects_stale_or_future_native_agent(
 ) -> None:
     expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
     observed = datetime.now(UTC) + timedelta(seconds=offset_seconds)
-    _native_agent(runner)["last_seen_at"] = observed.replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
+    _native_agent(runner)["last_seen_at"] = (
+        observed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )
 
     result = _observe_acceptance(expected, plan, runner)
@@ -1061,16 +1271,32 @@ def test_acceptance_status_rejects_stale_or_future_native_agent(
 @pytest.mark.parametrize(
     ("field", "value", "blocker"),
     [
-        ("agent_instance_id", "10000000-0000-0000-0000-000000000002", "native_builder_identity_mismatch"),
+        (
+            "agent_instance_id",
+            "10000000-0000-0000-0000-000000000002",
+            "native_builder_identity_mismatch",
+        ),
         ("agent_key_id", "gb10-native-builder-v2", "native_builder_identity_mismatch"),
         ("host_name", "gx10-ffff", "native_builder_identity_mismatch"),
         ("host_architecture", "x86_64", "native_builder_identity_mismatch"),
-        ("host_boot_id", "20000000-0000-0000-0000-000000000002", "native_builder_identity_mismatch"),
+        (
+            "host_boot_id",
+            "20000000-0000-0000-0000-000000000002",
+            "native_builder_identity_mismatch",
+        ),
         ("provider", "wrong-provider", "native_builder_identity_mismatch"),
         ("platform", "linux/amd64", "native_builder_identity_mismatch"),
         ("protocol_version", 2, "native_builder_identity_mismatch"),
-        ("agent_image", "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "f" * 64, "native_builder_inventory_drift"),
-        ("builder_image", "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "f" * 64, "native_builder_inventory_drift"),
+        (
+            "agent_image",
+            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "f" * 64,
+            "native_builder_inventory_drift",
+        ),
+        (
+            "builder_image",
+            "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "f" * 64,
+            "native_builder_inventory_drift",
+        ),
         ("runtime_profile_sha256", "f" * 64, "native_builder_inventory_drift"),
         ("max_concurrency", 1, "native_builder_inventory_drift"),
         ("readiness_evidence_sha256", "0" * 64, "native_builder_inventory_drift"),
@@ -1093,9 +1319,7 @@ def test_acceptance_status_rejects_native_identity_or_inventory_drift(
 
 def test_acceptance_status_rejects_unknown_inactive_managed_grant(tmp_path: Path) -> None:
     expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
-    _native_agent(runner)["managed_grant_ids"] = [
-        "30000000-0000-0000-0000-000000000001"
-    ]
+    _native_agent(runner)["managed_grant_ids"] = ["30000000-0000-0000-0000-000000000001"]
 
     result = _observe_acceptance(expected, plan, runner)
 

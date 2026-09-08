@@ -177,6 +177,49 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get nodes -o wide
 kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 ```
 
+### Authorized gateway bootstrap repair
+
+The deployment gateway's cloud-init grants the configured SSH-key operator
+`codex` passwordless sudo and installs `sudo`/`wireguard-tools`. Password SSH
+and direct root SSH remain disabled. This is the dedicated infrastructure
+gateway, not an execution Pod: the operator needs a legitimate guest-admin path
+to install and recover its authorized private connection. Package installation
+does not configure a peer, start WireGuard, alter routes or expose database ports.
+
+Older gateways created with `sudo: false` cannot acquire guest administration
+merely by changing a Terraform file. Replacing one requires explicit owner
+authorization for that exact gateway and a deployment-access interruption:
+
+1. Save the remote state, exact instance/boot-disk identity, dedicated known-hosts
+   entry, tool versions/hashes and necessary operator-owned configuration in a
+   mode-0700 evidence directory. Recovery archives can contain credentials;
+   keep them mode 0600, outside Git, and never print their contents.
+2. Run a **full** saved plan with
+   `-replace=module.execution_target.nebius_compute_v1_instance.deployment_access`.
+   Require this to be the only non-no-op resource change. Do not use `-target`
+   to hide unrelated changes. The nested managed boot disk belongs to this VM;
+   compare its provider ID separately. Cluster, node groups, data disks,
+   storage, registry, IAM and the fixed public allocation must not change.
+3. Confirm the before/after allocation ID, instance service account, shape,
+   source image, boot-disk specification and absence of secondary disks agree.
+   Apply only that reviewed saved plan. Do not enable create-before-destroy
+   against an allocation already held by the old gateway.
+4. Read the new instance identity and fixed public allocation from the
+   authenticated provider API. Verify the new SSH host-key fingerprint against
+   that exact instance's authenticated provider serial logs before replacing
+   only the dedicated known-hosts entry. A keyscan alone is not this verification.
+5. Verify cloud-init, `sudo -n true`, `wg --version`, required CLI tools and
+   instance-identity access to the private Kubernetes API. Restore only required
+   operator configuration, never a stale kubeconfig as a substitute for renewed
+   service-identity credentials. Private IPs may change; re-read them before
+   preparing the private-link binding. Finish with a full no-change plan.
+
+This repair does not deploy the staging attachment, migrate historical data,
+change execution capacity or bypass the protected staging backup/rollout lane.
+The former gateway and its managed boot disk are replaced, so retain the scoped
+recovery archive until post-rebuild acceptance is complete. Private-link
+activation and its service-level checks remain the next step.
+
 ## Live smoke order
 
 Run live acceptance in this order; stop and clean up at the first failed gate.
@@ -394,6 +437,221 @@ secret store; this attachment does not introduce a copied user/provider login.
 
 ### Canonical staging side: opt-in protected render
 
+#### Persistent host transport prerequisite
+
+`scripts/ops/nebius_private_link.py` owns only `wg-loom-nb` on the existing
+deployment-access gateway and the existing staging host. It does not deploy the
+attachment, expose PostgreSQL, route cluster CIDRs, or change default routes.
+Install the reviewed script through the authorized root installation path;
+never use a developer-owned startup unit to bypass protected staging rollout.
+
+On each host, run `sudo python3 nebius_private_link.py prepare`. This creates
+or reuses a root-only local WireGuard identity and emits **only its public key**.
+Exchange these public keys; never copy the private keys between hosts. Select
+two non-overlapping RFC1918 `/32` transport addresses after checking both hosts'
+routes, both clusters' address pools, and the dedicated UDP listener port.
+
+On the public Nebius gateway, configure the peer without an endpoint:
+
+```bash
+sudo python3 nebius_private_link.py configure \
+  --address "$GATEWAY_TRANSPORT_ADDRESS" \
+  --peer-address "$STAGING_TRANSPORT_ADDRESS" \
+  --peer-public-key "$STAGING_WIREGUARD_PUBLIC_KEY"
+```
+
+On staging, use the gateway's Terraform-owned fixed public allocation:
+
+```bash
+sudo python3 nebius_private_link.py configure \
+  --address "$STAGING_TRANSPORT_ADDRESS" \
+  --peer-address "$GATEWAY_TRANSPORT_ADDRESS" \
+  --peer-public-key "$GATEWAY_WIREGUARD_PUBLIC_KEY" \
+  --endpoint "$GATEWAY_FIXED_PUBLIC_IPV4:51871"
+```
+
+The standard `wg-quick@wg-loom-nb` system service is enabled at boot. Only the
+peer `/32` is allowed; staging sends a 25-second keepalive to preserve its NAT
+mapping. No short-lived browser session or copied user kubeconfig is involved.
+These are WireGuard's standard [keepalive](https://www.wireguard.com/quickstart/)
+and [systemd service](https://git.zx2c4.com/wireguard-tools/tree/src/systemd/wg-quick%40.service)
+mechanisms, not a new tunnel supervisor. Reapplying identical configuration
+does not restart the interface or rotate its identity. Failed changed-config
+activation restores the prior managed configuration and unit enable/active state.
+An unmanaged configuration or active interface is never adopted. A per-interface
+lock serializes key preparation and reconciliation.
+
+Before acceptance, verify a fresh handshake, a peer-only route, bidirectional
+reachability, and recovery after restarting **only this dedicated unit** on each
+host. Do not reboot a shared staging host for this test. Keep private keys and
+configuration in root-only recovery storage; a gateway replacement requires
+restoring its identity or reconciling its new public key on the peer. To disable
+only this transport, use `sudo systemctl disable --now wg-quick@wg-loom-nb`;
+retain the configuration/key for recovery and do not flush firewall tables.
+
+Host transport is not application connectivity. Before attachment activation,
+separately install narrowly bound service proxies/routes and validate the actual
+DB, canonical store, Control Plane and model endpoints from the Nebius Pod
+network. Their TLS identity, renewal and network-policy source addresses must
+match the real path. Do not expose a service on a public wildcard listener,
+disable certificate verification, assume PgBouncer speaks TLS, or claim that
+a WireGuard handshake proves canonical persistence. The Pod-facing Loom Gateway
+must remain in Nebius to preserve direct peer-IP/lease verification.
+
+#### Private service entry (opt-in, separate from execution activation)
+
+The canonical cluster renderer also supports a single private entry Pod on the
+existing staging WireGuard peer node. It uses the same hostPort mechanism as the
+existing worker/MinIO routers, but **every hostPort has an explicit WireGuard
+hostIP**. It creates no Ingress, NodePort, LoadBalancer or new database. The
+checked-in profile remains disabled; the table below is an operator example,
+not an approved live binding:
+
+```toml
+[nebius_private_entry]
+enabled = true
+node_name = "staging-control-1"
+wireguard_address = "10.253.71.2"
+peer_address = "10.253.71.1"
+proxy_image = "nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236"
+```
+
+Select the real existing peer node and non-conflicting transport addresses in
+the authorized candidate configuration. Both addresses must be distinct
+RFC1918 IPv4 hosts; public, wildcard and reserved documentation ranges fail
+render. This table is restricted to multi-node `loom-staging`, and may be
+enabled **before** `nebius_execution` so connectivity can be validated before
+provisioning execution credentials or enabling scheduling.
+
+| WireGuard-bound TCP port | Destination | Transport |
+| --- | --- | --- |
+| 15432 | `loom-postgres-rw:5432` | Native PostgreSQL SSLRequest/TLS passthrough |
+| 18443 | `loom-control-plane:8080` | TLS termination, unchanged HTTP bytes |
+| 19443 | `loom-minio:9000` | TLS termination, unchanged S3 Host/URI/body/signature |
+
+HTTPS clients must use a name covered by the existing
+`ingress_tls_secret_name` certificate (the canonical profile's
+`ingress_host`), with separately persisted private resolution to the Nebius
+gateway service entry. Do not use an IP URL with a DNS certificate, publish a
+private-service public DNS route, rewrite MinIO under a URL prefix, or add
+these backends to the existing public ingress.
+
+The Pod mounts the **existing cert-manager Secret directory**, without
+`subPath` or a one-time host copy. Every ten seconds the main process checks
+the projected certificate/key pair, validates nginx configuration, then reloads
+nginx on changes. Invalid pairs leave the previous active certificate serving
+and are retried; a failed reload validation emits a secret-free warning.
+Kubelet projection adds its own delay before this interval starts. Certificate
+renewal still belongs to the existing cert-manager Certificate/issuer, not to
+this proxy. nginx upstream DNS refresh uses its
+[dynamic upstream resolution](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html#server);
+the image must provide nginx >=1.27.3 with stream and stream SSL support.
+
+The entry follows the `loom-postgres-rw` Service, not a primary Pod IP or
+PgBouncer's non-TLS listener. Native TLS passthrough does not replace database
+certificate trust: approve the application's SSL mode and provide a persistent
+CA/trust path when certificate verification requires one. Verify the endpoint,
+role and `SELECT current_database()` before binding credentials; the accepted
+live staging database is `loom`, not a newly provisioned database.
+
+Configuration/script changes stamp a Pod-template revision and recreate this
+one replica (brief planned entry interruption, no surge hostPort collision).
+Kubernetes supervises the Pod; nginx exit ends its main process. New policies
+allow only the WireGuard peer /32 to these ports and the proxy to canonical CP,
+MinIO, CNPG and cluster DNS, with matching destination ingress allowances.
+Verify actual CNI source handling after deployment; do not broaden the policy
+because a host-only probe fails.
+
+Pre-merge reproducible transport verification:
+
+Requires Docker and locally cached copies of the pinned nginx image above and
+`python:3.12-slim`. The script never pulls images or publishes host ports. Its
+temporary Linux volume reproduces kubelet's atomic Secret-directory projection;
+Docker Desktop host-bind symlink behavior is not used as a renewal test.
+
+```bash
+PYTHONPATH=src:.:packages/loom-bundle-checksum \
+  python scripts/ops/smoke_nebius_private_entry.py
+```
+
+This uses disposable local Docker fixtures, not staging data or credentials.
+It is not Nebius Pod/CNI, database role, S3 authorization or full task acceptance.
+Protected activation must separately establish the host tunnel, stable
+Nebius-side private entry address/forwarding, private DNS and client trust,
+then test the three endpoints from the real Nebius Pod network. It must also
+verify recovery after restarting only the dedicated proxy/WireGuard services,
+and confirm that the public ingress and unrelated workloads are unchanged.
+Do not resume another initiator's staging rollout to install this table.
+
+Rollback through the supported candidate rollout by disabling this table and
+removing **only** `Deployment/loom-nebius-private-entry`, its same-name
+ConfigMap/NetworkPolicy and the three `loom-private-entry-to-*` policies.
+Preserve the shared TLS Secret, canonical databases/buckets, other routers and
+WireGuard identity. Verify resource removal rather than assuming an omitted
+rendered document is automatically pruned.
+
+#### Nebius gateway: reserved service address and persistent TCP forwarding
+
+The Terraform gateway output now separately exposes
+`private_service_allocation` and `private_service_cidr`. Use that reserved
+`/32`, **not** the existing dynamic `private_address`, for Pod-facing service
+routes and policy allowlists. The new allocation attaches using the
+[mutable secondary alias](https://docs.nebius.com/compute/virtual-machines/network#how-to-assign-a-secondary-private-ip-address-to-a-vm);
+it does not change the replacement-only primary IP or the fixed public
+WireGuard/SSH allocation.
+
+Before applying an authorized saved plan, require exactly one new private
+allocation plus an in-place gateway update; reject unexpected replacements,
+disk changes or unrelated resources. Fresh-stack ordering lets Kubernetes
+reserve its Service CIDR first, and an allocation postcondition rejects addresses
+outside the node network. A failed postcondition can leave a newly reserved
+allocation in state; investigate and recover only that resource. After apply,
+read back allocation/instance/subnet identity and the actual `/32` before
+configuring a guest listener. A validated input IP is not ownership proof.
+
+`scripts/ops/nebius_gateway_proxy.py` installs seven dedicated units through
+the authorized root path: one address unit and three socket/service pairs.
+It configures the reserved address on loopback with the `lo:loom-nb` label,
+without editing DHCP, netplan or default routes. Native
+[systemd-socket-proxyd](https://www.freedesktop.org/software/systemd/man/latest/systemd-socket-proxyd.html)
+forwards TCP bytes from only that private IP's `15432/18443/19443` to the
+same ports on the sole staging WireGuard peer. No extra proxy daemon dependency,
+public listener, NAT/firewall rule or full-cluster route is introduced.
+
+```bash
+sudo python3 nebius_gateway_proxy.py install \
+  --listen-address "$GATEWAY_RESERVED_PRIVATE_IPV4" \
+  --peer-address "$STAGING_WIREGUARD_IPV4"
+```
+
+The existing `wg-loom-nb` peer and peer-only route must already be configured.
+Installation rejects addresses assigned outside its managed loopback label,
+unmanaged units/drop-ins and unsafe files. A local lock covers preflight and
+reconciliation. The same configuration does not restart listeners; failed
+updates restore the prior managed files and active/enabled state. Installer
+success reports ports/status, not addresses or credentials. The offline
+`render` action emits unit contents for private review; do not publish its
+actual address-bearing output in logs or issue comments.
+
+Sockets are pulled at boot and by the WireGuard service, with restart/stop
+propagation. Explicit socket dependency ordering avoids a cycle with the
+default early `sockets.target`. Validate actual PID 1 behavior after protected
+installation: restart only `wg-quick@wg-loom-nb.service`, then confirm the
+address unit, three sockets, new connections and canonical endpoints recover.
+Unit parsing and a local socket-activation fixture are not that live proof.
+Reinstall from the approved persisted binding when replacing the gateway;
+retain the allocation and restore/reconcile the WireGuard identity separately.
+
+To disable only these forwards, disable/stop
+`loom-nebius-forward-15432.socket`, `loom-nebius-forward-18443.socket` and
+`loom-nebius-forward-19443.socket`, then stop
+`loom-nebius-private-address.service`. Paired forwarder services stop with their
+sockets. Keep unit files and the reserved allocation for recovery. Do not remove
+the primary address, stop the gateway VM, flush firewall rules or affect other
+resources as part of this rollback.
+
+#### Canonical render configuration
+
 The canonical render profile is
 `deploy/environments/staging.multinode.cluster.toml`, selected by
 `deploy/environments/staging.toml`. Its checked-in default remains disabled.
@@ -451,7 +709,7 @@ in `loom-nebius-staging`, not claims that those objects already exist.
   "environment": "staging",
   "target_id": "nebius-eu-north1-staging",
   "namespace": "loom-nebius-staging",
-  "canonical_database": "loom_staging",
+  "canonical_database": "loom",
   "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "local_providers_secret_name": "staging-local-providers",
   "gateway_image": "registry.example/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -507,6 +765,34 @@ bindings, unpinned Gateway images, incomplete Secret references and unscoped rou
 before output is written. JSON Secret references are shape-checked only; actual
 Secret existence/content and network DNS resolution remain deployment checks.
 
+For the reserved gateway entry above, the v1 attachment accepts an optional
+non-secret declaration:
+
+```json
+"private_entry": {
+  "hostname": "staging.example",
+  "address": "10.20.30.40"
+}
+```
+
+Replace both example values with the approved TLS hostname and Terraform
+`private_service_cidr` address (without `/32`). Set the canonical store origin
+to `https://staging.example:19443` and collector origin to
+`https://staging.example:18443`. The hostname must match both origins and the
+actual existing certificate. The independent spool must use a different
+hostname: a Pod hosts entry applies to all ports of a name.
+
+The renderer persists Kubernetes-native `hostAliases` on all three consumers:
+Gateway, actuator and collector. No hand-edited Pod hosts file, global cluster
+DNS override or changed TLS URL is required; recreated Pods inherit the mapping.
+It requires address-and-port policy permits for database `15432`, canonical
+store `19443` and Control Plane `18443`. Keep both DB URLs in Secret references,
+and verify separately that their DSNs use this same hostname on `15432` with
+the approved database/TLS settings; the renderer never reads or rewrites them.
+Omitting `private_entry` preserves the previous rendered files byte-for-byte.
+This mapping is desired configuration, not proof that the reserved alias,
+forwarders, certificate trust or credentials have been installed.
+
 Use the same `configuration_revision` on both sides of the attachment. The
 Nebius renderer stamps it on Gateway/actuator Pod templates and collector Job
 and Pod templates. Rotating values under an unchanged Secret name requires a
@@ -529,17 +815,36 @@ advance the shared deployment revision. Gateway rollout preserves the existing
 
 ### Activation and acceptance boundary
 
+The staging-specific [persistent credential workflow](nebius-staging-credentials.md)
+implements seed-before-registration, CNPG-managed service roles, dedicated
+source/input storage identities, renewable Kubernetes authentication and
+recurring PostgreSQL CA/credential synchronization. Use that workflow instead
+of the development apply helper. Its native `database_tls` binding is distinct
+from the HTTPS private-entry certificate; activation remains separately gated.
+
 Before any activation, read the current protected broker status and coordinate
-its request owner. Resolve the mandatory-backup failure tracked by #1807 through
-its owning lane; do not skip backup, resume another initiator's request, or
+its request owner. Resolve the current reported failure through its owning lane
+(including backup or final-attestation failures); do not assume the historical
+#1807 backup failure is still the current blocker. Do not skip backup, resume another initiator's request, or
 substitute the development gateway helper for protected staging deployment.
 This render work does not transfer rollout ownership or authorize production.
 
+The existing shared staging database is named `loom`; `loom_staging` remains an
+accepted declaration for installations already using that name. Set
+`canonical_database` to the actual approved database name, not an environment
+label. The renderer records this declaration in its manifest without reading
+Secrets, rewriting a DSN, provisioning a database or migrating data. A database
+named `loom` also exists in development, so the name alone is not authority proof.
+
 Deployment preflight still must verify:
 
-- Actual referenced actuator/Gateway DSNs reach the existing `loom_staging`
-  database with the intended roles, TLS and schema/candidate; the JSON database
-  label is not proof of endpoint identity. Keep secrets out of evidence.
+- Actual referenced actuator/Gateway DSNs reach the approved existing live
+  staging PostgreSQL endpoint with the intended roles, TLS and schema/candidate.
+  A read-only `SELECT current_database()` must match `canonical_database`
+  (`loom` for the existing shared staging), but also verify the endpoint's
+  environment identity: a matching name alone cannot distinguish development.
+  Never create another database or substitute a label to pass the render check.
+  Keep secrets out of evidence.
 - Persistent, scoped routes for Nebius actuator/Gateway to staging DB, Gateway
   to canonical input storage and model providers, staging Control Plane to the
   source spool, and collector to its authenticated Control Plane endpoint.
@@ -554,7 +859,9 @@ Deployment preflight still must verify:
   and restart/reconciliation procedures before calling access persistent.
 - Gateway master/step-signing keys match the staging identities, local model
   routes are configured, and the collector token is issued by staging with
-  target-bound `execution:capacity:observe` scope. Development credentials are
+  worker-only `execution:capacity:observe` scope. The current token is single-scope,
+  not token-level target-bound; the collector configuration selects the target.
+  Development credentials are
   not substitutes; compare identities without exposing secret values.
 - Runtime profile/admission keys and both clusters' image digests match the
   reviewed release, the staging target has a quota-backed capacity policy, and

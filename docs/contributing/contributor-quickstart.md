@@ -277,7 +277,11 @@ non-documentation changes. The ownership authority at
 Python, Go, or web test path. Schema v2 also declares the allowed CI lanes,
 versioned runtime-payload execution policies, immutable container digests,
 per-payload minimal fixture cases, and component smoke, scan, and attestation
-owners. Validate the whole inventory, inspect the exact isolated
+owners. Every ownership CLI invocation validates the current manifest, tracked
+inventory, and Python test syntax. Docker-marker detection skips AST traversal
+only after parsing a marker-free ASCII source; Unicode and possible-marker
+sources retain exact AST inspection. No prior validation verdict is cached.
+Validate the whole inventory, inspect the exact isolated
 payload plan, or query one path with:
 
 ```bash

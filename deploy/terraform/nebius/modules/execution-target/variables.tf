@@ -295,3 +295,20 @@ variable "labels" {
   type        = map(string)
   default     = {}
 }
+
+variable "staging_spool" {
+  description = "Opt-in dedicated staging runtime spool; null preserves existing resources and credentials."
+  type = object({
+    bucket_name = string
+  })
+  default = null
+
+  validation {
+    condition = var.staging_spool == null ? true : (
+      can(regex("^loom-[a-z0-9-]+-staging-spool$", var.staging_spool.bucket_name)) &&
+      length(var.staging_spool.bucket_name) <= 63 &&
+      var.staging_spool.bucket_name != var.evidence_bucket_name
+    )
+    error_message = "staging_spool must name a new dedicated loom-*-staging-spool bucket (at most 63 characters), never the evidence or state bucket."
+  }
+}
