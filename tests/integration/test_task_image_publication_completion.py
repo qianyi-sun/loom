@@ -568,6 +568,14 @@ async def test_two_completing_workers_and_nonlocking_historical_receipt(
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    async with registry_authority_session() as retirement:
+        await retirement.execute(
+            update(TaskImagePublicationKey).values(
+                status="revoked", revoked_at=NOW + timedelta(seconds=16)
+            )
+        )
+        await retirement.execute(update(TaskImagePublicationState).values(keyset_version=2))
+        await retirement.commit()
     async with registry_authority_session() as blocker, registry_authority_session() as history:
         await blocker.scalar(select(TaskImagePublicationState).with_for_update())
         await blocker.scalar(select(TaskImagePublicationKey).with_for_update())

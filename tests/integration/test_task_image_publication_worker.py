@@ -587,3 +587,38 @@ async def test_blocked_renewal_closes_stream_at_lease_expiry_not_database_timeou
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_deadline_crossed_while_retry_cleanup_waits_is_terminal(
+    registry_authority_session, tls_registry, token_key
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    entered, proceed = asyncio.Event(), asyncio.Event()
+
+    class FailingDistribution:
+        async def snapshot(self, *, state, key):
+            entered.set()
+            await proceed.wait()
+            raise ConnectionError("distribution unavailable")
+
+    now = NOW + timedelta(seconds=14)
+    values = (*values[:3], FailingDistribution(), lambda: now)
+    worker = _worker(registry_authority_session, tls_registry, values)
+    task = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        async with registry_authority_session() as blocker:
+            await blocker.scalar(select(TaskImagePublicationJob).with_for_update())
+            pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            proceed.set()
+            await _wait_blocked_pids(blocker, pid)
+            now = values[0].deadline
+            await blocker.rollback()
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(task, 5)
+        async with registry_authority_session() as session:
+            row = (await session.scalars(select(TaskImagePublicationJob))).one()
+            assert row.state == "failed" and row.failure_code == "deadline"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
