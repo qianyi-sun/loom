@@ -486,7 +486,11 @@ async def _enriched_response(request: Request, record: DevInstanceRecord) -> Dev
 def _personal_environment_response(
     record: PersonalDevEnvironmentRecord,
 ) -> PersonalDevEnvironmentResponse:
-    capacity_prepared = record.capacity_configuration_epoch is not None
+    capacity_prepared = (
+        record.accepted_capacity_membership_checkpoint is not None
+        if record.accepted_capacity_mode == "membership-v1"
+        else record.capacity_configuration_epoch is not None
+    )
     return PersonalDevEnvironmentResponse(
         name=record.name,
         subject_id=record.subject_id,

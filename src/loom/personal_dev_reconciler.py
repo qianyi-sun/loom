@@ -21,6 +21,8 @@ from loom.personal_dev_capacity import (
     personal_dev_capacity_retirement_projection,
 )
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_membership_admission import PersonalDevMembershipAdmissionError
+from loom.personal_dev_membership_reconciler import PersonalDevMembershipReconciler
 from loom_capacity_manager.contracts import canonical_digest
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
@@ -244,6 +246,7 @@ class PersonalDevEnvironmentReconciler:
     ]
     reconciler_id: str
     lease_seconds: int
+    membership_reconciler: PersonalDevMembershipReconciler | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -279,6 +282,25 @@ class PersonalDevEnvironmentReconciler:
             "reconciler_id": self.reconciler_id,
             "lease_epoch": attempt.lease_epoch,
         }
+        if (
+            claim.operation.capacity_mode == "membership-v1"
+            and claim.operation.checkpoint != "candidate_build"
+        ):
+            if self.membership_reconciler is None:
+                raise RuntimeError("membership reconciliation is not configured")
+
+            async def run_membership(work: Awaitable[_T]) -> _T:
+                return await self._with_heartbeats(
+                    work, lease=lease, started=started, initial_now=now
+                )
+
+            await self.membership_reconciler.reconcile(
+                claim,
+                lease=lease,
+                now=lambda: now + timedelta(seconds=loop.time() - started),
+                run=run_membership,
+            )
+            return True
         if claim.operation.kind == "destroy":
             await self._reconcile_destroy(
                 claim,
@@ -396,17 +418,34 @@ class PersonalDevEnvironmentReconciler:
             return True
         if claim.candidate.status != "ready":
             raise RuntimeError("personal-dev reconciler claimed a nonterminal candidate build")
+
+        async def assert_preparation_admission() -> None:
+            if claim.operation.capacity_mode != "membership-v1":
+                return
+            if self.membership_reconciler is None:
+                raise PersonalDevMembershipAdmissionError("membership reconciliation is not configured")
+            await self._with_heartbeats(
+                self.membership_reconciler.assert_admission_ready(
+                    now=now + timedelta(seconds=loop.time() - started)
+                ),
+                lease=lease, started=started, initial_now=now,
+            )
+
+        await assert_preparation_admission()
         preparation: asyncio.Task[PersonalDevReadinessObservation] | None = None
         try:
             personal_dev_candidate_images(claim)
 
             async def prepare_and_bootstrap() -> PersonalDevReadinessObservation:
                 access = await self.access_loader(claim)
+                await assert_preparation_admission()
                 observation = await self.executor.prepare(claim, access=access)
                 # Preparation can take minutes. Reload the exact attempt-bound
                 # credential immediately before copying it into the isolated
                 # database so revocation or expiry during deployment fails shut.
+                await assert_preparation_admission()
                 current_access = await self.access_loader(claim)
+                await assert_preparation_admission()
                 await self.executor.bootstrap_access(claim, access=current_access)
                 return observation
 
@@ -433,7 +472,7 @@ class PersonalDevEnvironmentReconciler:
                     lease_seconds=self.lease_seconds,
                 )
             readiness_evidence_sha256 = personal_dev_readiness_sha256(claim, observation)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, PersonalDevMembershipAdmissionError):
             if preparation is not None and not preparation.done():
                 preparation.cancel()
                 await asyncio.gather(preparation, return_exceptions=True)
@@ -451,6 +490,7 @@ class PersonalDevEnvironmentReconciler:
                 ),
             )
             return True
+        await assert_preparation_admission()
         callback_now = now + timedelta(seconds=loop.time() - started)
         await self.authority.begin_activation(
             **lease,

@@ -168,8 +168,66 @@ it cannot return a new proposal. Demand authentication remains current-only.
 
 Migrated PostgreSQL and HTTP tests exercise this manager boundary. They do not
 establish a live rollout, personal lifecycle convergence or build-provider readiness.
-The lifecycle client still needs its separate durable membership checkpoint and
-authenticated installer connection described in the dependent implementation plan.
+The dependent lifecycle candidate implements the connection below. Runtime
+enablement and live acceptance remain separate unfinished deliverables.
+
+## Lifecycle candidate: durable replay and release-gated cleanup
+
+Each local operation persists an explicit `shadow-v1` or `membership-v1` mode.
+Membership uses a complete canonical request, original trusted installation
+observation, idempotency key and independent manager checkpoint. A local lease
+takeover preserves those bytes; it does not reinstall, rotate credentials or
+re-attest the request. Only the typed same-authority revision conflict permits
+a persisted checkpoint refresh. The environment's accepted mode changes only
+with an exact current acknowledgement, never merely because a request was sent.
+
+The trusted installer validates its operator-pinned execution before mutation,
+reads installed protected database/agent identity, verifies credential separation
+and authenticates the installed agent login. An actually empty legacy protected
+inventory may attest high-water zero; existing legacy work requires its own
+authenticated transition. A caller-supplied digest is not this observation.
+
+`POST /v1/personal-memberships/operation-outcomes/query` resolves the original
+actor, key and full request through a separately authorized, current unbound
+`capacity:read` observer. An active/draining epoch's missing event is unresolved;
+only authenticated irreversible retirement and exact non-conflicting history
+can prove terminal non-commit. A recovered commit under unchanged authority
+stays pending for exact replay. Recording it as historical resolution requires
+an authenticated current-state observation proving an authority transition.
+Historical resolution preserves the original evidence and does not mark a new
+authority ready. Successor re-attestation remains a distinct transition.
+
+`POST /v1/personal-memberships/subjects/status/query` and
+`POST /v1/personal-memberships/subjects/release/query` bind an exact immutable
+receipt and report current authority plus historical incarnation work. Historical
+status explicitly reports `worker_available=false`. Release covers all retained
+deployments and epochs: released lifetime history is streamed with bounded memory,
+not truncated at a per-report claim limit. Unknown/unreleased executable intents,
+legacy reservations and observed commitments continue to block cleanup.
+
+Destroy persists its disabled receipt at `cleanup_pending`, observes authenticated
+release, persists `release_verified`, and only then seals local authority and
+deletes resources one lease-fenced checkpoint at a time. The database transition
+and runtime sealing/deletion entrypoints both require the exact persisted release.
+`keep_data` skips database and bucket deletion; recreation still requires fresh
+incarnation-specific storage and allowlisted application-data transfer, not reuse
+of the predecessor's protected authority. This retained-data successor path must
+be completed before enabling recreation.
+
+The separate active acceptance binding pins the entire V3 preparation, exact
+execution authority and a finite reviewed window; it cannot reinterpret old
+zero-capacity acceptance or operational certificates. The service loop accepts
+explicit membership ports and uses the same lease-fenced session authority for
+the membership driver and resource cleanup. Candidate preparation, credential
+bootstrap, pending admission and local readiness recheck the admission interlock
+across slow I/O. Expiry preserves retry evidence rather than claiming readiness
+or turning an authorization outage into a failed candidate. Historical lookup and
+destroy release remain independent of new-admission availability. Stored accepted
+membership reports capacity preparation only, never observed worker availability.
+
+Configuration/startup/client-ownership wiring and active operational promotion
+evidence remain incomplete. The new loop connection does not enable this runtime
+or certify live acceptance by itself.
 
 ## Build service and runtime connection
 

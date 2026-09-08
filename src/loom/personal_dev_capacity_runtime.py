@@ -14,6 +14,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -44,6 +45,15 @@ from loom.personal_dev_capacity_identity import (
     capacity_role_names as _role_names,
 )
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_membership_checkpoint import (
+    PersonalDevMembershipEnvelopeV1,
+    PersonalDevMembershipObservationV1,
+)
+from loom.personal_dev_membership_runtime import (
+    PersonalDevMembershipObserver,
+    observe_database,
+    validate_membership_observation_context,
+)
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
@@ -59,7 +69,11 @@ from loom_capacity_agent.store import CapacityAgentStore, CapacityAgentStoreErro
 from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes, canonical_digest
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
 from loom_capacity_guard.store import CapacityGuardStore, GuardNotInitializedError
-from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+from loom_capacity_manager.executable_contracts import (
+    ExecutionAuthorityV2,
+    canonical_executable_bytes,
+)
+from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
 
 _EXECUTABLE_ADMISSION_FUNCTIONS = (
     "prepare_executable_worker(uuid,uuid,jsonb,bytea,text,text)",
@@ -1411,6 +1425,23 @@ class PsycopgPersonalDevCapacityDatabase:
             configuration=configuration,
         )
 
+    async def observe_membership(
+        self,
+        *,
+        identity: DevInstanceIdentity,
+        configuration: ReporterConfigurationV1,
+        agent_database_url: str,
+        retirement_from_generation: int | None = None,
+    ) -> dict[str, object]:
+        """Read installed protected authority without reopening migration logins."""
+        return await observe_database(
+            self._admin_url,
+            identity=identity,
+            configuration=configuration,
+            agent_database_url=agent_database_url,
+            retirement_from_generation=retirement_from_generation,
+        )
+
 
 def _new_credentials(
     *,
@@ -1476,10 +1507,56 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         kubectl: KubectlClient,
         database: PersonalDevCapacityDatabase,
         config: PersonalDevCapacityRuntimeConfig,
+        membership_execution: ExecutionAuthorityV2 | None = None,
     ) -> None:
         self._kubectl = kubectl
         self._database = database
         self._config = config
+        self._membership_execution = membership_execution
+
+    def validate_membership_context(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        checkpoint: PersonalMembershipCheckpointV1,
+        *,
+        observed_at: datetime,
+    ) -> None:
+        """Fence initial convergence before it can change protected resources."""
+        validate_membership_observation_context(
+            claim, checkpoint, self._membership_execution, observed_at
+        )
+
+    async def observe_membership(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        installation: PersonalDevCapacityInstallation,
+        checkpoint: PersonalMembershipCheckpointV1,
+        *,
+        observed_at: datetime,
+    ) -> PersonalDevMembershipObservationV1:
+        if claim.operation.kind == "destroy":
+            raise ValueError("destroy requires retained membership observation")
+        return await PersonalDevMembershipObserver(self).observe(
+            claim, installation, checkpoint, observed_at=observed_at
+        )
+
+    async def observe_membership_retirement(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        checkpoint: PersonalMembershipCheckpointV1,
+        *,
+        observed_at: datetime,
+    ) -> PersonalDevMembershipObservationV1:
+        return await PersonalDevMembershipObserver(self).retirement(
+            claim, checkpoint, observed_at=observed_at
+        )
+
+    async def verify_membership_publishing(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        envelope: PersonalDevMembershipEnvelopeV1,
+    ) -> None:
+        await PersonalDevMembershipObserver(self).verify(claim, envelope)
 
     async def _credentials(
         self,
@@ -2145,11 +2222,19 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
     async def seal(self, claim: PersonalDevReconciliationClaim) -> None:
         if claim.operation.kind != "destroy":
             raise ValueError("capacity sealing requires a destroy operation")
+        if claim.operation.capacity_mode == "membership-v1":
+            from loom.personal_dev_membership_cleanup import validated_membership_destroy
+
+            validated_membership_destroy(claim, checkpoints=("release_verified",))
         await self._database.seal(derive_identity(claim.operation.environment_name))
 
     async def destroy(self, claim: PersonalDevReconciliationClaim) -> None:
         if claim.operation.kind != "destroy":
             raise ValueError("capacity cleanup requires a destroy operation")
+        if claim.operation.capacity_mode == "membership-v1":
+            from loom.personal_dev_membership_cleanup import validated_membership_destroy
+
+            validated_membership_destroy(claim, checkpoints=("namespace_deleted",))
         await self._database.destroy(derive_identity(claim.operation.environment_name))
 
 
