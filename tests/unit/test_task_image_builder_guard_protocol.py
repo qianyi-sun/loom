@@ -57,6 +57,33 @@ def _unsealed_memfd(name: str) -> int:
     return descriptor
 
 
+@pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
+def test_publication_operations_have_only_fixed_lease_request_fields(operation: str) -> None:
+    document = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": operation,
+        "grant_id": str(GRANT), "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION), "attempt_id": str(ATTEMPT),
+        "lease_epoch": 9007199254740991,
+    }
+    parsed = parse_local_request(_wire(document))
+    assert (parsed.operation, parsed.operation_id, parsed.lease_epoch) == (
+        operation, OPERATION, 9007199254740991,
+    )
+    for field in document:
+        incomplete = dict(document)
+        del incomplete[field]
+        with pytest.raises(GuardError, match="local_request_invalid"):
+            parse_local_request(_wire(incomplete))
+    for field in ("repository", "registry_origin", "candidate_set_sha256", "signing_key_id",
+                  "worker_generation", "session_token", "receipt"):
+        with pytest.raises(GuardError, match="local_request_invalid"):
+            parse_local_request(_wire(document | {field: "sentinel-private"}))
+    for invalid in (True, 0, -1, 1.0, 9007199254740992):
+        with pytest.raises(GuardError, match="local_request_invalid"):
+            parse_local_request(_wire(document | {"lease_epoch": invalid}))
+
+
 def test_project_request_contains_only_nonsecret_grant_authority() -> None:
     request = parse_local_request(
         _wire(

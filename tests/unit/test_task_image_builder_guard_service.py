@@ -67,6 +67,7 @@ from loom_task_image_builder_guard.protocol import (
     receive_request,
     send_packet,
 )
+from loom_task_image_builder_guard.publication import PublicationStatus
 from loom_task_image_builder_guard.service import (
     GuardService,
     NodeReconciler,
@@ -985,6 +986,22 @@ class _Authority:
             response_sha256=DIGEST_D,
             base_resolution=owned,
         )
+
+    def publication_submit(
+        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object],
+    ) -> PublicationStatus:
+        assert (grant_id, materialization_id) == (GRANT, MATERIALIZATION)
+        self.events.append("authority_publication_submit")
+        self.requests.append(("publication-submit", json.loads(_json(request))))
+        return PublicationStatus(_json(_publication_status_document(request)))
+
+    def publication_poll(
+        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object],
+    ) -> PublicationStatus:
+        assert (grant_id, materialization_id) == (GRANT, MATERIALIZATION)
+        self.events.append("authority_publication_poll")
+        self.requests.append(("publication-poll", json.loads(_json(request))))
+        return PublicationStatus(_json(_publication_status_document(request)))
 
     def revoke(self, grant_id: UUID, request: dict[str, object]) -> None:
         del grant_id, request
@@ -2918,6 +2935,108 @@ def test_registry_publication_operations_proxy_opaque_capability_without_ledger_
     ledger.close()
 
 
+def _publication_status_document(request: dict[str, object]) -> dict[str, object]:
+    common = {
+        key: request[key] for key in ("operation_id", "materialization_id", "attempt_id", "lease_epoch")
+    } | {"snapshot_sha256": DIGEST_A, "candidate_set_sha256": DIGEST_B, "component_count": 128}
+    return common | {
+        "schema": "loom.task-image-publication-status/v1", "grant_id": str(GRANT),
+        "state": "completed",
+        "receipt": common | {
+            "schema": "loom.task-image-publication-receipt/v1",
+            "worker_generation": 9007199254740991, "publication_set_sha256": DIGEST_C,
+            "completed_at": "2026-09-08T12:34:56Z",
+        },
+    }
+
+
+@pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
+@pytest.mark.parametrize("condition", ["success", "wrong-binding", "bad-receipt", "extra-secret", "unavailable", "cancel-ack"])
+def test_publication_status_real_socket_revalidates_adapter_and_closes_session_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, condition: str,
+) -> None:
+    service, ledger, peer, _slurm, _events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    service._uuid = lambda: RESPONSE
+    before = ledger.get(GRANT).raw  # type: ignore[union-attr]
+    request = {
+        "schema": LOCAL_SCHEMA, "operation": operation, "grant_id": str(GRANT),
+        "operation_id": str(LEASE_OPERATION), "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT), "lease_epoch": 9007199254740991,
+    }
+    status = _publication_status_document(request)
+    expected_status = json.loads(_json(status))
+    if condition == "wrong-binding":
+        status["grant_id"] = str(SESSION)
+    elif condition == "bad-receipt":
+        status["receipt"]["component_count"] = 1  # type: ignore[index]
+    elif condition == "extra-secret":
+        status["private"] = "sentinel-private-status"
+    authority_requests = []
+
+    def adapter(grant_id, materialization_id, body):
+        assert (grant_id, materialization_id) == (GRANT, MATERIALIZATION)
+        authority_requests.append(body)
+        if condition == "unavailable":
+            raise GuardError("authority_transport_failed")
+        return PublicationStatus(_json(status))
+
+    monkeypatch.setattr(service.authority, operation.replace("-", "_"), adapter)
+    received_fds = []
+    read = service_module.read_sealed_memfd
+
+    def track_read(descriptor, *, maximum):
+        received_fds.append(descriptor)
+        return read(descriptor, maximum=maximum)
+
+    monkeypatch.setattr(service_module, "read_sealed_memfd", track_read)
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    client.settimeout(3)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(client, _json(request), descriptor=current_fd)
+        os.close(current_fd)
+        response_payload, descriptor = receive_request(client, maximum=4096)
+        response = json.loads(response_payload)
+        assert descriptor is None
+        assert b"sentinel" not in response_payload and SESSION_TOKEN.encode() not in response_payload
+        if condition in {"success", "cancel-ack"}:
+            assert response == {
+                "schema": LOCAL_SCHEMA, "operation": operation, "response_id": str(RESPONSE),
+                "grant_id": str(GRANT), "publication_status": expected_status,
+            }
+            assert len(response_payload) < 1500
+            if condition == "success":
+                send_packet(client, _json({"schema": LOCAL_SCHEMA, "operation": "ack", "response_id": str(RESPONSE)}))
+            else:
+                client.close()
+        else:
+            assert response == {
+                "schema": LOCAL_SCHEMA, "operation": "error",
+                "code": "authority_transport_failed" if condition == "unavailable" else "authority_publication_invalid",
+            }
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+        assert authority_requests == [{
+            "schema_version": 1, "grant_id": str(GRANT), "session_id": str(SESSION),
+            "session_generation": 1, "session_token": SESSION_TOKEN,
+            "operation_id": str(LEASE_OPERATION), "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT), "lease_epoch": 9007199254740991,
+        }]
+        assert received_fds
+        for received_fd in received_fds:
+            with pytest.raises(OSError):
+                os.fstat(received_fd)
+        assert peer.closed
+        assert ledger.get(GRANT).raw == before  # type: ignore[union-attr]
+    finally:
+        client.close()
+        thread.join(timeout=3)
+        service.close()
+        ledger.close()
+
+
 def test_publication_candidate_v2_round_trips_maximum_owned_evidence(
     tmp_path: Path,
 ) -> None:
@@ -3088,6 +3207,7 @@ def test_publication_candidate_v2_rejects_maximum_evidence_under_legacy_packet_c
         ledger.close()
 
 
+@pytest.mark.parametrize("operation", ["registry-credential", "publication-submit", "publication-poll"])
 @pytest.mark.parametrize(
     ("condition", "expected_code"),
     [
@@ -3102,12 +3222,13 @@ def test_registry_credentials_require_one_live_current_session_descriptor(
     tmp_path: Path,
     condition: str,
     expected_code: str,
+    operation: str,
 ) -> None:
     service, ledger, peer, _slurm, events = _service(tmp_path)
     current_wire = _establish_session(service, ledger)
     request = {
         "schema": LOCAL_SCHEMA,
-        "operation": "registry-credential",
+        "operation": operation,
         "grant_id": str(GRANT),
         "operation_id": str(LEASE_OPERATION),
         "materialization_id": str(MATERIALIZATION),
@@ -3117,6 +3238,9 @@ def test_registry_credentials_require_one_live_current_session_descriptor(
         "predecessor_credential_id": None,
         "predecessor_generation": None,
     }
+    if operation != "registry-credential":
+        for field in ("component", "predecessor_credential_id", "predecessor_generation"):
+            del request[field]
     descriptors: list[int] = []
     server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     thread = _run_connection(service, server)
@@ -3179,7 +3303,7 @@ def test_registry_credentials_require_one_live_current_session_descriptor(
             os.close(descriptor)
         client.close()
 
-    assert "authority_registry_credential" not in events
+    assert "authority_" + operation.replace("-", "_") not in events
     service.close()
     ledger.close()
 
