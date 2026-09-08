@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
@@ -559,11 +561,14 @@ def test_phase2c_rootless_runtime_recipe_is_owned_without_release_publication() 
     assert owner.build_context == "deploy/task-image-builder"
     assert owner.release_digest is None
     assert owner.runtime_policy == "runtime-payload"
-    assert component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=(dockerfile,),
-        force_all=False,
-    ) == ()
+    assert (
+        component_ownership.select_release_image_matrix(
+            manifest,
+            changed_paths=(dockerfile,),
+            force_all=False,
+        )
+        == ()
+    )
 
 
 def test_validator_requires_any_docker_marked_pytest_module_in_docker_lane(
@@ -599,6 +604,69 @@ include_paths = ["tests/unit/**/*.py"]
         "docker-marked pytest module must use integration-docker lane: "
         "tests/unit/test_docker_runtime.py: tests-root" in errors
     )
+
+
+def test_marker_free_ascii_source_is_parsed_without_ast_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parse = ast.parse
+    walk = ast.walk
+    parsed: list[str] = []
+    walked: list[ast.AST] = []
+
+    def record_parse(source: str) -> ast.AST:
+        parsed.append(source)
+        return parse(source)
+
+    def record_walk(tree: ast.AST) -> Iterator[ast.AST]:
+        walked.append(tree)
+        return walk(tree)
+
+    source = "def test_example():\n    assert 1 + 2 == 3\n"
+    with monkeypatch.context() as patch:
+        patch.setattr(ast, "parse", record_parse)
+        patch.setattr(ast, "walk", record_walk)
+        assert not component_ownership._uses_pytest_docker_marker(source)
+
+    assert parsed == [source]
+    assert walked == []
+
+
+@pytest.mark.parametrize("source", ["def broken(:\n", "value = (\n"])
+def test_marker_free_ascii_syntax_errors_are_still_rejected(source: str) -> None:
+    with pytest.raises(SyntaxError):
+        component_ownership._uses_pytest_docker_marker(source)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("pytestmark = pytest.mark.ｄｏｃｋｅｒ\n", True),
+        ("π = 3\n", False),
+        ("pytestmark = pytest.mark.docker\n", True),
+        ("if False:\n    pytest.mark.docker\n", True),
+        ('value = f"{pytest.mark.docker}"\n', True),
+        ('value = "pytest.mark.docker"\n', False),
+        ("# pytest.mark.docker\nvalue = 1\n", False),
+        ("pytestmark = other.mark.docker\n", False),
+        ("pytestmark = pytest.other.docker\n", False),
+    ],
+)
+def test_possible_docker_marker_sources_retain_exact_ast_inspection(
+    monkeypatch: pytest.MonkeyPatch, source: str, expected: bool
+) -> None:
+    walk = ast.walk
+    walked: list[ast.AST] = []
+
+    def record_walk(tree: ast.AST) -> Iterator[ast.AST]:
+        walked.append(tree)
+        return walk(tree)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ast, "walk", record_walk)
+        assert component_ownership._uses_pytest_docker_marker(source) is expected
+
+    assert len(walked) == 1
 
 
 def test_validator_ignores_docker_marker_text_inside_strings(tmp_path: Path) -> None:
@@ -1009,9 +1077,7 @@ def test_capacity_manager_image_has_narrow_ownership_and_primary_rollout_role() 
 def test_execution_actuator_image_owns_capacity_collector_source() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
-    owners = manifest.component_owners_for_path(
-        "src/loom_execution_capacity_collector/nebius.py"
-    )
+    owners = manifest.component_owners_for_path("src/loom_execution_capacity_collector/nebius.py")
     assert "execution-actuator" in {component.id for component in owners}
     selected = component_ownership.select_release_image_matrix(
         manifest,
