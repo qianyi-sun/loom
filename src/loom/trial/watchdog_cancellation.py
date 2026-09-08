@@ -15,6 +15,7 @@ from enum import StrEnum
 class WatchdogTriggerReason(StrEnum):
     CP_CANCELLED = "cp_cancelled"
     CP_TERMINAL = "cp_terminal"
+    OWNERSHIP_REVOKED = "ownership_revoked"
     HARD_DEADLINE = "hard_deadline"
 
 
