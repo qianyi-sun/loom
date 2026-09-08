@@ -235,6 +235,15 @@ passed 32 tests with one historical-migration setup timeout; the isolated
 round-trip/ORM-parity retry passed with the unchanged timeout. No production
 migration was applied.
 
+Subsequent upstream convergence `b0773d632` rebases onto public `302e1a879`
+and moves only the unpublished signing migration to `0135`, after published
+`0134`. Public migration bytes remain unchanged. The single-head graph contains
+136 revisions; deployment policy and current-head fixtures agree. Independent
+scoped review passed, with 96 migration/policy checks, 631 deployment/CLI/package
+checks, 15 migrated signing/API/lifecycle checks and 12 composed flows passing.
+Historical pre-rebase commit identities above remain in the local recovery
+branch; the current migration is `0135`, not `0133`.
+
 ## Task 6: Retention and release integration
 
 Extend existing task-image registry GC and release metadata tests.
@@ -245,6 +254,19 @@ Extend existing task-image registry GC and release metadata tests.
 - [ ] Recompute all changed guard/provider/supervisor release identities using
   the deterministic dual-architecture assembly, not guessed hash substitutions.
 - [ ] Verify inactive deployment, package boundaries and Phase 1 compatibility.
+
+Credential-first repository discovery is implemented in `7b8c4e1dd`: every
+retained generation contributes its validated public-binding digest and expiry,
+including first issuance with no candidate. Generation order does not imply
+issue-time or expiry order; legitimate registry identity rotations and
+same-second renewals remain discoverable. The final 178 pure/package checks pass,
+including 23 inventory cases; independent scoped re-review cleared the findings.
+An earlier 53-case migrated inventory/publication run passed before the narrow
+rotation/time-order relaxations. Claim replay's parent/child inversion is fixed
+in `85e63ccd2`, with three real PostgreSQL lock/rebinding/cache cases passing and
+independent review. These are prerequisites, not completed retention: database
+immutability, transactional reference/retirement fencing, authoritative Phase 1
+ownership separation and maintained registry quiescence remain separate gates.
 
 ## Task 7: Review, protected merge and continuation
 

@@ -394,6 +394,23 @@ for existing Phase 1 ready rows. Legacy completion must reject rootless attempts
 while preserving Phase 1 behavior. D2 runtime composition remains unavailable
 until execution trust, shadow acceptance and architecture-fence gates exist.
 
+Attempt repository discovery uses retained registry credentials, not only
+candidate callbacks: a completed push or partial upload may outlive a lost
+callback. A pure validator derives exact production attempt/component paths
+from the frozen plan, validates every supplied credential's public schema,
+canonical hash and row bindings, and collapses complete predecessor chains into
+one repository inventory with the maximum expiry across all generations.
+Registry service/issuer/key rotation and equal-second issuance timestamps do not
+invalidate historical inventory. Every generation's public-binding digest stays
+in the canonical evidence; no bearer or secret-store read is needed.
+
+This inventory does not itself prove that all database rows were loaded, that
+they are immutable, or that the attempt is unreferenced, retired or safe to
+delete. Those guarantees belong to the pending locked retirement and host
+maintenance composition. Claim replay shares materialization-before-attempt
+locking with publication: its initial identity lookup is non-authoritative,
+and both rows are freshly reloaded and revalidated after acquiring the locks.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency
