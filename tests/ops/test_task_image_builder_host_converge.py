@@ -380,6 +380,12 @@ def test_host_bundle_convergence_rejects_substitute_runtime_manifest(
 
 def test_plan_and_check_are_read_only(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
+    # Force the first symlink read to update atime even on relatime filesystems.
+    os.utime(
+        fixture.cgroup_config,
+        ns=(1, fixture.cgroup_config.lstat().st_mtime_ns),
+        follow_symlinks=False,
+    )
     cgroup_before = fixture.cgroup_config.lstat()
     observed_before = fixture.observed_cgroup.read_bytes()
 
