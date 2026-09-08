@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import TaskImageMaterialization, TaskImagePublicationCandidate
+from loom_task_image_authority import registry_credentials
 from loom_task_image_authority.contracts import (
     TaskImageBaseResolutionEvidenceV1,
     TaskImagePublicationCandidateRequestV1,
@@ -95,6 +96,68 @@ async def _record(
         now=NOW + timedelta(seconds=12),
         candidate_id_factory=lambda: CANDIDATE_ID,
     )
+
+
+async def test_parse_stored_v2_candidate_returns_strict_typed_response(
+    registry_authority_session: async_sessionmaker[AsyncSession],
+    registry_issuer: DistributionRegistryTokenIssuer,
+) -> None:
+    async with registry_authority_session() as session:
+        authorization, _, request, _ = await _prepared(session, registry_issuer)
+        response = await _record(session, authorization, request)
+        stored = (await session.scalars(select(TaskImagePublicationCandidate))).one()
+
+        parsed = registry_credentials.parse_stored_publication_candidate_v2(
+            stored,
+            credential_generation=request.credential_generation,
+        )
+
+        assert type(parsed) is TaskImagePublicationCandidateResponseV2
+        assert parsed == response
+
+
+@pytest.mark.parametrize("corruption", ["hash", "row_binding"])
+async def test_parse_stored_v2_candidate_rejects_corrupt_row(
+    registry_authority_session: async_sessionmaker[AsyncSession],
+    registry_issuer: DistributionRegistryTokenIssuer,
+    corruption: str,
+) -> None:
+    async with registry_authority_session() as session:
+        authorization, _, request, _ = await _prepared(session, registry_issuer)
+        await _record(session, authorization, request)
+        stored = (await session.scalars(select(TaskImagePublicationCandidate))).one()
+        if corruption == "hash":
+            stored.response_sha256 = "0" * 64
+        else:
+            stored.manifest_size += 1
+
+        with pytest.raises(TaskImageSessionMaterializationConflictError):
+            registry_credentials.parse_stored_publication_candidate_v2(
+                stored,
+                credential_generation=request.credential_generation,
+            )
+
+
+async def test_parse_stored_v2_candidate_rejects_v1_row(
+    registry_authority_session: async_sessionmaker[AsyncSession],
+    registry_issuer: DistributionRegistryTokenIssuer,
+) -> None:
+    async with registry_authority_session() as session:
+        authorization, _, _, legacy = await _prepared(session, registry_issuer)
+        await record_session_publication_candidate(
+            session,
+            authorization=authorization,
+            request=legacy,
+            now=NOW + timedelta(seconds=12),
+            candidate_id_factory=lambda: CANDIDATE_ID,
+        )
+        stored = (await session.scalars(select(TaskImagePublicationCandidate))).one()
+
+        with pytest.raises(TaskImageSessionMaterializationConflictError):
+            registry_credentials.parse_stored_publication_candidate_v2(
+                stored,
+                credential_generation=legacy.credential_generation,
+            )
 
 
 @pytest.mark.parametrize("bases", [(), ("sha256:" + "b" * 64, "sha256:" + "c" * 64)])

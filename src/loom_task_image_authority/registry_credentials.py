@@ -539,6 +539,22 @@ def _candidate_response_from_row(
     return response
 
 
+def parse_stored_publication_candidate_v2(
+    row: TaskImagePublicationCandidate,
+    *,
+    credential_generation: int,
+) -> TaskImagePublicationCandidateResponseV2:
+    """Parse a stored V2 candidate after validating its complete row binding."""
+
+    response = _candidate_response_from_row(
+        row,
+        credential_generation=credential_generation,
+        response_model=TaskImagePublicationCandidateResponseV2,
+    )
+    assert isinstance(response, TaskImagePublicationCandidateResponseV2)
+    return response
+
+
 def _candidate_matches_request(
     response: TaskImagePublicationCandidateResponseV1,
     request: TaskImagePublicationCandidateRequestV1,
@@ -686,16 +702,22 @@ async def _record_session_publication_candidate(
         .with_for_update()
     )
     if replay is not None:
-        response = _candidate_response_from_row(
-            replay,
-            credential_generation=credential.generation,
-            response_model=response_model,
-        )
-        if not _candidate_matches_request(response, request):
+        replay_response: TaskImagePublicationCandidateResponseV1
+        if response_model is TaskImagePublicationCandidateResponseV2:
+            replay_response = parse_stored_publication_candidate_v2(
+                replay,
+                credential_generation=credential.generation,
+            )
+        else:
+            replay_response = _candidate_response_from_row(
+                replay,
+                credential_generation=credential.generation,
+            )
+        if not _candidate_matches_request(replay_response, request):
             raise TaskImageSessionMaterializationConflictError(
                 "task-image publication operation identity was already used"
             )
-        return response
+        return replay_response
     existing = await session.scalar(
         select(TaskImagePublicationCandidate)
         .where(
@@ -773,6 +795,7 @@ async def _record_session_publication_candidate(
 __all__ = [
     "TaskImageRegistryCredentialUnavailableError",
     "issue_session_registry_credential",
+    "parse_stored_publication_candidate_v2",
     "record_session_publication_candidate",
     "record_session_publication_candidate_v2",
 ]
