@@ -31,6 +31,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationAbortV2,
     ExecutionPreparationV2,
 )
+from loom_capacity_manager.membership_contracts import parse_execution_preparation
 from loom_capacity_manager.preparation_readiness import (
     PreparedExecutionReadinessV2,
     canonical_prepared_readiness_digest,
@@ -1215,9 +1216,12 @@ class ProtectedCapacityManagerClient:
     ) -> ExecutionContextV2:
         if not isinstance(preparation, ExecutionPreparationV2):
             raise TypeError("capacity manager execution preparation is invalid")
+        if type(preparation.schema_version) is not int or preparation.schema_version not in (2, 3):
+            raise ValueError("capacity manager execution preparation version is invalid")
+        preparation = parse_execution_preparation(preparation.model_dump_json())
         response = self._request(
             "POST",
-            "/v2/execution-preparations",
+            f"/v{preparation.schema_version}/execution-preparations",
             "manager-prepare",
             payload=preparation.model_dump(mode="json", exclude_none=False),
             idempotency_key=idempotency_key,

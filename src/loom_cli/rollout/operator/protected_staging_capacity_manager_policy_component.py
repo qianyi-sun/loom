@@ -19,7 +19,6 @@ import yaml  # type: ignore[import-untyped]
 from cryptography import x509
 
 from loom_capacity_manager.executable_contracts import (
-    ExecutionPreparationV2,
     canonical_executable_digest,
 )
 from loom_cli.capacity_control_plane import (
@@ -1001,20 +1000,10 @@ def _validate_manager_status(
         or writer_epoch <= 0
     ):
         raise ValueError("protected manager policy status is not frozen")
-    policy = prerequisite.execution_policy
-    request = ExecutionPreparationV2(
+    request = prerequisite.preparation_request(
         authority_incarnation=authority_incarnation,
         expected_writer_epoch=writer_epoch,
         configuration_epoch=configuration_epoch,
-        fleet_generation=prerequisite.desired_fleet_generation,
-        fleet_digest=prerequisite.desired_fleet_sha256,
-        trusted_fleet_release_sha256=policy.trusted_fleet_release_sha256,
-        requested_ceiling=policy.executable_new_capacity_ceiling,
-        requested_rate_per_minute=policy.executable_new_capacity_rate_per_minute,
-        executors=policy.executors,
-        subject_acknowledgements=policy.subject_acknowledgements,
-        legacy_writer_fences=policy.legacy_writer_fences,
-        rollback_evidence_sha256=policy.rollback_evidence_sha256,
     )
     if execution_manifest_sha256 != canonical_executable_digest(request):
         raise ValueError("protected manager policy prepared manifest is not exact")

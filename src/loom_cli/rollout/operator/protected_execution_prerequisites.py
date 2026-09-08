@@ -17,9 +17,14 @@ from pydantic import ValidationError
 from loom_capacity_manager.executable_contracts import (
     ExecutionContextV2,
     ExecutionPreparationPolicyV2,
+    ExecutionPreparationV2,
     PoolControllerAuthorityV2,
     PreparedExecutorBindingV2,
     canonical_executable_digest,
+)
+from loom_capacity_manager.membership_contracts import (
+    parse_execution_preparation,
+    parse_execution_preparation_policy,
 )
 from loom_cli.capacity_control_plane import (
     CapacityPoolExecutorBinding,
@@ -387,6 +392,30 @@ class ProtectedExecutionPrerequisiteArtifact:
     def execution_policy_sha256(self) -> str:
         return canonical_executable_digest(self.execution_policy)
 
+    def preparation_request(
+        self,
+        *,
+        authority_incarnation: UUID,
+        expected_writer_epoch: int,
+        configuration_epoch: int,
+    ) -> ExecutionPreparationV2:
+        """Bind live epochs without dropping the policy's versioned authority."""
+
+        policy = parse_execution_preparation_policy(self.execution_policy.model_dump_json())
+        payload = policy.model_dump(mode="json", exclude={"controller_authorities"})
+        payload["requested_ceiling"] = payload.pop("executable_new_capacity_ceiling")
+        payload["requested_rate_per_minute"] = payload.pop(
+            "executable_new_capacity_rate_per_minute"
+        )
+        payload.update(
+            authority_incarnation=str(authority_incarnation),
+            expected_writer_epoch=expected_writer_epoch,
+            configuration_epoch=configuration_epoch,
+            fleet_generation=self.desired_fleet_generation,
+            fleet_digest=self.desired_fleet_sha256,
+        )
+        return parse_execution_preparation(json.dumps(payload, allow_nan=False))
+
     @property
     def executor_profile_seed_sha256(self) -> str:
         return _hash_json(self.executor_profile_seed.to_dict())
@@ -516,7 +545,7 @@ class ProtectedExecutionPrerequisiteArtifact:
                 credential_metadata_sha256=string_map("credential_metadata_sha256"),
                 coexistence_witness_sha256=string_map("coexistence_witness_sha256"),
                 legacy_writer_evidence_sha256=string_map("legacy_writer_evidence_sha256"),
-                execution_policy=ExecutionPreparationPolicyV2.model_validate_json(
+                execution_policy=parse_execution_preparation_policy(
                     json.dumps(
                         value["execution_policy"],
                         sort_keys=True,

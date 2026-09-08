@@ -21,7 +21,9 @@ from loom_cli.rollout.operator.protected_capacity_execution_preparation_componen
     _ManagerExecutionStatus,
     _preparation_request,
 )
-from loom_cli.rollout.operator.protected_capacity_manager_client import ProtectedCapacityManagerClient
+from loom_cli.rollout.operator.protected_capacity_manager_client import (
+    ProtectedCapacityManagerClient,
+)
 from loom_cli.rollout.operator.protected_execution_prerequisites import (
     ProtectedExecutionPrerequisiteArtifact,
     canonical_execution_prerequisite_bytes,
@@ -34,11 +36,11 @@ from tests.loom_cli.rollout.operator.protected_execution_prerequisite_fixtures i
     execution_prerequisite_artifact,
 )
 from tests.loom_cli.rollout.operator.test_protected_capacity_manager_client import (
-    _HTTPClient,
-    _Response,
     _credentials,
     _execution_preparation,
+    _HTTPClient,
     _prepared_execution,
+    _Response,
 )
 
 
@@ -86,9 +88,7 @@ def test_prerequisite_round_trip_preserves_exact_versioned_policy(version: int) 
 
 @pytest.mark.parametrize("version", [2, 3])
 @pytest.mark.parametrize("surface", ["request", "readback"])
-def test_preparation_and_prepared_readback_preserve_membership(
-    version: int, surface: str
-) -> None:
+def test_preparation_and_prepared_readback_preserve_membership(version: int, surface: str) -> None:
     artifact = _artifact(version)
     expected = _request(version)
     status = _ManagerExecutionStatus(
@@ -131,6 +131,22 @@ def test_preparation_and_prepared_readback_preserve_membership(
     _validate_manager_status(
         observed, authority_incarnation=status.authority_incarnation, prerequisite=artifact
     )
+    if version == 3:
+        changed = replace(
+            artifact,
+            execution_policy=artifact.execution_policy.model_copy(
+                update={
+                    "personal_membership": _membership().model_copy(update={"max_subjects": 17})
+                }
+            ),
+        )
+        assert changed.artifact_sha256 != artifact.artifact_sha256
+        with pytest.raises(ValueError, match="manifest"):
+            _validate_manager_status(
+                observed, authority_incarnation=status.authority_incarnation, prerequisite=changed
+            )
+        with pytest.raises(ValueError, match="manifest"):
+            _preparation_request(status, artifact=changed)
 
 
 @pytest.mark.parametrize("version", [2, 3])
@@ -159,7 +175,7 @@ def test_client_sends_exact_versioned_preparation_to_matching_endpoint(
     assert call["headers"]["Idempotency-Key"] == str(key)
 
 
-@pytest.mark.parametrize("version", [1, 4, "3", 3.0, True])
+@pytest.mark.parametrize("version", [1, 2, 4, "3", 3.0, True])
 def test_client_rejects_invalid_preparation_version_before_transport(
     tmp_path: Path, version: object
 ) -> None:
@@ -173,6 +189,17 @@ def test_client_rejects_invalid_preparation_version_before_transport(
         client_factory=lambda _context: http,
     )
 
-    with pytest.raises((TypeError, ValueError), match="preparation|schema|tag"):
+    with pytest.raises(
+        (TypeError, ValueError), match=r"preparation|schema|tag|personal_membership"
+    ):
         client.prepare_execution(request, UUID(int=1872))
     assert http.calls == []
+
+
+@pytest.mark.parametrize("version", [1, 2, 4, "3", 3.0, True])
+def test_artifact_rejects_unknown_or_downgraded_membership_policy(version: object) -> None:
+    value = _artifact(3).to_dict()
+    value["execution_policy"]["schema_version"] = version
+
+    with pytest.raises(ValueError, match="artifact"):
+        parse_execution_prerequisite_bytes(json.dumps(value).encode("ascii"))

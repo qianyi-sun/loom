@@ -145,6 +145,16 @@ V2 endpoint and its static manifest retain their original contract. Membership
 management has a separate single-purpose, unbound `capacity:membership:manage`
 principal whose identity must match the prepared delegation.
 
+The protected operator preserves the explicit V2 or V3 policy through immutable
+prerequisite artifact readback, preparation request construction and prepared
+manifest verification. It selects the matching preparation endpoint using the
+validated wire version; it does not infer delegation from an installed manager
+binary or silently discard membership fields. A changed delegation changes both
+the artifact identity and the prepared manifest. Unknown versions and a V3 policy
+relabeled as V2 are rejected. This transport support does not opt the existing
+rollout source into V3 or supply installed-generation activation, real legacy
+writer freezes, lifecycle wiring, or live acceptance evidence.
+
 `GET /v1/personal-memberships/checkpoint` returns a consistent active execution,
 namespace and membership revision/head. `PUT /v1/personal-memberships/{subject_id}`
 uses that checkpoint for compare-and-swap; an exact replay returns its original
