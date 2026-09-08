@@ -22,6 +22,10 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_pool_executor.config import SlurmInventoryNodeDocument
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
+from loom_cli.rollout.operator.protected_capacity_execution_preparation_component import (
+    _ManagerExecutionStatus,
+    _preparation_request,
+)
 from loom_cli.rollout.operator.protected_execution_prerequisite_source import (
     ProtectedExecutionPrerequisiteAuthority,
     ProtectedExecutionPrerequisiteRuntimeSource,
@@ -354,13 +358,50 @@ def test_source_publishes_prerequisite_only_from_exact_typed_authorities(
     assert artifact.backup_lease_sha256 == lease.evidence_digest
     assert artifact.rollback_evidence_sha256 == expected_rollback
     assert artifact.executor_profile_seed.executor_image == fixture.source.executor_image
-    assert artifact.execution_policy.executable_new_capacity_ceiling == 158
+    assert artifact.execution_policy.executable_new_capacity_ceiling == 1
     assert artifact.execution_policy.subject_acknowledgements == (
         fixture.authority.subject_acknowledgements
     )
     assert artifact.execution_policy.legacy_writer_fences == (
         fixture.authority.legacy_writer_fences
     )
+
+
+def test_initial_cutover_prepares_one_slot_without_shrinking_fleet_capacity(
+    tmp_path: Path,
+) -> None:
+    fixture = _source_fixture(tmp_path)
+    before = deepcopy(fixture.active)
+    artifact = fixture.store.read(fixture.source.publish(fixture.lease))
+    status = _ManagerExecutionStatus(
+        authority_incarnation=fixture.desired.fleet.authority_incarnation,
+        writer_epoch=1,
+        configuration_epoch=artifact.source_configuration_epoch,
+        configuration_digest=artifact.source_configuration_sha256,
+        execution_epoch=0,
+        execution_state="shadow",
+        execution_manifest_sha256=None,
+        executable_new_capacity_ceiling=0,
+        increase_freeze=True,
+    )
+    request = _preparation_request(status, artifact=artifact)
+
+    assert request.requested_ceiling == 1
+    assert request.requested_rate_per_minute == min(
+        fixture.desired.fleet.global_submission_rate_per_minute,
+        sum(pool.submission_rate_per_minute for pool in fixture.desired.fleet.pools),
+    )
+    assert {pool.pool_id: pool.max_slots for pool in fixture.desired.fleet.pools} == {
+        "gb10": 140,
+        "oldlab": 18,
+    }
+    assert fixture.desired.fleet.executable_new_capacity_ceiling == 0
+    assert fixture.desired.staging_subject.min_slots == 0
+    assert artifact.desired_fleet_sha256 == canonical_digest(fixture.desired.fleet)
+    assert request.executors == artifact.execution_policy.executors
+    assert request.subject_acknowledgements == fixture.authority.subject_acknowledgements
+    assert request.legacy_writer_fences == fixture.authority.legacy_writer_fences
+    assert fixture.active == before
 
 
 def test_source_rejects_zero_filled_legacy_high_water(tmp_path: Path) -> None:
