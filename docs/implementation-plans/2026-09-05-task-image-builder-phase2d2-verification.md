@@ -104,8 +104,11 @@ integration tests; extend schema/migration from Task 3 with job/receipt bindings
 Partial implementation evidence: legacy completion now rejects grant-bound
 rootless attempts using the current persisted lease/attempt identity, not a
 builder-name prefix or failure-budget counter. 52 materialization/session/route
-integration tests passed, including ordinary Phase 1 completion. Durable jobs,
-the verifier worker and signed atomic readiness are still pending.
+integration tests passed, including ordinary Phase 1 completion. Durable snapshot
+jobs are implemented and reviewed through `b9adc814c`: the covering suite passed
+387 tests, and the contention-review amendment passed 154 affected tests. Real
+cross-grant INSERT contention and mutation-tested post-wait expiry checks are
+covered. The verifier worker and signed atomic readiness remain in progress.
 
 The internal current-session prerequisite is independently reviewed and complete.
 It shares strict validation with bearer authentication, accepts valid successors,
@@ -114,7 +117,7 @@ The review's stale-cache finding was reproduced and fixed in `47e933ac5`;
 128 focused session/projection tests and a final 420-test combined verification
 passed. No durable publication worker or readiness transition is implied.
 
-- [ ] Test snapshot creation/replay, unique complete candidate sets and leased
+- [x] Test snapshot creation/replay, unique complete candidate sets and leased
   worker generation claims under real concurrent transactions.
 - [ ] Implement snapshot/read/commit using existing session/lease lock helpers.
   A clock sampled after network work controls final expiry checks.
@@ -125,6 +128,12 @@ passed. No durable publication worker or readiness transition is implied.
   frozen attempt. Validate replay without signing or rewriting rows.
 - [ ] Fence the legacy completion path against rootless attempts and prove
   accepted Phase 1 completion remains unchanged. Review the complete lock graph.
+
+The compact receipt contract is implemented and independently reviewed through
+`8b1b01d29`; 97 focused contract/package checks passed. Receipts bind the complete
+frozen snapshot, candidate identities and signed-envelope set in at most 2 KiB.
+Precise stored completion time and whole-second wire time have one defined
+relationship. This pure contract does not itself verify database completion.
 
 ## Task 5: Fixed API and supervisor completion
 
@@ -167,8 +176,12 @@ share traffic limits, and real invalid-V2 requests prove response/log/metric
 redaction and no persistence. The final covering API/guard run passed 219 tests;
 scoped independent re-review cleared both material findings. Maximum-evidence
 tests use 32768-byte packets; matching release configuration and checked source
-digests remain Task 6 gates. Go candidate handoff, polling and publication
-composition remain pending. No slice grants readiness or activates the provider.
+digests remain Task 6 gates. Go V2 candidate handoff is implemented and reviewed
+through `6ab2c99c8`, including mandatory actual Go/Python handoff CI. A subsequent
+sidecar-only compatibility fix (`10720a4cc`) passes full Go normal/race suites.
+The pure bounded status projection (`1e503fcce`) passes 62 status/receipt/job
+checks plus six package checks; HTTP/guard submit/poll, publication liveness and
+terminal completion handling remain pending. No slice activates the provider.
 
 Upstream reconciliation `2171ed1b7` moves only the unpublished publication
 migration to `0133`, after unchanged public `0132`. Independent review approved
@@ -189,6 +202,9 @@ Extend existing task-image registry GC and release metadata tests.
 - [ ] Verify inactive deployment, package boundaries and Phase 1 compatibility.
 
 ## Task 7: Review, protected merge and continuation
+
+Track full activation acceptance in issue #1861. Incremental PRs reference it
+without closing the remaining execution-trust, native, incident and soak gates.
 
 - [ ] Run graph/transport/signature/store/API/Go/migration tests, Ruff, mypy,
   package boundaries and deterministic dual-architecture assembly.
