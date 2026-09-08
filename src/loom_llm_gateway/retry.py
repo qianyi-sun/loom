@@ -9,6 +9,7 @@ claude-code, qwen-cli, etc.) hit the gateway directly via
 `OPENAI_API_BASE`. Worker-side retry only catches the in-process
 direct-completion runtime. The gateway is the universal interception point.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +27,7 @@ from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 
 if TYPE_CHECKING:
     from loom_llm_gateway.config import GatewaySettings
+    from loom_llm_gateway.dispatch_audit import DispatchAudit
 
 from loom_llm_gateway.metrics import (
     RETRY_AMBIGUOUS_504_TOTAL,
@@ -59,6 +61,7 @@ async def send_with_retry(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
     deadline: GatewayAttemptDeadline | None = None,
+    dispatch_audit: DispatchAudit | None = None,
 ) -> RetryOutcome:
     """Run `send()` with retry on transient failures.
 
@@ -88,19 +91,24 @@ async def send_with_retry(
     for attempt in range(1, max_attempts + 1):
         last_exc = None
         try:
-            response = (
-                await send()
-                if deadline is None
-                else await deadline.run(send)
-            )
+            if dispatch_audit is not None:
+                response = await dispatch_audit.send(
+                    send,
+                    deadline=deadline,
+                    attempt=attempt,
+                )
+            else:
+                response = await send() if deadline is None else await deadline.run(send)
         except httpx.HTTPError as exc:
             last_exc = exc
             if not is_retryable(exc) or attempt >= max_attempts:
                 _record_exhaustion(dialect, attempt, status=0)
                 raise
             wait_for = _next_backoff(
-                attempt=attempt, base=base_backoff,
-                jitter=jitter, cap=max_backoff,
+                attempt=attempt,
+                base=base_backoff,
+                jitter=jitter,
+                cap=max_backoff,
             )
             if deadline is not None and wait_for >= deadline.require_remaining():
                 await deadline.sleep(wait_for, sleep=sleep)
@@ -109,7 +117,10 @@ async def send_with_retry(
                 raise
             logger.info(
                 "gateway_retry dialect=%s attempt=%d transport_error=%r wait=%.2fs",
-                dialect, attempt, exc, wait_for,
+                dialect,
+                attempt,
+                exc,
+                wait_for,
             )
             if deadline is None:
                 await sleep(wait_for)
@@ -127,7 +138,9 @@ async def send_with_retry(
             RETRY_ATTEMPTS.labels(dialect=dialect).observe(attempt)
             outcome = "success" if status < 400 else "non_retryable_error"
             RETRY_TOTAL.labels(
-                dialect=dialect, outcome=outcome, status=str(status),
+                dialect=dialect,
+                outcome=outcome,
+                status=str(status),
             ).inc()
             return RetryOutcome(response=response, attempt=attempt)
 
@@ -142,7 +155,10 @@ async def send_with_retry(
             return RetryOutcome(response=response, attempt=attempt)
 
         wait_for = _next_backoff(
-            attempt=attempt, base=base_backoff, jitter=jitter, cap=max_backoff,
+            attempt=attempt,
+            base=base_backoff,
+            jitter=jitter,
+            cap=max_backoff,
         )
         if deadline is not None and wait_for >= deadline.require_remaining():
             await deadline.sleep(wait_for, sleep=sleep)
@@ -152,7 +168,10 @@ async def send_with_retry(
 
         logger.info(
             "gateway_retry dialect=%s attempt=%d status=%d wait=%.2fs",
-            dialect, attempt, status, wait_for,
+            dialect,
+            attempt,
+            status,
+            wait_for,
         )
         if deadline is None:
             await sleep(wait_for)
@@ -174,7 +193,11 @@ def _status_retryable(status: int) -> bool:
 
 
 def _next_backoff(
-    *, attempt: int, base: float, jitter: float, cap: float,
+    *,
+    attempt: int,
+    base: float,
+    jitter: float,
+    cap: float,
 ) -> float:
     raw: float = base * (2 ** (attempt - 1))
     if jitter > 0:
@@ -185,12 +208,16 @@ def _next_backoff(
 def _record_exhaustion(dialect: str, attempt: int, status: int) -> None:
     RETRY_ATTEMPTS.labels(dialect=dialect).observe(attempt)
     RETRY_TOTAL.labels(
-        dialect=dialect, outcome="exhausted", status=str(status),
+        dialect=dialect,
+        outcome="exhausted",
+        status=str(status),
     ).inc()
 
 
 def _record_budget_exceeded(dialect: str, attempt: int, status: int) -> None:
     RETRY_ATTEMPTS.labels(dialect=dialect).observe(attempt)
     RETRY_TOTAL.labels(
-        dialect=dialect, outcome="budget_exceeded", status=str(status),
+        dialect=dialect,
+        outcome="budget_exceeded",
+        status=str(status),
     ).inc()

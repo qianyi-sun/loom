@@ -908,6 +908,11 @@ async def test_explicit_agent_timeout_retry_gets_a_new_deadline(
 
         async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
             self.calls += 1
+            deadline = self.deadlines[-1]
+            await deadline.record_step_token_grant(
+                agent_attempt_id=deadline.agent_attempt_id,
+                step_jwt_id=uuid4(),
+            )
             if self.calls == 1:
                 await asyncio.Future()
 
@@ -943,6 +948,19 @@ async def test_explicit_agent_timeout_retry_gets_a_new_deadline(
     assert agent.calls == 2
     assert len(agent.deadlines) == 2
     assert agent.deadlines[0] is not agent.deadlines[1]
+    starts = [event for event in events if event.kind == EventKind.AGENT_ATTEMPT_START]
+    timeouts = [event for event in events if event.kind == EventKind.AGENT_TIMEOUT]
+    assert len(starts) == 2
+    assert starts[0].agent_attempt_id == agent.deadlines[0].agent_attempt_id
+    assert starts[1].agent_attempt_id == agent.deadlines[1].agent_attempt_id
+    assert starts[0].agent_attempt_id != starts[1].agent_attempt_id
+    assert timeouts[0].agent_attempt_id == starts[0].agent_attempt_id
+    grants = [event for event in events if event.kind == EventKind.AGENT_STEP_TOKEN_GRANT]
+    assert len(grants) == 2
+    assert [event.agent_attempt_id for event in grants] == [
+        event.agent_attempt_id for event in starts
+    ]
+    assert grants[0].step_jwt_id != grants[1].step_jwt_id
     assert agent.close_calls == 2
     assert sum(event.kind == EventKind.AGENT_TIMEOUT for event in events) == 1
     assert sum(event.kind == EventKind.AGENT_RETRY for event in events) == 1

@@ -733,6 +733,11 @@ def _is_runnable_test_path(path: str) -> bool:
 
 def _uses_pytest_docker_marker(source: str) -> bool:
     tree = ast.parse(source)
+    # Keep syntax validation even when no marker can exist. ASCII identifiers
+    # cannot normalize to an absent spelling; Unicode identifiers can (NFKC),
+    # so non-ASCII inputs must retain the exact AST predicate below.
+    if source.isascii() and "docker" not in source:
+        return False
     return any(
         isinstance(node, ast.Attribute)
         and node.attr == "docker"
@@ -786,9 +791,7 @@ def validate_manifest(
                 continue
             owners = manifest.test_owners_for_path(pin.path)
             if len(owners) != 1 or owners[0].lane != shard_policy.lane:
-                errors.append(
-                    f"test shard pin crosses CI lane: {shard_policy.lane}: {pin.path}"
-                )
+                errors.append(f"test shard pin crosses CI lane: {shard_policy.lane}: {pin.path}")
     for policy in manifest.execution_policies:
         if not any(suite.execution_policy == policy.id for suite in manifest.test_suites):
             errors.append(f"execution policy has no test suite owner: {policy.id}")

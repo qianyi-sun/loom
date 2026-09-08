@@ -3025,9 +3025,7 @@ class TaskImageMaterializationAttempt(Base):
     session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     session_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
-    claim_deterministic_failure_count: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
-    )
+    claim_deterministic_failure_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     claim_lease_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )
@@ -5434,12 +5432,8 @@ class ServiceExecutionLease(Base):
     materialization_claim_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True)
     )
-    materialization_started_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True)
-    )
-    materialization_committed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True)
-    )
+    materialization_started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    materialization_committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     materialization_error_code: Mapped[str | None] = mapped_column(Text)
     materialization_error_message: Mapped[str | None] = mapped_column(Text)
     canonical_trajectory_sha256: Mapped[str | None] = mapped_column(Text)
@@ -9352,7 +9346,7 @@ class TerminusAgentRunAttempt(Base):
 
 
 class EpisodeCheckpoint(Base):
-    """Versioned Terminus2 episode checkpoint for reclaim."""
+    """Multi-model progress marker for terminus reclaim (not Harbor resume)."""
 
     __tablename__ = "episode_checkpoints"
     __table_args__ = (
@@ -9431,6 +9425,66 @@ class LlmCallIntent(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class GatewayDispatchReceipt(Base):
+    """Non-billing admission/transport observations, never execution evidence."""
+
+    __tablename__ = "gateway_dispatch_receipts"
+    __table_args__ = (
+        UniqueConstraint("request_id", "dispatch_ordinal", name="gateway_receipt_request_uidx"),
+        CheckConstraint(
+            "(trial_id IS NOT NULL)::integer + (execution_attempt_id IS NOT NULL)::integer = 1",
+            name="gateway_receipt_subject_check",
+        ),
+        CheckConstraint("dispatch_ordinal > 0 AND attempt > 0", name="gateway_receipt_count_check"),
+        CheckConstraint(
+            "provider_outcome IN ('admitted','response_received','stream_completed',"
+            "'deadline','cancelled','transport_error','not_dispatched')",
+            name="gateway_receipt_provider_check",
+        ),
+        CheckConstraint(
+            "gateway_outcome IN ('pending','completed','error','cancelled','deadline')",
+            name="gateway_receipt_gateway_check",
+        ),
+        CheckConstraint(
+            "purpose IN ('model_call','capability_probe','adapter_call')",
+            name="gateway_receipt_purpose_check",
+        ),
+        Index("gateway_receipt_trial_idx", "trial_id", "admitted_at"),
+        Index("gateway_receipt_pending_idx", "provider_outcome", "admitted_at"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    dispatch_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    trial_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="CASCADE"), nullable=True
+    )
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE"), nullable=True
+    )
+    step_id: Mapped[str] = mapped_column(Text, nullable=False)
+    step_jwt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    agent_attempt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    provider_connection_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    dialect: Mapped[str] = mapped_column(Text, nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt_deadline_wall_clock: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    admitted_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    provider_outcome: Mapped[str] = mapped_column(Text, nullable=False, server_default="admitted")
+    provider_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    provider_http_status: Mapped[int | None] = mapped_column(Integer)
+    gateway_outcome: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    gateway_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    gateway_http_status: Mapped[int | None] = mapped_column(Integer)
 
 
 class LlmCall(Base):

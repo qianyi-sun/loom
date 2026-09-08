@@ -35,6 +35,7 @@ class _StepTokenIssuer(Protocol):
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
+        agent_attempt_id: UUID | None = None,
     ) -> StepTokenGrant: ...
 
 
@@ -120,6 +121,15 @@ class StepTokenGatewayClient:
                 step_id=step_id,
                 ttl_sec=self.token_ttl_sec,
                 attempt_deadline_wall_clock=self.attempt_deadline.wall_deadline,
+                **(
+                    {"agent_attempt_id": self.attempt_deadline.agent_attempt_id}
+                    if self.attempt_deadline.agent_attempt_id is not None
+                    else {}
+                ),
+            )
+            await self.attempt_deadline.record_step_token_grant(
+                agent_attempt_id=grant.agent_attempt_id,
+                step_jwt_id=grant.step_jwt_id,
             )
             return grant.token
         return await self.token_issuer.mint_step_token(

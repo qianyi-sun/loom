@@ -80,6 +80,14 @@ class GatewayAttemptDeadline:
         return self.monotonic_cutoff - self._clock()
 
     @property
+    def deadline_observed(self) -> bool:
+        """A dispatch/read/retry boundary actually rejected this request.
+
+        Do not infer a timeout from the wall clock during later audit writes.
+        """
+        return self._metric_recorded
+
+    @property
     def reached(self) -> bool:
         return self.remaining() <= 0
 
@@ -113,16 +121,12 @@ class GatewayAttemptDeadline:
         except TimeoutError:
             if self.reached:
                 self._record_reached()
-                raise AttemptDeadlineReachedError(
-                    "signed attempt deadline reached"
-                ) from None
+                raise AttemptDeadlineReachedError("signed attempt deadline reached") from None
             raise
         except Exception:
             if self.reached:
                 self._record_reached()
-                raise AttemptDeadlineReachedError(
-                    "signed attempt deadline reached"
-                ) from None
+                raise AttemptDeadlineReachedError("signed attempt deadline reached") from None
             raise
         # A fake clock or an operation completing exactly at the boundary must
         # not let a provider result/error win the deadline race.
@@ -138,9 +142,7 @@ class GatewayAttemptDeadline:
         remaining = self.require_remaining()
         if delay >= remaining:
             self._record_reached()
-            raise AttemptDeadlineReachedError(
-                "retry backoff would cross signed attempt deadline"
-            )
+            raise AttemptDeadlineReachedError("retry backoff would cross signed attempt deadline")
         await self.run(lambda: sleep(delay))
 
     async def anext(self, iterator: AsyncIterator[T]) -> T:

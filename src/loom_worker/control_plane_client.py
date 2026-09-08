@@ -22,9 +22,11 @@ from urllib.parse import quote
 from uuid import UUID
 
 import httpx
+import jwt
 
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
+from loom_worker.trial_cancellation_watchdog import TrialOwnershipSnapshot
 
 EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
 _MAX_STEP_TOKEN_TTL_SEC = 30_000
@@ -50,6 +52,10 @@ class StepTokenGrant:
     token: str
     expires_at: datetime
     attempt_deadline_wall_clock: datetime | None
+    agent_attempt_id: UUID | None = None
+    step_jwt_id: UUID | None = None
+    # Only in-process CLI issuers may construct this; never read from HTTP JSON.
+    local_only: bool = False
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> StepTokenGrant:
@@ -73,10 +79,39 @@ class StepTokenGrant:
             seconds=_STEP_TOKEN_DEADLINE_GRACE_SEC
         ):
             raise ValueError("step-token response does not cover the attempt deadline")
+        raw_attempt_id = payload.get("agent_attempt_id")
+        raw_grant_id = payload.get("step_jwt_id")
+        attempt_id = UUID(str(raw_attempt_id)) if raw_attempt_id is not None else None
+        grant_id = UUID(str(raw_grant_id)) if raw_grant_id is not None else None
+        if attempt_id is not None:
+            if deadline is None or grant_id is None:
+                raise ValueError("step-token response has incomplete agent attempt identity")
+            # Consistency check only: workers do not own the signing key. Gateway
+            # verifies the signature before treating these claims as authority.
+            try:
+                claims = jwt.decode(token[len("loom_step_") :], options={"verify_signature": False})
+                if (
+                    claims.get("agent_attempt_id") != str(attempt_id)
+                    or claims.get("jti") != str(grant_id)
+                    or claims.get("subject_kind") != "trial"
+                    or not claims.get("trial_id")
+                    or claims.get("execution_attempt_id") is not None
+                    or _parse_wall_clock_timestamp(
+                        claims.get("attempt_deadline_wall_clock"),
+                        field_name="signed deadline",
+                    )
+                    != deadline
+                    or claims.get("exp") != int(expires_at.timestamp())
+                ):
+                    raise ValueError("step-token response metadata does not match token claims")
+            except jwt.PyJWTError as exc:
+                raise ValueError("step-token response has malformed identity token") from exc
         return cls(
             token=token,
             expires_at=expires_at,
             attempt_deadline_wall_clock=deadline,
+            agent_attempt_id=attempt_id,
+            step_jwt_id=grant_id,
         )
 
 
@@ -126,6 +161,7 @@ class StepTokenClient(Protocol):
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
+        agent_attempt_id: UUID | None = None,
     ) -> StepTokenGrant: ...
 
 
@@ -335,7 +371,9 @@ class HttpControlPlaneClient:
                     self.executor_worker_credential is not None
                     and self.executor_worker_credential != executor_worker_credential
                 ):
-                    raise ValueError("executor worker credential cannot change after client creation")
+                    raise ValueError(
+                        "executor worker credential cannot change after client creation"
+                    )
                 self.executor_worker_credential = executor_worker_credential
             r = await client.post(
                 "/workers/register",
@@ -1243,11 +1281,8 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
-    async def get_trial_state(self, trial_id: UUID) -> str:
-        """Fetch the current CP-side state for ``trial_id``. Used by the
-        worker's cancellation watchdog (#360) to detect operator-driven
-        cancels and cascade an ``asyncio.CancelledError`` into the running
-        trial task."""
+    async def get_trial_ownership(self, trial_id: UUID) -> TrialOwnershipSnapshot:
+        """Fetch CP ownership fields for the live-worker revoke watchdog (#1491)."""
         client, owned = self._http()
         try:
             r = await client.get(
@@ -1256,12 +1291,39 @@ class HttpControlPlaneClient:
             )
             r.raise_for_status()
             body = r.json()
+            raw_worker_id = body.get("worker_id")
+            worker_id: UUID | None
+            if raw_worker_id is None or raw_worker_id == "":
+                worker_id = None
+            else:
+                worker_id = UUID(str(raw_worker_id))
+            raw_attempt = body.get("attempt_count")
+            attempt_count = (
+                int(raw_attempt) if isinstance(raw_attempt, int) else None
+            )
+            # Operator cancel may stamp cancellation_requested_at before the
+            # row reaches state=cancelled; treat that as cancelled for revoke.
             if body.get("cancellation_requested_at") is not None:
-                return "cancelled"
-            return str(body["state"])
+                state = "cancelled"
+            else:
+                state = str(body["state"])
+            return TrialOwnershipSnapshot(
+                state=state,
+                worker_id=worker_id,
+                attempt_count=attempt_count,
+            )
         finally:
             if owned:
                 await client.aclose()
+
+    async def get_trial_state(self, trial_id: UUID) -> str:
+        """Fetch the current CP-side state for ``trial_id``.
+
+        Prefer :meth:`get_trial_ownership` for new revoke logic; this helper
+        remains for callers that only need the state string. A non-null
+        ``cancellation_requested_at`` is reported as ``cancelled``.
+        """
+        return (await self.get_trial_ownership(trial_id)).state
 
     async def get_task_bundle(self, task_id: str) -> dict[str, Any]:
         """Fetch full TaskConfig + checksum + source by `task_id`."""
@@ -1306,6 +1368,7 @@ class HttpControlPlaneClient:
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
+        agent_attempt_id: UUID | None = None,
     ) -> StepTokenGrant:
         """Mint a credential bound to an absolute attempt wall-clock deadline.
 
@@ -1324,10 +1387,23 @@ class HttpControlPlaneClient:
             step_id=step_id,
             ttl_sec=ttl_sec,
             attempt_deadline_wall_clock=deadline,
+            agent_attempt_id=agent_attempt_id,
         )
         grant = StepTokenGrant.from_payload(payload)
         if grant.attempt_deadline_wall_clock != deadline:
             raise ValueError("step-token response changed the attempt deadline")
+        if grant.agent_attempt_id != agent_attempt_id:
+            raise ValueError("step-token response changed the agent attempt identity")
+        if agent_attempt_id is not None:
+            claims = jwt.decode(
+                grant.token[len("loom_step_") :], options={"verify_signature": False}
+            )
+            if (
+                claims.get("team_id") != str(team_id)
+                or claims.get("trial_id") != str(trial_id)
+                or claims.get("step_id") != step_id
+            ):
+                raise ValueError("step-token response changed the requested subject")
         return grant
 
     async def _request_step_token_payload(
@@ -1338,6 +1414,7 @@ class HttpControlPlaneClient:
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime | None,
+        agent_attempt_id: UUID | None = None,
     ) -> Mapping[str, Any]:
         client, owned = self._http()
         try:
@@ -1348,9 +1425,9 @@ class HttpControlPlaneClient:
                 "ttl_sec": ttl_sec,
             }
             if attempt_deadline_wall_clock is not None:
-                body["attempt_deadline_wall_clock"] = (
-                    attempt_deadline_wall_clock.isoformat()
-                )
+                body["attempt_deadline_wall_clock"] = attempt_deadline_wall_clock.isoformat()
+            if agent_attempt_id is not None:
+                body["agent_attempt_id"] = str(agent_attempt_id)
             r = await client.post(
                 "/admin/step-tokens",
                 headers=self._headers,
@@ -1510,10 +1587,7 @@ class HttpControlPlaneClient:
                     conflict = r.json()
                 except ValueError:
                     conflict = None
-                if (
-                    isinstance(conflict, Mapping)
-                    and conflict.get("detail") == "worker lost claim"
-                ):
+                if isinstance(conflict, Mapping) and conflict.get("detail") == "worker lost claim":
                     return False
             r.raise_for_status()
             return True

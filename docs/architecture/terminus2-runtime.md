@@ -222,7 +222,7 @@ The Harbor-embedded runtime emits these events for operators and debuggers:
 | `terminus2_model_mix_planned` | Durable `beta_mixture` plan (`beta`, seed fingerprint) |
 | `terminus2_model_switch` | Applied student↔teacher cut |
 | `terminus2_llm_call_started` / `_completed` / `_failed` | Per-call correlation around the router |
-| `terminus2_episode_checkpoint` | Episode snapshot used on worker retry |
+| `terminus2_episode_checkpoint` | Multi-model **progress marker** for reclaim (not a Harbor resume save; distinct from `HarborCheckpointBridge`) |
 | `terminus2_recovery_failed` | Retry refused rather than merging two Harbor runs |
 
 Gateway join failures (missing `cp_client`, ambiguous token match, command
@@ -308,30 +308,32 @@ not production-accepted.
 
 ### Case A: default no-retry timeout
 
-Submit one trial through `POST /api/v1/batches` with this decision-complete
+Submit one trial through `POST /api/v1/trials` with this decision-complete
 payload shape (replace angle-bracket placeholders; keep the timeout and retry
 values exact):
 
 ```json
 {
-  "name_suffix": "issue-1748-deadline-10s-no-retry",
-  "task_filter": {"task_ids": ["<dedicated-canary-task-id>"]},
-  "trial_config": {
+  "task_id": "<dedicated-canary-task-id>",
+  "idempotency_key": "<unique-case-A-idempotency-key>",
+  "required_worker_pool": "<authorized-exclusive-canary-pool>",
+  "config": {
     "agent_name": "terminus-2",
     "agent_model": {"provider": "<provider-type>", "name": "<model-id>"},
     "override_agent_timeout_sec": 10,
     "agent_timeout_multiplier": 1,
     "retry": {"max_attempts": 1, "retry_on": []}
   },
-  "n_per_task": 1,
   "provider_connection_id": "<dedicated-provider-connection-id>",
   "provider_model_id": "<model-id>"
 }
 ```
 
-Start the fault endpoint's hold before submission. Release it only after Loom
+Prepare the fault endpoint before submission; arm the returned trial identity
+and approve the exact durable dispatch receipt before allowing its hold.
+Release it only after Loom
 has reported the terminal trial or 40 seconds have elapsed. Then collect the
-batch/trial API response, canonical trajectory JSONL, ATIF artifact, output
+single-trial API response, canonical trajectory JSONL, ATIF artifact, output
 projection response, Gateway logs/metrics, fault-endpoint log, worker log, and
 post-run worker/pool read-back.
 
@@ -359,7 +361,7 @@ Case A passes only if all of these are true:
 
 ### Case B: explicit timeout retry
 
-Repeat with a new batch name, `retry.max_attempts=2`, and
+Repeat with a new single-trial idempotency key, `retry.max_attempts=2`, and
 `retry.retry_on=["agent_timeout"]`. Hold only attempt 1 across its 10-second
 deadline; allow attempt 2 to complete normally.
 
@@ -385,7 +387,7 @@ image_digests:
   worker: <digest>
   gateway: <digest>
   control_plane: <digest>
-batch_id: <uuid>
+batch_id: null # single-trial canary, not a batch coverage run
 trial_id: <uuid>
 step_id: <id>
 worker_id: <uuid>
@@ -393,9 +395,12 @@ worker_pool: <pool>
 task_id: <id>
 task_checksum: <sha256>
 terminus2_runtime_provenance: <event-reference>
-batch_submitted_at: <rfc3339>
+trial_submitted_at: <rfc3339>
 attempts:
   - attempt: 1
+    agent_attempt_id: <supervisor-uuid>
+    step_jwt_ids: [<cp-issued-grant-uuid>]
+    gateway_dispatch_receipt_ids: [<internal-receipt-uuid>]
     attempt_started_at: <rfc3339>
     attempt_deadline_wall_clock: <rfc3339>
     deadline_latched_at: <rfc3339>
@@ -432,6 +437,72 @@ worker_restart_evidence: <required-when-unhealthy>
 
 Attach timestamps or immutable object/log references for every assertion. A
 healthy route, green CI, or matching image tag alone is not canary evidence.
+
+### Checked-in local transport harness
+
+The separate [isolated fixture implementation](../runbooks/isolated-deadline-canary.md)
+adds OpenAI model discovery, receipt-authorized hold/reply and a bounded Job
+resource renderer. Its protected launcher and complete evidence collector are
+still pending under #1857; it is not a completed live acceptance path.
+
+`scripts/ops/issue_1748_deadline_canary.py` is a deliberately partial,
+loopback-only fault provider and evidence validator. It exercises real HTTP at
+the Gateway-to-provider boundary without a live provider, worker pool, or Loom
+batch. Case A accepts and holds one request. Case B holds request 1, permits one
+separately signed deadline grant to complete, and rejects any later request.
+Both cases count wrong-capability and over-limit requests so an unexpected
+dispatch cannot be hidden by the one-shot boundary. Request bodies and graceful
+shutdown are independently wall-time bounded.
+
+Run the real-HTTP regression with:
+
+```bash
+uv run --extra dev pytest -q \
+  tests/ops/test_issue_1748_deadline_canary.py \
+  tests/integration/test_issue_1748_deadline_canary.py
+```
+
+The integration test uses two loopback Uvicorn servers and a disposable
+PostgreSQL schema. It proves the Gateway returns the stable `504` /
+`agent_timeout` / `attempt_deadline_reached` result for the held request, sends
+no extra request when the same expired grant is explicitly replayed, and lets a
+separately minted Case B deadline-bearing grant reach the provider and complete.
+That local observation does not prove that Control Plane retry authority created
+a new execution attempt. It does not exercise Control Plane
+terminal persistence, worker supervision/retry, canonical trajectory or ATIF
+publication, deployed image/route read-back, or post-run pool health.
+Its candidate strings are test fixtures; candidate provenance is enforced only
+by the separate manual CLI checkout binding described below.
+
+The provider can also be started manually for loopback development. The
+capability is accepted only through an environment variable and is never
+written to its evidence file:
+
+```bash
+export LOOM_1748_CANARY_NONCE="$(${PYTHON:-python3} -c \
+  'import secrets; print(secrets.token_urlsafe(32))')"
+candidate_sha="$(git rev-parse HEAD)"
+candidate_tree="$(git rev-parse 'HEAD^{tree}')"
+
+uv run python scripts/ops/issue_1748_deadline_canary.py serve \
+  --case A \
+  --candidate-sha "$candidate_sha" \
+  --candidate-tree "$candidate_tree" \
+  --trial-id '<local-trial-uuid>' \
+  --step-id main \
+  --deadline-budget-sec 10 \
+  --hold-sec 15 \
+  --output /tmp/issue-1748-fault-provider.json
+```
+
+The manual command refuses a dirty or candidate-mismatched checkout and any
+non-loopback bind. Its output is only a provider observation; a combined local
+transport document must additionally contain the Gateway outcomes and can be
+checked with `... issue_1748_deadline_canary.py validate --input <path>`.
+Every local document is forced to `full_canary_passed: false` and enumerates
+the missing acceptance layers. Do not substitute it for the authorized
+post-install Case A/B manifest above, and do not use this local command to
+configure a staging provider connection, worker pool, or deployment.
 
 ## Export
 
@@ -472,6 +543,12 @@ for a label on student-driven episodes. `beta = 1` is all teacher, including
 episode 1. Emits `terminus2_model_mix_planned` instead of the two K1/K2
 planned cuts. Applied `terminus2_model_switch` still fires when consecutive
 episodes change role.
+
+Third policy `student_to_teacher_turns` (`--multi-model-step-start` /
+`--multi-model-step-end`): each `LoomRoleRouter.call()` / `call_ordinal` is a
+schedule turn. Student before step start, rising β until step end, then force
+teacher with one-way latch. Plan stores the window as `k1`/`k2`. Also emits
+`terminus2_model_mix_planned` with `grain=turn`.
 
 Constraints:
 

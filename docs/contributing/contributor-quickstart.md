@@ -159,6 +159,10 @@ For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
 ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
 parallel jobs, then it combines their coverage artifacts, applies the 70%
 fast-tier gate, and writes the default fast-tier coverage summary.
+Each root shard has a bounded 40-minute whole-job budget, including environment
+setup, tests, wheel verification, coverage upload, and cleanup. This leaves
+headroom after the observed approximately 29-minute test phase; it does not
+relax per-test timeouts or remove any required checks.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op
@@ -277,7 +281,11 @@ non-documentation changes. The ownership authority at
 Python, Go, or web test path. Schema v2 also declares the allowed CI lanes,
 versioned runtime-payload execution policies, immutable container digests,
 per-payload minimal fixture cases, and component smoke, scan, and attestation
-owners. Validate the whole inventory, inspect the exact isolated
+owners. Every ownership CLI invocation validates the current manifest, tracked
+inventory, and Python test syntax. Docker-marker detection skips AST traversal
+only after parsing a marker-free ASCII source; Unicode and possible-marker
+sources retain exact AST inspection. No prior validation verdict is cached.
+Validate the whole inventory, inspect the exact isolated
 payload plan, or query one path with:
 
 ```bash

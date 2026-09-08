@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import secrets
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -17,8 +17,17 @@ from loom.models.types import ModelSpec
 
 
 def plan_snapshot_from_row(row: ModelSwitchPlan) -> ModelSwitchPlanSnapshot:
-    mix_mode = row.mix_mode or "student_teacher_student"
-    if mix_mode not in {"student_teacher_student", "beta_mixture"}:
+    raw_mode = row.mix_mode or "student_teacher_student"
+    mix_mode: Literal[
+        "student_teacher_student",
+        "beta_mixture",
+        "student_to_teacher_turns",
+    ]
+    if raw_mode == "beta_mixture":
+        mix_mode = "beta_mixture"
+    elif raw_mode == "student_to_teacher_turns":
+        mix_mode = "student_to_teacher_turns"
+    else:
         mix_mode = "student_teacher_student"
     return ModelSwitchPlanSnapshot(
         id=row.id,
@@ -71,6 +80,13 @@ async def persist_model_switch_plan(
         k2 = None
         teacher_episodes = None
         beta = float(spec.beta)
+    elif mix_mode == "student_to_teacher_turns":
+        if spec.step_start is None or spec.step_end is None:
+            return None
+        k1 = int(spec.step_start)
+        k2 = int(spec.step_end)
+        teacher_episodes = None
+        beta = None
     else:
         if spec.switch_episode is None or spec.return_switch_episode is None:
             return None
