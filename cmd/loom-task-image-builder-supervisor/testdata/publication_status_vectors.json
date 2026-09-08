@@ -1,0 +1,52 @@
+{
+  "binding": {
+    "attempt_id": "00000000-0000-0000-0000-0000000001f7",
+    "candidate_set_sha256": "28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2",
+    "component_count": 128,
+    "grant_id": "00000000-0000-0000-0000-0000000001f4",
+    "lease_epoch": 9007199254740991,
+    "materialization_id": "00000000-0000-0000-0000-0000000001f6",
+    "operation_id": "00000000-0000-0000-0000-0000000001f5",
+    "pinned_snapshot_sha256": ""
+  },
+  "schema": "loom.task-image-publication-status-go-test-vectors/v1",
+  "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "statuses": [
+    {
+      "expected": {
+        "failure_code": null,
+        "publication_set_sha256": null,
+        "state": "queued"
+      },
+      "name": "queued",
+      "payload": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001f7\",\"candidate_set_sha256\":\"28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2\",\"component_count\":128,\"grant_id\":\"00000000-0000-0000-0000-0000000001f4\",\"lease_epoch\":9007199254740991,\"materialization_id\":\"00000000-0000-0000-0000-0000000001f6\",\"operation_id\":\"00000000-0000-0000-0000-0000000001f5\",\"schema\":\"loom.task-image-publication-status/v1\",\"snapshot_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"state\":\"queued\"}"
+    },
+    {
+      "expected": {
+        "failure_code": null,
+        "publication_set_sha256": null,
+        "state": "running"
+      },
+      "name": "running",
+      "payload": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001f7\",\"candidate_set_sha256\":\"28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2\",\"component_count\":128,\"grant_id\":\"00000000-0000-0000-0000-0000000001f4\",\"lease_epoch\":9007199254740991,\"materialization_id\":\"00000000-0000-0000-0000-0000000001f6\",\"operation_id\":\"00000000-0000-0000-0000-0000000001f5\",\"schema\":\"loom.task-image-publication-status/v1\",\"snapshot_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"state\":\"running\"}"
+    },
+    {
+      "expected": {
+        "failure_code": "verification_failed",
+        "publication_set_sha256": null,
+        "state": "failed"
+      },
+      "name": "failed",
+      "payload": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001f7\",\"candidate_set_sha256\":\"28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2\",\"component_count\":128,\"failure_code\":\"verification_failed\",\"grant_id\":\"00000000-0000-0000-0000-0000000001f4\",\"lease_epoch\":9007199254740991,\"materialization_id\":\"00000000-0000-0000-0000-0000000001f6\",\"operation_id\":\"00000000-0000-0000-0000-0000000001f5\",\"schema\":\"loom.task-image-publication-status/v1\",\"snapshot_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"state\":\"failed\"}"
+    },
+    {
+      "expected": {
+        "failure_code": null,
+        "publication_set_sha256": "a986d136eb1d49cd8394128f2871ce862fa16c9e422b864c79927050c64a9b87",
+        "state": "completed"
+      },
+      "name": "completed",
+      "payload": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001f7\",\"candidate_set_sha256\":\"28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2\",\"component_count\":128,\"grant_id\":\"00000000-0000-0000-0000-0000000001f4\",\"lease_epoch\":9007199254740991,\"materialization_id\":\"00000000-0000-0000-0000-0000000001f6\",\"operation_id\":\"00000000-0000-0000-0000-0000000001f5\",\"receipt\":{\"attempt_id\":\"00000000-0000-0000-0000-0000000001f7\",\"candidate_set_sha256\":\"28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2\",\"completed_at\":\"2026-09-08T12:34:56Z\",\"component_count\":128,\"lease_epoch\":9007199254740991,\"materialization_id\":\"00000000-0000-0000-0000-0000000001f6\",\"operation_id\":\"00000000-0000-0000-0000-0000000001f5\",\"publication_set_sha256\":\"a986d136eb1d49cd8394128f2871ce862fa16c9e422b864c79927050c64a9b87\",\"schema\":\"loom.task-image-publication-receipt/v1\",\"snapshot_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"worker_generation\":9007199254740991},\"schema\":\"loom.task-image-publication-status/v1\",\"snapshot_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"state\":\"completed\"}"
+    }
+  ]
+}
