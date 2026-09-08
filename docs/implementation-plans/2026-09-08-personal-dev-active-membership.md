@@ -283,7 +283,8 @@ Pydantic-valid caller-made certificate as authenticated.
 ## Task 4: Authenticated lifecycle and executor end-to-end admission
 
 **Files:**
-- Modify `src/loom_capacity_manager/api.py`, `auth.py`, `execution_store.py`.
+- Modify `src/loom_capacity_manager/api.py`, `auth.py`, `execution_store.py`,
+  and `store.py`'s active-demand binding validator.
 - Extend `tests/integration/test_capacity_membership.py` and
   `tests/integration/test_capacity_manager_api.py`.
 - Update `docs/architecture/personal-dev-active-membership.md` with exact delivered scope.
@@ -302,6 +303,11 @@ revalidates current subject lifecycle/generation and membership materialization;
 release may authenticate immutable historical bindings without reopening admission.
 Pending/rate/account limits continue to use the same charged ledger and canonical
 owner account. Unknown and terminal-but-unreleased allocations stay charged.
+The active demand-report validator in `store.py` must use that same strict V2/V3
+manifest parser and exact-generation resolver: a delegated owner cannot reach the
+allocator if its reports are still restricted to prepared base acknowledgements.
+Preserve its candidate/publication/reporter checks and reject disabled or stale
+current membership before recording a demand snapshot.
 
 - [ ] Test unauthenticated/wrong-scope/wrong-principal/subject-path substitution
   requests fail without log or reporter writes; valid delegate reaches real store.
