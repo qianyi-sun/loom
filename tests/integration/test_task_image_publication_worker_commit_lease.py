@@ -30,8 +30,9 @@ from tests.unit.test_task_image_registry_reader import token_key as token_key
 
 
 @pytest.mark.parametrize("expired_at_commit", [True, False])
+@pytest.mark.parametrize("commit_stage", ["claim", "renewal"])
 async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
-    registry_authority_session, tls_registry, token_key, expired_at_commit
+    registry_authority_session, tls_registry, token_key, expired_at_commit, commit_stage
 ):
     values = await _prepared(registry_authority_session, tls_registry, token_key)
     next(
@@ -45,6 +46,7 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
         return last_sample[0]
 
     values = (*values[:4], clock)
+    old_state = "queued" if commit_stage == "claim" else "running"
     async with registry_authority_session() as session:
         await session.execute(
             text("""CREATE FUNCTION publication_claim_commit_wait() RETURNS trigger
@@ -52,9 +54,9 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
             PERFORM pg_advisory_xact_lock(987123); RETURN NEW; END $$""")
         )
         await session.execute(
-            text("""CREATE CONSTRAINT TRIGGER publication_claim_commit_wait
+            text(f"""CREATE CONSTRAINT TRIGGER publication_claim_commit_wait
             AFTER UPDATE ON task_image_publication_jobs DEFERRABLE INITIALLY DEFERRED
-            FOR EACH ROW WHEN (OLD.state='queued' AND NEW.state='running')
+            FOR EACH ROW WHEN (OLD.state='{old_state}' AND NEW.state='running')
             EXECUTE FUNCTION publication_claim_commit_wait()""")
         )
         await session.commit()
@@ -88,7 +90,11 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
             assert task in done, "claim commit left work running beyond its remaining lease"
             with pytest.raises(PublicationJobOwnershipError):
                 await task
-            assert not tls_registry.requests
+            if commit_stage == "claim":
+                assert not tls_registry.requests
+            else:
+                assert len(tls_registry.requests) == 1
+                assert tls_registry.peer_closed.is_set()
             assert not values[2].entered.is_set()
         else:
             # Recover remaining live authority promptly instead of unnecessarily
