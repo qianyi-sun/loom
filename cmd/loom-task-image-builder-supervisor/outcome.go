@@ -255,12 +255,12 @@ func validatePublicationBuiltSet(set BuiltComponentSet) error {
 		if !componentPattern.MatchString(component.Name) {
 			return errors.New("registry publication component invalid")
 		}
-		if index == 0 {
-			if component.Name != "task" {
+		if component.Name == "task" {
+			if index != 0 {
 				return errors.New("registry publication component order invalid")
 			}
 		} else {
-			if component.Name == "task" || component.Name <= previousSidecar {
+			if previousSidecar != "" && component.Name <= previousSidecar {
 				return errors.New("registry publication component order invalid")
 			}
 			previousSidecar = component.Name
