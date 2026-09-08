@@ -155,10 +155,10 @@ supervisor protocol, BuildKit metadata capture, publication and orchestration.
   no caller-selected repository, signing key, URL, platform or digest set.
 - [ ] Record observed base resolution metadata from pinned BuildKit, covering
   FROM scratch, multiple stages, malformed metadata and missing evidence.
-- [ ] Renew session, attestation and lease while polling; close BuildKit and
+- [x] Renew session, attestation and lease while polling; close BuildKit and
   release retryably on publication infrastructure errors. Receipt completion
   must bind the same attempt and full component set.
-- [ ] Run real Go/Python handoff integration plus Go race tests. Keep activation
+- [x] Run real Go/Python handoff integration plus Go race tests. Keep activation
   controlled by the later protected composition rather than enabling defaults.
 
 Runtime integration exposed two upstream shapes: empty scratch exports use
@@ -213,8 +213,19 @@ full Go normal/race/vet checks passed. Actual credential-source refresh through
 the orchestrator closes the successor and receipt-confirmed completion skips
 release. The extended real Go/Python guard flow (`eb756dadc`) passes eight
 required-mode checks, including candidate recording, queued submit and completed
-poll with an independently derived set hash. Full HTTP/guard/Go/worker composition
-and independent composed review remain pending. No slice activates the provider.
+poll with an independently derived set hash. The full Go/guard/API/PostgreSQL/
+worker composition is covered through `e9985a46c`, with mandatory race-enabled CI
+coverage in `eb4bdad16`. All 12 local/composed cases passed in 72.58 seconds using
+a freshly rebuilt race helper; Go normal/race/vet and 123 workflow checks passed.
+Real source renewal preserves original claim provenance; corrupted registry bytes
+and revocation during signing leave no readiness or signed envelope. Atomic
+completion before heartbeat produces an actual conflict followed by exact receipt
+confirmation and successful finish, with no release or deterministic failure.
+The harness exposed and regression-tested fractional bootstrap timestamp loss;
+`ef4ece7d7` preserves the exact issuance instant and has independent scoped review.
+The composition uses explicit native/build/upload/signing and ASGI transport
+doubles; it does not substitute for native containment or production trust.
+Independent full composition review remains pending. No slice activates the provider.
 
 Upstream reconciliation `2171ed1b7` moves only the unpublished publication
 migration to `0133`, after unchanged public `0132`. Independent review approved

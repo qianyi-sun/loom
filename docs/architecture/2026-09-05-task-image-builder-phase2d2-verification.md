@@ -206,6 +206,25 @@ that lease; other publication failures close the executor and release retryably
 without charging deterministic task-failure budget. Full HTTP/guard/Go/worker
 composition, release assembly and activation remain separate acceptance gates.
 
+The maintained composition fixture now drives the real Go orchestrator through
+the sealed-descriptor guard protocol, production authority parsers, authenticated
+API routes, disposable migrated PostgreSQL and the publication worker. It verifies
+streamed TLS registry bytes and independently checks the durable Ed25519 test
+signature. Cases cover source-driven session renewal, corrupt registry bytes,
+revocation during signing, and atomic completion before a racing heartbeat. The
+last case receives a real heartbeat conflict and confirms the exact completed
+receipt without releasing the cleared lease. CI requires these flows with a
+race-instrumented Go helper; an absent helper cannot silently skip the lane.
+
+This fixture substitutes node/Slurm/containment/storage adapters, bundle download,
+build and registry upload, test signing/keyset distribution, and the authority
+HTTP byte transport (ASGI). It does not prove native containment, real registry
+upload, authority mTLS networking or production signing. Those boundaries retain
+their separate tests and activation gates. Bootstrap exchange preserves the
+precise authority-issued receipt timestamp, including fractional seconds, when
+forming its deterministic UTC observation; truncation would backdate the request
+before receipt issuance and correctly fail authority admission.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
