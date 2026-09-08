@@ -53,6 +53,7 @@ ALLOWED_AUTHORITY_IMPORTS = {
     "loom.db.schema_startup",
     "loom.security.secret_store",
     "loom.task_image_build_plan",
+    "loom.task_image_materialization",
 }
 
 
@@ -125,7 +126,7 @@ def test_only_the_dedicated_authority_api_imports_the_projection_store() -> None
         for path in PRODUCTION_ROOT.rglob("*.py")
         if _imports_store(_tree(path))
     }
-    assert importers == {AUTHORITY_ROOT / "api.py"}
+    assert importers == {AUTHORITY_ROOT / "api.py", AUTHORITY_ROOT / "publication_store.py"}
 
 
 def test_no_other_production_package_imports_the_authority_api() -> None:

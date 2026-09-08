@@ -28,6 +28,7 @@ TABLES = (
     "task_image_publication_state",
     "task_image_publication_keys",
     "task_image_publication_envelopes",
+    "task_image_publication_jobs",
 )
 
 
@@ -45,6 +46,7 @@ def test_0133_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
             "TaskImagePublicationState",
             "TaskImagePublicationKey",
             "TaskImagePublicationEnvelope",
+            "TaskImagePublicationJob",
         ):
             model = getattr(schema, model_name)
             actual = {column["name"] for column in inspect(engine).get_columns(model.__tablename__)}
