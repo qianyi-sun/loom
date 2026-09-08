@@ -380,6 +380,7 @@ def test_host_bundle_convergence_rejects_substitute_runtime_manifest(
 
 def test_plan_and_check_are_read_only(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
+    cgroup_target_before = os.readlink(fixture.cgroup_config)
     # Force the first symlink read to update atime even on relatime filesystems.
     os.utime(
         fixture.cgroup_config,
@@ -395,7 +396,22 @@ def test_plan_and_check_are_read_only(tmp_path: Path) -> None:
 
     assert plan["changes"] == ["packages", "helpers", "cgroup", "quota", "identity", "runtime"]
     assert fixture.cgroup_config.is_symlink()
-    assert fixture.cgroup_config.lstat() == cgroup_before
+    cgroup_after = fixture.cgroup_config.lstat()
+    # Reading a symlink may update atime; identity and mutation metadata must
+    # stay exact, including subsecond changes hidden by stat_result equality.
+    for attribute in (
+        "st_mode",
+        "st_ino",
+        "st_dev",
+        "st_nlink",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    ):
+        assert getattr(cgroup_after, attribute) == getattr(cgroup_before, attribute), attribute
+    assert os.readlink(fixture.cgroup_config) == cgroup_target_before
     assert fixture.observed_cgroup.read_bytes() == observed_before
     assert fixture.backend.calls == ["preflight", "preflight"]
     assert list(fixture.receipt_dir.iterdir()) == []
