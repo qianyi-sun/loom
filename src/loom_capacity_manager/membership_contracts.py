@@ -11,6 +11,7 @@ from pydantic import Field, TypeAdapter, field_validator, model_validator
 from loom_capacity_manager.contracts import (
     MAX_SUBJECTS,
     AllocationInputV1,
+    ConfigurationGenerationRefV1,
     Digest,
     DynamicDevelopmentSubjectProjectionV1,
     Identifier,
@@ -65,15 +66,74 @@ class PersonalMembershipPolicyV1(StrictV1Model):
 class ExecutionPreparationPolicyV3(ExecutionPreparationPolicyV2):
     """V2 execution policy extended by an exact personal-membership policy."""
 
-    schema_version: Literal[3] = 3
+    # Intentional wire-version replacement; the discriminated parser retains V2.
+    schema_version: Literal[3] = 3  # type: ignore[assignment]
     personal_membership: PersonalMembershipPolicyV1
 
 
 class ExecutionPreparationV3(ExecutionPreparationV2):
     """V2 execution preparation extended by its personal-membership policy."""
 
-    schema_version: Literal[3] = 3
+    # Keep inherited fields/validators without widening V2's accepted wire tag.
+    schema_version: Literal[3] = 3  # type: ignore[assignment]
     personal_membership: PersonalMembershipPolicyV1
+
+
+class PersonalReincarnationEvidenceV1(StrictV1Model):
+    """Store-issued binding of a successor to its released predecessor.
+
+    Structural validation is not authentication: the membership store must verify
+    the immutable event chain and actual durable release witnesses.
+    """
+
+    namespace_id: UUID
+    execution_manifest_sha256: Digest
+    origin: ConfigurationGenerationRefV1
+    predecessor: SubjectConfigurationV1
+    predecessor_revision: PositiveQuantity
+    predecessor_head_sha256: Digest
+    admission_revision: PositiveQuantity
+    successor_incarnation: UUID
+    release_set_sha256: Digest
+
+    _identities_nonzero = field_validator("namespace_id", "successor_incarnation")(_nonzero_uuid)
+
+    @field_validator("execution_manifest_sha256", "predecessor_head_sha256", "release_set_sha256")
+    @classmethod
+    def _nonzero_digest(cls, value: str) -> str:
+        if value == _ZERO_DIGEST:
+            raise ValueError("reincarnation evidence digest must be nonzero")
+        return value
+
+    @model_validator(mode="after")
+    def _predecessor_binding(self) -> PersonalReincarnationEvidenceV1:
+        predecessor = self.predecessor
+        identities = (
+            self.origin.subject_id,
+            self.origin.subject_incarnation,
+            predecessor.subject_id,
+            predecessor.subject_incarnation,
+            predecessor.demand_reporter_incarnation,
+        )
+        if any(value is None or value.int == 0 for value in identities):
+            raise ValueError("reincarnation subject identities must be nonzero")
+        if (
+            self.origin.scope != "subject"
+            or self.origin.subject_id != predecessor.subject_id
+            or self.origin.digest == _ZERO_DIGEST
+            or self.origin.generation > predecessor.configuration_generation
+            or predecessor.lifecycle_state != "disabled"
+            or predecessor.min_slots != 0
+            or predecessor.max_slots != 0
+            or self.successor_incarnation
+            in (
+                predecessor.subject_incarnation,
+                self.origin.subject_incarnation,
+            )
+            or self.admission_revision <= self.predecessor_revision
+        ):
+            raise ValueError("reincarnation predecessor binding changed")
+        return self
 
 
 class PersonalApplicationMemberV1(StrictV1Model):
@@ -84,6 +144,7 @@ class PersonalApplicationMemberV1(StrictV1Model):
     purpose: Literal["personal-application"] = "personal-application"
     configuration: SubjectConfigurationV1
     acknowledgement: SubjectExecutionAcknowledgementV2
+    reincarnation: PersonalReincarnationEvidenceV1 | None = None
 
     _owner_is_nonzero = field_validator("owner_id")(_nonzero_uuid)
 
@@ -112,6 +173,27 @@ class PersonalApplicationMemberV1(StrictV1Model):
             or acknowledgement.candidate.publication_sha256 == _ZERO_DIGEST
         ):
             raise ValueError("personal application candidate publication is invalid")
+        evidence = self.reincarnation
+        if evidence is not None:
+            predecessor = evidence.predecessor
+            if (
+                evidence.successor_incarnation != configuration.subject_incarnation
+                or predecessor.subject_id != configuration.subject_id
+                or predecessor.account_id != configuration.account_id
+                or predecessor.display_name != configuration.display_name
+                or predecessor.demand_reporter_incarnation
+                == configuration.demand_reporter_incarnation
+                or configuration.configuration_generation <= predecessor.configuration_generation
+                or evidence.admission_revision > self.revision
+                or (
+                    evidence.admission_revision == self.revision
+                    and (
+                        configuration.candidate_generation != 1
+                        or configuration.deployment_generation != 1
+                    )
+                )
+            ):
+                raise ValueError("reincarnation successor binding changed")
         return self
 
 
@@ -181,7 +263,8 @@ class PersonalApplicationMembershipResultV1(StrictV1Model):
 class DelegatedAllocationInputV2(AllocationInputV1):
     """Allocator input overlaid with a bounded personal membership snapshot."""
 
-    schema_version: Literal[2] = 2
+    # The delegated subtype has a distinct wire version, not a widened V1 parser.
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
     preparation: ExecutionPreparationV3
     managed_base_subjects: Annotated[
         tuple[SubjectConfigurationV1, ...],
@@ -211,17 +294,19 @@ class DelegatedAllocationInputV2(AllocationInputV1):
         return self
 
 
-_PREPARATION_ADAPTER = TypeAdapter(
+_PREPARATION_ADAPTER: TypeAdapter[ExecutionPreparationV2 | ExecutionPreparationV3] = TypeAdapter(
     Annotated[
         ExecutionPreparationV2 | ExecutionPreparationV3,
         Field(discriminator="schema_version"),
     ]
 )
-_POLICY_ADAPTER = TypeAdapter(
-    Annotated[
-        ExecutionPreparationPolicyV2 | ExecutionPreparationPolicyV3,
-        Field(discriminator="schema_version"),
-    ]
+_POLICY_ADAPTER: TypeAdapter[ExecutionPreparationPolicyV2 | ExecutionPreparationPolicyV3] = (
+    TypeAdapter(
+        Annotated[
+            ExecutionPreparationPolicyV2 | ExecutionPreparationPolicyV3,
+            Field(discriminator="schema_version"),
+        ]
+    )
 )
 
 
@@ -261,6 +346,7 @@ __all__ = [
     "PersonalApplicationMembershipResultV1",
     "PersonalMembershipPolicyV1",
     "PersonalMembershipSnapshotV1",
+    "PersonalReincarnationEvidenceV1",
     "parse_execution_preparation",
     "parse_execution_preparation_policy",
 ]

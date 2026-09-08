@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypedDict, TypeVar, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -223,6 +223,19 @@ class CapacityStatusPageV1:
 
 _ContractT = TypeVar("_ContractT", bound=StrictV1Model)
 _EXECUTION_LIFECYCLE_NAMESPACE = UUID("9e40e05d-f1c0-4aa8-9ee2-21cc4b46f489")
+
+
+class _AllocationInputValues(TypedDict):
+    configuration: ConfigurationSnapshotV1
+    fleet: FleetManifestV1
+    effective_account_policies: tuple[AccountPolicyV1, ...]
+    subjects: tuple[SubjectAllocationInputV1, ...]
+    pools: tuple[PoolAllocationInputV1, ...]
+    reservation_valid_until: datetime | None
+    observed_commitments: tuple[ObservedCommitmentV1, ...]
+    fairness_cursors: tuple[FairnessCursorV1, ...]
+    existing_pending_slots: int
+    existing_pending_jobs: int
 
 
 def _parse_contract(model: type[_ContractT], payload: dict[str, Any]) -> _ContractT:
@@ -3599,20 +3612,22 @@ class CapacityManagementStore:
             }:
                 raise ExecutionConflictError("prepared base subject materialization changed")
             subjects_by_id = {subject.subject_id: subject for subject in subjects}
-            for row in materialized:
-                expected_subject = subjects_by_id[row.subject_id]
+            for materialized_subject in materialized:
+                expected_subject = subjects_by_id[materialized_subject.subject_id]
                 try:
-                    payload = _parse_contract(SubjectConfigurationV1, row.payload)
+                    payload = _parse_contract(SubjectConfigurationV1, materialized_subject.payload)
                 except ValueError as exc:
                     raise ExecutionConflictError(
                         "prepared base subject materialization changed"
                     ) from exc
-                if payload != expected_subject or not _subject_scalars_match(row, expected_subject):
+                if payload != expected_subject or not _subject_scalars_match(
+                    materialized_subject, expected_subject
+                ):
                     raise ExecutionConflictError("prepared base subject materialization changed")
         if isinstance(request, ExecutionPreparationV3):
             subjects_by_id = {subject.subject_id: subject for subject in subjects}
             for subject_id in request.personal_membership.managed_base_subject_ids:
-                subject = subjects_by_id.get(subject_id)
+                managed_subject = subjects_by_id.get(subject_id)
                 projection = (
                     (
                         await session.execute(
@@ -3624,14 +3639,14 @@ class CapacityManagementStore:
                     .scalars()
                     .first()
                 )
-                if subject is None or projection is None:
+                if managed_subject is None or projection is None:
                     raise ExecutionConflictError(
                         "managed base subject has no personal projection record"
                     )
                 projected_subject = _parse_contract(
                     SubjectConfigurationV1, projection.result_payload["subject"]
                 )
-                if projected_subject != subject:
+                if projected_subject != managed_subject:
                     raise ExecutionConflictError(
                         "managed base subject differs from its personal projection"
                     )
@@ -4282,6 +4297,7 @@ class CapacityManagementStore:
             parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
             if isinstance(parsed_preparation, ExecutionPreparationV3):
                 preparation = parsed_preparation
+                delegated_epoch_row = execution_epoch_row
                 from loom_capacity_manager.membership_store import CapacityMembershipStore
 
                 membership_store = CapacityMembershipStore(self)
@@ -4300,13 +4316,13 @@ class CapacityManagementStore:
                     .all()
                 )
                 materialized: dict[UUID, SubjectConfigurationV1] = {}
-                for row in materialized_rows:
-                    value = _parse_contract(SubjectConfigurationV1, row.payload)
-                    if not _subject_scalars_match(row, value):
+                for subject_row in materialized_rows:
+                    subject_value = _parse_contract(SubjectConfigurationV1, subject_row.payload)
+                    if not _subject_scalars_match(subject_row, subject_value):
                         raise ConfigurationConflictError(
                             "personal membership materialized subject changed"
                         )
-                    materialized[value.subject_id] = value
+                    materialized[subject_value.subject_id] = subject_value
                 expected = {value.subject_id: value for value in base_subjects}
                 expected.update(
                     {
@@ -4346,17 +4362,17 @@ class CapacityManagementStore:
             .all()
         )
         observed: list[ObservedCommitmentV1] = []
-        for row in observed_rows:
-            payload = row.binding_payload.get("observed_contract")
+        for observed_row in observed_rows:
+            payload = observed_row.binding_payload.get("observed_contract")
             if not isinstance(payload, dict):
                 continue
             contract = _parse_contract(ObservedCommitmentV1, payload)
-            if row.kind != contract.kind:
+            if observed_row.kind != contract.kind:
                 raise ConfigurationConflictError(
                     "stored commitment kind does not match its contract"
                 )
-            if row.state != contract.state:
-                contract = contract.model_copy(update={"state": row.state})
+            if observed_row.state != contract.state:
+                contract = contract.model_copy(update={"state": observed_row.state})
             observed.append(contract)
         reservation_rows = (
             await session.execute(
@@ -4480,7 +4496,7 @@ class CapacityManagementStore:
                     )
             await membership_store.verify_snapshot_materialization(
                 session,
-                execution_epoch_row,
+                delegated_epoch_row,
                 membership,
             )
         snapshot = ConfigurationSnapshotV1(
@@ -4501,7 +4517,7 @@ class CapacityManagementStore:
                 for row in base_subject_rows
             ),
         )
-        values = dict(
+        values: _AllocationInputValues = dict(
             configuration=snapshot,
             fleet=fleet,
             effective_account_policies=effective_accounts,

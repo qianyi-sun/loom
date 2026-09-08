@@ -239,8 +239,13 @@ assert value.membership.members[0].owner_id == bob_owner_id
 
 **Files:**
 - Extend `membership_contracts.py`, `membership.py`, `membership_store.py`.
+- Create `membership_release.py` for read-only predecessor release validation,
+  shared by recreation and the following lifecycle release gate. Keep physical
+  cleanup authority in the existing executor/grant stores.
 - Extend `tests/unit/test_capacity_membership.py` and
   `tests/integration/test_capacity_membership.py`.
+- Create focused `tests/integration/test_capacity_membership_release.py` for
+  executable and legacy witness validation without growing the mutation test file.
 
 Add `PersonalReincarnationEvidenceV1` and an optional `reincarnation` field to
 `PersonalApplicationMemberV1`. Evidence binds namespace and execution-manifest

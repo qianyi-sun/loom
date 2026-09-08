@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from typing import cast
 from uuid import UUID
 
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import (
     AccountPolicyV1,
+    ConfigurationGenerationRefV1,
+    DynamicDevelopmentSubjectProjectionV1,
     FleetManifestV1,
     SubjectConfigurationV1,
     canonical_digest,
@@ -26,6 +29,7 @@ from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMembershipResultV1,
     PersonalApplicationMemberV1,
     PersonalMembershipSnapshotV1,
+    PersonalReincarnationEvidenceV1,
     parse_execution_preparation,
 )
 from loom_capacity_manager.models import (
@@ -33,6 +37,7 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityCandidate,
     CapacityConfigGeneration,
+    CapacityConfigurationEpoch,
     CapacityDemandReporter,
     CapacityDeploymentGeneration,
     CapacityExecutionEpoch,
@@ -52,6 +57,16 @@ from loom_capacity_manager.store import (
 )
 
 _ZERO_DIGEST = "0" * 64
+
+
+def _subject_reference(subject: SubjectConfigurationV1) -> ConfigurationGenerationRefV1:
+    return ConfigurationGenerationRefV1(
+        scope="subject",
+        subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation,
+        generation=subject.configuration_generation,
+        digest=canonical_digest(subject),
+    )
 
 
 def _json_digest(value: object) -> str:
@@ -167,7 +182,7 @@ def _acknowledgement_matches(
 
 
 def _validated_event_results(
-    rows: list[CapacityPersonalMembershipEvent],
+    rows: Sequence[CapacityPersonalMembershipEvent],
     epoch: CapacityExecutionEpoch,
 ) -> tuple[PersonalApplicationMembershipResultV1, ...]:
     try:
@@ -216,6 +231,73 @@ def _validated_event_results(
         expected_previous = row.head_sha256
         results.append(result)
     return tuple(results)
+
+
+async def _validated_membership_history(
+    session: AsyncSession,
+    rows: Sequence[CapacityPersonalMembershipEvent],
+    epoch: CapacityExecutionEpoch,
+) -> tuple[PersonalApplicationMembershipResultV1, ...]:
+    """Authenticate recreation certificates against history and release facts."""
+
+    from loom_capacity_manager.membership_release import predecessor_release_sha256
+
+    results = _validated_event_results(rows, epoch)
+    if not results:
+        return results
+    configuration = await session.get(CapacityConfigurationEpoch, epoch.configuration_epoch)
+    if configuration is None:
+        raise ConfigurationConflictError("personal membership origin configuration is absent")
+    origins = {
+        reference.subject_id: reference
+        for reference in (
+            _parse_contract(ConfigurationGenerationRefV1, payload)
+            for payload in configuration.subject_generation_manifest
+        )
+    }
+    previous: dict[UUID, tuple[CapacityPersonalMembershipEvent, PersonalApplicationMemberV1]] = {}
+    used_incarnations = {reference.subject_incarnation for reference in origins.values()}
+    for row, result in zip(rows, results, strict=True):
+        member = result.member
+        subject = member.configuration
+        origin = origins.setdefault(subject.subject_id, _subject_reference(subject))
+        prior = previous.get(subject.subject_id)
+        evidence = member.reincarnation
+        if prior is None:
+            if evidence is not None:
+                raise ConfigurationConflictError("reincarnation predecessor membership is absent")
+        else:
+            previous_row, old_member = prior
+            old = old_member.configuration
+            if (
+                member.owner_id != old_member.owner_id
+                or subject.display_name != old.display_name
+                or subject.configuration_generation <= old.configuration_generation
+            ):
+                raise ConfigurationConflictError("personal membership historical identity changed")
+            if subject.subject_incarnation != old.subject_incarnation:
+                if subject.subject_incarnation in used_incarnations:
+                    raise ConfigurationConflictError("reincarnation identity was already used")
+                if (
+                    evidence is None
+                    or evidence.origin != origin
+                    or evidence.predecessor != old
+                    or evidence.predecessor_revision != previous_row.revision
+                    or evidence.predecessor_head_sha256 != previous_row.head_sha256
+                    or evidence.admission_revision != row.revision
+                    or evidence.namespace_id != row.namespace_id
+                    or evidence.execution_manifest_sha256 != epoch.execution_manifest_sha256
+                    or row.request_payload["projection"]["operation_kind"] != "create"
+                    or evidence.release_set_sha256 != await predecessor_release_sha256(session, old)
+                ):
+                    raise ConfigurationConflictError("personal reincarnation release chain changed")
+            elif evidence != old_member.reincarnation or old.lifecycle_state == "disabled":
+                raise ConfigurationConflictError(
+                    "personal reincarnation evidence was replaced or dropped"
+                )
+        previous[subject.subject_id] = (row, member)
+        used_incarnations.add(subject.subject_incarnation)
+    return results
 
 
 class CapacityMembershipStore:
@@ -311,6 +393,7 @@ class CapacityMembershipStore:
                     raise IdempotencyConflictError(
                         "personal membership identity was reused with different input"
                     )
+                await self.snapshot(session, epoch)
                 return _event_result(replay).model_copy(update={"replayed": True})
 
             verified_input = await self._management.load_allocation_input(
@@ -355,8 +438,9 @@ class CapacityMembershipStore:
             if fleet_row is None:
                 raise ConfigurationConflictError("personal membership fleet is unavailable")
             fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
-            if policy.development_template_sha256 != canonical_digest(
-                fleet.development_subject_template
+            if fleet.development_subject_template is None or (
+                policy.development_template_sha256
+                != canonical_digest(fleet.development_subject_template)
             ):
                 raise ConfigurationConflictError("personal membership template changed")
 
@@ -376,6 +460,7 @@ class CapacityMembershipStore:
                 for row in materialized_rows
             }
             existing = latest_members.get(projection.subject_id)
+            recreating = False
             base_ids = {item.subject_id for item in preparation.subject_acknowledgements}
             if existing is None and projection.subject_id in set(policy.managed_base_subject_ids):
                 original = materialized.get(projection.subject_id)
@@ -471,16 +556,19 @@ class CapacityMembershipStore:
                     )
             else:
                 old = existing.configuration
-                if old.lifecycle_state == "disabled":
+                recreating = (
+                    old.lifecycle_state == "disabled" and projection.operation_kind == "create"
+                )
+                if old.lifecycle_state == "disabled" and not recreating:
                     raise ConfigurationConflictError(
                         "disabled personal application cannot be reactivated"
                     )
-                if projection.operation_kind == "create":
+                if projection.operation_kind == "create" and not recreating:
                     raise ConfigurationConflictError(
                         "personal application membership already exists"
                     )
                 if (
-                    projection.subject_incarnation != old.subject_incarnation
+                    (projection.subject_incarnation != old.subject_incarnation and not recreating)
                     or projection.owner_id != existing.owner_id
                     or display_name != old.display_name
                 ):
@@ -489,7 +577,45 @@ class CapacityMembershipStore:
                     raise ConfigurationConflictError(
                         "personal application configuration generation is not monotonic"
                     )
-                if projection.operation_kind == "update":
+                if recreating:
+                    if (
+                        projection.subject_incarnation == old.subject_incarnation
+                        or projection.candidate_generation != 1
+                        or projection.deployment_generation != 1
+                    ):
+                        raise ConfigurationConflictError(
+                            "reincarnation requires a fresh deployment identity"
+                        )
+                    used_configuration = (
+                        await session.execute(
+                            select(CapacityConfigGeneration.id)
+                            .where(
+                                CapacityConfigGeneration.subject_incarnation
+                                == projection.subject_incarnation,
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    used_membership = (
+                        await session.execute(
+                            select(CapacityPersonalMembershipEvent.id)
+                            .where(
+                                CapacityPersonalMembershipEvent.subject_incarnation
+                                == projection.subject_incarnation,
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if (
+                        used_configuration is not None
+                        or used_membership is not None
+                        or any(
+                            row.subject_incarnation == projection.subject_incarnation
+                            for row in materialized_rows
+                        )
+                    ):
+                        raise ConfigurationConflictError("reincarnation identity was already used")
+                elif projection.operation_kind == "update":
                     if projection.deployment_generation <= old.deployment_generation:
                         raise ConfigurationConflictError(
                             "personal application deployment generation is not monotonic"
@@ -558,6 +684,52 @@ class CapacityMembershipStore:
                 tuple(derived_accounts.values()),
             )
 
+            reincarnation = None if existing is None else existing.reincarnation
+            if recreating:
+                from loom_capacity_manager.membership_release import predecessor_release_sha256
+
+                assert existing is not None
+                predecessor_row = next(
+                    (row for row in reversed(prior_rows) if row.subject_id == subject.subject_id),
+                    None,
+                )
+                if predecessor_row is None:
+                    raise ConfigurationConflictError(
+                        "reincarnation predecessor membership is absent"
+                    )
+                origin: ConfigurationGenerationRefV1 | None
+                if existing.reincarnation is not None:
+                    origin = existing.reincarnation.origin
+                else:
+                    origin = next(
+                        (
+                            reference
+                            for reference in verified_input.configuration.subjects
+                            if reference.subject_id == subject.subject_id
+                        ),
+                        None,
+                    )
+                    if origin is None:
+                        origin = _subject_reference(
+                            next(
+                                _event_result(row).member.configuration
+                                for row in prior_rows
+                                if row.subject_id == subject.subject_id
+                            )
+                        )
+                reincarnation = PersonalReincarnationEvidenceV1(
+                    namespace_id=policy.namespace_id,
+                    execution_manifest_sha256=epoch.execution_manifest_sha256,
+                    origin=origin,
+                    predecessor=existing.configuration,
+                    predecessor_revision=predecessor_row.revision,
+                    predecessor_head_sha256=predecessor_row.head_sha256,
+                    admission_revision=current_revision + 1,
+                    successor_incarnation=subject.subject_incarnation,
+                    release_set_sha256=await predecessor_release_sha256(
+                        session, existing.configuration
+                    ),
+                )
             await self._persist_generation_evidence(session, projection, subject, existing)
             await self._materialize_subject(
                 session,
@@ -572,6 +744,7 @@ class CapacityMembershipStore:
                 owner_id=projection.owner_id,
                 configuration=subject,
                 acknowledgement=acknowledgement,
+                reincarnation=reincarnation,
             )
             head_sha256 = _head_digest(
                 actor=actor,
@@ -669,7 +842,7 @@ class CapacityMembershipStore:
         latest: dict[UUID, PersonalApplicationMemberV1] = {}
         for row, result in zip(
             rows,
-            _validated_event_results(rows, epoch_row),
+            await _validated_membership_history(session, rows, epoch_row),
             strict=True,
         ):
             latest[row.subject_id] = result.member
@@ -745,9 +918,9 @@ class CapacityMembershipStore:
     async def _require_retained_evidence(
         self,
         session: AsyncSession,
-        projection,
+        projection: DynamicDevelopmentSubjectProjectionV1,
         existing: SubjectConfigurationV1,
-    ) -> None:  # type: ignore[no-untyped-def]
+    ) -> None:
         candidate = (
             await session.execute(
                 select(CapacityCandidate).where(
@@ -823,10 +996,10 @@ class CapacityMembershipStore:
     async def _persist_generation_evidence(
         self,
         session: AsyncSession,
-        projection,
+        projection: DynamicDevelopmentSubjectProjectionV1,
         subject: SubjectConfigurationV1,
         existing: PersonalApplicationMemberV1 | None,
-    ) -> None:  # type: ignore[no-untyped-def]
+    ) -> None:
         if projection.operation_kind in {"create", "update"}:
             session.add(
                 CapacityCandidate(
@@ -897,7 +1070,7 @@ class CapacityMembershipStore:
         configuration_epoch: int,
         subject: SubjectConfigurationV1,
         account: AccountPolicyV1,
-        rows: list[CapacitySubject],
+        rows: Sequence[CapacitySubject],
     ) -> None:
         row = next((item for item in rows if item.subject_id == subject.subject_id), None)
         values = dict(
@@ -999,7 +1172,7 @@ async def resolve_subject_acknowledgement(
         .scalars()
         .all()
     )
-    results = _validated_event_results(rows, epoch)
+    results = await _validated_membership_history(session, rows, epoch)
     for row, result in reversed(tuple(zip(rows, results, strict=True))):
         if (
             row.subject_id == subject_id

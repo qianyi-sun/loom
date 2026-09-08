@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
     checked_sum,
 )
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from loom_capacity_manager.membership_contracts import (
     DelegatedAllocationInputV2,
     PersonalApplicationMemberV1,
@@ -168,7 +170,8 @@ def resolved_subject_references(
         for account in (value.effective_account_policies or fleet.account_policies)
     }
 
-    base_references = {item.subject_id: item for item in configuration.subjects}
+    # Subject references have non-null identities under the snapshot contract.
+    base_references = {cast(UUID, item.subject_id): item for item in configuration.subjects}
     managed_ids = set(policy.managed_base_subject_ids)
     managed_base = {item.subject_id: item for item in value.managed_base_subjects}
     if set(managed_base) != managed_ids:
@@ -203,13 +206,23 @@ def resolved_subject_references(
             template,
             owner_policy,
         )
-        original = managed_base.get(subject_id)
-        if subject_id in base_references and original is None:
+        managed_original = managed_base.get(subject_id)
+        if subject_id in base_references and managed_original is None:
             raise _invalid("personal membership cannot override a static base subject")
-        if original is not None and (
-            original.subject_incarnation != member.configuration.subject_incarnation
-            or original.display_name != member.configuration.display_name
-            or _owner_id(original) != member.owner_id
+        evidence = member.reincarnation
+        if evidence is not None and (
+            evidence.namespace_id != membership.namespace_id
+            or evidence.execution_manifest_sha256 != canonical_executable_digest(preparation)
+            or (managed_original is not None and evidence.origin != base_references[subject_id])
+        ):
+            raise _invalid("personal reincarnation authority or origin changed")
+        if managed_original is not None and (
+            (
+                managed_original.subject_incarnation != member.configuration.subject_incarnation
+                and evidence is None
+            )
+            or managed_original.display_name != member.configuration.display_name
+            or _owner_id(managed_original) != member.owner_id
         ):
             raise _invalid("managed base subject identity changed")
         resolved[subject_id] = _member_reference(member)
@@ -220,8 +233,8 @@ def resolved_subject_references(
     }
     if set(input_configurations) != set(resolved):
         raise _invalid("resolved personal subject manifest is incomplete")
-    for subject_id, reference in resolved.items():
-        supplied = input_configurations[subject_id]
+    for resolved_subject_id, reference in resolved.items():
+        supplied = input_configurations[resolved_subject_id]
         if (
             reference.subject_incarnation != supplied.subject_incarnation
             or reference.generation != supplied.configuration_generation
