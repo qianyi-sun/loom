@@ -256,6 +256,146 @@ def test_registry_publication_operations_have_exact_nonsecret_fields(
     assert parse_local_request(_wire(document)) == expected
 
 
+def test_publication_candidate_v2_owns_exact_base_resolution_evidence() -> None:
+    observations = ["sha256:" + "1" * 64, "sha256:" + "2" * 64]
+    document = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "publication-candidate-v2",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 2,
+        "component": "task",
+        "manifest_digest": "sha256:" + "b" * 64,
+        "manifest_size": 512,
+        "oci_file_sha256": "c" * 64,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+        "base_resolution": {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "solve_1-arm64",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + "b" * 64,
+            "observed_base_digests": observations,
+        },
+    }
+
+    request = parse_local_request(_wire(document))
+    observations.append("sha256:" + "3" * 64)
+    document["base_resolution"]["solve_ref"] = "changed"  # type: ignore[index]
+
+    assert request.operation == "publication-candidate-v2"
+    assert request.base_resolution == protocol_module.BaseResolutionEvidence(
+        solve_ref="solve_1-arm64",
+        platform="linux/arm64",
+        output_digest="sha256:" + "b" * 64,
+        observed_base_digests=("sha256:" + "1" * 64, "sha256:" + "2" * 64),
+    )
+    assert request.base_resolution.as_dict()["observed_base_digests"] == [
+        "sha256:" + "1" * 64,
+        "sha256:" + "2" * 64,
+    ]
+
+
+def test_publication_candidate_v2_accepts_explicit_scratch_evidence() -> None:
+    document = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "publication-candidate-v2",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 2,
+        "component": "task",
+        "manifest_digest": "sha256:" + "b" * 64,
+        "manifest_size": 512,
+        "oci_file_sha256": "c" * 64,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+        "base_resolution": {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "scratch1",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + "b" * 64,
+            "observed_base_digests": [],
+        },
+    }
+
+    request = parse_local_request(_wire(document))
+
+    assert request.base_resolution is not None
+    assert request.base_resolution.observed_base_digests == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing",
+        "null",
+        "unknown",
+        "duplicate",
+        "unsorted",
+        "wrong-root",
+        "wrong-platform",
+    ),
+)
+def test_publication_candidate_v2_rejects_incomplete_or_substituted_evidence(
+    mutation: str,
+) -> None:
+    evidence: dict[str, object] = {
+        "schema": "loom.task-image-base-resolution/v1",
+        "solve_ref": "solve1",
+        "platform": "linux/arm64",
+        "output_digest": "sha256:" + "b" * 64,
+        "observed_base_digests": ["sha256:" + "1" * 64],
+    }
+    document: dict[str, object] = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "publication-candidate-v2",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 2,
+        "component": "task",
+        "manifest_digest": "sha256:" + "b" * 64,
+        "manifest_size": 512,
+        "oci_file_sha256": "c" * 64,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+        "base_resolution": evidence,
+    }
+    if mutation == "missing":
+        evidence.pop("solve_ref")
+    elif mutation == "null":
+        evidence["solve_ref"] = None
+    elif mutation == "unknown":
+        evidence["extra"] = "bad"
+    elif mutation == "unsorted":
+        evidence["observed_base_digests"] = ["sha256:" + "2" * 64, "sha256:" + "1" * 64]
+    elif mutation == "wrong-root":
+        evidence["output_digest"] = "sha256:" + "3" * 64
+    elif mutation == "wrong-platform":
+        evidence["platform"] = "linux/amd64"
+    else:
+        payload = _wire(document).replace(
+            b'"solve_ref":"solve1"', b'"solve_ref":"solve1","solve_ref":"solve2"'
+        )
+        with pytest.raises(GuardError, match="local_request_invalid"):
+            parse_local_request(payload)
+        return
+
+    with pytest.raises(GuardError, match="local_request_invalid"):
+        parse_local_request(_wire(document))
+
+
 def test_registry_credential_accepts_only_a_complete_predecessor_pair() -> None:
     document = {
         "schema": "loom.task-image-builder-guard-local/v1",
@@ -375,7 +515,8 @@ def test_registry_publication_operations_reject_missing_and_duplicate_fields() -
     "operation",
     ("renew", "claim", "start", "heartbeat", "bundle", "release", "fail", "finish"),
 )
-def test_local_operations_reject_secret_or_caller_selected_authority(operation: str) -> None:
+def test_local_operations_reject_secret_or_caller_selected_authority(operation: str,
+) -> None:
     document: dict[str, object] = {
         "schema": "loom.task-image-builder-guard-local/v1",
         "operation": operation,
@@ -569,7 +710,9 @@ def test_projected_packet_rejects_changed_descriptor_order(tmp_path: Path) -> No
         receiver.close()
 
 
-def test_authenticated_receive_identifies_the_process_using_an_inherited_socket() -> None:
+def test_authenticated_receive_identifies_the_process_using_an_inherited_socket() -> (
+    None
+):
     sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
     connected_pid = struct.unpack(

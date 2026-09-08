@@ -22,7 +22,11 @@ from uuid import UUID
 
 from loom_task_image_builder_guard.errors import GuardError
 from loom_task_image_builder_guard.models import AuthorityConfig
-from loom_task_image_builder_guard.protocol import create_sealed_memfd
+from loom_task_image_builder_guard.protocol import (
+    BaseResolutionEvidence,
+    create_sealed_memfd,
+    parse_base_resolution,
+)
 from loom_task_image_builder_guard.safeio import read_stable_file
 
 _MAX_CREDENTIAL_BYTES = 64 * 1024
@@ -316,6 +320,13 @@ class PublicationCandidateAcknowledgement:
     platform: Literal["linux/amd64", "linux/arm64"]
     recorded_at: datetime
     response_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationCandidateAcknowledgementV2(PublicationCandidateAcknowledgement):
+    """V2 acknowledgement owning mandatory same-build observations."""
+
+    base_resolution: BaseResolutionEvidence
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -1085,41 +1096,44 @@ class AuthorityClient:
         )
         return SealedAuthorityPayload(descriptor, hashlib.sha256(raw).hexdigest())
 
-    def publication_candidate(
+    def _publication_candidate(
         self,
         grant_id: UUID,
         materialization_id: UUID,
         request: dict[str, object],
-    ) -> PublicationCandidateAcknowledgement:
+        *,
+        version: Literal[1, 2],
+    ) -> PublicationCandidateAcknowledgement | PublicationCandidateAcknowledgementV2:
         """Record one inert candidate and return only its strict nonsecret binding."""
 
         grant = self._grant(grant_id)
         if not isinstance(materialization_id, UUID) or materialization_id.int == 0:
             raise GuardError("authority_candidate_invalid")
         code = "authority_candidate_invalid"
+        request_keys = {
+            "schema_version",
+            "operation_id",
+            "grant_id",
+            "session_id",
+            "session_generation",
+            "session_token",
+            "materialization_id",
+            "attempt_id",
+            "lease_epoch",
+            "credential_id",
+            "credential_generation",
+            "component",
+            "manifest_digest",
+            "manifest_size",
+            "oci_file_sha256",
+            "oci_file_size",
+            "platform",
+        }
+        if version == 2:
+            request_keys.add("base_resolution")
         request_value = _exact(
             request,
-            frozenset(
-                {
-                    "schema_version",
-                    "operation_id",
-                    "grant_id",
-                    "session_id",
-                    "session_generation",
-                    "session_token",
-                    "materialization_id",
-                    "attempt_id",
-                    "lease_epoch",
-                    "credential_id",
-                    "credential_generation",
-                    "component",
-                    "manifest_digest",
-                    "manifest_size",
-                    "oci_file_sha256",
-                    "oci_file_size",
-                    "platform",
-                }
-            ),
+            frozenset(request_keys),
             code=code,
         )
         request_operation_id = _uuid(request_value["operation_id"], code=code)
@@ -1144,50 +1158,66 @@ class AuthorityClient:
         request_oci_file_sha256 = _digest(request_value["oci_file_sha256"], code=code)
         request_oci_file_size = _integer(request_value["oci_file_size"], code=code)
         request_platform = request_value["platform"]
+        try:
+            request_base_resolution = (
+                parse_base_resolution(request_value["base_resolution"])
+                if version == 2
+                else None
+            )
+        except (TypeError, ValueError):
+            raise GuardError(code) from None
         if (
-            request_value["schema_version"] != 1
+            request_value["schema_version"] != version
             or _uuid(request_value["grant_id"], code=code) != grant
             or not _token(request_value["session_token"], kind="session", code=code)
             or _uuid(request_value["materialization_id"], code=code)
             != materialization_id
             or request_platform not in {"linux/amd64", "linux/arm64"}
+            or (
+                request_base_resolution is not None
+                and (
+                    request_base_resolution.platform != request_platform
+                    or request_base_resolution.output_digest != request_manifest_digest
+                )
+            )
         ):
             raise GuardError(code)
 
         raw = self._request(
-            f"/v1/projections/{grant}/materializations/{materialization_id}/"
+            f"/v{version}/projections/{grant}/materializations/{materialization_id}/"
             "publication-candidate",
             request,
             expected_status=200,
             maximum_bytes=_MAX_REQUEST_BYTES,
         )
+        response_keys = {
+            "schema_version",
+            "candidate_id",
+            "operation_id",
+            "credential_id",
+            "credential_generation",
+            "grant_id",
+            "session_id",
+            "session_generation",
+            "materialization_id",
+            "attempt_id",
+            "attempt_number",
+            "lease_epoch",
+            "builder_id",
+            "component",
+            "repository",
+            "manifest_digest",
+            "manifest_size",
+            "oci_file_sha256",
+            "oci_file_size",
+            "platform",
+            "recorded_at",
+        }
+        if version == 2:
+            response_keys.add("base_resolution")
         response = _exact(
             _document(raw),
-            frozenset(
-                {
-                    "schema_version",
-                    "candidate_id",
-                    "operation_id",
-                    "credential_id",
-                    "credential_generation",
-                    "grant_id",
-                    "session_id",
-                    "session_generation",
-                    "materialization_id",
-                    "attempt_id",
-                    "attempt_number",
-                    "lease_epoch",
-                    "builder_id",
-                    "component",
-                    "repository",
-                    "manifest_digest",
-                    "manifest_size",
-                    "oci_file_sha256",
-                    "oci_file_size",
-                    "platform",
-                    "recorded_at",
-                }
-            ),
+            frozenset(response_keys),
             code=code,
         )
         candidate_id = _uuid(response["candidate_id"], code=code)
@@ -1195,9 +1225,17 @@ class AuthorityClient:
         builder_id = response["builder_id"]
         repository = response["repository"]
         recorded_at = _time(response["recorded_at"], code=code)
+        try:
+            response_base_resolution = (
+                parse_base_resolution(response["base_resolution"])
+                if version == 2
+                else None
+            )
+        except (TypeError, ValueError):
+            raise GuardError(code) from None
         if (
             response["schema_version"]
-            != "loom.task-image-publication-candidate.v1"
+            != f"loom.task-image-publication-candidate.v{version}"
             or _uuid(response["operation_id"], code=code) != request_operation_id
             or _uuid(response["credential_id"], code=code) != request_credential_id
             or _credential_generation(response["credential_generation"], code=code)
@@ -1224,9 +1262,10 @@ class AuthorityClient:
             or _integer(response["oci_file_size"], code=code)
             != request_oci_file_size
             or response["platform"] != request_platform
+            or response_base_resolution != request_base_resolution
         ):
             raise GuardError(code)
-        return PublicationCandidateAcknowledgement(
+        acknowledgement = PublicationCandidateAcknowledgement(
             candidate_id=candidate_id,
             operation_id=request_operation_id,
             credential_id=request_credential_id,
@@ -1248,6 +1287,66 @@ class AuthorityClient:
             recorded_at=recorded_at,
             response_sha256=hashlib.sha256(raw).hexdigest(),
         )
+        if request_base_resolution is not None:
+            return PublicationCandidateAcknowledgementV2(
+                candidate_id=acknowledgement.candidate_id,
+                operation_id=acknowledgement.operation_id,
+                credential_id=acknowledgement.credential_id,
+                credential_generation=acknowledgement.credential_generation,
+                grant_id=acknowledgement.grant_id,
+                session_id=acknowledgement.session_id,
+                session_generation=acknowledgement.session_generation,
+                materialization_id=acknowledgement.materialization_id,
+                attempt_id=acknowledgement.attempt_id,
+                attempt_number=acknowledgement.attempt_number,
+                lease_epoch=acknowledgement.lease_epoch,
+                builder_id=acknowledgement.builder_id,
+                component=acknowledgement.component,
+                manifest_digest=acknowledgement.manifest_digest,
+                manifest_size=acknowledgement.manifest_size,
+                oci_file_sha256=acknowledgement.oci_file_sha256,
+                oci_file_size=acknowledgement.oci_file_size,
+                platform=acknowledgement.platform,
+                recorded_at=acknowledgement.recorded_at,
+                response_sha256=acknowledgement.response_sha256,
+                base_resolution=request_base_resolution,
+            )
+        return acknowledgement
+
+    def publication_candidate(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgement:
+        """Record one explicit legacy candidate without V2 reinterpretation."""
+
+        result = self._publication_candidate(
+            grant_id,
+            materialization_id,
+            request,
+            version=1,
+        )
+        assert isinstance(result, PublicationCandidateAcknowledgement)
+        return result
+
+    def publication_candidate_v2(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgementV2:
+        """Record one explicit V2 candidate with mandatory same-build evidence."""
+
+        result = self._publication_candidate(
+            grant_id,
+            materialization_id,
+            request,
+            version=2,
+        )
+        if not isinstance(result, PublicationCandidateAcknowledgementV2):
+            raise GuardError("authority_candidate_invalid")
+        return result
 
     def attest(
         self,
@@ -1309,5 +1408,6 @@ __all__ = [
     "ProjectionChallenge",
     "ProjectionReceipt",
     "PublicationCandidateAcknowledgement",
+    "PublicationCandidateAcknowledgementV2",
     "SealedAuthorityPayload",
 ]

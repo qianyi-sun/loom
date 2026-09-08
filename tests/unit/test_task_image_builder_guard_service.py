@@ -30,6 +30,7 @@ from loom_task_image_builder_guard.authority import (
     ProjectionChallenge,
     ProjectionReceipt,
     PublicationCandidateAcknowledgement,
+    PublicationCandidateAcknowledgementV2,
     SealedAuthorityPayload,
 )
 from loom_task_image_builder_guard.bpf import (
@@ -58,6 +59,8 @@ from loom_task_image_builder_guard.models import (
 )
 from loom_task_image_builder_guard.protocol import (
     LOCAL_SCHEMA,
+    BaseResolutionEvidence,
+    LocalRequest,
     PeerCredentials,
     create_sealed_memfd,
     read_sealed_memfd,
@@ -205,7 +208,8 @@ def test_terminal_slurm_observation_requires_matching_exact_terminal_facts(
         CommandIdentity(Path("/usr/bin/bpftool"), DIGEST_A),
     )
     comment = f"loom-task-builder-v1:grant={GRANT}"
-    control = " ".join(
+    control = (
+        " ".join(
         (
             "JobId=12345",
             "UserId=loom-builder(993)",
@@ -226,7 +230,9 @@ def test_terminal_slurm_observation_requires_matching_exact_terminal_facts(
             "Restarts=0",
         )
     ) + "\n"
-    accounting = "|".join(
+    )
+    accounting = (
+        "|".join(
         (
             "12345",
             "COMPLETED",
@@ -244,6 +250,7 @@ def test_terminal_slurm_observation_requires_matching_exact_terminal_facts(
             "",
         )
     ) + "\n"
+    )
 
     class _TerminalRunner:
         def run(
@@ -321,7 +328,8 @@ def test_build_service_shares_one_progress_tracker_across_dependencies(
     monkeypatch.setattr(
         guard_main,
         "NetworkPolicy",
-        type("NetworkPolicyFactory", (), {"from_file": staticmethod(lambda *args, **kwargs: network)}),
+        type("NetworkPolicyFactory", (), {"from_file": staticmethod(lambda *args, **kwargs: network)},
+        ),
     )
     monkeypatch.setattr(guard_main, "BpfLoader", lambda **kwargs: loader)
     monkeypatch.setattr(guard_main, "BpftoolDeviceProbe", lambda *args: device_probe)
@@ -397,7 +405,9 @@ class _Peer:
     def adopt_trusted_service_cgroup(self) -> None:
         self.events.append("peer_move")
         self.adopted = True
-        self.cgroup_relative = self.batch_cgroup_relative / "loom-builder" / "trusted-service"
+        self.cgroup_relative = (
+            self.batch_cgroup_relative / "loom-builder" / "trusted-service"
+        )
 
     @contextmanager
     def containment_hold(self) -> Iterator[None]:
@@ -934,6 +944,48 @@ class _Authority:
             response_sha256=DIGEST_D,
         )
 
+    def publication_candidate_v2(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgementV2:
+        assert grant_id == GRANT
+        assert materialization_id == MATERIALIZATION
+        evidence = request["base_resolution"]
+        assert isinstance(evidence, dict)
+        owned = BaseResolutionEvidence(
+            solve_ref=str(evidence["solve_ref"]),
+            platform=str(evidence["platform"]),  # type: ignore[arg-type]
+            output_digest=str(evidence["output_digest"]),
+            observed_base_digests=tuple(evidence["observed_base_digests"]),  # type: ignore[arg-type]
+        )
+        self.events.append("authority_publication_candidate_v2")
+        self.requests.append(("publication-candidate-v2", json.loads(_json(request))))
+        return PublicationCandidateAcknowledgementV2(
+            candidate_id=CANDIDATE,
+            operation_id=UUID(str(request["operation_id"])),
+            credential_id=UUID(str(request["credential_id"])),
+            credential_generation=int(request["credential_generation"]),
+            grant_id=grant_id,
+            session_id=UUID(str(request["session_id"])),
+            session_generation=int(request["session_generation"]),
+            materialization_id=materialization_id,
+            attempt_id=UUID(str(request["attempt_id"])),
+            attempt_number=2,
+            lease_epoch=int(request["lease_epoch"]),
+            builder_id="rootless:" + "a" * 32,
+            component=str(request["component"]),
+            manifest_digest=str(request["manifest_digest"]),
+            manifest_size=int(request["manifest_size"]),
+            oci_file_sha256=str(request["oci_file_sha256"]),
+            oci_file_size=int(request["oci_file_size"]),
+            platform=str(request["platform"]),  # type: ignore[arg-type]
+            recorded_at=NOW + timedelta(seconds=6),
+            response_sha256=DIGEST_D,
+            base_resolution=owned,
+        )
+
     def revoke(self, grant_id: UUID, request: dict[str, object]) -> None:
         del grant_id, request
         self.events.append("authority_revoke")
@@ -1262,7 +1314,7 @@ def _pinned_probe_fixture(
                 "resource_limits_sha256": (
                     config.containment.resource_profile_sha256
                 ),
-            }
+            },
         },
         "projection_request": {
             "cgroup_path": str(batch),
@@ -1370,8 +1422,13 @@ def _service(
     keepalive_interval_seconds: float = 10.0,
     progress_timeout_seconds: float = 75.0,
     startup_extension_limit_seconds: float = 900.0,
+    max_packet_bytes: int = 4096,
 ):
     config = _config(tmp_path)
+    config = replace(
+        config,
+        protocol=replace(config.protocol, max_packet_bytes=max_packet_bytes),
+    )
     config.containment.ledger_root.mkdir(mode=0o700)
     config.containment.bpffs_root.mkdir(mode=0o700)
     config.protocol.socket_path.parent.mkdir(mode=0o711)
@@ -1393,9 +1450,7 @@ def _service(
         ledger=ledger,
         peers=_Peers(peer, events),
         slurm=slurm,
-        derive_batch=lambda value, job_id: (
-            events.append("derive_batch") or _Batch()
-        ),
+        derive_batch=lambda value, job_id: events.append("derive_batch") or _Batch(),
         containment=_Containment(ledger, peer, events, build_egress_cgroup),
         storage=storage,
         policy=object(),
@@ -1707,9 +1762,11 @@ def test_projection_prepares_storage_and_sends_three_identity_bound_rights(
         response_payload, rights = _receive_rights(client)
         response = json.loads(response_payload)
         assert len(rights) == 3
-        assert json.loads(read_sealed_memfd(rights[0], maximum=65536))[
+        assert (
+            json.loads(read_sealed_memfd(rights[0], maximum=65536))[
             "bootstrap_token"
         ] == BOOTSTRAP
+        )
         workspace = os.fstat(rights[1])
         build_egress = os.fstat(rights[2])
         assert response["rights"] == [
@@ -2111,9 +2168,11 @@ def test_exchange_requires_outer_inner_binding_and_returns_only_sealed_session(
     assert b"loom_tibs_" not in entry_payload
     assert ledger.get(GRANT).state == "exchanged"  # type: ignore[union-attr]
     assert ledger.get(GRANT).document()["session_generation"] == 1  # type: ignore[union-attr]
-    assert ledger.get(GRANT).document()["session_wire_sha256"] == hashlib.sha256(  # type: ignore[union-attr]
+    assert (
+        ledger.get(GRANT).document()["session_wire_sha256"] == hashlib.sha256(  # type: ignore[union-attr]
         _json(session)
     ).hexdigest()
+    )
     assert events.index("transfer_hold_begin") < events.index("secret_send")
     assert events.index("secret_send") < events.index("transfer_hold_end")
     ledger.close()
@@ -2859,6 +2918,176 @@ def test_registry_publication_operations_proxy_opaque_capability_without_ledger_
     ledger.close()
 
 
+def test_publication_candidate_v2_round_trips_maximum_owned_evidence(
+    tmp_path: Path,
+) -> None:
+    service, ledger, _peer, _slurm, _events = _service(
+        tmp_path,
+        max_packet_bytes=32768,
+    )
+    current_wire = _establish_session(service, ledger)
+    service._uuid = iter((UUID("abababab-abab-4bab-8bab-abababababab"),)).__next__
+    observations = [f"sha256:{index:064x}" for index in range(1, 129)]
+    evidence = {
+        "schema": "loom.task-image-base-resolution/v1",
+        "solve_ref": "solve_1-arm64",
+        "platform": "linux/arm64",
+        "output_digest": "sha256:" + DIGEST_A,
+        "observed_base_digests": observations,
+    }
+    request = {
+        "schema": LOCAL_SCHEMA,
+        "operation": "publication-candidate-v2",
+        "grant_id": str(GRANT),
+        "operation_id": str(LEASE_OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 1,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 1,
+        "component": "task",
+        "manifest_digest": "sha256:" + DIGEST_A,
+        "manifest_size": 512,
+        "oci_file_sha256": DIGEST_B,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+        "base_resolution": evidence,
+    }
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(client, _json(request), descriptor=current_fd)
+        os.close(current_fd)
+        response_payload, descriptor = receive_request(client, maximum=32768)
+        response = json.loads(response_payload)
+        assert descriptor is None
+        assert response["operation"] == "publication-candidate-v2"
+        assert response["base_resolution"] == evidence
+        observations.append("sha256:" + "f" * 64)
+        assert len(response["base_resolution"]["observed_base_digests"]) == 128
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "ack",
+                    "response_id": response["response_id"],
+                }
+            ),
+        )
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+
+    operation, authority_request = service.authority.requests[-1]  # type: ignore[attr-defined]
+    assert operation == "publication-candidate-v2"
+    assert authority_request["schema_version"] == 2
+    assert authority_request["base_resolution"] == evidence | {
+        "observed_base_digests": evidence["observed_base_digests"][:-1]
+    }
+    assert ledger.get(GRANT) is not None
+    service.close()
+    ledger.close()
+
+
+def test_publication_candidate_v2_revalidates_direct_request_evidence(
+    tmp_path: Path,
+) -> None:
+    service, ledger, peer, _slurm, _events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    request = LocalRequest(
+        operation="publication-candidate-v2",
+        grant_id=GRANT,
+        operation_id=LEASE_OPERATION,
+        materialization_id=MATERIALIZATION,
+        attempt_id=ATTEMPT,
+        lease_epoch=1,
+        credential_id=CREDENTIAL,
+        credential_generation=1,
+        component="task",
+        manifest_digest="sha256:" + DIGEST_A,
+        manifest_size=512,
+        oci_file_sha256=DIGEST_B,
+        oci_file_size=4096,
+        platform="linux/arm64",
+        base_resolution=BaseResolutionEvidence(
+            "solve1", "linux/arm64", "sha256:" + DIGEST_C, ()
+        ),
+    )
+    try:
+        with pytest.raises(GuardError, match="local_request_invalid"):
+            service._lease_operation(
+                server,
+                request,
+                current_fd,
+                peer,
+                PeerCredentials(os.getpid(), os.geteuid(), os.getegid()),
+            )
+    finally:
+        os.close(current_fd)
+        server.close()
+        client.close()
+        service.close()
+        ledger.close()
+
+
+def test_publication_candidate_v2_rejects_maximum_evidence_under_legacy_packet_cap(
+    tmp_path: Path,
+) -> None:
+    service, ledger, _peer, _slurm, _events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    request = {
+        "schema": LOCAL_SCHEMA,
+        "operation": "publication-candidate-v2",
+        "grant_id": str(GRANT),
+        "operation_id": str(LEASE_OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 1,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 1,
+        "component": "task",
+        "manifest_digest": "sha256:" + DIGEST_A,
+        "manifest_size": 512,
+        "oci_file_sha256": DIGEST_B,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+        "base_resolution": {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "solve1",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + DIGEST_A,
+            "observed_base_digests": [
+                f"sha256:{index:064x}" for index in range(1, 129)
+            ],
+        },
+    }
+    assert len(_json(request)) > service.config.protocol.max_packet_bytes
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(client, _json(request), descriptor=current_fd)
+        os.close(current_fd)
+        response_payload, descriptor = receive_request(client, maximum=4096)
+        assert descriptor is None
+        assert json.loads(response_payload) == {
+            "schema": LOCAL_SCHEMA,
+            "operation": "error",
+            "code": "local_packet_invalid",
+        }
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+        service.close()
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     ("condition", "expected_code"),
     [
@@ -3288,7 +3517,8 @@ def test_start_replaces_only_an_exact_stale_socket_under_singleton_lock(
     ledger.close()
 
 
-def test_start_accepts_a_root_owned_search_only_runtime_directory(tmp_path: Path) -> None:
+def test_start_accepts_a_root_owned_search_only_runtime_directory(tmp_path: Path,
+) -> None:
     service, ledger, _peer, _slurm, _events = _service(tmp_path)
     service.config.protocol.socket_path.parent.chmod(0o711)
 
@@ -3342,7 +3572,8 @@ def test_deeply_nested_exchange_document_returns_a_typed_error(tmp_path: Path) -
     ledger.close()
 
 
-def test_attestation_advances_exactly_once_per_monotonic_interval(tmp_path: Path) -> None:
+def test_attestation_advances_exactly_once_per_monotonic_interval(tmp_path: Path,
+) -> None:
     monotonic = [0.0]
     service, ledger, _peer, _slurm, events = _service(
         tmp_path, monotonic=lambda: monotonic[0]
@@ -3887,8 +4118,7 @@ def test_runtime_reconciliation_rejects_descendant_drift(
         "build_egress": Path(str(attachment["build_egress_cgroup"])),
     }
     (paths[scope] / "cgroup.stat").write_text(
-        f"nr_descendants {expected_descendants}\n"
-        f"nr_dying_descendants {dying_descendants}\n",
+        f"nr_descendants {expected_descendants}\nnr_dying_descendants {dying_descendants}\n",
         encoding="ascii",
     )
 
@@ -3932,7 +4162,8 @@ def test_runtime_reconciliation_rejects_device_authority_drift(tmp_path: Path) -
     assert caught.value.code == "reconciliation_resource_identity_invalid"
 
 
-def test_runtime_reconciliation_rejects_device_program_tag_drift(tmp_path: Path) -> None:
+def test_runtime_reconciliation_rejects_device_program_tag_drift(tmp_path: Path,
+) -> None:
     probe, entry, device = _pinned_probe_fixture(tmp_path, corrupt_link=False)
     probe._verify_runtime_controls(entry.payload)
     device.tag = "fedcba9876543210"
@@ -4064,7 +4295,8 @@ def test_terminal_classification_requires_pidfd_proof_that_peer_is_dead(
     request = entry.payload["projection_request"]
     assert isinstance(request, dict)
     root = Path(str(request["cgroup_path"])) / "loom-builder"
-    for directory in (root.parent, root, root / "trusted-service", root / "build-egress"):
+    for directory in (root.parent, root, root / "trusted-service", root / "build-egress",
+    ):
         (directory / "cgroup.procs").write_text("", encoding="ascii")
     observed: list[int] = []
 
@@ -4368,9 +4600,11 @@ def test_project_retry_after_guard_restart_reuses_durable_proof_and_pins(
 
     assert "containment_attach" not in events
     assert ledger.get(GRANT).request_id == persisted.request_id  # type: ignore[union-attr]
-    assert ledger.get(GRANT).document()["proof_sha256"] == persisted.document()[  # type: ignore[union-attr]
+    assert (
+        ledger.get(GRANT).document()["proof_sha256"] == persisted.document()[  # type: ignore[union-attr]
         "proof_sha256"
     ]
+    )
     restarted.close()
     ledger.close()
 
@@ -4392,10 +4626,12 @@ def test_cli_is_self_check_or_one_absolute_config_without_ambient_injection(
     assert output.err == "loom_task_image_builder_guard error=cli_arguments_invalid\n"
     assert "private-token" not in output.err
 
-    assert main(
+    assert (
+        main(
         ["--config", "/etc/loom/task-image-builder-guard/config.json"],
         environ={"PYTHONPATH": "/tmp/injected"},
     ) == 1
+    )
     output = capfd.readouterr()
     assert output.err == "loom_task_image_builder_guard error=unsafe_environment\n"
     assert "/tmp/injected" not in output.err

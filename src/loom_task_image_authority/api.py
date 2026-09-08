@@ -62,6 +62,7 @@ from loom_task_image_authority.contracts import (
     TaskImageProjectionRequestV1,
     TaskImageProjectionRevocationV1,
     TaskImagePublicationCandidateRequestV1,
+    TaskImagePublicationCandidateRequestV2,
     TaskImageRegistryCredentialRequestV1,
     TaskImageRegistryCredentialV1,
     TaskImageSessionRenewalV1,
@@ -72,6 +73,7 @@ from loom_task_image_authority.http_contracts import (
     TaskImageMaterializationClaimResponseV1,
     TaskImageMaterializationOperationResponseV1,
     TaskImagePublicationCandidateResponseV1,
+    TaskImagePublicationCandidateResponseV2,
 )
 from loom_task_image_authority.materializations import (
     DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS,
@@ -88,6 +90,7 @@ from loom_task_image_authority.materializations import (
 from loom_task_image_authority.registry_credentials import (
     issue_session_registry_credential,
     record_session_publication_candidate,
+    record_session_publication_candidate_v2,
 )
 from loom_task_image_authority.registry_token import (
     DistributionRegistryTokenIssuer,
@@ -332,6 +335,14 @@ class AuthorityMetricsMiddleware:
                 "registry-credential": "registry_credential",
                 "publication-candidate": "publication_candidate",
             }.get(parts[5])
+        if (
+            method == "PUT"
+            and len(parts) == 6
+            and parts[:2] == ["v2", "projections"]
+            and parts[3] == "materializations"
+            and parts[5] == "publication-candidate"
+        ):
+            return "publication_candidate_v2"
         return None
 
     @staticmethod
@@ -535,6 +546,9 @@ def create_app(
     failure_body = contract_body(TaskImageMaterializationFailureRequestV1)
     registry_credential_body = contract_body(TaskImageRegistryCredentialRequestV1)
     publication_candidate_body = contract_body(TaskImagePublicationCandidateRequestV1)
+    publication_candidate_v2_body = contract_body(
+        TaskImagePublicationCandidateRequestV2
+    )
 
     async def transition(
         operation: Callable[
@@ -1130,6 +1144,44 @@ def create_app(
                 authorization=authorization,
                 request=body,
                 now=request_now,
+                candidate_id_factory=resolved_candidate_id,
+            )
+
+        return bounded_response(await transition(candidate_transition))
+
+    @app.put(
+        "/v2/projections/{grant_id}/materializations/{materialization_id}/publication-candidate"
+    )
+    async def publication_candidate_v2(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImagePublicationCandidateRequestV2 = Depends(
+            publication_candidate_v2_body
+        ),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+
+        async def candidate_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImagePublicationCandidateResponseV2:
+            del secret_store
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=resolved_now(),
+            )
+            return await record_session_publication_candidate_v2(
+                session,
+                authorization=authorization,
+                request=body,
+                now=resolved_now(),
                 candidate_id_factory=resolved_candidate_id,
             )
 

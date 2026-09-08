@@ -24,9 +24,100 @@ REQUIRED_MEMFD_SEALS = 0x0001 | 0x0002 | 0x0004 | 0x0008
 _MFD_CLOEXEC = 0x0001
 _MFD_ALLOW_SEALING = 0x0002
 _DIGEST_LENGTH = 64
-_MAX_JSON_FIELDS = 15
+_MAX_JSON_FIELDS = 16
 _PEER_CREDENTIALS = struct.Struct("3i")
 _COMPONENT = re.compile(r"(?:task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})")
+
+_SOLVE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+
+@dataclass(frozen=True, slots=True)
+class BaseResolutionEvidence:
+    """Owned strict same-solve evidence for V2 candidate transport."""
+
+    solve_ref: str
+    platform: Literal["linux/amd64", "linux/arm64"]
+    output_digest: str
+    observed_base_digests: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.solve_ref, str)
+            or _SOLVE_REF.fullmatch(self.solve_ref) is None
+        ):
+            raise ValueError("invalid solve reference")
+        if self.platform not in {"linux/amd64", "linux/arm64"}:
+            raise ValueError("invalid platform")
+        _manifest_digest(self.output_digest)
+        if (
+            not isinstance(self.observed_base_digests, tuple)
+            or len(self.observed_base_digests) > 128
+        ):
+            raise ValueError("invalid observations")
+        for digest in self.observed_base_digests:
+            _manifest_digest(digest)
+        if any(
+            left >= right
+            for left, right in zip(
+                self.observed_base_digests,
+                self.observed_base_digests[1:],
+                strict=False,
+            )
+        ):
+            raise ValueError("invalid observations")
+        if len(_evidence_bytes(self.as_dict())) > 16 * 1024:
+            raise ValueError("evidence too large")
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a fresh wire document with no mutable aliases."""
+
+        return {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": self.solve_ref,
+            "platform": self.platform,
+            "output_digest": self.output_digest,
+            "observed_base_digests": list(self.observed_base_digests),
+        }
+
+
+def _evidence_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def parse_base_resolution(value: object) -> BaseResolutionEvidence:
+    """Parse and own one exact five-field base-resolution record."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "solve_ref",
+        "platform",
+        "output_digest",
+        "observed_base_digests",
+    }:
+        raise ValueError("invalid evidence")
+    observations = value["observed_base_digests"]
+    if not isinstance(observations, list):
+        raise ValueError("invalid observations")
+    platform = value["platform"]
+    if value["schema"] != "loom.task-image-base-resolution/v1" or platform not in {
+        "linux/amd64",
+        "linux/arm64",
+    }:
+        raise ValueError("invalid evidence")
+    return BaseResolutionEvidence(
+        solve_ref=value["solve_ref"] if isinstance(value["solve_ref"], str) else "",
+        platform=platform,
+        output_digest=(
+            value["output_digest"] if isinstance(value["output_digest"], str) else ""
+        ),
+        observed_base_digests=tuple(observations),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +134,7 @@ class LocalRequest:
         "fail",
         "registry-credential",
         "publication-candidate",
+        "publication-candidate-v2",
         "finish",
         "ack",
     ]
@@ -66,6 +158,7 @@ class LocalRequest:
     oci_file_sha256: str | None = None
     oci_file_size: int | None = None
     platform: Literal["linux/amd64", "linux/arm64"] | None = None
+    base_resolution: BaseResolutionEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +375,38 @@ def parse_local_request(payload: bytes) -> LocalRequest:
                 oci_file_sha256=_digest(document["oci_file_sha256"]),
                 oci_file_size=_positive_integer(document["oci_file_size"]),
                 platform=platform,
+            )
+        if operation == "publication-candidate-v2" and set(
+            document
+        ) == candidate_keys | {"base_resolution"}:
+            platform = document["platform"]
+            if platform not in {"linux/amd64", "linux/arm64"}:
+                raise ValueError("invalid platform")
+            base_resolution = parse_base_resolution(document["base_resolution"])
+            manifest_digest = _manifest_digest(document["manifest_digest"])
+            if (
+                base_resolution.platform != platform
+                or base_resolution.output_digest != manifest_digest
+            ):
+                raise ValueError("invalid evidence binding")
+            return LocalRequest(
+                operation="publication-candidate-v2",
+                grant_id=_uuid(document["grant_id"]),
+                operation_id=_uuid(document["operation_id"]),
+                materialization_id=_uuid(document["materialization_id"]),
+                attempt_id=_uuid(document["attempt_id"]),
+                lease_epoch=_positive_integer(document["lease_epoch"]),
+                credential_id=_uuid(document["credential_id"]),
+                credential_generation=_credential_generation(
+                    document["credential_generation"]
+                ),
+                component=_component(document["component"]),
+                manifest_digest=manifest_digest,
+                manifest_size=_positive_integer(document["manifest_size"]),
+                oci_file_sha256=_digest(document["oci_file_sha256"]),
+                oci_file_size=_positive_integer(document["oci_file_size"]),
+                platform=platform,
+                base_resolution=base_resolution,
             )
         if operation == "finish" and set(document) == {
             "schema",
@@ -698,9 +823,11 @@ __all__ = [
     "LOCAL_SCHEMA",
     "REQUIRED_MEMFD_SEALS",
     "AuthenticatedPacket",
+    "BaseResolutionEvidence",
     "LocalRequest",
     "PeerCredentials",
     "create_sealed_memfd",
+    "parse_base_resolution",
     "parse_local_request",
     "read_sealed_memfd",
     "receive_authenticated_packet",
