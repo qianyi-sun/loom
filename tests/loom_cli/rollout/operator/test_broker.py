@@ -1448,7 +1448,10 @@ def test_requestless_preflight_fails_closed_after_second_dependency_expiry(
     assert assessment_calls == 2
     assert deps.order == ["preflight", "fetch", "preflight", "fetch"]
     assert deps.stdout.getvalue() == ""
-    assert deps.stderr.getvalue() == "error: request authorization or validation failed\n"
+    report = json.loads(deps.stderr.getvalue())
+    assert report["failure_code"] == "preflight-dependency-expired"
+    assert report["assessment_complete"] is False
+    assert report["checks"][0]["dependency_ids"] == ["candidate.identity"]
     assert deps.store.requests == {}
     assert deps.store.preflight_requests == {}
 
@@ -1475,7 +1478,9 @@ def test_requestless_preflight_does_not_retry_unrelated_assessment_error(
     assert assessment_calls == 1
     assert deps.order == ["preflight", "fetch"]
     assert deps.stdout.getvalue() == ""
-    assert deps.stderr.getvalue() == "error: request authorization or validation failed\n"
+    report = json.loads(deps.stderr.getvalue())
+    assert report["failure_code"] == "preflight-internal-error"
+    assert "known-secret" not in deps.stderr.getvalue()
 
 
 def test_preflight_reports_all_deep_blockers_without_publishing_request(

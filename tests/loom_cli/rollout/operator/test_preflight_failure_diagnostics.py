@@ -23,6 +23,7 @@ from loom_cli.rollout.preflight_artifact_store import (
     PreflightArtifactStoreError,
 )
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_contract import DependencyExpiredError, StageCapability
 from loom_cli.rollout.preflight_pipeline import PreflightPipeline
 from tests.loom_cli.rollout.operator.test_broker import (
     NOW,
@@ -33,6 +34,77 @@ from tests.loom_cli.rollout.operator.test_broker import (
     pipeline_registry,
 )
 from tests.loom_cli.rollout.test_preflight_artifact_store import _publish as publish_artifacts
+
+
+@pytest.mark.parametrize("failure_phase", ["report", "candidate-binding", "assessment"])
+def test_expiry_replay_diagnostic_never_reuses_first_candidate(
+    tmp_path: Path, failure_phase: str
+) -> None:
+    bundle = fakes(tmp_path)
+    bundle.config.state_root.mkdir(mode=0o700)
+    guard = FakeMutationGuard(bundle.order)
+    reports = 0
+    bindings = 0
+    epochs = 0
+    assessments = []
+
+    def report():  # type: ignore[no-untyped-def]
+        nonlocal reports
+        reports += 1
+        if reports == 2 and failure_phase == "report":
+            return PreflightReport((PreflightCheck("candidate-identity", False, "blocked"),))
+        return bundle.dependencies.preflight()
+
+    def bind():  # type: ignore[no-untyped-def]
+        nonlocal bindings
+        bindings += 1
+        if bindings == 2 and failure_phase == "candidate-binding":
+            raise ValueError("second-bind-secret")
+        return replace(
+            bundle.dependencies.bind_candidate(),
+            resolved_sha=str(bindings) * 40,
+            image_tag=f"staging-{str(bindings) * 7}",
+        )
+
+    def epoch():  # type: ignore[no-untyped-def]
+        nonlocal epochs
+        epochs += 1
+        return epochs
+
+    def assess(candidate, mutation_epoch):  # type: ignore[no-untyped-def]
+        assessments.append((candidate.resolved_sha, mutation_epoch))
+        raise DependencyExpiredError(
+            "manifests.render", ("candidate.identity",), StageCapability.STATIC
+        )
+
+    deps = replace(
+        bundle.dependencies,
+        preflight=report,
+        bind_candidate=bind,
+        read_mutation_epoch=epoch,
+        assess_preflight=assess,
+        mutation_guard=guard,
+    )
+    assert main(["preflight"], dependencies=deps) == 1
+    result = json.loads(bundle.stderr.getvalue())
+    record = diagnostics.PreflightDiagnosticStore(bundle.config.state_root).read(
+        result["diagnostic_sha256"]
+    )
+    assert reports == 2
+    assert record["stage"] == failure_phase
+    assert record["candidate_sha"] == ("2" * 40 if failure_phase == "assessment" else None)
+    assert assessments == (
+        [("1" * 40, 1), ("2" * 40, 2)] if failure_phase == "assessment" else [("1" * 40, 1)]
+    )
+    if failure_phase == "assessment":
+        assert result["candidate_sha"] == "2" * 40
+        assert result["mutation_epoch"] == 2
+        assert result["failure_code"] == "preflight-dependency-expired"
+    assert "second-bind-secret" not in bundle.stderr.getvalue()
+    assert bundle.stdout.getvalue() == ""
+    assert bundle.store.requests == bundle.store.preflight_requests == {}
+    assert bundle.backup.create_count == bundle.systemd.start_count == 0
+    assert guard.acquired == []
 
 
 @pytest.mark.parametrize("argv", [["preflight"], ["start"], ["start", "--dry-run"]])

@@ -614,7 +614,9 @@ def _preflight_only(
     if assess_preflight is None or read_mutation_epoch is None:
         return _preflight_failure(dependencies, "preflight-not-configured")
 
-    def assess_once(*, report_expiry: bool = False) -> tuple[CandidateBinding, int, PreflightAssessment] | None:
+    def assess_once(
+        *, report_expiry: bool = False
+    ) -> tuple[CandidateBinding, int, PreflightAssessment] | None:
         _diagnostic_stage(dependencies, "report")
         if dependencies.diagnostic_context is not None:
             dependencies.diagnostic_context.candidate_sha = None
