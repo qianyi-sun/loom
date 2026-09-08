@@ -667,7 +667,7 @@ jobs:
           cache: false
       - name: gofmt
         run: |
-          out=$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-gateway-sandbox)
+          out=$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-llm-gateway-sandbox)
           if [ -n "$out" ]; then
             echo "$out"
             echo "gofmt found issues; run gofmt on the selected runtime packages to fix"
