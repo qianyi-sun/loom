@@ -815,6 +815,13 @@ advance the shared deployment revision. Gateway rollout preserves the existing
 
 ### Activation and acceptance boundary
 
+The staging-specific [persistent credential workflow](nebius-staging-credentials.md)
+implements seed-before-registration, CNPG-managed service roles, dedicated
+source/input storage identities, renewable Kubernetes authentication and
+recurring PostgreSQL CA/credential synchronization. Use that workflow instead
+of the development apply helper. Its native `database_tls` binding is distinct
+from the HTTPS private-entry certificate; activation remains separately gated.
+
 Before any activation, read the current protected broker status and coordinate
 its request owner. Resolve the current reported failure through its owning lane
 (including backup or final-attestation failures); do not assume the historical

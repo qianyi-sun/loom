@@ -609,3 +609,93 @@ def test_private_entry_rejects_incomplete_or_generic_dns_override(
     with pytest.raises(NebiusRuntimeRenderError, match="private entry"):
         render(tmp_path, payload)
     assert not (tmp_path / "rendered").exists()
+
+
+def database_tls_binding() -> dict:
+    payload = private_binding()
+    payload["database_tls"] = {
+        "server_name": "loom-postgres-rw.loom-staging.svc.cluster.local",
+        "ca_secret": {"name": "loom-staging-db-ca", "key": "server-ca.crt"},
+    }
+    return payload
+
+
+def test_database_tls_mounts_renewable_ca_and_native_name_only_for_db_consumers(
+    tmp_path: Path,
+) -> None:
+    payload = database_tls_binding()
+    _, docs = render(tmp_path, payload)
+    for doc in docs:
+        if doc["kind"] not in {"Deployment", "CronJob"}:
+            continue
+        spec = doc["spec"] if doc["kind"] == "Deployment" else doc["spec"]["jobTemplate"]["spec"]
+        pod = spec["template"]["spec"]
+        container = pod["containers"][0]
+        env = {item["name"]: item for item in container.get("env", [])}
+        if doc["kind"] == "CronJob":
+            assert pod["hostAliases"] == [{"ip": "10.42.0.8", "hostnames": ["staging.example"]}]
+            assert not {"PGSSLMODE", "PGSSLROOTCERT"} & env.keys()
+            assert "loom-postgres-ca" not in {item["name"] for item in pod.get("volumes", [])}
+            continue
+        assert pod["hostAliases"] == [
+            {"ip": "10.42.0.8", "hostnames": ["staging.example"]},
+            {"ip": "10.42.0.8", "hostnames": [payload["database_tls"]["server_name"]]},
+        ]
+        assert env["PGSSLMODE"]["value"] == "verify-full"
+        assert env["PGSSLROOTCERT"]["value"] == "/var/run/loom/postgres-tls/ca.crt"
+        ca = next(item for item in pod["volumes"] if item["name"] == "loom-postgres-ca")
+        assert ca["secret"] == {
+            "secretName": "loom-staging-db-ca",
+            "defaultMode": 0o444,
+            "items": [{"key": "server-ca.crt", "path": "ca.crt"}],
+        }
+        mount = next(item for item in container["volumeMounts"] if item["name"] == ca["name"])
+        assert mount == {
+            "name": "loom-postgres-ca",
+            "mountPath": "/var/run/loom/postgres-tls",
+            "readOnly": True,
+        }
+        # The public CA is world-readable, including the non-root runtime UID.
+        assert ca["secret"]["defaultMode"] & 0o004
+        assert "value" not in next(item for item in env.values() if item["name"].endswith("DB_URL"))
+    assert not any(doc["kind"] == "Secret" for doc in docs)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda x: x.pop("private_entry"),
+        lambda x: x.update(database_tls=None),
+        lambda x: x["database_tls"].update(password="never-emit-this"),
+        lambda x: x["database_tls"].pop("ca_secret"),
+        lambda x: x["database_tls"].update(server_name="staging.example"),
+        lambda x: x["database_tls"].update(server_name="spool.example"),
+        lambda x: x["database_tls"].update(server_name="10.42.0.8"),
+        lambda x: x["database_tls"].update(server_name="localhost"),
+        lambda x: x["database_tls"].update(server_name="db.example."),
+        lambda x: x["database_tls"].update(server_name="bad_name.example"),
+        lambda x: x["database_tls"].update(server_name="db.example:15432"),
+        lambda x: x["database_tls"].update(server_name="db.example\n"),
+        lambda x: x["database_tls"].update(server_name=None),
+        lambda x: x["database_tls"]["ca_secret"].update(key="../../ca.crt"),
+        lambda x: x["database_tls"]["ca_secret"].update(name=""),
+        lambda x: x["database_tls"]["ca_secret"].update(certificate="never-emit-this"),
+    ],
+)
+def test_database_tls_rejects_incomplete_unsafe_or_colliding_identity(
+    tmp_path: Path, mutation
+) -> None:
+    payload = database_tls_binding()
+    mutation(payload)
+    with pytest.raises(NebiusRuntimeRenderError) as error:
+        render(tmp_path, payload)
+    assert "never-emit-this" not in str(error.value)
+    assert not (tmp_path / "rendered").exists()
+
+
+def test_database_tls_omission_does_not_add_ca_mount_or_libpq_environment(tmp_path: Path) -> None:
+    _, docs = render(tmp_path, private_binding())
+    serialized = yaml.safe_dump_all(docs)
+    assert "PGSSLMODE" not in serialized
+    assert "PGSSLROOTCERT" not in serialized
+    assert "loom-postgres-ca" not in serialized

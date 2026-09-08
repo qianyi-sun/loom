@@ -17,6 +17,8 @@ _NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,253}\Z")
 _IMAGE = re.compile(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}\Z")
 _DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_DB_CA_DIRECTORY = "/var/run/loom/postgres-tls"
+_DB_CA_VOLUME = "loom-postgres-ca"
 _RFC1918 = tuple(
     ipaddress.IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
@@ -99,7 +101,11 @@ def validate_staging_attachment(
             "collector",
             "network",
         }
-        | ({"private_entry"} if isinstance(value, dict) and "private_entry" in value else set()),
+        | (
+            {field for field in ("private_entry", "database_tls") if field in value}
+            if isinstance(value, dict)
+            else set()
+        ),
         "staging attachment",
     )
     if (
@@ -196,24 +202,30 @@ def validate_staging_attachment(
             raise StagingAttachmentError(f"network {name} does not contain its endpoint address")
     if "private_entry" in value:
         _validate_private_entry(value)
+    if "database_tls" in value:
+        _validate_database_tls(value)
 
 
-def _validate_private_entry(value: dict[str, Any]) -> None:
-    entry = _object(value["private_entry"], {"hostname", "address"}, "private entry")
-    hostname = entry["hostname"]
+def _dns_name(hostname: Any, label: str) -> str:
     if (
         not isinstance(hostname, str)
         or len(hostname) > 253
         or "." not in hostname
         or not all(_DNS_LABEL.fullmatch(label) for label in hostname.split("."))
     ):
-        raise StagingAttachmentError("private entry hostname must be a DNS name")
+        raise StagingAttachmentError(f"{label} must be a DNS name")
     try:
         ipaddress.ip_address(hostname)
     except ValueError:
         pass
     else:
-        raise StagingAttachmentError("private entry hostname must not be an IP literal")
+        raise StagingAttachmentError(f"{label} must not be an IP literal")
+    return hostname
+
+
+def _validate_private_entry(value: dict[str, Any]) -> None:
+    entry = _object(value["private_entry"], {"hostname", "address"}, "private entry")
+    hostname = _dns_name(entry["hostname"], "private entry hostname")
     try:
         if not isinstance(entry["address"], str):
             raise ValueError
@@ -236,7 +248,8 @@ def _validate_private_entry(value: dict[str, Any]) -> None:
     if urlsplit(value["source"]["endpoint"]).hostname == hostname:
         raise StagingAttachmentError("private entry must not override the independent spool host")
     # The Secret DSNs are not read or rewritten here. Deployment preflight must
-    # separately verify that both DB references use this hostname on port 15432.
+    # separately verify the DB name from database_tls (or the legacy private
+    # entry name when omitted), port 15432 and the canonical database identity.
     for name, port in (("database", 15432), ("canonical_store", 19443), ("control_plane", 18443)):
         if not any(
             item["port"] == port and address in ipaddress.ip_network(item["cidr"])
@@ -245,6 +258,45 @@ def _validate_private_entry(value: dict[str, Any]) -> None:
             raise StagingAttachmentError(
                 f"private entry network {name} must allow its address and port"
             )
+
+
+def _validate_database_tls(value: dict[str, Any]) -> None:
+    if "private_entry" not in value:
+        raise StagingAttachmentError("database TLS requires a private entry")
+    tls = _object(value["database_tls"], {"server_name", "ca_secret"}, "database TLS")
+    hostname = _dns_name(tls["server_name"], "database TLS server name")
+    if hostname in (
+        value["private_entry"]["hostname"],
+        urlsplit(value["source"]["endpoint"]).hostname,
+    ):
+        raise StagingAttachmentError("database TLS server name must be distinct from HTTPS hosts")
+    _secret(tls["ca_secret"], {"key"}, "database TLS CA Secret")
+
+
+def _database_tls_pod(pod: dict[str, Any], value: dict[str, Any]) -> None:
+    tls = value["database_tls"]
+    pod["hostAliases"].append(
+        {"ip": value["private_entry"]["address"], "hostnames": [tls["server_name"]]}
+    )
+    pod.setdefault("volumes", []).append(
+        {
+            "name": _DB_CA_VOLUME,
+            "secret": {
+                "secretName": tls["ca_secret"]["name"],
+                # This is public trust material, readable by the runtime UID.
+                "defaultMode": 0o444,
+                "items": [{"key": tls["ca_secret"]["key"], "path": "ca.crt"}],
+            },
+        }
+    )
+    container = pod["containers"][0]
+    container.setdefault("volumeMounts", []).append(
+        {"name": _DB_CA_VOLUME, "mountPath": _DB_CA_DIRECTORY, "readOnly": True}
+    )
+    # Directory mount (never subPath) follows kubelet's atomic Secret updates.
+    # libpq reads this CA for each new connection; existing TLS sessions persist.
+    _set_env(container, _env("PGSSLMODE", "verify-full"))
+    _set_env(container, _env("PGSSLROOTCERT", f"{_DB_CA_DIRECTORY}/ca.crt"))
 
 
 def _env(name: str, value: str) -> dict[str, Any]:
@@ -501,6 +553,8 @@ def render_staging_attachment(
             else:
                 continue
             pod["hostAliases"] = [{"ip": entry["address"], "hostnames": [entry["hostname"]]}]
+            if "database_tls" in value and doc["kind"] == "Deployment":
+                _database_tls_pod(pod, value)
     return {
         name: yaml.safe_dump_all(documents, sort_keys=False).encode()
         for name, documents in (

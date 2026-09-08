@@ -64,6 +64,59 @@ logs and exports stable target/cluster/node-group identities for #1552's
 collector and accounting work. Account-level budget enforcement is separately
 configurable; cluster health must never be treated as cost or alert evidence.
 
+## Optional staging source spool
+
+The existing shared state can additionally own one dedicated staging source
+bucket, without another cluster, state, or VM. It is disabled by default:
+omitting `staging_spool` leaves all five spool resources absent and preserves
+the original resources and credentials. To opt in, add this non-secret input to
+the protected variable file after selecting a globally unique unused name:
+
+```json
+"staging_spool": { "bucket_name": "loom-eu-north1-example-staging-spool" }
+```
+
+An opt-in plan adds exactly a bucket, service account, group, membership, and
+access key. Never import/reuse an existing state or evidence bucket/key as this
+spool. The variable rejects evidence-bucket equality and non-spool names; the
+operator must also compare the selected name with the actual backend bucket
+because Terraform does not expose backend configuration to module variables.
+
+The dedicated group receives only `storage.object-editor` through that bucket's
+policy: object read/write/list, multipart create/complete/abort, and deletes for
+acknowledged materialization GC. It receives no project/tenant permit, anonymous
+access, bucket administration, or policy-edit permission. Completed objects have
+no expiry; only unfinished multipart uploads are aborted after seven days.
+Versioning is disabled so application GC removes bytes rather than accumulating
+old versions. No new size/budget limit is imposed; account quota still applies.
+The canonical staging PostgreSQL and MinIO remain authoritative destinations.
+
+The key omits `expires_at` and explicitly uses `EXPLICIT` delivery. The existing
+automation service-account profile obtains refreshed API tokens; no personal
+browser session or runtime STS-refresh support is required. The sensitive root
+output `staging_spool` contains endpoint, region, bucket and service-account IDs,
+`access_key_resource_id`, `aws_access_key_id`, and delivery mode, **not secret
+bytes**. A protected bootstrap consumer captures the result of
+`nebius iam v2 access-key get-secret --id <access_key_resource_id>` using the
+automation profile, checks the returned top-level `aws_access_key_id` against
+the protected output, and installs the top-level `secret` into the canonical
+staging source Secret. Neither response nor raw Terraform output belongs in
+terminal logs or review evidence. The persisted key can be fetched again after
+provider refresh/import; creation does not depend on a one-time INLINE result.
+Use the supported Secret reconciliation/rollout path when deliberately rotating
+credentials; non-expiring does not mean irrevocable.
+
+The native endpoint is `https://storage.<region>.nebius.cloud`; ordinary system
+CA verification remains enabled. Tests prove plan shape, policy boundaries,
+omitted expiration, and output references, not live S3 authorization. Activation
+still requires the reviewed exact plan and a real small-object, multipart,
+readback, canonical materialization, and post-acknowledgment GC smoke.
+
+Provider/API contracts: [access-key resource at the pinned provider version](https://github.com/nebius/terraform-provider-nebius/blob/v0.6.46/docs/resources/iam_v2_access_key.md),
+[non-expiring service-account access keys and native endpoints](https://docs.nebius.com/iam/service-accounts/access-keys),
+[Object Storage action/role matrix](https://docs.nebius.com/object-storage/supported-actions),
+and [bucket-scoped policies](https://docs.nebius.com/object-storage/buckets/bucket-policy).
+
 ## Plan shape
 
 The deployment gateway now has a separately reserved private `/32` allocation

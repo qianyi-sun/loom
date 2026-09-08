@@ -85,3 +85,11 @@ variable "deployment_access_disk_gib" {
   type        = number
   default     = 40
 }
+
+variable "staging_spool" {
+  description = "Optional dedicated staging source spool. Omit to preserve the current stack."
+  type = object({
+    bucket_name = string
+  })
+  default = null
+}

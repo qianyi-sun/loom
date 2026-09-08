@@ -140,6 +140,79 @@ run "development_private_payg_plan" {
     condition     = nebius_iam_v1_auth_public_key.capacity_observer.expires_at == null
     error_message = "The recurring capacity observer key must not acquire a calendar expiry."
   }
+
+  assert {
+    condition     = output.staging_spool == null && length(nebius_storage_v1_bucket.staging_spool) == 0 && length(nebius_iam_v1_service_account.staging_spool) == 0 && length(nebius_iam_v1_group.staging_spool) == 0 && length(nebius_iam_v1_group_membership.staging_spool) == 0 && length(nebius_iam_v2_access_key.staging_spool) == 0
+    error_message = "Omitted staging spool must create no bucket, identity, membership, or credential."
+  }
+}
+
+run "dedicated_staging_spool" {
+  command = plan
+  variables {
+    staging_spool = { bucket_name = "loom-eu-north1-test-staging-spool" }
+  }
+  override_resource {
+    target          = nebius_iam_v1_service_account.staging_spool["staging"]
+    override_during = plan
+    values          = { id = "serviceaccount-staging-spool" }
+  }
+  override_resource {
+    target          = nebius_iam_v1_group.staging_spool["staging"]
+    override_during = plan
+    values          = { id = "group-staging-spool" }
+  }
+  override_resource {
+    target          = nebius_iam_v2_access_key.staging_spool["staging"]
+    override_during = plan
+    values = {
+      id = "accesskey-staging-spool"
+      status = {
+        aws_access_key_id = "test-aws-id"
+      }
+    }
+  }
+  assert {
+    condition     = length(nebius_storage_v1_bucket.staging_spool) == 1 && length(nebius_iam_v1_service_account.staging_spool) == 1 && length(nebius_iam_v1_group.staging_spool) == 1 && length(nebius_iam_v1_group_membership.staging_spool) == 1 && length(nebius_iam_v2_access_key.staging_spool) == 1
+    error_message = "Opt-in must provision exactly one dedicated bucket and one identity/key chain."
+  }
+  assert {
+    condition     = nebius_iam_v1_group_membership.staging_spool["staging"].member_id == "serviceaccount-staging-spool" && nebius_iam_v1_group_membership.staging_spool["staging"].parent_id == "group-staging-spool" && nebius_iam_v2_access_key.staging_spool["staging"].account.service_account.id == "serviceaccount-staging-spool"
+    error_message = "The spool key and membership must use only the dedicated service account."
+  }
+  assert {
+    condition     = nebius_iam_v2_access_key.staging_spool["staging"].expires_at == null && nebius_iam_v2_access_key.staging_spool["staging"].secret_delivery_mode == "EXPLICIT"
+    error_message = "No calendar expiry or one-time INLINE secret dependency is permitted."
+  }
+  assert {
+    condition     = length(nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules) == 1 && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].group_id == "group-staging-spool" && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].paths == tolist(["*"]) && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].roles == tolist(["storage.object-editor"]) && nebius_storage_v1_bucket.staging_spool["staging"].bucket_policy.rules[0].anonymous == null
+    error_message = "The dedicated bucket alone must grant object operations, not bucket administration or anonymous access."
+  }
+  assert {
+    condition     = nebius_storage_v1_bucket.staging_spool["staging"].versioning_policy == "DISABLED" && nebius_storage_v1_bucket.staging_spool["staging"].max_size_bytes == 0 && length(nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules) == 1 && nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules[0].expiration == null && nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules[0].noncurrent_version_expiration == null && nebius_storage_v1_bucket.staging_spool["staging"].lifecycle_configuration.rules[0].abort_incomplete_multipart_upload.days_after_initiation == 7
+    error_message = "Only unfinished multipart uploads expire; completed objects await acknowledged materialization GC with no added budget ceiling."
+  }
+  assert {
+    condition     = output.staging_spool.endpoint == "https://storage.eu-north1.nebius.cloud" && output.staging_spool.target_id == "nebius-eu-north1-staging" && output.staging_spool.access_key_resource_id == "accesskey-staging-spool" && output.staging_spool.aws_access_key_id == "test-aws-id" && !contains(keys(output.staging_spool), "secret") && !contains(keys(output.staging_spool), "secret_access_key")
+    error_message = "Output must identify the native HTTPS endpoint and protected credential reference, never secret bytes."
+  }
+}
+
+run "staging_spool_rejects_evidence_reuse" {
+  command = plan
+  variables {
+    evidence_bucket_name = "loom-eu-north1-test-staging-spool"
+    staging_spool        = { bucket_name = "loom-eu-north1-test-staging-spool" }
+  }
+  expect_failures = [var.staging_spool]
+}
+
+run "staging_spool_rejects_state_bucket_name" {
+  command = plan
+  variables {
+    staging_spool = { bucket_name = "loom-nebius-terraform-state" }
+  }
+  expect_failures = [var.staging_spool]
 }
 
 run "gateway_alias_rejects_service_cidr" {
