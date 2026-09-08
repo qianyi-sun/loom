@@ -27,6 +27,11 @@ from loom_task_image_builder_guard.protocol import (
     create_sealed_memfd,
     parse_base_resolution,
 )
+from loom_task_image_builder_guard.publication import (
+    MAX_PUBLICATION_STATUS_BYTES,
+    PublicationStatus,
+    parse_publication_status,
+)
 from loom_task_image_builder_guard.safeio import read_stable_file
 
 _MAX_CREDENTIAL_BYTES = 64 * 1024
@@ -896,6 +901,80 @@ class AuthorityClient:
             _uuid(request.get("operation_id"), code="authority_lease_invalid"),
             _uuid(request.get("attempt_id"), code="authority_lease_invalid"),
             _integer(request.get("lease_epoch"), code="authority_lease_invalid"),
+        )
+
+    def _publication_operation(
+        self,
+        operation: Literal["publication-submit", "publication-poll"],
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus:
+        code = "authority_publication_invalid"
+        grant = self._grant(grant_id)
+        checked = _exact(
+            request,
+            frozenset(
+                {
+                    "schema_version",
+                    "grant_id",
+                    "session_id",
+                    "session_generation",
+                    "session_token",
+                    "operation_id",
+                    "materialization_id",
+                    "attempt_id",
+                    "lease_epoch",
+                }
+            ),
+            code=code,
+        )
+        if type(checked["schema_version"]) is not int or checked["schema_version"] != 1:
+            raise GuardError(code)
+        _uuid(checked["session_id"], code=code)
+        _integer(checked["session_generation"], code=code)
+        token = checked["session_token"]
+        if not isinstance(token, str) or _TOKEN["session"].fullmatch(token) is None:
+            raise GuardError(code)
+        operation_id, attempt_id, lease_epoch = self._request_binding(
+            grant, materialization_id, checked
+        )
+        if lease_epoch > (1 << 53) - 1:
+            raise GuardError(code)
+        raw = self._request(
+            f"/v1/projections/{grant}/materializations/{materialization_id}/{operation}",
+            checked,
+            expected_status=200,
+            method="POST",
+            maximum_bytes=MAX_PUBLICATION_STATUS_BYTES,
+        )
+        return parse_publication_status(
+            raw,
+            grant_id=grant,
+            operation_id=operation_id,
+            materialization_id=materialization_id,
+            attempt_id=attempt_id,
+            lease_epoch=lease_epoch,
+        )
+
+    def publication_submit(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus:
+        return self._publication_operation(
+            "publication-submit", grant_id, materialization_id, request
+        )
+
+    def publication_poll(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus:
+        return self._publication_operation(
+            "publication-poll", grant_id, materialization_id, request
         )
 
     def claim(

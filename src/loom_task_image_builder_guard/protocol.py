@@ -135,6 +135,8 @@ class LocalRequest:
         "registry-credential",
         "publication-candidate",
         "publication-candidate-v2",
+        "publication-submit",
+        "publication-poll",
         "finish",
         "ack",
     ]
@@ -293,16 +295,24 @@ def parse_local_request(payload: bytes) -> LocalRequest:
             "attempt_id",
             "lease_epoch",
         }
-        if operation in {"start", "heartbeat", "bundle", "release"} and set(
-            document
-        ) == lease_keys:
+        if (
+            operation
+            in {"start", "heartbeat", "bundle", "release", "publication-submit", "publication-poll"}
+            and set(document) == lease_keys
+        ):
+            lease_epoch = _positive_integer(document["lease_epoch"])
+            if (
+                operation in {"publication-submit", "publication-poll"}
+                and lease_epoch > (1 << 53) - 1
+            ):
+                raise ValueError("invalid publication epoch")
             return LocalRequest(
                 operation=operation,
                 grant_id=_uuid(document["grant_id"]),
                 operation_id=_uuid(document["operation_id"]),
                 materialization_id=_uuid(document["materialization_id"]),
                 attempt_id=_uuid(document["attempt_id"]),
-                lease_epoch=_positive_integer(document["lease_epoch"]),
+                lease_epoch=lease_epoch,
             )
         if operation == "fail" and set(document) == lease_keys | {"failure_kind"}:
             failure_kind = document["failure_kind"]

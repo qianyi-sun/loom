@@ -170,6 +170,26 @@ request bodies and private failure details do not enter logs or metric labels.
 No HTTP request starts verification tasks, calls the registry/signer, or adds
 production worker scheduling; those dependencies remain explicit and inactive.
 
+The node guard exposes these same two fixed operations over its existing local
+socket protocol. Requests name only the grant, operation, materialization,
+attempt and lease epoch and must carry one sealed current-session descriptor
+from the same admitted supervisor peer. The closed response contains `schema`,
+`operation`, `response_id`, `grant_id` and inline `publication_status`; it carries
+no response descriptor and uses the normal peer-bound ACK flow. The guard's
+stdlib-only parser independently checks canonical status bytes, request IDs,
+safe integer bounds, whole-second UTC timestamps and embedded receipt bindings.
+Both its HTTP adapter and local service revalidate this boundary. No full
+snapshot, registry destination, token, signing key or arbitrary failure text is
+returned. Maximum-width status plus wrapper fits within 4 KiB; V2 candidate
+metadata still requires the separate 32 KiB release configuration gate.
+
+The guard cannot reconstruct candidate identities from an IDs-only request.
+The supervisor must independently hash its complete validated V2 acknowledgements
+and pin the first authenticated snapshot for subsequent polls. A well-formed
+status is not itself signature verification, current readiness, or trial-start
+authorization. Supervisor lifecycle composition and production activation remain
+gated separately.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over

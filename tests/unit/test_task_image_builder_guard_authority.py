@@ -330,26 +330,41 @@ def _json_response(value: object) -> tuple[int, bytes, dict[str, str]]:
 
 def _publication_request() -> dict[str, object]:
     return {
-        "schema_version": 1, "grant_id": str(GRANT), "session_id": str(SESSION),
-        "session_generation": 1, "session_token": SESSION_TOKEN,
-        "operation_id": str(OPERATION), "materialization_id": str(MATERIALIZATION),
-        "attempt_id": str(ATTEMPT), "lease_epoch": 3,
+        "schema_version": 1,
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token": SESSION_TOKEN,
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
     }
 
 
 def _publication_status_bytes() -> bytes:
-    return json.dumps({
-        "schema": "loom.task-image-publication-status/v1", "grant_id": str(GRANT),
-        "operation_id": str(OPERATION), "materialization_id": str(MATERIALIZATION),
-        "attempt_id": str(ATTEMPT), "lease_epoch": 3, "state": "queued",
-        "snapshot_sha256": DIGEST_A, "candidate_set_sha256": DIGEST_B,
-        "component_count": 128,
-    }, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return json.dumps(
+        {
+            "schema": "loom.task-image-publication-status/v1",
+            "grant_id": str(GRANT),
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "state": "queued",
+            "snapshot_sha256": DIGEST_A,
+            "candidate_set_sha256": DIGEST_B,
+            "component_count": 128,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
 
 
 @pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
 def test_publication_fixed_post_uses_current_credentials_and_bounded_status(
-    tmp_path: Path, operation: str,
+    tmp_path: Path,
+    operation: str,
 ) -> None:
     with _authority(tmp_path) as (server, config):
         client = AuthorityClient(config, trusted_uid=os.geteuid(), trusted_gid=os.getegid())
@@ -367,48 +382,72 @@ def test_publication_fixed_post_uses_current_credentials_and_bounded_status(
 
 
 @pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
-@pytest.mark.parametrize(("status", "payload", "code"), [
-    (200, b" " * 4097, "authority_response_too_large"),
-    (200, _publication_status_bytes() + b"\n", "authority_publication_invalid"),
-    (200, _publication_status_bytes().replace(str(ATTEMPT).encode(), str(SESSION).encode()),
-     "authority_publication_invalid"),
-    (503, b"sentinel-private-server-error", "authority_http_failed"),
-    (401, b"sentinel-private-auth-error", "authority_http_failed"),
-])
+@pytest.mark.parametrize(
+    ("status", "payload", "code"),
+    [
+        (200, b" " * 4097, "authority_response_too_large"),
+        (200, _publication_status_bytes() + b"\n", "authority_publication_invalid"),
+        (
+            200,
+            _publication_status_bytes().replace(str(ATTEMPT).encode(), str(SESSION).encode()),
+            "authority_publication_invalid",
+        ),
+        (503, b"sentinel-private-server-error", "authority_http_failed"),
+        (401, b"sentinel-private-auth-error", "authority_http_failed"),
+    ],
+)
 def test_publication_http_rejection_is_bounded_and_redacted(
-    tmp_path: Path, operation: str, status: int, payload: bytes, code: str,
+    tmp_path: Path,
+    operation: str,
+    status: int,
+    payload: bytes,
+    code: str,
 ) -> None:
     with _authority(tmp_path) as (server, config):
-        client = AuthorityClient(replace(config, max_response_bytes=65536),
-                                 trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        client = AuthorityClient(
+            replace(config, max_response_bytes=65536),
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+        )
         route = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/{operation}"
         server.responses[route] = (status, payload, {"Content-Type": "application/json"})
         with pytest.raises(GuardError, match=code) as caught:
-            getattr(client, operation.replace("-", "_"))(GRANT, MATERIALIZATION, _publication_request())
+            getattr(client, operation.replace("-", "_"))(
+                GRANT, MATERIALIZATION, _publication_request()
+            )
         assert "sentinel" not in str(caught.value)
 
 
 @pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
-def test_publication_rejects_extra_request_authority_before_http(tmp_path: Path, operation: str) -> None:
+def test_publication_rejects_extra_request_authority_before_http(
+    tmp_path: Path, operation: str
+) -> None:
     with _authority(tmp_path) as (server, config):
         client = AuthorityClient(config, trusted_uid=os.geteuid(), trusted_gid=os.getegid())
         with pytest.raises(GuardError, match="authority_publication_invalid"):
             getattr(client, operation.replace("-", "_"))(
-                GRANT, MATERIALIZATION, _publication_request() | {"repository": "private"},
+                GRANT,
+                MATERIALIZATION,
+                _publication_request() | {"repository": "private"},
             )
         assert not server.requests
 
 
 @pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
-def test_publication_http_absolute_deadline_interrupts_drip_headers(tmp_path: Path, operation: str) -> None:
+def test_publication_http_absolute_deadline_interrupts_drip_headers(
+    tmp_path: Path, operation: str
+) -> None:
     with _authority(tmp_path) as (server, config):
-        client = AuthorityClient(replace(config, timeout_seconds=0.2),
-                                 trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        client = AuthorityClient(
+            replace(config, timeout_seconds=0.2), trusted_uid=os.geteuid(), trusted_gid=os.getegid()
+        )
         route = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/{operation}"
         server.drip_paths.add(route)
         started = time.monotonic()
         with pytest.raises(GuardError, match="authority_deadline_exceeded"):
-            getattr(client, operation.replace("-", "_"))(GRANT, MATERIALIZATION, _publication_request())
+            getattr(client, operation.replace("-", "_"))(
+                GRANT, MATERIALIZATION, _publication_request()
+            )
         assert time.monotonic() - started < 1.5
 
 

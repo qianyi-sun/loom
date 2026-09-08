@@ -62,6 +62,7 @@ from loom_task_image_builder_guard.protocol import (
     require_ack,
     send_packet,
 )
+from loom_task_image_builder_guard.publication import PublicationStatus, parse_publication_status
 from loom_task_image_builder_guard.storage import JobStorage
 
 _BOOTSTRAP = re.compile(r"^loom_tibp_[A-Za-z0-9_-]{64,128}$")
@@ -277,6 +278,20 @@ class Authority(Protocol):
         materialization_id: UUID,
         request: dict[str, object],
     ) -> PublicationCandidateAcknowledgementV2: ...
+
+    def publication_submit(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus: ...
+
+    def publication_poll(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus: ...
 
     def release(
         self,
@@ -2333,6 +2348,8 @@ class GuardService:
                 "registry-credential",
                 "publication-candidate",
                 "publication-candidate-v2",
+                "publication-submit",
+                "publication-poll",
             }:
                 if descriptor is None:
                     raise GuardError("local_session_descriptor_required")
@@ -3248,6 +3265,7 @@ class GuardService:
         authority_request = self._session_request(session)
         secret: SealedAuthorityPayload | None = None
         acknowledgement: LeaseAcknowledgement | None = None
+        publication_status: PublicationStatus | None = None
         candidate: (
             PublicationCandidateAcknowledgement
             | PublicationCandidateAcknowledgementV2
@@ -3399,6 +3417,31 @@ class GuardService:
                     request.materialization_id,
                     authority_request,
                 )
+            elif request.operation in {"publication-submit", "publication-poll"}:
+                if request.operation == "publication-submit":
+                    publication_status = self.authority.publication_submit(
+                        grant_id,
+                        request.materialization_id,
+                        authority_request,
+                    )
+                else:
+                    publication_status = self.authority.publication_poll(
+                        grant_id,
+                        request.materialization_id,
+                        authority_request,
+                    )
+                # Adapters are a second boundary: never forward an unchecked
+                # mutable document or a forged status wrapper to the supervisor.
+                if type(publication_status) is not PublicationStatus:
+                    raise GuardError("authority_publication_invalid")
+                publication_status = parse_publication_status(
+                    publication_status.canonical_bytes,
+                    grant_id=grant_id,
+                    operation_id=operation_id,
+                    materialization_id=request.materialization_id,
+                    attempt_id=request.attempt_id,
+                    lease_epoch=request.lease_epoch,
+                )
             elif request.operation not in {
                 "registry-credential",
                 "publication-candidate",
@@ -3436,6 +3479,8 @@ class GuardService:
         elif request.operation == "claim":
             response["operation_id"] = str(operation_id)
             response["available"] = False
+        elif publication_status is not None:
+            response["publication_status"] = publication_status.as_dict()
         elif candidate is not None:
             response.update(
                 {

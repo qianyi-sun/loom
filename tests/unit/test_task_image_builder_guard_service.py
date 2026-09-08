@@ -988,7 +988,10 @@ class _Authority:
         )
 
     def publication_submit(
-        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object],
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
     ) -> PublicationStatus:
         assert (grant_id, materialization_id) == (GRANT, MATERIALIZATION)
         self.events.append("authority_publication_submit")
@@ -996,7 +999,10 @@ class _Authority:
         return PublicationStatus(_json(_publication_status_document(request)))
 
     def publication_poll(
-        self, grant_id: UUID, materialization_id: UUID, request: dict[str, object],
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
     ) -> PublicationStatus:
         assert (grant_id, materialization_id) == (GRANT, MATERIALIZATION)
         self.events.append("authority_publication_poll")
@@ -2937,32 +2943,46 @@ def test_registry_publication_operations_proxy_opaque_capability_without_ledger_
 
 def _publication_status_document(request: dict[str, object]) -> dict[str, object]:
     common = {
-        key: request[key] for key in ("operation_id", "materialization_id", "attempt_id", "lease_epoch")
+        key: request[key]
+        for key in ("operation_id", "materialization_id", "attempt_id", "lease_epoch")
     } | {"snapshot_sha256": DIGEST_A, "candidate_set_sha256": DIGEST_B, "component_count": 128}
     return common | {
-        "schema": "loom.task-image-publication-status/v1", "grant_id": str(GRANT),
+        "schema": "loom.task-image-publication-status/v1",
+        "grant_id": str(GRANT),
         "state": "completed",
-        "receipt": common | {
+        "receipt": common
+        | {
             "schema": "loom.task-image-publication-receipt/v1",
-            "worker_generation": 9007199254740991, "publication_set_sha256": DIGEST_C,
+            "worker_generation": 9007199254740991,
+            "publication_set_sha256": DIGEST_C,
             "completed_at": "2026-09-08T12:34:56Z",
         },
     }
 
 
 @pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
-@pytest.mark.parametrize("condition", ["success", "wrong-binding", "bad-receipt", "extra-secret", "unavailable", "cancel-ack"])
+@pytest.mark.parametrize(
+    "condition",
+    ["success", "wrong-binding", "bad-receipt", "extra-secret", "unavailable", "cancel-ack"],
+)
 def test_publication_status_real_socket_revalidates_adapter_and_closes_session_fd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, condition: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    condition: str,
 ) -> None:
     service, ledger, peer, _slurm, _events = _service(tmp_path)
     current_wire = _establish_session(service, ledger)
     service._uuid = lambda: RESPONSE
     before = ledger.get(GRANT).raw  # type: ignore[union-attr]
     request = {
-        "schema": LOCAL_SCHEMA, "operation": operation, "grant_id": str(GRANT),
-        "operation_id": str(LEASE_OPERATION), "materialization_id": str(MATERIALIZATION),
-        "attempt_id": str(ATTEMPT), "lease_epoch": 9007199254740991,
+        "schema": LOCAL_SCHEMA,
+        "operation": operation,
+        "grant_id": str(GRANT),
+        "operation_id": str(LEASE_OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 9007199254740991,
     }
     status = _publication_status_document(request)
     expected_status = json.loads(_json(status))
@@ -3000,30 +3020,50 @@ def test_publication_status_real_socket_revalidates_adapter_and_closes_session_f
         response_payload, descriptor = receive_request(client, maximum=4096)
         response = json.loads(response_payload)
         assert descriptor is None
-        assert b"sentinel" not in response_payload and SESSION_TOKEN.encode() not in response_payload
+        assert (
+            b"sentinel" not in response_payload and SESSION_TOKEN.encode() not in response_payload
+        )
         if condition in {"success", "cancel-ack"}:
             assert response == {
-                "schema": LOCAL_SCHEMA, "operation": operation, "response_id": str(RESPONSE),
-                "grant_id": str(GRANT), "publication_status": expected_status,
+                "schema": LOCAL_SCHEMA,
+                "operation": operation,
+                "response_id": str(RESPONSE),
+                "grant_id": str(GRANT),
+                "publication_status": expected_status,
             }
             assert len(response_payload) < 1500
             if condition == "success":
-                send_packet(client, _json({"schema": LOCAL_SCHEMA, "operation": "ack", "response_id": str(RESPONSE)}))
+                send_packet(
+                    client,
+                    _json(
+                        {"schema": LOCAL_SCHEMA, "operation": "ack", "response_id": str(RESPONSE)}
+                    ),
+                )
             else:
                 client.close()
         else:
             assert response == {
-                "schema": LOCAL_SCHEMA, "operation": "error",
-                "code": "authority_transport_failed" if condition == "unavailable" else "authority_publication_invalid",
+                "schema": LOCAL_SCHEMA,
+                "operation": "error",
+                "code": "authority_transport_failed"
+                if condition == "unavailable"
+                else "authority_publication_invalid",
             }
         thread.join(timeout=3)
         assert not thread.is_alive()
-        assert authority_requests == [{
-            "schema_version": 1, "grant_id": str(GRANT), "session_id": str(SESSION),
-            "session_generation": 1, "session_token": SESSION_TOKEN,
-            "operation_id": str(LEASE_OPERATION), "materialization_id": str(MATERIALIZATION),
-            "attempt_id": str(ATTEMPT), "lease_epoch": 9007199254740991,
-        }]
+        assert authority_requests == [
+            {
+                "schema_version": 1,
+                "grant_id": str(GRANT),
+                "session_id": str(SESSION),
+                "session_generation": 1,
+                "session_token": SESSION_TOKEN,
+                "operation_id": str(LEASE_OPERATION),
+                "materialization_id": str(MATERIALIZATION),
+                "attempt_id": str(ATTEMPT),
+                "lease_epoch": 9007199254740991,
+            }
+        ]
         assert received_fds
         for received_fd in received_fds:
             with pytest.raises(OSError):
