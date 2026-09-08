@@ -1,0 +1,575 @@
+{
+  "candidate_sets": [
+    {
+      "identities": [
+        {
+          "candidate_id": "00000000-0000-0000-0000-0000000003e9",
+          "component": "task"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-0000000003ea",
+          "component": "sidecar:cache"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-0000000003eb",
+          "component": "sidecar:db"
+        }
+      ],
+      "name": "optional_task",
+      "sha256": "ed29834f14a8d485aa150acee4edf19c26da454d2d5ccab02dc2f59ae662281e"
+    },
+    {
+      "identities": [
+        {
+          "candidate_id": "00000000-0000-0000-0000-0000000007d1",
+          "component": "sidecar:cache"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-0000000007d2",
+          "component": "sidecar:db"
+        }
+      ],
+      "name": "sidecar_only",
+      "sha256": "7563dc68fb5b44263dea078c3e0b17548d41bcc4919404acaeda489283d53948"
+    },
+    {
+      "identities": [
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000001",
+          "component": "task"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000002",
+          "component": "sidecar:s001"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000003",
+          "component": "sidecar:s002"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000004",
+          "component": "sidecar:s003"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000005",
+          "component": "sidecar:s004"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000006",
+          "component": "sidecar:s005"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000007",
+          "component": "sidecar:s006"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000008",
+          "component": "sidecar:s007"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000009",
+          "component": "sidecar:s008"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000000a",
+          "component": "sidecar:s009"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000000b",
+          "component": "sidecar:s010"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000000c",
+          "component": "sidecar:s011"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000000d",
+          "component": "sidecar:s012"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000000e",
+          "component": "sidecar:s013"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000000f",
+          "component": "sidecar:s014"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000010",
+          "component": "sidecar:s015"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000011",
+          "component": "sidecar:s016"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000012",
+          "component": "sidecar:s017"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000013",
+          "component": "sidecar:s018"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000014",
+          "component": "sidecar:s019"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000015",
+          "component": "sidecar:s020"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000016",
+          "component": "sidecar:s021"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000017",
+          "component": "sidecar:s022"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000018",
+          "component": "sidecar:s023"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000019",
+          "component": "sidecar:s024"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000001a",
+          "component": "sidecar:s025"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000001b",
+          "component": "sidecar:s026"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000001c",
+          "component": "sidecar:s027"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000001d",
+          "component": "sidecar:s028"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000001e",
+          "component": "sidecar:s029"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000001f",
+          "component": "sidecar:s030"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000020",
+          "component": "sidecar:s031"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000021",
+          "component": "sidecar:s032"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000022",
+          "component": "sidecar:s033"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000023",
+          "component": "sidecar:s034"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000024",
+          "component": "sidecar:s035"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000025",
+          "component": "sidecar:s036"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000026",
+          "component": "sidecar:s037"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000027",
+          "component": "sidecar:s038"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000028",
+          "component": "sidecar:s039"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000029",
+          "component": "sidecar:s040"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000002a",
+          "component": "sidecar:s041"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000002b",
+          "component": "sidecar:s042"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000002c",
+          "component": "sidecar:s043"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000002d",
+          "component": "sidecar:s044"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000002e",
+          "component": "sidecar:s045"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000002f",
+          "component": "sidecar:s046"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000030",
+          "component": "sidecar:s047"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000031",
+          "component": "sidecar:s048"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000032",
+          "component": "sidecar:s049"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000033",
+          "component": "sidecar:s050"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000034",
+          "component": "sidecar:s051"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000035",
+          "component": "sidecar:s052"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000036",
+          "component": "sidecar:s053"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000037",
+          "component": "sidecar:s054"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000038",
+          "component": "sidecar:s055"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000039",
+          "component": "sidecar:s056"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000003a",
+          "component": "sidecar:s057"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000003b",
+          "component": "sidecar:s058"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000003c",
+          "component": "sidecar:s059"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000003d",
+          "component": "sidecar:s060"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000003e",
+          "component": "sidecar:s061"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000003f",
+          "component": "sidecar:s062"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000040",
+          "component": "sidecar:s063"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000041",
+          "component": "sidecar:s064"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000042",
+          "component": "sidecar:s065"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000043",
+          "component": "sidecar:s066"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000044",
+          "component": "sidecar:s067"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000045",
+          "component": "sidecar:s068"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000046",
+          "component": "sidecar:s069"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000047",
+          "component": "sidecar:s070"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000048",
+          "component": "sidecar:s071"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000049",
+          "component": "sidecar:s072"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000004a",
+          "component": "sidecar:s073"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000004b",
+          "component": "sidecar:s074"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000004c",
+          "component": "sidecar:s075"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000004d",
+          "component": "sidecar:s076"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000004e",
+          "component": "sidecar:s077"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000004f",
+          "component": "sidecar:s078"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000050",
+          "component": "sidecar:s079"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000051",
+          "component": "sidecar:s080"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000052",
+          "component": "sidecar:s081"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000053",
+          "component": "sidecar:s082"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000054",
+          "component": "sidecar:s083"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000055",
+          "component": "sidecar:s084"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000056",
+          "component": "sidecar:s085"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000057",
+          "component": "sidecar:s086"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000058",
+          "component": "sidecar:s087"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000059",
+          "component": "sidecar:s088"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000005a",
+          "component": "sidecar:s089"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000005b",
+          "component": "sidecar:s090"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000005c",
+          "component": "sidecar:s091"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000005d",
+          "component": "sidecar:s092"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000005e",
+          "component": "sidecar:s093"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000005f",
+          "component": "sidecar:s094"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000060",
+          "component": "sidecar:s095"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000061",
+          "component": "sidecar:s096"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000062",
+          "component": "sidecar:s097"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000063",
+          "component": "sidecar:s098"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000064",
+          "component": "sidecar:s099"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000065",
+          "component": "sidecar:s100"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000066",
+          "component": "sidecar:s101"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000067",
+          "component": "sidecar:s102"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000068",
+          "component": "sidecar:s103"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000069",
+          "component": "sidecar:s104"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000006a",
+          "component": "sidecar:s105"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000006b",
+          "component": "sidecar:s106"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000006c",
+          "component": "sidecar:s107"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000006d",
+          "component": "sidecar:s108"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000006e",
+          "component": "sidecar:s109"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000006f",
+          "component": "sidecar:s110"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000070",
+          "component": "sidecar:s111"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000071",
+          "component": "sidecar:s112"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000072",
+          "component": "sidecar:s113"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000073",
+          "component": "sidecar:s114"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000074",
+          "component": "sidecar:s115"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000075",
+          "component": "sidecar:s116"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000076",
+          "component": "sidecar:s117"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000077",
+          "component": "sidecar:s118"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000078",
+          "component": "sidecar:s119"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000079",
+          "component": "sidecar:s120"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000007a",
+          "component": "sidecar:s121"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000007b",
+          "component": "sidecar:s122"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000007c",
+          "component": "sidecar:s123"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000007d",
+          "component": "sidecar:s124"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000007e",
+          "component": "sidecar:s125"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-00000000007f",
+          "component": "sidecar:s126"
+        },
+        {
+          "candidate_id": "00000000-0000-0000-0000-000000000080",
+          "component": "sidecar:s127"
+        }
+      ],
+      "name": "maximum_128",
+      "sha256": "28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2"
+    }
+  ],
+  "receipts": [
+    {
+      "binding": {
+        "attempt_id": "00000000-0000-0000-0000-0000000001f7",
+        "candidate_set_sha256": "28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2",
+        "component_count": 128,
+        "lease_epoch": 9007199254740991,
+        "materialization_id": "00000000-0000-0000-0000-0000000001f6",
+        "operation_id": "00000000-0000-0000-0000-0000000001f5",
+        "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "completed_at": "2026-09-08T12:34:56Z",
+        "publication_set_sha256": "a986d136eb1d49cd8394128f2871ce862fa16c9e422b864c79927050c64a9b87",
+        "worker_generation": 9007199254740991
+      },
+      "name": "maximum_safe_counters",
+      "payload": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001f7\",\"candidate_set_sha256\":\"28b79828acd82fa2b4161a2dcd31ce5b639021ce68c20c52eec3bd97b03f41a2\",\"completed_at\":\"2026-09-08T12:34:56Z\",\"component_count\":128,\"lease_epoch\":9007199254740991,\"materialization_id\":\"00000000-0000-0000-0000-0000000001f6\",\"operation_id\":\"00000000-0000-0000-0000-0000000001f5\",\"publication_set_sha256\":\"a986d136eb1d49cd8394128f2871ce862fa16c9e422b864c79927050c64a9b87\",\"schema\":\"loom.task-image-publication-receipt/v1\",\"snapshot_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"worker_generation\":9007199254740991}"
+    }
+  ],
+  "schema": "loom.task-image-publication-go-test-vectors/v1"
+}
