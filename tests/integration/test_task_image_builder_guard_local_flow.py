@@ -6,10 +6,14 @@ import socket
 import subprocess
 from pathlib import Path
 from threading import Event, Thread
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
+from loom_task_image_authority.publication_receipts import (
+    PublicationCandidateIdentity,
+    candidate_set_sha256,
+)
 from loom_task_image_builder_guard.protocol import (
     LOCAL_SCHEMA,
     create_sealed_memfd,
@@ -17,6 +21,7 @@ from loom_task_image_builder_guard.protocol import (
     receive_request,
     send_packet,
 )
+from loom_task_image_builder_guard.publication import PublicationStatus
 from tests.unit.test_task_image_builder_guard_service import (
     ATTEMPT,
     BOOTSTRAP,
@@ -28,6 +33,7 @@ from tests.unit.test_task_image_builder_guard_service import (
     SESSION_TOKEN,
     _establish_session,
     _json,
+    _publication_status_document,
     _receive_projected_secret,
     _service,
 )
@@ -206,7 +212,13 @@ def test_go_publication_status_handoff_reaches_actual_python_service(tmp_path: P
     _go_handoff_reaches_actual_python_service(tmp_path, publication_status=True)
 
 
-def _go_handoff_reaches_actual_python_service(tmp_path: Path, *, publication_status: bool) -> None:
+def test_go_publication_lifecycle_reaches_actual_python_service(tmp_path: Path) -> None:
+    _go_handoff_reaches_actual_python_service(tmp_path, publication_status=True, lifecycle=True)
+
+
+def _go_handoff_reaches_actual_python_service(
+    tmp_path: Path, *, publication_status: bool, lifecycle: bool = False,
+) -> None:
     helper_value = os.environ.get("LOOM_GO_V2_TEST_BINARY")
     if helper_value is None:
         if os.environ.get("LOOM_GO_V2_TEST_REQUIRED") == "1":
@@ -228,6 +240,28 @@ def _go_handoff_reaches_actual_python_service(tmp_path: Path, *, publication_sta
             UUID("acacacac-acac-4cac-8cac-acacacacacac"),
         )
     ).__next__
+    if lifecycle:
+        service._uuid = uuid4
+        candidate_hash = candidate_set_sha256((PublicationCandidateIdentity(
+            candidate_id=str(CANDIDATE), component="task",
+        ),))
+
+        def status(grant_id: UUID, materialization_id: UUID, request: dict[str, object], *, submit: bool) -> PublicationStatus:
+            assert (grant_id, materialization_id) == (GRANT, MATERIALIZATION)
+            operation = "publication-submit" if submit else "publication-poll"
+            service.authority.requests.append((operation, json.loads(_json(request))))
+            document = _publication_status_document(request)
+            document.update(candidate_set_sha256=candidate_hash, component_count=1)
+            receipt = document["receipt"]
+            assert isinstance(receipt, dict)
+            receipt.update(candidate_set_sha256=candidate_hash, component_count=1)
+            if submit:
+                document["state"] = "queued"
+                del document["receipt"]
+            return PublicationStatus(_json(document))
+
+        service.authority.publication_submit = lambda g, m, r: status(g, m, r, submit=True)
+        service.authority.publication_poll = lambda g, m, r: status(g, m, r, submit=False)
     failure: list[BaseException] = []
 
     def run() -> None:
@@ -257,8 +291,10 @@ def _go_handoff_reaches_actual_python_service(tmp_path: Path, *, publication_sta
             [
                 str(helper),
                 "-test.v",
-                "-test.run=^TestGoPublicationStatusPythonHandoffHelper$"
-                if publication_status else "-test.run=^TestGoPublicationCandidateV2PythonHandoffHelper$",
+                "-test.run=^TestGoPublicationLifecyclePythonHandoffHelper$" if lifecycle else (
+                    "-test.run=^TestGoPublicationStatusPythonHandoffHelper$"
+                    if publication_status else "-test.run=^TestGoPublicationCandidateV2PythonHandoffHelper$"
+                ),
             ],
             check=False,
             capture_output=True,
@@ -280,6 +316,11 @@ def _go_handoff_reaches_actual_python_service(tmp_path: Path, *, publication_sta
     assert SESSION_TOKEN not in completed.stderr
     operation, authority_request = service.authority.requests[-1]
     if publication_status:
+        if lifecycle:
+            assert [item[0] for item in service.authority.requests[-3:]] == [
+                "publication-candidate-v2", "publication-submit", "publication-poll",
+            ]
+            assert service.authority.requests[-2][1]["operation_id"] == authority_request["operation_id"]
         assert [item[0] for item in service.authority.requests[-2:]] == [
             "publication-submit", "publication-poll",
         ]
@@ -303,17 +344,18 @@ def _go_handoff_reaches_actual_python_service(tmp_path: Path, *, publication_sta
     ledger.close()
 
 
-@pytest.mark.parametrize("publication_status", [False, True])
+@pytest.mark.parametrize("publication_status,lifecycle", [(False, False), (True, False), (True, True)])
 def test_go_v2_candidate_handoff_required_mode_fails_without_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     publication_status: bool,
+    lifecycle: bool,
 ) -> None:
     monkeypatch.delenv("LOOM_GO_V2_TEST_BINARY", raising=False)
     monkeypatch.setenv("LOOM_GO_V2_TEST_REQUIRED", "1")
 
     with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as raised:
-        _go_handoff_reaches_actual_python_service(tmp_path, publication_status=publication_status)
+        _go_handoff_reaches_actual_python_service(tmp_path, publication_status=publication_status, lifecycle=lifecycle)
 
     assert isinstance(raised.value, pytest.fail.Exception)
     assert str(raised.value) == "LOOM_GO_V2_TEST_BINARY is required"

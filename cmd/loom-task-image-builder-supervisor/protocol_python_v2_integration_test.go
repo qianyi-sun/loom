@@ -107,3 +107,60 @@ func TestGoPublicationStatusPythonHandoffHelper(t *testing.T) {
 		t.Fatal("status binding differs from Python fixture")
 	}
 }
+
+// Exercises candidate recording and the composed controller over real sealed
+// descriptors/ACKs. Python owns the independently derived status/receipt fixture.
+func TestGoPublicationLifecyclePythonHandoffHelper(t *testing.T) {
+	if os.Getenv("LOOM_GO_V2_HELPER") != "1" {
+		t.Skip("cross-language helper is driven by the Python integration fixture")
+	}
+	useTestProtocolPolicy(t)
+	socketPath := os.Getenv("LOOM_GO_V2_SOCKET")
+	fd, err := strconv.Atoi(os.Getenv("LOOM_GO_V2_SESSION_FD"))
+	if err != nil || socketPath == "" {
+		t.Fatal("cross-language helper environment invalid")
+	}
+	syscall.CloseOnExec(fd)
+	current, err := NewSecretBuffer(fd, maxSecretBytes)
+	if err != nil {
+		t.Fatal("session unavailable")
+	}
+	defer current.Close()
+	previousArch := runtimeGOARCH
+	runtimeGOARCH = func() string { return "arm64" }
+	t.Cleanup(func() { runtimeGOARCH = previousArch })
+	envelope, err := parseSessionEnvelope(current)
+	if err != nil {
+		t.Fatal("session invalid")
+	}
+	client := NewGuardClient(socketPath, 32768, 2*time.Second)
+	manager := NewSessionManager(envelope.GrantID, envelope, client)
+	defer manager.Close()
+	clock := &publicationTestClock{manualClock: newManualClock(envelope.IssuedAt.Add(time.Second)), armed: make(chan time.Duration, 100)}
+	set := handoffBuiltSet()
+	set.GrantID, set.MaterializationID, set.AttemptID = envelope.GrantID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	set.Components = set.Components[:1]
+	component := set.Components[0]
+	builder := "rootless:" + strings.Repeat("a", 32)
+	p := &publicationLifecycle{clock: clock, session: manager, guard: client, set: set, builderID: builder, leaseExpiresAt: clock.Now().Add(time.Minute), timeout: time.Hour}
+	p.upload = func(ctx context.Context) ([]PublicationCandidateV2Acknowledgement, error) {
+		request := PublicationCandidateV2Request{PublicationCandidateRequest: PublicationCandidateRequest{
+			GrantID: set.GrantID, OperationID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", CredentialID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", CredentialGeneration: 1,
+			SessionID: envelope.SessionID, SessionGeneration: envelope.Generation, MaterializationID: set.MaterializationID, AttemptID: set.AttemptID, AttemptNumber: 2, LeaseEpoch: 1, BuilderID: builder,
+			Component: component.Name, ManifestDigest: component.Output.TopLevelDigest, ManifestSize: component.Output.ManifestSize, OCIFileSHA256: component.Output.FileSHA256, OCIFileSize: component.Output.SizeBytes, Platform: "linux/arm64"}, BaseResolution: component.BaseResolution}
+		var ack *PublicationCandidateV2Acknowledgement
+		err := manager.WithCurrent(func(secret *SecretBuffer) error {
+			var err error
+			ack, err = client.PublicationCandidateV2(ctx, request, secret)
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		return []PublicationCandidateV2Acknowledgement{*ack}, nil
+	}
+	receipt, err := drivePublication(t, p, clock)
+	if err != nil || receipt == nil || receipt.ComponentCount != 1 || receipt.PublicationSetSHA256 != strings.Repeat("3", 64) {
+		t.Fatalf("lifecycle receipt unavailable: %v", err)
+	}
+}
