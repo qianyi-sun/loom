@@ -37,6 +37,11 @@ from loom_llm_gateway.attempt_deadline import (
     request_attempt_deadline,
 )
 from loom_llm_gateway.dialect import TokenUsage
+from loom_llm_gateway.dispatch_audit import (
+    DispatchAudit,
+    DispatchAuditUnavailableError,
+    request_dispatch_audit,
+)
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
@@ -403,6 +408,11 @@ async def chat_completions(
             provider_label=byo_row.provider_type,
             request_params=normalize_request_params(raw_body),
             attempt_deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="chat_byo",
+                provider_connection_id=byo_row.id,
+            ),
         )
     else:
         acompletion_kwargs = dict(
@@ -417,16 +427,26 @@ async def chat_completions(
         try:
             deadline = request_attempt_deadline(request)
             if deadline is not None:
-                acompletion_kwargs["timeout"] = deadline.cap_seconds(
-                    settings.upstream_timeout_sec
+                acompletion_kwargs["timeout"] = deadline.cap_seconds(settings.upstream_timeout_sec)
+            audit = request_dispatch_audit(
+                request,
+                dialect="chat_litellm",
+                provider_connection_id=byo_row.id if byo_row is not None else None,
+                purpose="adapter_call",
+            )
+            if audit is not None:
+                raw = await audit.send(
+                    lambda: litellm_wrapper.acompletion(**acompletion_kwargs),
+                    deadline=deadline,
                 )
-                raw = await deadline.run(
-                    lambda: litellm_wrapper.acompletion(**acompletion_kwargs)
-                )
+            elif deadline is not None:
+                raw = await deadline.run(lambda: litellm_wrapper.acompletion(**acompletion_kwargs))
             else:
                 raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
         except AttemptDeadlineReachedError as exc:
             raise_deadline_http_exception(exc)
+        except (HTTPException, DispatchAuditUnavailableError):
+            raise
         except Exception as exc:
             detail = _redact_provider_exception(exc, api_key)
             async with request.app.state.session_factory() as audit_session:
@@ -585,6 +605,7 @@ async def _forward_openai_compatible_byo_chat(
     provider_label: str,
     request_params: dict[str, Any],
     attempt_deadline: GatewayAttemptDeadline | None = None,
+    dispatch_audit: DispatchAudit | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Forward BYO OpenAI-compatible chat through the egress client pool.
 
@@ -615,15 +636,14 @@ async def _forward_openai_compatible_byo_chat(
                 json=payload,
                 headers=headers,
                 timeout=(
-                    timeout
-                    if attempt_deadline is None
-                    else attempt_deadline.httpx_timeout(timeout)
+                    timeout if attempt_deadline is None else attempt_deadline.httpx_timeout(timeout)
                 ),
                 follow_redirects=False,
             ),
             settings=settings,
             dialect="chat_byo",
             deadline=attempt_deadline,
+            dispatch_audit=dispatch_audit,
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)

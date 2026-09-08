@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import cast
+from uuid import uuid4
 
 import pytest
 
@@ -224,3 +225,82 @@ async def test_cancellation_drain_cannot_exceed_thirty_seconds() -> None:
             run=run,
             cancellation_drain_sec=30.01,
         )
+
+
+@pytest.mark.parametrize("blocked_phase", ["begin", "start"])
+async def test_attempt_setup_callbacks_share_supervised_deadline(blocked_phase: str) -> None:
+    class BlockingAgent(_LifecycleAgent):
+        async def begin_attempt(self, deadline: AttemptDeadline) -> None:
+            self.deadlines.append(deadline)
+            if blocked_phase == "begin":
+                await asyncio.Future()
+
+    agent = BlockingAgent()
+
+    async def on_started(*_args: object) -> None:
+        if blocked_phase == "start":
+            await asyncio.Future()
+
+    async def run(_writer: TrajectoryWriter) -> None:
+        pytest.fail("agent must not run after setup deadline")
+
+    diagnostic = await asyncio.wait_for(
+        supervise_agent_attempt(
+            agent=agent,
+            configured_timeout_sec=0.01,
+            trajectory=cast(TrajectoryWriter, _RecordingWriter()),
+            run=run,
+            cancellation_drain_sec=0.01,
+            on_attempt_started=on_started,
+        ),
+        timeout=0.2,
+    )
+    assert diagnostic is not None
+    assert diagnostic.task_stopped
+    assert agent.close_calls == 1
+
+
+async def test_late_cancel_resistant_grant_callback_is_trajectory_fenced() -> None:
+    agent = _LifecycleAgent()
+    writer = _RecordingWriter()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    rejected = []
+
+    async def grant_callback(*args: object) -> None:
+        # Compatibility form allows the same test to expose the original
+        # callback API's unfenced writer as well as the fixed supplied guard.
+        guarded_writer = cast(TrajectoryWriter, args[2] if len(args) == 3 else writer)
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release.wait()
+        try:
+            await guarded_writer.write_raw_dict({"kind": "late-grant"})
+        except AttemptTrajectoryFencedError:
+            rejected.append(True)
+        finally:
+            finished.set()
+
+    async def run(_writer: TrajectoryWriter) -> None:
+        deadline = agent.deadlines[-1]
+        await deadline.record_step_token_grant(
+            agent_attempt_id=deadline.agent_attempt_id,
+            step_jwt_id=uuid4(),
+        )
+
+    diagnostic = await supervise_agent_attempt(
+        agent=agent,
+        configured_timeout_sec=0.01,
+        trajectory=cast(TrajectoryWriter, writer),
+        run=run,
+        cancellation_drain_sec=0.01,
+        on_step_token_grant=grant_callback,
+    )
+    assert diagnostic is not None and not diagnostic.task_stopped
+    assert getattr(agent, "_loom_worker_unhealthy", False)
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=0.2)
+    await asyncio.sleep(0)
+    assert rejected == [True]
+    assert writer.raw == []

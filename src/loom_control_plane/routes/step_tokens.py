@@ -75,6 +75,7 @@ class _IssueStepTokenRequest(BaseModel):
     step_id: str = Field(min_length=1, max_length=64)
     ttl_sec: int = Field(gt=0, le=_MAX_STEP_TOKEN_TTL_SEC)
     attempt_deadline_wall_clock: datetime | None = None
+    agent_attempt_id: UUID | None = None
     # Only the dedicated family-orchestrator credential may set this field.
     # Presence is significant: explicit null means the evolver must use the
     # platform route even when the completed trial used a BYO connection.
@@ -100,6 +101,12 @@ class _IssueStepTokenRequest(BaseModel):
     def exactly_one_subject(self) -> _IssueStepTokenRequest:
         if (self.trial_id is None) == (self.execution_attempt_id is None):
             raise ValueError("exactly one step-token subject is required")
+        if self.agent_attempt_id is not None and (
+            self.trial_id is None
+            or self.attempt_deadline_wall_clock is None
+            or self.step_id in {"verifier", "family_evolver"}
+        ):
+            raise ValueError("agent attempt identity requires a Trial agent deadline")
         return self
 
 
@@ -107,6 +114,8 @@ class _IssueStepTokenResponse(BaseModel):
     token: str
     expires_at: datetime
     attempt_deadline_wall_clock: datetime | None
+    agent_attempt_id: UUID | None = None
+    step_jwt_id: UUID | None = None
 
 
 async def _step_token_principal(
@@ -161,9 +170,7 @@ async def _protected_step_token_worker_session(
         raise HTTPException(status_code=400, detail="step-token worker subject required")
 
     dependency = (
-        protected_trial_worker_session
-        if trial_id is not None
-        else protected_attempt_worker_session
+        protected_trial_worker_session if trial_id is not None else protected_attempt_worker_session
     )
     identity = trial_id if trial_id is not None else attempt_id
     assert identity is not None
@@ -459,6 +466,8 @@ async def issue_step_token(
                             detail="provider_connection not found",
                         )
 
+    # A new grant id per mint; no idempotency or ongoing lease claim implied.
+    step_jwt_id = attempt_step_jwt_id or service_step_jwt_id or uuid4()
     token = mint_step_jwt(
         team_id=payload.team_id,
         trial_id=payload.trial_id,
@@ -474,7 +483,8 @@ async def issue_step_token(
             or payload.execution_attempt_id is not None
             or service_execution_lease_id is not None
         ),
-        step_jwt_id=attempt_step_jwt_id or service_step_jwt_id,
+        step_jwt_id=step_jwt_id,
+        agent_attempt_id=payload.agent_attempt_id,
         execution_attempt_lease_epoch=attempt_lease_epoch,
         execution_spec_digest=attempt_execution_spec_digest,
         control_binding_snapshot_digest=attempt_control_binding_digest,
@@ -517,4 +527,6 @@ async def issue_step_token(
         token=token,
         expires_at=expires_at,
         attempt_deadline_wall_clock=attempt_deadline,
+        agent_attempt_id=payload.agent_attempt_id,
+        step_jwt_id=step_jwt_id,
     )

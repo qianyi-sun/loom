@@ -105,6 +105,8 @@ class AuthContext:
     # Gateway must re-check before contacting an upstream provider.  Trial
     # JWTs and pre-upgrade attempt JWTs leave these fields unset.
     step_jwt_id: UUID | None = None
+    # Ordinary Trial internal agent retry identity, not a scheduler attempt.
+    agent_attempt_id: UUID | None = None
     execution_attempt_lease_epoch: int | None = None
     execution_spec_digest: str | None = None
     control_binding_snapshot_digest: str | None = None
@@ -184,6 +186,7 @@ def mint_step_jwt(
     provider_connection_id: UUID | None = None,
     provider_connection_id_bound: bool = False,
     step_jwt_id: UUID | None = None,
+    agent_attempt_id: UUID | None = None,
     execution_attempt_lease_epoch: int | None = None,
     execution_spec_digest: str | None = None,
     control_binding_snapshot_digest: str | None = None,
@@ -211,6 +214,15 @@ def mint_step_jwt(
         execution_attempt_id = subject.id if subject.kind == "execution_attempt" else None
     if (trial_id is None) == (execution_attempt_id is None):
         raise ValueError("exactly one token subject is required")
+    if agent_attempt_id is not None and (
+        not isinstance(agent_attempt_id, UUID)
+        or trial_id is None
+        or attempt_deadline_wall_clock is None
+        or step_jwt_id is None
+        or step_id in {"verifier", "family_evolver"}
+        or service_execution_role == "verifier"
+    ):
+        raise ValueError("agent attempt identity requires a Trial agent deadline and grant")
 
     now = issued_at if issued_at is not None else datetime.now(UTC)
     if now.tzinfo is None or now.utcoffset() is None:
@@ -241,9 +253,13 @@ def mint_step_jwt(
     }
     if attempt_deadline_wall_clock is not None:
         payload["attempt_deadline_wall_clock"] = attempt_deadline_wall_clock.isoformat()
+    if agent_attempt_id is not None:
+        payload["agent_attempt_id"] = str(agent_attempt_id)
     if trial_id is not None:
         payload["trial_id"] = str(trial_id)
         payload["subject_kind"] = "trial"
+        if step_jwt_id is not None:
+            payload["jti"] = str(step_jwt_id)
         service_authority = (
             service_execution_lease_id,
             service_execution_generation,
@@ -376,11 +392,25 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
                 or isinstance(expires_at, bool)
                 or attempt_deadline_wall_clock.timestamp() <= issued_at
                 or expires_at - issued_at > 30_000
-                or expires_at
-                < (attempt_deadline_wall_clock + timedelta(seconds=300)).timestamp()
+                or expires_at < (attempt_deadline_wall_clock + timedelta(seconds=300)).timestamp()
             ):
                 raise ValueError("invalid attempt deadline lifetime")
         step_jwt_id = UUID(payload["jti"]) if isinstance(payload.get("jti"), str) else None
+        raw_agent_attempt_id = payload.get("agent_attempt_id")
+        agent_attempt_id = None
+        if raw_agent_attempt_id is not None:
+            if not isinstance(raw_agent_attempt_id, str):
+                raise ValueError("invalid agent attempt identity")
+            agent_attempt_id = UUID(raw_agent_attempt_id)
+            if (
+                raw_trial_id is None
+                or payload.get("subject_kind") != "trial"
+                or attempt_deadline_wall_clock is None
+                or step_jwt_id is None
+                or payload.get("step_id") in {"verifier", "family_evolver"}
+                or payload.get("service_execution_role") == "verifier"
+            ):
+                raise ValueError("invalid agent attempt scope")
         execution_attempt_lease_epoch = payload.get("execution_attempt_lease_epoch")
         if execution_attempt_lease_epoch is not None and (
             not isinstance(execution_attempt_lease_epoch, int)
@@ -479,6 +509,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         provider_connection_id=provider_connection_id,
         provider_connection_id_bound=provider_connection_id_bound,
         step_jwt_id=step_jwt_id,
+        agent_attempt_id=agent_attempt_id,
         execution_attempt_lease_epoch=execution_attempt_lease_epoch,
         execution_spec_digest=(
             payload.get("execution_spec_digest")

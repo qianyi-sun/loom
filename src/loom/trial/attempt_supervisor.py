@@ -9,6 +9,7 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
+from uuid import UUID, uuid4
 
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.trajectory.attempt_guard import AttemptFence, AttemptTrajectoryGuard
@@ -39,6 +40,7 @@ class AttemptTimeoutDiagnostic:
     cancellation_drain_sec: float
     transport_close_required: bool
     task_stopped: bool
+    agent_attempt_id: UUID | None = None
 
 
 async def supervise_agent_attempt(
@@ -48,6 +50,9 @@ async def supervise_agent_attempt(
     trajectory: TrajectoryWriter,
     run: Callable[[TrajectoryWriter], Awaitable[None]],
     cancellation_drain_sec: float = DEFAULT_CANCELLATION_DRAIN_SEC,
+    on_attempt_started: Callable[[AttemptDeadline, TrajectoryWriter], Awaitable[None]]
+    | None = None,
+    on_step_token_grant: Callable[[UUID, UUID, TrajectoryWriter], Awaitable[None]] | None = None,
 ) -> AttemptTimeoutDiagnostic | None:
     """Run one attempt and make an absolute deadline the first-cause arbiter.
 
@@ -64,30 +69,44 @@ async def supervise_agent_attempt(
         raise ValueError("cancellation drain must be finite and between 0 and 30 seconds")
     loop = asyncio.get_running_loop()
     started_at = loop.time()
-    deadline = AttemptDeadline.after(configured_timeout_sec, clock=loop.time)
     fence = AttemptFence()
-    guarded_trajectory = cast(
-        TrajectoryWriter,
-        AttemptTrajectoryGuard(trajectory, fence),
-    )
+    guard = AttemptTrajectoryGuard(trajectory, fence)
+    guarded_trajectory = cast(TrajectoryWriter, guard)
 
-    await _begin_attempt(agent, deadline)
+    async def observe_grant(agent_attempt_id: UUID, step_jwt_id: UUID) -> None:
+        guard.require_attempt_active()
+        deadline.require_remaining()
+        if on_step_token_grant is not None:
+            await on_step_token_grant(agent_attempt_id, step_jwt_id, guarded_trajectory)
+        guard.require_attempt_active()
+        deadline.require_remaining()
+
+    deadline = AttemptDeadline.after(
+        configured_timeout_sec,
+        clock=loop.time,
+        agent_attempt_id=uuid4(),
+        grant_observer=observe_grant,
+    )
 
     async def run_and_latch() -> None:
         try:
+            deadline.require_remaining()
+            await _begin_attempt(agent, deadline)
+            guard.require_attempt_active()
+            deadline.require_remaining()
+            if on_attempt_started is not None:
+                await on_attempt_started(deadline, guarded_trajectory)
+            guard.require_attempt_active()
+            deadline.require_remaining()
             await run(guarded_trajectory)
         except AttemptDeadlineExceededError:
             fence.latch("agent_timeout")
             raise
         except BaseException:
-            fence.latch(
-                "agent_timeout" if deadline.reached else "agent_finished"
-            )
+            fence.latch("agent_timeout" if deadline.reached else "agent_finished")
             raise
         else:
-            fence.latch(
-                "agent_timeout" if deadline.reached else "agent_finished"
-            )
+            fence.latch("agent_timeout" if deadline.reached else "agent_finished")
 
     task = asyncio.create_task(run_and_latch())
     close_started = False
@@ -118,9 +137,7 @@ async def supervise_agent_attempt(
 
         # The deadline wins before cancellation or transport teardown begins.
         # Later exceptions and auth responses can no longer replace this cause.
-        deadline_won = fence.terminal_cause == "agent_timeout" or fence.latch(
-            "agent_timeout"
-        )
+        deadline_won = fence.terminal_cause == "agent_timeout" or fence.latch("agent_timeout")
         if not deadline_won:
             try:
                 await task
@@ -160,6 +177,7 @@ async def supervise_agent_attempt(
             cancellation_drain_sec=cancellation_elapsed,
             transport_close_required=close_task is not None,
             task_stopped=task_stopped,
+            agent_attempt_id=deadline.agent_attempt_id,
         )
     except asyncio.CancelledError:
         fence.latch("supervisor_cancelled")

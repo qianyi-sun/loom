@@ -32,6 +32,7 @@ from loom_llm_gateway.attempt_deadline import (
     upstream_timeout,
 )
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
+from loom_llm_gateway.dispatch_audit import request_dispatch_audit
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.provider_dispatch import (
     ProviderDispatchError,
@@ -149,6 +150,12 @@ async def _resolve_responses_support(
             api_key=api_key,
             client=upstream,
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="responses",
+                provider_connection_id=row.id,
+                purpose="capability_probe",
+            ),
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)
@@ -316,6 +323,8 @@ async def responses(
                 dialect_label="/v1/responses",
             )
             api_key = await decrypt_facade_api_key(session, row)
+
+        request.state.dispatch_connection_id = row.id
 
         upstream_url = f"{row.base_url.rstrip('/')}/responses"
         upstream: httpx.AsyncClient = await request.app.state.egress_client_pool.get(row.id)
@@ -634,11 +643,7 @@ async def _dispatch_execution_attempt_responses(
                 follow_redirects=False,
             )
 
-        upstream_response = (
-            await _post()
-            if deadline is None
-            else await deadline.run(_post)
-        )
+        upstream_response = await _post() if deadline is None else await deadline.run(_post)
         enforce_request_attempt_deadline(request)
     except AttemptDeadlineReachedError as exc:
         await _settle_attempt_failure(
@@ -844,6 +849,11 @@ async def _post_upstream_responses(
             settings=settings,
             dialect=dialect,
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect=dialect,
+                provider_connection_id=getattr(request.state, "dispatch_connection_id", None),
+            ),
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)
@@ -889,6 +899,11 @@ async def _post_upstream_chat_completion(
             settings=settings,
             dialect="facade_openai_chat_compat",
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="facade_openai_chat_compat",
+                provider_connection_id=getattr(request.state, "dispatch_connection_id", None),
+            ),
         )
     except AttemptDeadlineReachedError as exc:
         raise_deadline_http_exception(exc)
