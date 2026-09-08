@@ -92,3 +92,11 @@ exit status and sanitized diagnostics alongside partial scan evidence.
 Required follow-up acceptance: provision the Nebius runner and environment/IAM
 bindings, publish an exact merged integration commit, verify registry readback,
 and deploy that signed bundle through the independent platform renderer/deployer.
+
+The release derivative retains the runner listener and Node 20/24 executables
+needed by JavaScript actions. It removes upstream's unused Docker daemon/CLI,
+containerd/runc/buildx and bundled npm/corepack distributions. Application package
+installation runs inside BuildKit's build stages, not in this release runner.
+This narrower tooling avoids inheriting vulnerable dependencies from software
+the publication job never uses. The complete remaining image is scanned under
+the unchanged critical-vulnerability policy.

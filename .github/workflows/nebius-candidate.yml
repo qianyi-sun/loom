@@ -32,10 +32,12 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          enable-cache: false
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
       - name: Install locked candidate tooling
         run: |
-          uv sync --frozen --no-dev --extra cluster
+          uv sync --locked --no-dev --extra cluster
           test "$(dpkg-query -W -f='${Version}' skopeo)" = '1.13.3+ds1-2ubuntu0.24.04.3'
           skopeo --version
           /opt/buildkit/buildctl --version
