@@ -11,7 +11,7 @@ from loom.task_image_materialization import ensure_task_image_materializations
 from tests.integration.test_task_image_materialization_store import _task_values
 from tests.integration.test_task_image_publication_jobs import _blocked
 from tests.integration.test_task_image_publication_jobs import (
-    registry_authority_session as materialization_session,
+    registry_authority_session as registry_authority_session,
 )
 
 
@@ -25,9 +25,9 @@ async def _prepared(factory):
         return task, {row.cpu_arch: row.id for row in rows}
 
 
-async def test_cached_ready_state_cannot_survive_committed_retirement(materialization_session):
-    task, ids = await _prepared(materialization_session)
-    async with materialization_session() as session:
+async def test_cached_ready_state_cannot_survive_committed_retirement(registry_authority_session):
+    task, ids = await _prepared(registry_authority_session)
+    async with registry_authority_session() as session:
         await session.execute(
             update(TaskImageMaterialization)
             .where(TaskImageMaterialization.id == ids["arm64"])
@@ -38,7 +38,7 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(materializ
             )
         )
         await session.commit()
-    async with materialization_session() as referrer, materialization_session() as retire:
+    async with registry_authority_session() as referrer, registry_authority_session() as retire:
         cached = await referrer.get(TaskImageMaterialization, ids["arm64"])
         assert cached.state == "ready" and cached.registry_images
         await retire.execute(
@@ -54,7 +54,7 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(materializ
             current.state == "queued" and current.registry_images == {} and current.ready_at is None
         )
         await referrer.commit()
-    async with materialization_session() as session:
+    async with registry_authority_session() as session:
         assert (
             await session.scalar(
                 select(TaskImageMaterialization.state).where(
@@ -65,9 +65,11 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(materializ
         )
 
 
-async def test_ensure_locks_arm64_before_x86_64_independent_of_heap_order(materialization_session):
-    task, ids = await _prepared(materialization_session)
-    async with materialization_session() as earlier, materialization_session() as ensurer:
+async def test_ensure_locks_arm64_before_x86_64_independent_of_heap_order(
+    registry_authority_session,
+):
+    task, ids = await _prepared(registry_authority_session)
+    async with registry_authority_session() as earlier, registry_authority_session() as ensurer:
         await earlier.scalar(
             select(TaskImageMaterialization)
             .where(TaskImageMaterialization.id == ids["arm64"])
@@ -98,12 +100,29 @@ async def test_ensure_locks_arm64_before_x86_64_independent_of_heap_order(materi
 
 
 async def test_suppressed_autoflush_cannot_discard_pending_materialization_changes(
-    materialization_session,
+    registry_authority_session,
 ):
-    task, ids = await _prepared(materialization_session)
-    async with materialization_session() as session:
+    task, ids = await _prepared(registry_authority_session)
+    async with registry_authority_session() as session:
         row = await session.get(TaskImageMaterialization, ids["arm64"])
         row.failure_message = "pending caller change"
         with session.no_autoflush, pytest.raises(RuntimeError, match="pending materialization"):
             await ensure_task_image_materializations(session, task_row=task)
         assert row.failure_message == "pending caller change" and row in session.dirty
+
+
+async def test_detached_submitted_revision_is_not_replaced_by_current_task(
+    registry_authority_session,
+):
+    submitted, _ = await _prepared(registry_authority_session)
+    async with registry_authority_session() as registrar:
+        await registrar.execute(
+            update(Task).where(Task.id == submitted.id).values(checksum="2" * 64)
+        )
+        await registrar.commit()
+    async with registry_authority_session() as session:
+        rows = await ensure_task_image_materializations(session, task_row=submitted)
+        assert {row.task_checksum for row in rows} == {"1" * 64}
+        assert (
+            await session.scalar(select(Task.checksum).where(Task.id == submitted.id)) == "2" * 64
+        )

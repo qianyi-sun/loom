@@ -159,6 +159,14 @@ async def ensure_task_image_materializations(
     if not architectures:
         return ()
 
+    # Locked refresh below must never overwrite pending caller-owned state,
+    # including when the caller has deliberately suppressed ORM autoflush.
+    if any(
+        isinstance(row, TaskImageMaterialization)
+        for row in (*session.new, *session.dirty, *session.deleted)
+    ):
+        raise RuntimeError("task image ensure has pending materialization writes")
+
     task_checksum = canonical_task_checksum(task_row.checksum)
     keys = {
         cpu_arch: task_image_materialization_key(
@@ -190,6 +198,8 @@ async def ensure_task_image_materializations(
             await session.execute(
                 select(TaskImageMaterialization)
                 .where(TaskImageMaterialization.materialization_key.in_(keys.values()))
+                .order_by(TaskImageMaterialization.cpu_arch, TaskImageMaterialization.id)
+                .execution_options(populate_existing=True)
                 .with_for_update()
             )
         )
