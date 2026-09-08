@@ -42,6 +42,7 @@ class AssemblyFixture:
     fetcher: FixtureFetcher
     expected_urls: set[str]
     source: BundleFixture
+    runtime_artifact_root: Path | None = None
 
     def install_runner(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(bundle, "SubprocessCommandRunner", lambda: FixtureRunner(self.source))
@@ -54,6 +55,7 @@ class AssemblyFixture:
             architecture="x86_64",
             output=output,
             fetcher=self.fetcher,
+            runtime_artifact_root=self.runtime_artifact_root,
         )
 
 
@@ -90,6 +92,60 @@ def release_fixture(tmp_path: Path) -> AssemblyFixture:
     )
 
 
+def release_fixture_v2(tmp_path: Path) -> AssemblyFixture:
+    fixture = release_fixture(tmp_path)
+    runtime = json.loads(fixture.runtime_path.read_text(encoding="utf-8"))
+    artifacts = runtime["architectures"][fixture.source.architecture]["artifacts"]
+    fixture.runtime_path = fixture.runtime_path.with_name("rootless-runtime-v2.json")
+    fixture.release_path = fixture.release_path.with_name("host-release-v2.json")
+    fixture.source.runtime_path = fixture.runtime_path
+    fixture.source.release_path = fixture.release_path
+    fixture.source.release["runtime_manifest"] = fixture.runtime_path.name
+    fixture.source.write_release()
+    fixture.runtime_path.write_text(
+        json.dumps(
+            {
+                "schema": "loom.task-image-builder-rootless-runtime/v2",
+                "release": "rootless-runtime-v2",
+                "source": {
+                    "buildkit": {
+                        "version": "v0.32.2",
+                        "signed_tag_commit": "1" * 40,
+                        "archive_sha256": "2" * 64,
+                    },
+                    "rootlesskit": {
+                        "version": "v3.1.0",
+                        "signed_tag_commit": "3" * 40,
+                        "archive_sha256": "4" * 64,
+                    },
+                },
+                "toolchain": {
+                    "go": "go1.26.7",
+                    "image": "golang:1.26-alpine3.23",
+                    "image_sha256": "5" * 64,
+                    "x_crypto": "v0.55.0",
+                    "reproducible_flags": ["-trimpath", "-buildvcs=false"],
+                },
+                "architectures": {
+                    fixture.source.debian_architecture: {
+                        "platform": f"linux/{fixture.source.debian_architecture}",
+                        "members": runtime["architectures"][fixture.source.architecture][
+                            "binaries"
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixture.runtime_path.chmod(0o644)
+    fixture.runtime_artifact_root = fixture.source.bundle / "runtime"
+    for artifact in artifacts:
+        del fixture.fetcher.responses[artifact["url"]]
+    fixture.expected_urls = set(fixture.fetcher.responses)
+    return fixture
+
+
 def _temporary_outputs(parent: Path, output: Path) -> list[Path]:
     return list(parent.glob(f".{output.name}.loom-tmp-*"))
 
@@ -109,6 +165,27 @@ def test_assembler_fetches_exact_closure_verifies_and_publishes(
     assert len(fixture.fetcher.requested) == len(fixture.expected_urls) == 11
     assert output.is_dir()
     assert not _temporary_outputs(tmp_path, output)
+
+
+def test_assembler_accepts_v2_manifest_with_explicit_local_runtime_artifact_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = release_fixture_v2(tmp_path)
+    fixture.install_runner(monkeypatch)
+    output = tmp_path / "published-bundle"
+
+    digest = fixture.assemble(output)
+
+    assert len(digest) == 64
+    assert set(fixture.fetcher.requested) == fixture.expected_urls
+    assert len(fixture.fetcher.requested) == len(fixture.expected_urls) == 7
+    assert sorted(path.name for path in (output / "runtime").iterdir()) == [
+        "buildkit-v0.32.2.linux-amd64.tar.gz",
+        "fuse-overlayfs-x86_64",
+        "rootlesskit-x86_64.tar.gz",
+        "slirp4netns-x86_64",
+    ]
 
 
 def test_assembler_never_replaces_existing_output(tmp_path: Path) -> None:

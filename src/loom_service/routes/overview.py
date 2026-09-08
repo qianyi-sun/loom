@@ -35,6 +35,7 @@ router = APIRouter()
 _BATCH_STATES = ("submitted", "running", "finished", "cancelled")
 _TRIAL_STATES = (
     "queued",
+    "protected-pending",
     "claimed",
     "running",
     "succeeded",

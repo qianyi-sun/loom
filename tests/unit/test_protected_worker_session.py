@@ -369,3 +369,34 @@ def test_runtime_database_url_loader_rejects_malformed_content(
 
     with pytest.raises(module.ProtectedWorkerRuntimeConfigurationError):
         module.load_protected_worker_runtime_db_url(path)
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_trial_wraps_non_mapping_guard_response() -> None:
+    module = _module()
+
+    class _Result:
+        def scalar_one(self) -> list[object]:
+            return []
+
+    class _Session:
+        @asynccontextmanager
+        async def begin(self) -> AsyncIterator[None]:
+            yield
+
+        async def execute(self, *_args: object, **_kwargs: object) -> _Result:
+            return _Result()
+
+    @asynccontextmanager
+    async def session_factory() -> AsyncIterator[_Session]:
+        yield _Session()
+
+    store = module.ProtectedWorkerSessionStore(session_factory)
+    with pytest.raises(
+        module.ProtectedTrialCancellationError,
+        match="malformed response",
+    ):
+        await store.cancel_pending_trial(
+            trial_id=UUID("00000000-0000-4000-8000-000000000401"),
+            team_id=None,
+        )

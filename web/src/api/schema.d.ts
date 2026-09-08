@@ -727,6 +727,7 @@ export interface components {
         };
         trials: {
           queued: number;
+          "protected-pending": number;
           claimed: number;
           running: number;
           materializing: number;
@@ -737,6 +738,7 @@ export interface components {
       };
       queue: {
         queued: number;
+        protected_pending: number;
         claimed: number;
         running: number;
         waiting: number;

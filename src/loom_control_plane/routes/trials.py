@@ -41,6 +41,7 @@ from loom_capacity_guard.contracts import SealedRequirementsV1, canonical_digest
 from loom_control_plane.protected_worker_session import (
     EXECUTOR_WORKER_CREDENTIAL_HEADER,
     ProtectedPrincipalTrialSession,
+    ProtectedTrialCancellationError,
     ProtectedTrialSubmissionConflictError,
     ProtectedTrialSubmissionError,
     ProtectedWorkerPrincipal,
@@ -48,7 +49,7 @@ from loom_control_plane.protected_worker_session import (
     protected_trial_worker_session,
 )
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
-from loom_control_plane.service_execution import request_trial_execution_cancellation
+from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
@@ -698,17 +699,19 @@ async def submit_trial(
     }
 
 
-_CANCEL_SQL = text("""
-UPDATE trials
-   SET state = 'cancelled',
-       cancellation_requested_at = NOW(),
-       cancellation_observed_at = CASE WHEN state = 'queued' THEN NOW()
-                                       ELSE cancellation_observed_at END,
-       finished_at = COALESCE(finished_at, NOW())
+_FAMILY_CANCEL_SCOPE_SQL = text("""
+SELECT team_id
+  FROM trials
  WHERE id = (:trial_id)::uuid
-   AND ((:team_id)::uuid IS NULL OR team_id = (:team_id)::uuid)
-   AND state IN ('queued', 'claimed', 'running')
- RETURNING id, state, finished_at;
+   AND batch_id IS NOT NULL
+   AND family_key IS NOT NULL;
+""")
+
+_BATCH_CANCEL_SCOPE_SQL = text("""
+SELECT team_id
+  FROM trials
+ WHERE id = (:trial_id)::uuid
+   AND batch_id IS NOT NULL;
 """)
 
 
@@ -723,43 +726,67 @@ async def cancel_trial(
             session,
             authorization,
             admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
+            allow_family_orchestrator=True,
         )
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     caller_is_admin = is_admin(ctx)
-    # A platform admin may cancel any trial; a team caller is scoped to its own
-    # team. A non-admin token with no team has nothing it may act on.
-    if not caller_is_admin and ctx.team_id is None:
-        raise HTTPException(status_code=401, detail="not authorized")
-    scoped_team_id = None if caller_is_admin else ctx.team_id
-
-    async with request.app.state.session_factory() as session:
-        row = (
-            (
+    if ctx.type == "family_orchestrator":
+        async with request.app.state.session_factory() as session:
+            scoped_team_id = (
                 await session.execute(
-                    _CANCEL_SQL,
-                    {
-                        "trial_id": trial_id,
-                        "team_id": scoped_team_id,
-                    },
+                    _FAMILY_CANCEL_SCOPE_SQL,
+                    {"trial_id": trial_id},
                 )
-            )
-            .mappings()
-            .one_or_none()
+            ).scalar_one_or_none()
+        if scoped_team_id is None:
+            raise HTTPException(status_code=401, detail="not authorized")
+    elif (
+        ctx.type == "worker"
+        and ctx.team_id is None
+        and ctx.user_id is None
+        and ctx.scopes == ["submit:batch"]
+    ):
+        async with request.app.state.session_factory() as session:
+            scoped_team_id = (
+                await session.execute(
+                    _BATCH_CANCEL_SCOPE_SQL,
+                    {"trial_id": trial_id},
+                )
+            ).scalar_one_or_none()
+        if scoped_team_id is None:
+            raise HTTPException(status_code=401, detail="not authorized")
+    else:
+        # A platform admin may cancel any trial; a team caller is scoped to its
+        # own team. A non-admin token with no team has nothing it may act on.
+        if not caller_is_admin and ctx.team_id is None:
+            raise HTTPException(status_code=401, detail="not authorized")
+        scoped_team_id = None if caller_is_admin else ctx.team_id
+
+    row: Any | None = None
+    protected_store = getattr(request.app.state, "protected_worker_session_store", None)
+    try:
+        row = await cancel_trial_under_authority(
+            session_factory=request.app.state.session_factory,
+            protected_store=protected_store,
+            trial_id=trial_id,
+            team_id=scoped_team_id,
         )
-        if row is not None:
-            await request_trial_execution_cancellation(
-                session,
-                trial_id=trial_id,
-            )
-        await session.commit()
+    except ProtectedTrialCancellationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="protected trial cancellation unavailable",
+        ) from exc
 
     if row is None:
         raise HTTPException(
             status_code=409,
             detail="trial is in a terminal state (succeeded/failed/cancelled)",
         )
-    return {"trial_id": str(row["id"]), "state": row["state"]}
+    response_state = (
+        "cancellation-requested" if row["state"] in {"claimed", "running"} else "cancelled"
+    )
+    return {"trial_id": str(row["id"]), "state": response_state}
 
 
 @router.get("/trials/{trial_id}")
@@ -796,6 +823,11 @@ async def get_trial(
             row.pre_start_heartbeat_at.isoformat() if row.pre_start_heartbeat_at else None
         ),
         "started_at": row.started_at.isoformat() if row.started_at else None,
+        "cancellation_requested_at": (
+            row.cancellation_requested_at.isoformat()
+            if row.cancellation_requested_at
+            else None
+        ),
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "attempt_count": row.attempt_count,
         "result": row.result,

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,6 +16,7 @@ from loom.db.schema_startup import assert_schema_at_head
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.storage_credentials import build_s3_client
+from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.artifact_commit_runtime import (
     CheckpointRouteService,
@@ -89,7 +89,28 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
     return await assert_schema_at_head(engine, db_url_env_var="LOOM_CP_DB_URL")
 
 
+async def _cancel_and_drain_tasks(
+    tasks: Sequence[asyncio.Task[None] | None],
+    *,
+    grace_seconds: float = 5.0,
+) -> None:
+    active_tasks = tuple(task for task in tasks if task is not None)
+    if not active_tasks:
+        return
+    for task in active_tasks:
+        task.cancel()
+    _done, pending = await asyncio.wait(active_tasks, timeout=grace_seconds)
+    for task in pending:
+        task.cancel()
+    results = await asyncio.gather(*active_tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            raise result
+
+
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
+    source_config = ServiceExecutionSourceConfig.from_settings(settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(
@@ -148,6 +169,10 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             secret_key=settings.minio_secret_key.get_secret_value(),
             region=settings.minio_region,
         )
+        source_store = (
+            source_config.build_store(MinioObjectStore) if source_config else artifact_store
+        )
+        source_bucket = source_config.bucket if source_config else settings.artifacts_bucket
         artifact_repository = SqlArtifactCommitRepository(
             session_factory=session_factory,
             store=artifact_store,
@@ -288,65 +313,49 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 name="loom-cp-service-execution-scheduler",
             )
         service_execution_materializer_task: asyncio.Task[None] | None = None
+        service_execution_materializer_stop_event: asyncio.Event | None = None
         if settings.service_execution_materializer_enabled:
+            service_execution_materializer_stop_event = asyncio.Event()
             service_execution_materializer_task = asyncio.create_task(
                 run_service_execution_materializer_loop(
                     materializer=ServiceExecutionMaterializer(
                         session_factory=session_factory,
-                        source_store=artifact_store,
-                        source_bucket=settings.artifacts_bucket,
+                        source_store=source_store,
+                        source_bucket=source_bucket,
                         canonical_store=artifact_store,
                         artifacts_bucket=settings.artifacts_bucket,
                         trajectories_bucket=settings.trajectories_bucket,
-                        claim_ttl_seconds=(
-                            settings.service_execution_materializer_claim_ttl_sec
-                        ),
-                        source_retention_seconds=(
-                            settings.service_execution_source_retention_sec
-                        ),
+                        claim_ttl_seconds=(settings.service_execution_materializer_claim_ttl_sec),
+                        source_retention_seconds=(settings.service_execution_source_retention_sec),
                     ),
                     interval_seconds=settings.service_execution_materializer_interval_sec,
                     concurrency=settings.service_execution_materializer_concurrency,
+                    stop_event=service_execution_materializer_stop_event,
                 ),
                 name="loom-cp-service-execution-materializer",
             )
         try:
             yield
         finally:
-            crash_detector_task.cancel()
-            metrics_refresher_task.cancel()
-            retry_exhausted_task.cancel()
-            worker_pool_autoscaler_task.cancel()
-            live_preview_reconciler_task.cancel()
-            if slurm_controller_task is not None:
-                slurm_controller_task.cancel()
-            if service_execution_scheduler_task is not None:
-                service_execution_scheduler_task.cancel()
             if service_execution_materializer_task is not None:
-                service_execution_materializer_task.cancel()
-            # Bound the await so a stuck task (e.g. mid-DB call when
-            # cancellation arrives, asyncpg connection takes a moment
-            # to release) doesn't block the entire lifespan shutdown —
-            # which then blocks `TestClient.__exit__`, which then
-            # blocks the test. Five seconds is generous for a task
-            # that should respond to cancel in microseconds.
-            for t in (
-                crash_detector_task,
-                metrics_refresher_task,
-                retry_exhausted_task,
-                worker_pool_autoscaler_task,
-                live_preview_reconciler_task,
-                slurm_controller_task,
-                service_execution_scheduler_task,
-                service_execution_materializer_task,
-            ):
-                if t is None:
-                    continue
-                with contextlib.suppress(
-                    asyncio.CancelledError,
-                    asyncio.TimeoutError,
-                ):
-                    await asyncio.wait_for(t, timeout=5.0)
+                assert service_execution_materializer_stop_event is not None
+                service_execution_materializer_stop_event.set()
+            # All tasks share one grace window. A driver may defer or consume
+            # the first cancellation while unwinding a database operation, so
+            # any survivors receive a concurrent follow-up cancellation. Every
+            # task is still drained before either database engine is disposed.
+            await _cancel_and_drain_tasks(
+                (
+                    crash_detector_task,
+                    metrics_refresher_task,
+                    retry_exhausted_task,
+                    worker_pool_autoscaler_task,
+                    live_preview_reconciler_task,
+                    slurm_controller_task,
+                    service_execution_scheduler_task,
+                    service_execution_materializer_task,
+                )
+            )
             await engine.dispose()
             if protected_worker_runtime_engine is not None:
                 await protected_worker_runtime_engine.dispose()

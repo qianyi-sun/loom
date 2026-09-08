@@ -13,14 +13,15 @@ each is counted independently against its filter.
 """
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Token
-from loom_control_plane.metrics import WORKER_TOKENS_STALE_COUNT
+from loom.db.schema import Task, Team, Token, Trial
+from loom_control_plane.metrics import QUEUE_DEPTH, TRIALS_INFLIGHT, WORKER_TOKENS_STALE_COUNT
 from loom_control_plane.metrics_refresher import refresh_once
 
 
@@ -92,6 +93,54 @@ async def test_fresh_token_is_not_flagged(postgres_url: str) -> None:
         assert unused._value.get() == 0
         assert aged._value.get() == 0
     finally:
+        await engine.dispose()
+
+
+async def test_protected_pending_trial_is_published_as_waiting(
+    postgres_url: str,
+) -> None:
+    factory, engine = await _make_factory(postgres_url)
+    team_id = uuid4()
+    task_id = f"metrics-protected-{uuid4().hex}"
+    trial_id = uuid4()
+    try:
+        async with factory() as session:
+            await session.execute(insert(Team).values(id=team_id, name=task_id))
+            await session.execute(
+                insert(Task).values(id=task_id, checksum="0" * 64, config={})
+            )
+            await session.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id=task_id,
+                    config={},
+                    requires_caps={},
+                    state="protected-pending",
+                )
+            )
+            await session.commit()
+
+        async with factory() as session:
+            await refresh_once(session, expiry_sec=30)
+
+        team_label = str(team_id)
+        assert QUEUE_DEPTH.labels(team_id=team_label)._value.get() == 1
+        assert (
+            TRIALS_INFLIGHT.labels(
+                team_id=team_label,
+                state="protected-pending",
+            )._value.get()
+            == 1
+        )
+    finally:
+        async with factory() as session:
+            await session.execute(delete(Trial).where(Trial.id == trial_id))
+            await session.execute(delete(Task).where(Task.id == task_id))
+            await session.execute(delete(Team).where(Team.id == team_id))
+            await session.commit()
+        QUEUE_DEPTH.clear()
+        TRIALS_INFLIGHT.clear()
         await engine.dispose()
 
 

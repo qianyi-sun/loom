@@ -31,7 +31,14 @@ from loom_service.usage_accounting import (
     summarize_llm_evidence_for_trials,
 )
 
-_ACTIVE_STATES = {"queued", "claimed", "running", "materializing", "submitted"}
+_ACTIVE_STATES = {
+    "queued",
+    "protected-pending",
+    "claimed",
+    "running",
+    "materializing",
+    "submitted",
+}
 
 _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {
     "agent_error": (
@@ -815,6 +822,7 @@ def _summary_from_trials(trials: Sequence[Any]) -> dict[str, int]:
     )
     return {
         "queued": counts.get("queued", 0),
+        "protected-pending": counts.get("protected-pending", 0),
         "claimed": counts.get("claimed", 0),
         "claimed_without_started": claimed_without_started,
         "claimed_without_started_with_pre_start_heartbeat": (

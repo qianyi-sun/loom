@@ -50,6 +50,28 @@ async def test_get_trial_state_returns_string_from_body(
     await cp_client._client.aclose()  # type: ignore[union-attr]
 
 
+async def test_get_trial_state_reports_latched_cancellation_to_worker_watchdog(
+    cp_client: HttpControlPlaneClient,
+) -> None:
+    transport = _FakeTransport(
+        {
+            "state": "running",
+            "id": str(uuid4()),
+            "cancellation_requested_at": "2026-09-05T12:00:00+00:00",
+        }
+    )
+    cp_client._client = httpx.AsyncClient(  # type: ignore[assignment]
+        base_url="http://cp.local:8080",
+        transport=transport,
+    )
+    try:
+        state = await cp_client.get_trial_state(uuid4())
+    finally:
+        await cp_client._client.aclose()  # type: ignore[union-attr]
+
+    assert state == "cancelled"
+
+
 async def test_get_trial_state_propagates_http_error(
     cp_client: HttpControlPlaneClient,
 ) -> None:

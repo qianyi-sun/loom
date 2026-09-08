@@ -49,6 +49,9 @@ class _FakeResult:
     def one_or_none(self) -> dict[str, Any] | None:
         return self.rows[0] if self.rows else None
 
+    def all(self) -> list[dict[str, Any]]:
+        return self.rows
+
 
 @dataclass
 class _FakeSession:
@@ -115,10 +118,12 @@ def _ctx(
     *,
     adapter: Any,
     backend: Any = None,
+    cancellation_client: Any = None,
 ) -> OrchestratorContext:
     return OrchestratorContext(
         session_factory=_factory(session),
         gateway=object(),
+        cancellation_client=cancellation_client,
         object_store=None,
         artifacts_bucket="artifacts",
         state_backend_factory=(lambda spec: backend or _StubBackend()),
@@ -138,6 +143,110 @@ async def test_run_once_empty_queue_returns_false(monkeypatch):
     result = await run_once(ctx)
     assert result is False
     assert session.committed  # empty poll still commits to release lock
+
+
+@pytest.mark.asyncio
+async def test_run_once_retries_aborted_family_cancellation_after_commit() -> None:
+    batch_id = uuid4()
+    queued_trial_id = uuid4()
+    session = _FakeSession(responses=[
+        ("FROM public.batch_family_state AS cancellation", [{
+            "batch_id": batch_id,
+            "family_key": "fam",
+            "state": "aborted",
+            "task_sequence": ["a", "b"],
+            "current_index": 0,
+        }]),
+        ("FROM public.trials AS pending_trial", [{"id": queued_trial_id}]),
+    ])
+    cancelled: list[str] = []
+
+    class _CancellationClient:
+        async def cancel_trial(self, trial_id: str) -> None:
+            assert session.committed
+            cancelled.append(trial_id)
+
+    ctx = _ctx(
+        session,
+        adapter=_AdapterOK(),
+        cancellation_client=_CancellationClient(),
+    )
+
+    assert await run_once(ctx) is True
+    assert cancelled == [str(queued_trial_id)]
+
+
+@pytest.mark.asyncio
+async def test_run_once_completes_cancelling_family_after_authority_succeeds() -> None:
+    batch_id = uuid4()
+    queued_trial_id = uuid4()
+    session = _FakeSession(responses=[
+        ("FROM public.batch_family_state AS cancellation", [{
+            "batch_id": batch_id,
+            "family_key": "fam",
+            "state": "cancelling",
+            "task_sequence": ["a", "b", "c"],
+            "current_index": 1,
+        }]),
+        ("FROM public.trials AS pending_trial", [{"id": queued_trial_id}]),
+    ])
+
+    class _CancellationClient:
+        async def cancel_trial(self, _trial_id: str) -> None:
+            assert session.committed
+
+    ctx = _ctx(
+        session,
+        adapter=_AdapterOK(),
+        cancellation_client=_CancellationClient(),
+    )
+
+    assert await run_once(ctx) is True
+    completions = [
+        params
+        for statement, params in session.executed
+        if "AND state = 'cancelling'" in statement
+        and "UPDATE public.batch_family_state" in statement
+    ]
+    assert completions == [{
+        "batch_id": batch_id,
+        "family_key": "fam",
+        "final_state": "pending",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_run_once_keeps_cancelling_state_when_authority_fails() -> None:
+    batch_id = uuid4()
+    queued_trial_id = uuid4()
+    session = _FakeSession(responses=[
+        ("FROM public.batch_family_state AS cancellation", [{
+            "batch_id": batch_id,
+            "family_key": "fam",
+            "state": "cancelling",
+            "task_sequence": ["a", "b"],
+            "current_index": 1,
+        }]),
+        ("FROM public.trials AS pending_trial", [{"id": queued_trial_id}]),
+    ])
+
+    class _CancellationClient:
+        async def cancel_trial(self, _trial_id: str) -> None:
+            raise RuntimeError("control plane unavailable")
+
+    ctx = _ctx(
+        session,
+        adapter=_AdapterOK(),
+        cancellation_client=_CancellationClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="control plane unavailable"):
+        await run_once(ctx)
+    assert not any(
+        "UPDATE public.batch_family_state" in statement
+        and "AND state = 'cancelling'" in statement
+        for statement, _params in session.executed
+    )
 
 
 @pytest.mark.asyncio
@@ -375,6 +484,7 @@ async def test_run_once_abort_family_marks_aborted_and_cancels_queued(monkeypatc
     from loom.family_run import registry
     batch_id = uuid4()
     trial_id = uuid4()
+    queued_trial_id = uuid4()
     adapter = _AdapterBoom()
     monkeypatch.setattr(
         "loom_family_orchestrator.main_loop.resolve_plugin",
@@ -382,6 +492,8 @@ async def test_run_once_abort_family_marks_aborted_and_cancels_queued(monkeypatc
     )
     spec = _spec(failure_policy="abort_family")
     session = _FakeSession(responses=[
+        ("FROM public.batch_family_state AS cancellation", []),
+        ("FROM public.trials AS pending_trial", [{"id": queued_trial_id}]),
         ("FROM batch_family_state", [{
             "batch_id": batch_id,
             "family_key": "fam",
@@ -399,18 +511,30 @@ async def test_run_once_abort_family_marks_aborted_and_cancels_queued(monkeypatc
             "result": None, "attempt_count": 1, "trajectory_uri": None,
         }]),
     ])
-    ctx = _ctx(session, adapter=adapter)
+    cancelled: list[Any] = []
+
+    class _CancellationClient:
+        async def cancel_trial(self, trial_id: Any) -> None:
+            assert session.committed
+            cancelled.append(trial_id)
+
+    ctx = _ctx(
+        session,
+        adapter=adapter,
+        cancellation_client=_CancellationClient(),
+    )
     await run_once(ctx)
     aborted = [
         (s, p) for s, p in session.executed
         if "UPDATE batch_family_state" in s and "'aborted'" in s
     ]
-    cancelled = [
+    direct_cancellations = [
         (s, p) for s, p in session.executed
         if "UPDATE trials" in s and "'cancelled'" in s
     ]
     assert aborted
-    assert cancelled
+    assert cancelled == [str(queued_trial_id)]
+    assert direct_cancellations == []
 
 
 @pytest.mark.asyncio

@@ -58,7 +58,7 @@ def _registry() -> dict[str, object]:
                 "pool_reporter_incarnation": None,
             },
             {
-                "principal_id": "configuration-activate",
+                "principal_id": "capacity-config-activate",
                 "token_sha256": "2" * 64,
                 "scopes": ["capacity:configure:activate"],
                 "subject_id": None,
@@ -409,8 +409,8 @@ def test_registry_mutation_preserves_existing_principals_and_adds_one_bound_repo
     principals = {principal["principal_id"]: principal for principal in parsed["principals"]}
     assert principals["existing-operator"] == registry["principals"][0]
     assert principals["existing-demand-reporter"] == registry["principals"][2]
-    assert principals["configuration-activate"] == {
-        "principal_id": "configuration-activate",
+    assert principals["capacity-config-activate"] == {
+        "principal_id": "capacity-config-activate",
         "token_sha256": "2" * 64,
         "scopes": [
             "capacity:configure:activate",
@@ -467,6 +467,62 @@ def test_registry_mutation_is_idempotent_and_rejects_conflicting_binding() -> No
     with pytest.raises(ValueError, match="staging demand reporter conflicts"):
         _mutate_registry()(
             json.dumps(conflicting).encode("ascii"),
+            seed=seed,
+        )
+
+
+def test_registry_mutation_rotates_only_the_bound_predecessor_reporter() -> None:
+    seed = _seed()
+    desired = json.loads(
+        _mutate_registry()(
+            json.dumps(_registry()).encode("ascii"),
+            seed=seed,
+        )
+    )
+    predecessor = deepcopy(desired)
+    predecessor["principals"][-1]["demand_reporter_incarnation"] = (
+        "00000000-0000-4000-8000-000000000398"
+    )
+
+    rotated = json.loads(
+        _mutate_registry()(
+            json.dumps(predecessor).encode("ascii"),
+            seed=seed,
+        )
+    )
+
+    assert rotated == desired
+
+
+@pytest.mark.parametrize(
+    ("field", "collision"),
+    (
+        ("subject_id", "00000000-0000-4000-8000-000000000301"),
+        ("subject_incarnation", "00000000-0000-4000-8000-000000000302"),
+        ("demand_reporter_incarnation", "00000000-0000-4000-8000-000000000303"),
+    ),
+)
+def test_registry_rotation_rejects_foreign_staging_identity_collision(
+    field: str,
+    collision: str,
+) -> None:
+    """Break caught: rotating without checking foreign principal identity collisions."""
+
+    seed = _seed()
+    predecessor = json.loads(
+        _mutate_registry()(
+            json.dumps(_registry()).encode("ascii"),
+            seed=seed,
+        )
+    )
+    predecessor["principals"][-1]["demand_reporter_incarnation"] = (
+        "00000000-0000-4000-8000-000000000398"
+    )
+    predecessor["principals"][2][field] = collision
+
+    with pytest.raises(ValueError, match="staging demand reporter conflicts"):
+        _mutate_registry()(
+            json.dumps(predecessor).encode("ascii"),
             seed=seed,
         )
 
@@ -595,21 +651,21 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
     principals = json.loads(principal_payload)["principals"]
     assert [principal["principal_id"] for principal in principals] == [
         "existing-operator",
-        "configuration-activate",
+        "capacity-config-activate",
         "existing-demand-reporter",
         "staging-demand-reporter",
     ]
     principal_scopes = {
         principal["principal_id"]: set(principal["scopes"]) for principal in principals
     }
-    assert principal_scopes["configuration-activate"] == {
+    assert principal_scopes["capacity-config-activate"] == {
         "capacity:configure:activate",
         "capacity:configure:rollback",
     }
     assert all(
         "capacity:configure:rollback" not in scopes
         for principal_id, scopes in principal_scopes.items()
-        if principal_id != "configuration-activate"
+        if principal_id != "capacity-config-activate"
     )
     desired_image = "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
     template = cluster.deployment["spec"]["template"]
@@ -617,7 +673,10 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
         "loom.yylx.dev/principal-registry-sha256": hashlib.sha256(principal_payload).hexdigest()
     }
     pod_spec = template["spec"]
-    assert [container["image"] for container in pod_spec["initContainers"]] == [desired_image]
+    assert [container["image"] for container in pod_spec["initContainers"]] == [
+        desired_image,
+        desired_image,
+    ]
     assert [container["image"] for container in pod_spec["containers"]] == [
         desired_image,
         desired_image,
@@ -651,6 +710,56 @@ def test_manager_runtime_preserves_secret_and_rolls_out_trusted_candidate(
         and "--field-manager=loom-staging-capacity-manager-runtime" in command
         for command in mutation_commands
     )
+
+
+def test_manager_runtime_migrates_capacity_schema_before_starting_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(tmp_path)
+    plan = _plan_with_manager(tmp_path)
+    cluster = _ManagerCluster(candidate)
+    monkeypatch.setattr(
+        "loom_cli.capacity_control_plane._capacity_head",
+        lambda: (_ for _ in ()).throw(AssertionError("local migration head lookup is forbidden")),
+    )
+
+    _component(cluster, candidate).apply(plan)
+
+    pod_spec = cluster.deployment["spec"]["template"]["spec"]
+    init_containers = pod_spec["initContainers"]
+    assert [container["name"] for container in init_containers] == [
+        "prepare-credentials",
+        "migrate-capacity-schema",
+    ]
+    migration = init_containers[1]
+    assert migration["image"] == (
+        "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
+    )
+    assert migration["command"] == ["python", "-m", "loom_capacity_manager.migrate"]
+    assert migration["args"] == [
+        "--db-url-file",
+        "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+        "--expected-authority-incarnation",
+        "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+    ]
+    assert migration["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+    assert migration["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+    assert migration["volumeMounts"] == [
+        {
+            "name": "runtime",
+            "mountPath": "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        }
+    ]
 
 
 def test_manager_runtime_preserves_unrelated_secret_data_byte_for_byte(

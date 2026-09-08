@@ -38,7 +38,7 @@ constrain_devices = true
 required_delegated_controllers = ["io", "pids"]
 
 [runtime]
-manifest = "rootless-runtime-v1.json"
+manifest = "rootless-runtime-v2.json"
 snapshotter = "fuse-overlayfs"
 network_driver = "slirp4netns"
 rootlesskit_flags = [

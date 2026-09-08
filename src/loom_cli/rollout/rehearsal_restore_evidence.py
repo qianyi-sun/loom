@@ -36,7 +36,7 @@ def build_restore_verification_evidence(
     tier_three = {
         execution.check_id: execution for execution in rehearsal.executions if execution.tier == 3
     }
-    if set(tier_three) != set(REHEARSAL_CHECK_IDS):
+    if not set(REHEARSAL_CHECK_IDS).issubset(tier_three):
         raise ValueError("restore rehearsal coverage is incomplete")
     isolation_ids: set[str] = set()
     candidate_shas: set[str] = set()

@@ -19,6 +19,7 @@ const monitorSummaryPayload = {
     batches: { submitted: 1, running: 0, finished: 0, cancelled: 0 },
     trials: {
       queued: 1,
+      "protected-pending": 0,
       claimed: 0,
       running: 2,
       materializing: 1,
@@ -29,6 +30,7 @@ const monitorSummaryPayload = {
   },
   queue: {
     queued: 1,
+    protected_pending: 0,
     claimed: 1,
     running: 2,
     waiting: 2,
@@ -601,6 +603,85 @@ describe("Monitor human-readable labels", () => {
       );
       expect(url.searchParams.get("provider_model_id")).toBe("qwen");
     });
+  });
+
+  it("shows protected pending demand as active queue work", async () => {
+    mockMonitorEndpoints({
+      ...monitorSummaryPayload,
+      state_counts: {
+        ...monitorSummaryPayload.state_counts,
+        trials: {
+          ...monitorSummaryPayload.state_counts.trials,
+          "protected-pending": 2,
+        },
+      },
+      queue: {
+        ...monitorSummaryPayload.queue,
+        protected_pending: 2,
+        waiting: 4,
+      },
+      resources: {
+        ...monitorSummaryPayload.resources,
+        aggregate: {
+          ...monitorSummaryPayload.resources.aggregate,
+          queued_tasks: 3,
+        },
+      },
+    });
+    renderWithProviders(<Monitor />, { route: "/monitor?view=trials" });
+
+    expect(await screen.findByText("3 queued")).toBeInTheDocument();
+    expect(screen.getByText("4 waiting for 9 free slots.")).toBeInTheDocument();
+    expect(screen.getByText("2 protected pending")).toBeInTheDocument();
+  });
+
+  it("offers protected pending as a shareable trial state filter", async () => {
+    const fetchMock = mockMonitorEndpoints();
+    renderWithProviders(<Monitor />, {
+      route: "/monitor?view=trials&state=protected-pending",
+    });
+
+    expect(
+      await screen.findByRole("option", {
+        name: "Protected pending - waiting for runtime admission",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("filter by state")).toHaveValue(
+      "protected-pending",
+    );
+    await waitFor(() => {
+      for (const path of ["/api/v1/monitor/summary", "/api/v1/trials"]) {
+        const request = fetchMock.mock.calls.find(([input]) =>
+          String(input).includes(path),
+        );
+        expect(request).toBeTruthy();
+        const url = new URL(String(request![0]), "http://localhost");
+        expect(url.searchParams.get("state")).toBe("protected-pending");
+      }
+    });
+  });
+
+  it("adds protected pending demand to the fallback queued count", async () => {
+    mockMonitorEndpoints({
+      ...monitorSummaryPayload,
+      state_counts: {
+        ...monitorSummaryPayload.state_counts,
+        trials: {
+          ...monitorSummaryPayload.state_counts.trials,
+          "protected-pending": 2,
+        },
+      },
+      queue: {
+        ...monitorSummaryPayload.queue,
+        queued: 1,
+        protected_pending: 2,
+        waiting: 3,
+      },
+      resources: undefined,
+    });
+    renderWithProviders(<Monitor />, { route: "/monitor?view=trials" });
+
+    expect(await screen.findByText("3 queued")).toBeInTheDocument();
   });
 
   it("shows stale Nebius capacity, blockers, and empty lifecycle evidence explicitly", async () => {

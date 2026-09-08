@@ -52,6 +52,10 @@ class ProtectedTrialSubmissionConflictError(ProtectedTrialSubmissionError):
     """An idempotency key is already bound to a different submission."""
 
 
+class ProtectedTrialCancellationError(RuntimeError):
+    """The protected capacity guard rejected a trial cancellation."""
+
+
 MAX_RUNTIME_DATABASE_URL_BYTES = 4096
 EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
 
@@ -212,6 +216,10 @@ _RETRY_CLAIMED_TRIAL = text(
     "SELECT loom_capacity_guard.retry_staging_claimed_trial("
     ":worker_id, :credential, CAST(:retry_request AS jsonb))"
 )
+_CANCEL_PENDING_TRIAL = text(
+    "SELECT loom_capacity_guard.cancel_protected_runtime_pending_trial("
+    ":trial_id, :team_id)"
+)
 _CURRENT_REGISTRATION = text("SELECT loom_capacity_guard.current_protected_runtime_registration()")
 
 
@@ -348,6 +356,45 @@ class ProtectedWorkerSessionStore:
                 )
         except (DBAPIError, CapacityTrialSubmissionError) as exc:
             raise ProtectedTrialSubmissionError("protected trial readiness rejected") from exc
+
+    async def cancel_pending_trial(
+        self,
+        *,
+        trial_id: UUID,
+        team_id: UUID | None,
+    ) -> Mapping[str, Any] | None:
+        """Atomically cancel one unclaimed protected runtime trial."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                value = (
+                    await session.execute(
+                        _CANCEL_PENDING_TRIAL,
+                        {"trial_id": trial_id, "team_id": team_id},
+                    )
+                ).scalar_one()
+        except DBAPIError as exc:
+            raise ProtectedTrialCancellationError(
+                "protected trial cancellation rejected"
+            ) from exc
+        if value is None:
+            return None
+        try:
+            payload = _mapping(value)
+            returned_trial_id = UUID(str(payload["trial_id"]))
+            state = str(payload["state"])
+            replayed = payload["replayed"]
+        except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+            raise ProtectedTrialCancellationError(
+                "protected trial cancellation returned a malformed response"
+            ) from exc
+        if returned_trial_id != trial_id or state != "cancelled" or not isinstance(
+            replayed, bool
+        ):
+            raise ProtectedTrialCancellationError(
+                "protected trial cancellation returned a malformed response"
+            )
+        return payload
 
     async def register(
         self,

@@ -517,6 +517,7 @@ class PreflightPipeline:
             or late_registry.coverage_digest != self._registry.coverage_digest
         ):
             raise ValueError("deferred preflight check changed registry authority")
+        completion_started_at = self._clock()
         completed_executions = late_registry.dag(max_concurrency=self._max_concurrency).run(
             context,
             operation=CheckOperation.PROBE,
@@ -525,7 +526,7 @@ class PreflightPipeline:
             prior_executions={
                 current_id: execution
                 for current_id, execution in prior.items()
-                if current_id != check_id
+                if current_id != check_id and execution.expires_at > completion_started_at
             },
         )
         completed = next(

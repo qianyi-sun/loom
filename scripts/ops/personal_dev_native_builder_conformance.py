@@ -40,6 +40,22 @@ _BUILDKIT_NAME = "loom-native-conformance-buildkit"
 _CLIENT_NAME = "loom-native-conformance-client"
 _DENIAL_NAME = "loom-native-conformance-denial-target"
 _FOREIGN_CLIENT_NAME = "loom-native-conformance-foreign-client"
+CONFORMANCE_FAILURE_STAGES = frozenset(
+    {
+        "buildkit_create",
+        "buildkit_readiness",
+        "cleanup",
+        "client_create",
+        "client_execution",
+        "denial_create",
+        "denial_readiness",
+        "foreign_isolation",
+        "host_isolation",
+        "networks",
+        "postconditions",
+        "preconditions",
+    }
+)
 _DENIAL_READY_PROGRAM = """import socket
 connection=socket.create_connection(('127.0.0.1',1234),timeout=2)
 connection.close()
@@ -94,6 +110,12 @@ __import__('os').execvp('buildctl',('buildctl','--addr','tcp://buildkit-01234567
 
 class ConformanceError(RuntimeError):
     """The fixed probe failed without exposing command output or input values."""
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        if stage is not None and stage not in CONFORMANCE_FAILURE_STAGES:
+            raise ValueError("conformance stage is invalid")
+        self.stage = stage
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -513,6 +535,22 @@ def _strings(value: object) -> list[str]:
     return cast(list[str], value)
 
 
+def _normalized_capability_set(value: object) -> frozenset[str] | None:
+    if not isinstance(value, list):
+        return None
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return None
+        name = item.removeprefix("CAP_")
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
+            return None
+        normalized.append(name)
+    if len(normalized) != len(set(normalized)):
+        return None
+    return frozenset(normalized)
+
+
 def _inspect_matches_create(
     value: dict[str, object],
     argv: tuple[str, ...],
@@ -549,10 +587,14 @@ def _inspect_matches_create(
         }
         expected_entrypoint = options.get("--entrypoint", [])
         observed_entrypoint = configuration.get("Entrypoint")
+        expected_cap_add = _normalized_capability_set(options.get("--cap-add", []))
+        observed_cap_add = _normalized_capability_set(host.get("CapAdd", []))
         if isinstance(observed_entrypoint, str):
             observed_entrypoint = [observed_entrypoint]
         if (
-            value.get("Name") != f"/{options['--name'][0]}"
+            expected_cap_add is None
+            or observed_cap_add is None
+            or value.get("Name") != f"/{options['--name'][0]}"
             or configuration.get("Image") != image_or_name
             or observed_entrypoint != expected_entrypoint
             or configuration.get("Cmd") != list(command)
@@ -562,7 +604,7 @@ def _inspect_matches_create(
             or host.get("NetworkMode") != network_name
             or host.get("ReadonlyRootfs") is not True
             or host.get("CapDrop") != options.get("--cap-drop", [])
-            or host.get("CapAdd", []) != options.get("--cap-add", [])
+            or observed_cap_add != expected_cap_add
             or host.get("SecurityOpt") != options.get("--security-opt", [])
             or host.get("CgroupParent", "") != options.get("--cgroup-parent", [""])[0]
             or host.get("NanoCpus") != int(float(options["--cpus"][0]) * 1_000_000_000)
@@ -606,7 +648,7 @@ def _is_exact_not_found(
         if kind == "network"
         else f"Error response from daemon: No such container: {name}\n"
     )
-    return result.returncode == 1 and result.stdout == "" and result.stderr == expected
+    return result.returncode == 1 and result.stdout in {"", "[]\n"} and result.stderr == expected
 
 
 def _inspect_owned_create(
@@ -759,8 +801,9 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
     """Run the exact two-sandbox gVisor KVM probe and return a public receipt."""
     created: list[tuple[str, str, str]] = []
     verified_absent: list[tuple[str, str, str]] = []
-    invocation = uuid.uuid4().hex
+    stage = "preconditions"
     try:
+        invocation = uuid.uuid4().hex
         for endpoint, kind, name in (
             (_NATIVE_ENDPOINT, "network", _NETWORK_NAME),
             (_NATIVE_ENDPOINT, "network", _DENIED_NETWORK_NAME),
@@ -774,6 +817,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         _expect_platform(runner, _NATIVE_ENDPOINT, inputs.builder_image)
         _expect_platform(runner, _PRIMARY_ENDPOINT, inputs.agent_image)
 
+        stage = "networks"
         _create_owned(
             runner,
             created,
@@ -815,6 +859,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             invocation=invocation,
         )
 
+        stage = "buildkit_create"
         buildkit_id = _create_owned(
             runner,
             created,
@@ -871,6 +916,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             invocation=invocation,
         )
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", buildkit_id))
+        stage = "buildkit_readiness"
         for attempt in range(60):
             logs = _run(runner, _docker(_NATIVE_ENDPOINT, "logs", buildkit_id), allow_failure=True)
             workers = _run(
@@ -891,8 +937,8 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 break
             if attempt == 59:
                 raise ConformanceError("conformance failed")
-            if isinstance(runner, SubprocessRunner):
-                time.sleep(1)
+            time.sleep(1)
+        stage = "host_isolation"
         buildkit_ip = _run(
             runner,
             _docker(
@@ -907,6 +953,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             raise ConformanceError("conformance failed")
         _run(runner, ("/usr/bin/python3", "-c", _HOST_DENIAL_PROGRAM, buildkit_ip))
 
+        stage = "foreign_isolation"
         foreign_id = _create_owned(
             runner,
             created,
@@ -955,6 +1002,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             "0",
         )
 
+        stage = "denial_create"
         denial_id = _create_owned(
             runner,
             created,
@@ -1007,6 +1055,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             invocation=invocation,
         )
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", denial_id))
+        stage = "denial_readiness"
         for attempt in range(60):
             ready = _run(
                 runner,
@@ -1024,9 +1073,9 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 break
             if attempt == 59:
                 raise ConformanceError("conformance failed")
-            if isinstance(runner, SubprocessRunner):
-                time.sleep(1)
+            time.sleep(1)
 
+        stage = "client_create"
         client_id = _create_owned(
             runner,
             created,
@@ -1080,12 +1129,14 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         )
         if client_id == buildkit_id:
             raise ConformanceError("conformance failed")
+        stage = "client_execution"
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", "-a", client_id))
         _expect(
             runner,
             _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.State.ExitCode}}", client_id),
             "0",
         )
+        stage = "postconditions"
         _expect(
             runner,
             _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Runtime}}", buildkit_id),
@@ -1106,12 +1157,15 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         try:
             _cleanup(runner, created, verified_absent)
         except BaseException as cleanup_failure:
-            raise ConformanceError("conformance cleanup failed") from cleanup_failure
-        if isinstance(primary_failure, ConformanceError):
-            raise
-        raise ConformanceError("conformance failed") from primary_failure
+            raise ConformanceError(
+                "conformance cleanup failed", stage="cleanup"
+            ) from cleanup_failure
+        raise ConformanceError("conformance failed", stage=stage) from primary_failure
 
-    _cleanup(runner, created, verified_absent)
+    try:
+        _cleanup(runner, created, verified_absent)
+    except BaseException as cleanup_failure:
+        raise ConformanceError("conformance cleanup failed", stage="cleanup") from cleanup_failure
     return {
         "schema": "loom-personal-dev-native-builder-conformance-v1",
         "status": "passed",

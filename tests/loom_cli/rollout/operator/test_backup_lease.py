@@ -13,7 +13,7 @@ from loom_cli.rollout.operator.backup_lease import (
 )
 
 NOW = datetime(2026, 7, 19, 18, tzinfo=UTC)
-AUTHORITY_DIGEST = "9450f793871aaaf62362a281605b0af15c5b8ca2859fa279616624fbcee1a03e"
+AUTHORITY_DIGEST = "aa20c387b785d21f9aae333af899b49503c56967e3182e885d747738f16e3e06"
 
 
 def _lease() -> BackupLease:
@@ -57,7 +57,7 @@ def _schema_three_lease() -> BackupLease:
         checkpoint_schema_version=3,
         database_authority_digest=AUTHORITY_DIGEST,
         public_schema_revision="0066",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         manager_configuration_epoch=9,
         manager_configuration_digest="1" * 64,
         manager_authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
@@ -139,7 +139,7 @@ def test_lease_reader_preserves_historical_schema_and_rejects_mixed_fields() -> 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("capacity_guard_schema_revision", "guard_0027"),
+        ("capacity_guard_schema_revision", "guard_0028"),
         ("manager_execution_manifest_sha256", "f" * 64),
     ],
 )

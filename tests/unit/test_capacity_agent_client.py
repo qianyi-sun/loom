@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -38,7 +39,12 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableIntentBindingV2,
+    ExecutableInventoryRecordV2,
+    ExecutableOwnershipMetadataV2,
+    ExecutableTerminalInventoryEvidenceV2,
+    ExecutionContextV2,
     ExecutionFenceV2,
+    SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
@@ -164,6 +170,58 @@ def _executable_bootstrap(
         proposal_epoch=1,
         bootstrap_sha256="6" * 64,
         expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+
+
+def _terminal_inventory_evidence(
+    configuration: ReporterConfigurationV1,
+) -> ExecutableTerminalInventoryEvidenceV2:
+    base = _executable_bootstrap(configuration).binding
+    candidate = base.candidate.model_copy(
+        update={
+            "identity": configuration.candidate_identity,
+            "publication_sha256": configuration.candidate_publication_sha256,
+        }
+    )
+    binding = base.model_copy(update={"candidate": candidate})
+    metadata = ExecutableOwnershipMetadataV2(
+        binding=binding,
+        controller_authority_sha256="6" * 64,
+        trusted_launcher_sha256=binding.execution.trusted_fleet_release_sha256,
+        slurm_cluster="oldlab-controller",
+        submitter_identity="loom",
+        association="loom",
+        submitted_at=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+    )
+    record = ExecutableInventoryRecordV2(
+        physical_identity="job-101",
+        physical_kind="slurm-job",
+        authority_scope="dedicated-loom-association",
+        state="terminal",
+        resources=binding.resources,
+        node_ids=binding.node_ids,
+        controller_evidence_sha256="7" * 64,
+        ownership_proof=SignedExecutableOwnershipProofV2(
+            metadata=metadata,
+            signing_key_id="oldlab-key",
+            signature_base64=base64.b64encode(b"\0" * 64).decode("ascii"),
+        ),
+        terminal_evidence_sha256="8" * 64,
+    )
+    return ExecutableTerminalInventoryEvidenceV2(
+        binding=binding,
+        inventory_execution=ExecutionContextV2.model_validate(
+            binding.execution.model_dump(
+                mode="python",
+                exclude={"allocation_epoch", "executable"},
+            )
+        ),
+        inventory_sequence=4,
+        inventory_digest="9" * 64,
+        journal_sequence=5,
+        journal_digest="b" * 64,
+        record=record,
+        observed_at=datetime(2026, 9, 5, 12, 1, tzinfo=UTC),
     )
 
 
@@ -489,6 +547,205 @@ async def test_subject_client_fetches_and_acknowledges_executable_admission() ->
         f"{proposal.proposal_id}",
     ]
     assert seen[1].headers["Idempotency-Key"] == str(idempotency_key)
+
+
+@pytest.mark.asyncio
+async def test_subject_client_fetches_exact_terminal_inventory_evidence() -> None:
+    configuration = _configuration()
+    evidence = _terminal_inventory_evidence(configuration)
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.method == "GET"
+        assert request.headers["Authorization"] == "Bearer reporter-secret"
+        return httpx.Response(200, content=canonical_executable_bytes(evidence))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        assert hasattr(client, "get_executable_terminal_inventory_evidence")
+        fetched = await client.get_executable_terminal_inventory_evidence(
+            evidence.binding.intent_id
+        )
+    finally:
+        await http.aclose()
+
+    assert fetched == evidence
+    assert [request.url.path for request in seen] == [
+        f"/v2/subjects/{configuration.subject_id}/intents/"
+        f"{evidence.binding.intent_id}/terminal-inventory-evidence"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subject_client_returns_none_for_absent_terminal_inventory_evidence() -> None:
+    configuration = _configuration()
+    evidence = _terminal_inventory_evidence(configuration)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"null")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        assert (
+            await client.get_executable_terminal_inventory_evidence(
+                evidence.binding.intent_id
+            )
+            is None
+        )
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed_binding",
+    (
+        "intent_id",
+        "subject_id",
+        "subject_incarnation",
+        "deployment_generation",
+        "candidate_algorithm",
+        "candidate_identity",
+        "candidate_publication_sha256",
+    ),
+)
+async def test_subject_client_rejects_changed_terminal_inventory_evidence_binding(
+    changed_binding: str,
+) -> None:
+    configuration = _configuration()
+    evidence = _terminal_inventory_evidence(configuration)
+    binding = evidence.binding
+    if changed_binding.startswith("candidate_"):
+        field = changed_binding.removeprefix("candidate_")
+        candidate = binding.candidate.model_copy(
+            update=(
+                {"algorithm": "git-sha1", "identity": "0" * 40}
+                if field == "algorithm"
+                else {field: "0" * 64}
+            )
+        )
+        changed = binding.model_copy(update={"candidate": candidate})
+    else:
+        changed = binding.model_copy(
+            update={
+                changed_binding: (
+                    99 if changed_binding == "deployment_generation" else uuid4()
+                )
+            }
+        )
+    proof = evidence.record.ownership_proof
+    assert proof is not None
+    changed_proof = proof.model_copy(
+        update={"metadata": proof.metadata.model_copy(update={"binding": changed})}
+    )
+    changed_record = evidence.record.model_copy(
+        update={"ownership_proof": changed_proof}
+    )
+    changed_evidence = evidence.model_copy(
+        update={"binding": changed, "record": changed_record}
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=canonical_executable_bytes(changed_evidence))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="binding changed"):
+            await client.get_executable_terminal_inventory_evidence(
+                evidence.binding.intent_id
+            )
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "content", "message"),
+    (
+        (302, b"", "status 302"),
+        (503, b"unavailable", "status 503"),
+        (200, b"{}", "invalid terminal inventory evidence"),
+        (200, b"x" * (16 * 1024 + 1), "byte bound"),
+    ),
+)
+async def test_subject_client_rejects_untrusted_terminal_inventory_responses(
+    status: int,
+    content: bytes,
+    message: str,
+) -> None:
+    configuration = _configuration()
+    evidence = _terminal_inventory_evidence(configuration)
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            status,
+            content=content,
+            headers={"Location": "https://capacity.internal/redirect"},
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match=message):
+            await client.get_executable_terminal_inventory_evidence(
+                evidence.binding.intent_id
+            )
+    finally:
+        await http.aclose()
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_subject_client_rejects_terminal_inventory_transport_failure() -> None:
+    configuration = _configuration()
+    evidence = _terminal_inventory_evidence(configuration)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="transport failed"):
+            await client.get_executable_terminal_inventory_evidence(
+                evidence.binding.intent_id
+            )
+    finally:
+        await http.aclose()
 
 
 @pytest.mark.asyncio

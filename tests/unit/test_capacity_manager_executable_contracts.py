@@ -1457,6 +1457,69 @@ def test_executable_inventory_rejects_authority_binding_drift() -> None:
         )
 
 
+def test_terminal_inventory_evidence_binds_one_verified_record_to_exact_inventory() -> None:
+    """Changing any physical or executor binding must invalidate exported evidence."""
+
+    contracts = _contracts()
+    assert hasattr(contracts, "ExecutableTerminalInventoryEvidenceV2")
+    binding = _intent_binding()
+    metadata = contracts.ExecutableOwnershipMetadataV2(
+        binding=binding,
+        controller_authority_sha256="1" * 64,
+        trusted_launcher_sha256=binding.execution.trusted_fleet_release_sha256,
+        slurm_cluster="oldlab-cluster",
+        submitter_identity="loom",
+        association="loom",
+        submitted_at=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+    )
+    proof = contracts.SignedExecutableOwnershipProofV2(
+        metadata=metadata,
+        signing_key_id="oldlab-key-1",
+        signature_base64=base64.b64encode(b"\0" * 64).decode("ascii"),
+    )
+    record = contracts.ExecutableInventoryRecordV2(
+        physical_identity="job-101",
+        physical_kind="slurm-job",
+        authority_scope="dedicated-loom-association",
+        state="terminal",
+        resources=binding.resources,
+        node_ids=binding.node_ids,
+        controller_evidence_sha256="3" * 64,
+        ownership_proof=proof,
+        terminal_evidence_sha256="4" * 64,
+    )
+    inventory_execution = contracts.ExecutionContextV2.model_validate(
+        binding.execution.model_dump(
+            mode="python",
+            exclude={"allocation_epoch", "executable"},
+        )
+    )
+    evidence = contracts.ExecutableTerminalInventoryEvidenceV2(
+        binding=binding,
+        inventory_execution=inventory_execution,
+        inventory_sequence=9,
+        inventory_digest="5" * 64,
+        journal_sequence=12,
+        journal_digest="6" * 64,
+        record=record,
+        observed_at=datetime(2026, 9, 5, 12, 1, tzinfo=UTC),
+    )
+
+    assert evidence.record.ownership_proof is not None
+    assert evidence.record.ownership_proof.metadata.binding == binding
+    assert evidence.record.terminal_evidence_sha256 == "4" * 64
+    with pytest.raises(ValidationError, match="terminal inventory evidence binding changed"):
+        contracts.ExecutableTerminalInventoryEvidenceV2.model_validate(
+            evidence.model_dump(mode="python")
+            | {"binding": binding.model_copy(update={"executor_incarnation": UUID(int=999)})}
+        )
+    with pytest.raises(ValidationError, match="terminal inventory evidence requires"):
+        contracts.ExecutableTerminalInventoryEvidenceV2.model_validate(
+            evidence.model_dump(mode="python")
+            | {"record": record.model_copy(update={"state": "active", "terminal_evidence_sha256": None})}
+        )
+
+
 def test_prepared_abort_contract_requires_the_exact_nonzero_fence() -> None:
     """A generic or incomplete zeroing request must not retire preparation."""
 

@@ -784,6 +784,26 @@ def test_preflight_suppresses_systemd_sysusers_informational_stderr(
     assert environments[indexes[0]].get("SYSTEMD_LOG_LEVEL") == "warning"
 
 
+def test_install_suppresses_systemd_sysusers_informational_stderr(
+    tmp_path: Path,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner(calls=[], environments=[])
+    installer = _installer(tmp_path, profile, runner=runner)
+
+    installer.install(archive)
+
+    calls = runner.calls or []
+    environments = runner.environments or []
+    indexes = [
+        index
+        for index, call in enumerate(calls)
+        if Path(call[0]).name == "systemd-sysusers" and "--dry-run" not in call
+    ]
+    assert len(indexes) == 1
+    assert environments[indexes[0]].get("SYSTEMD_LOG_LEVEL") == "warning"
+
+
 def test_install_fsyncs_files_and_publication_directories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

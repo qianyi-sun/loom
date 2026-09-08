@@ -643,6 +643,17 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
+id = "task-image-builder-rootless-runtime-v2"
+kind = "runtime-payload-image"
+dockerfile = "deploy/task-image-builder/Dockerfile.rootless-runtime-v2"
+build_context = "deploy/task-image-builder"
+source_paths = ["deploy/task-image-builder/Dockerfile.rootless-runtime-v2"]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
 id = "gb10-smoke-task"
 kind = "runtime-payload-image"
 dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environment/Dockerfile"

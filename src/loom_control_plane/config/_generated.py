@@ -53,7 +53,14 @@ class ControlPlaneSettings(BaseSettings):
     service_execution_scheduler_interval_sec: float = 2.0
     service_execution_scheduler_max_deadline_sec: int = 7200
     service_execution_scheduler_pool_id: str = "nebius-cpu"
+    service_execution_source_access_key: SecretStr | None = None
+    service_execution_source_access_key_file: Path | None = None
+    service_execution_source_bucket: str | None = None
+    service_execution_source_endpoint: str | None = None
+    service_execution_source_region: str | None = None
     service_execution_source_retention_sec: int = 86400
+    service_execution_source_secret_key: SecretStr | None = None
+    service_execution_source_secret_key_file: Path | None = None
     signed_url_expiry_sec: int = 3600
     skill_evolver_default_model: str = "anthropic/claude-sonnet-4-6"
     slurm_worker_controller_allowed_nodes: str = ""

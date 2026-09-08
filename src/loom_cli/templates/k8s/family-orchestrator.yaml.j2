@@ -19,9 +19,10 @@ spec:
               value: "/var/run/loom/secrets/admin/secrets.toml"
             - name: LOOM_ENV
               value: "{{ runtime_environment }}"
-            # Dedicated family:evolve credential. The orchestrator exchanges
-            # it at the Control Plane for a real trial/team/provider-bound
-            # step JWT; this token is never sent to the Gateway directly.
+            # Dedicated family:cancel + family:evolve credential. Cancellation
+            # stays at the Control Plane; evolution exchanges this credential
+            # for a real trial/team/provider-bound step JWT. The credential is
+            # never sent to the Gateway directly.
             - name: LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:

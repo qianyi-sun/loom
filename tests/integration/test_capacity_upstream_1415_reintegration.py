@@ -15,10 +15,11 @@ def _script(package: str) -> ScriptDirectory:
 
 def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
     script = _script("capacity_migrations")
-    assert tuple(script.get_heads()) == ("capacity_0014",)
+    assert tuple(script.get_heads()) == ("capacity_0015",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0014")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0015")
     ) == (
+        "capacity_0015",
         "capacity_0014",
         "capacity_0013",
         "capacity_0012",
@@ -34,20 +35,25 @@ def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
     official = script.get_revision("capacity_0007")
     prepared_abort = script.get_revision("capacity_0013")
     protected_admission = script.get_revision("capacity_0014")
+    terminal_inventory = script.get_revision("capacity_0015")
     assert official is not None
     assert prepared_abort is not None
     assert protected_admission is not None
+    assert terminal_inventory is not None
     assert official.path.endswith("capacity_0007_protected_bootstrap_handshake.py")
     assert prepared_abort.path.endswith("capacity_0013_prepared_abort_evidence.py")
     assert protected_admission.path.endswith("capacity_0014_protected_admission_plan.py")
+    assert terminal_inventory.path.endswith("capacity_0015_terminal_inventory_evidence.py")
 
 
 def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     script = _script("capacity_guard_migrations")
-    assert tuple(script.get_heads()) == ("guard_0027",)
+    assert tuple(script.get_heads()) == ("guard_0029",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0027")
+        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0029")
     ) == (
+        "guard_0029",
+        "guard_0028",
         "guard_0027",
         "guard_0026",
         "guard_0025",
@@ -75,6 +81,8 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     protected_trial_retry = script.get_revision("guard_0025")
     protected_trial_requeue = script.get_revision("guard_0026")
     runtime_self_validation = script.get_revision("guard_0027")
+    terminal_inventory_recovery = script.get_revision("guard_0028")
+    protected_pending_cancellation = script.get_revision("guard_0029")
     assert handshake is not None
     assert admission is not None
     assert exact_assignment is not None
@@ -85,6 +93,8 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     assert protected_trial_retry is not None
     assert protected_trial_requeue is not None
     assert runtime_self_validation is not None
+    assert terminal_inventory_recovery is not None
+    assert protected_pending_cancellation is not None
     assert handshake.path.endswith("guard_0012_protected_bootstrap_handshake.py")
     assert admission.path.endswith("guard_0013_executable_admission.py")
     assert exact_assignment.path.endswith("guard_0020_exact_claim_assignment.py")
@@ -97,3 +107,9 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     assert protected_trial_retry.path.endswith("guard_0025_protected_trial_retry.py")
     assert protected_trial_requeue.path.endswith("guard_0026_protected_trial_requeue.py")
     assert runtime_self_validation.path.endswith("guard_0027_runtime_self_validation.py")
+    assert terminal_inventory_recovery.path.endswith(
+        "guard_0028_terminal_inventory_recovery.py"
+    )
+    assert protected_pending_cancellation.path.endswith(
+        "guard_0029_protected_pending_cancellation.py"
+    )

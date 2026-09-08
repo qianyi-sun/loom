@@ -11,16 +11,18 @@ import os
 import re
 import secrets
 import sys
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import psycopg
 import yaml  # type: ignore[import-untyped]
 from psycopg import sql
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -77,6 +79,7 @@ _STAGING_WORKER_RUNTIME_FUNCTIONS = (
     "assert_staging_worker_session(uuid,text)",
     "claim_staging_assigned_trial(uuid,text,jsonb)",
     "retry_staging_claimed_trial(uuid,text,jsonb)",
+    "cancel_protected_runtime_pending_trial(uuid,uuid)",
 )
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
@@ -112,7 +115,82 @@ def _retarget_database_url(
     password: str,
 ) -> str:
     parsed = make_url(fixture_database_url(admin_url, database))
-    return parsed.set(username=username, password=password).render_as_string(hide_password=False)
+    drivername = "postgresql+psycopg" if parsed.drivername == "postgresql" else parsed.drivername
+    return URL.create(
+        drivername=drivername,
+        username=username,
+        password=password,
+        host=parsed.host,
+        port=parsed.port,
+        database=parsed.database,
+        query=parsed.query,
+    ).render_as_string(hide_password=False)
+
+
+def _pgpass_field(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
+def _private_passfile_fd() -> int:
+    memfd_create = getattr(os, "memfd_create", None)
+    if memfd_create is not None:
+        create = cast(Callable[[str, int], int], memfd_create)
+        return create(
+            "loom-capacity-guard-pgpass",
+            getattr(os, "MFD_CLOEXEC", 0),
+        )
+    with tempfile.TemporaryFile(prefix="loom-capacity-guard-pgpass-") as handle:
+        return os.dup(handle.fileno())
+
+
+def _migration_url_with_passfile(migrator_url: str) -> tuple[str, int]:
+    parsed = make_url(migrator_url)
+    password = parsed.password
+    if not parsed.username or not parsed.database or not password:
+        raise PersonalDevCapacityInstallationError(
+            "protected capacity migration credential is invalid"
+        )
+    try:
+        host = parsed.host or "*"
+        port = str(parsed.port or 5432)
+        payload = (
+            ":".join(
+                _pgpass_field(value)
+                for value in (host, port, parsed.database, parsed.username, password)
+            )
+            + "\n"
+        ).encode("utf-8")
+    except UnicodeEncodeError:
+        raise PersonalDevCapacityInstallationError(
+            "protected capacity migration credential is invalid"
+        ) from None
+    fd = _private_passfile_fd()
+    try:
+        os.fchmod(fd, 0o600)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("protected capacity migration passfile write made no progress")
+            remaining = remaining[written:]
+        os.lseek(fd, 0, os.SEEK_SET)
+        query = dict(parsed.query)
+        query["passfile"] = f"/proc/self/fd/{fd}"
+        drivername = (
+            "postgresql+psycopg" if parsed.drivername == "postgresql" else parsed.drivername
+        )
+        password_free_url = URL.create(
+            drivername=drivername,
+            username=parsed.username,
+            host=parsed.host,
+            port=parsed.port,
+            database=parsed.database,
+            query=query,
+        ).render_as_string(hide_password=False)
+    except Exception:
+        os.close(fd)
+        raise
+    return password_free_url, fd
 
 
 def _validate_kubernetes_label_key(value: str) -> None:
@@ -252,13 +330,142 @@ class PersonalDevCapacityDatabase(Protocol):
 class PsycopgPersonalDevCapacityDatabase:
     """Provision least-privilege roles, migrate the guard, and bind the agent."""
 
-    def __init__(self, admin_url: str, *, migration_timeout_seconds: float = 180.0) -> None:
+    def __init__(
+        self,
+        admin_url: str,
+        *,
+        migration_timeout_seconds: float = 180.0,
+        transient_role_admin: bool = False,
+    ) -> None:
         self._admin_url = admin_url
         self._migration_timeout_seconds = migration_timeout_seconds
+        self._transient_role_admin = transient_role_admin
 
     @property
     def _connect_url(self) -> str:
         return self._admin_url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+    async def _verify_transient_role_envelope(
+        self,
+        identity: DevInstanceIdentity,
+        *,
+        owner: str,
+        migrator: str,
+        agent: str,
+        executor: str,
+        observer: str,
+        runtime: str,
+    ) -> None:
+        protected = (owner, migrator, agent, executor, observer, runtime)
+        try:
+            async with await psycopg.AsyncConnection.connect(
+                self._connect_url,
+                autocommit=True,
+            ) as connection:
+                owner_result = await connection.execute(
+                    "SELECT pg_catalog.pg_get_userbyid(datdba) "
+                    "FROM pg_catalog.pg_database WHERE datname = %s",
+                    (identity.database,),
+                )
+                owner_row = await owner_result.fetchone()
+                if owner_row != (identity.db_role,):
+                    raise PersonalDevCapacityInstallationError(
+                        "protected capacity transient database owner is invalid"
+                    )
+                application_result = await connection.execute(
+                    "SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = %s",
+                    (identity.db_role,),
+                )
+                application_row = await application_result.fetchone()
+                if application_row is None or application_row != (False, False):
+                    raise PersonalDevCapacityInstallationError(
+                        "protected capacity transient application role is invalid"
+                    )
+                roles_result = await connection.execute(
+                    "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                    "rolcreaterole, rolreplication, rolbypassrls, "
+                    "rolvaliduntil IS NOT NULL AND rolvaliduntil > CURRENT_TIMESTAMP "
+                    "AND rolvaliduntil < 'infinity'::timestamptz "
+                    "FROM pg_roles WHERE rolname = ANY(%s)",
+                    (list(protected),),
+                )
+                observed_roles = {row[0]: row[1:] for row in await roles_result.fetchall()}
+                expected_roles = {
+                    owner: (False, False, False, False, False, False, False, False),
+                    migrator: (True, True, False, False, False, False, False, True),
+                    agent: (True, False, False, False, False, False, False, True),
+                    executor: (False, False, False, False, False, False, False, False),
+                    observer: (True, False, False, False, False, False, False, True),
+                    runtime: (True, False, False, False, False, False, False, True),
+                }
+                if observed_roles != expected_roles:
+                    raise PersonalDevCapacityInstallationError(
+                        "protected capacity transient role envelope is invalid"
+                    )
+                memberships_result = await connection.execute(
+                    "SELECT member.rolname, granted.rolname, membership.admin_option, "
+                    "membership.inherit_option, membership.set_option "
+                    "FROM pg_auth_members membership "
+                    "JOIN pg_roles member ON member.oid = membership.member "
+                    "JOIN pg_roles granted ON granted.oid = membership.roleid "
+                    "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s)",
+                    (list(protected), list(protected)),
+                )
+                observed_memberships = {
+                    (row[0], row[1], row[2], row[3], row[4])
+                    for row in await memberships_result.fetchall()
+                }
+                expected_memberships = {
+                    (migrator, identity.db_role, False, True, True),
+                    (migrator, owner, False, True, True),
+                }
+                if observed_memberships != expected_memberships:
+                    raise PersonalDevCapacityInstallationError(
+                        "protected capacity transient memberships are invalid"
+                    )
+        except PersonalDevCapacityInstallationError:
+            raise
+        except Exception:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity transient role verification failed"
+            ) from None
+
+    async def _verify_transient_login_credentials(
+        self,
+        identity: DevInstanceIdentity,
+        credentials: CapacityDatabaseCredentials,
+        *,
+        migrator: str,
+        agent: str,
+        observer: str,
+        runtime: str,
+    ) -> None:
+        try:
+            for role, password in (
+                (migrator, credentials.migrator_password),
+                (agent, credentials.agent_password),
+                (observer, credentials.observer_password),
+                (runtime, credentials.runtime_password),
+            ):
+                parsed = make_url(
+                    _retarget_database_url(
+                        self._admin_url,
+                        database=identity.database,
+                        username=role,
+                        password=password,
+                    ).replace("postgresql+psycopg://", "postgresql://", 1)
+                )
+                query = dict(parsed.query)
+                query.setdefault("connect_timeout", "5")
+                async with await psycopg.AsyncConnection.connect(
+                    parsed.set(query=query).render_as_string(hide_password=False),
+                    autocommit=True,
+                ) as connection:
+                    await connection.execute("SELECT 1")
+        except Exception:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity transient login credentials are invalid"
+            ) from None
 
     async def _converge_roles(
         self,
@@ -278,117 +485,137 @@ class PsycopgPersonalDevCapacityDatabase:
             username=agent,
             password=credentials.agent_password,
         )
+        if self._transient_role_admin and make_url(self._admin_url).username != migrator:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity transient role authority is invalid"
+            )
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._connect_url,
-                autocommit=True,
-            ) as connection:
-                protected_roles = sql.SQL(", ").join(
-                    sql.Identifier(role)
-                    for role in (owner, migrator, agent, executor, observer, runtime)
+            if self._transient_role_admin:
+                await self._verify_transient_role_envelope(
+                    identity,
+                    owner=owner,
+                    migrator=migrator,
+                    agent=agent,
+                    executor=executor,
+                    observer=observer,
+                    runtime=runtime,
                 )
-                for role in (owner, migrator, agent, executor, observer, runtime):
-                    await connection.execute(
-                        sql.SQL(
-                            "DO $loom$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles "
-                            "WHERE rolname = {}) THEN CREATE ROLE {}; END IF; END $loom$"
-                        ).format(sql.Literal(role), sql.Identifier(role))
+            else:
+                async with await psycopg.AsyncConnection.connect(
+                    self._connect_url,
+                    autocommit=True,
+                ) as connection:
+                    protected_roles = sql.SQL(", ").join(
+                        sql.Identifier(role)
+                        for role in (owner, migrator, agent, executor, observer, runtime)
                     )
-                    await connection.execute(
-                        sql.SQL("ALTER ROLE {} RESET ALL").format(sql.Identifier(role))
-                    )
-                await connection.execute(
-                    sql.SQL(
-                        "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
-                    ).format(sql.Identifier(owner))
-                )
-                await connection.execute(
-                    sql.SQL(
-                        "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
-                    ).format(sql.Identifier(executor))
-                )
-                await connection.execute(
-                    sql.SQL(
-                        "ALTER ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                    ).format(
-                        sql.Identifier(runtime),
-                        sql.Literal(credentials.runtime_password),
-                    )
-                )
-                for role, password, inherit in (
-                    (migrator, credentials.migrator_password, "INHERIT"),
-                    (agent, credentials.agent_password, "NOINHERIT"),
-                    (observer, credentials.observer_password, "NOINHERIT"),
-                ):
-                    await connection.execute(
-                        sql.SQL(
-                            "ALTER ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE {} "
-                            "NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                        ).format(
-                            sql.Identifier(role),
-                            sql.SQL(inherit),
-                            sql.Literal(password),
-                        )
-                    )
-                await connection.execute(
-                    sql.SQL("GRANT {} TO {}").format(
-                        sql.Identifier(owner),
-                        sql.Identifier(migrator),
-                    )
-                )
-                await connection.execute(
-                    sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
-                        sql.Identifier(identity.database),
-                        protected_roles,
-                    )
-                )
-                await connection.execute(
-                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}, {}, {}").format(
-                        sql.Identifier(identity.database),
-                        sql.Identifier(migrator),
-                        sql.Identifier(agent),
-                        sql.Identifier(observer),
-                        sql.Identifier(runtime),
-                    )
-                )
-                await connection.execute(
-                    sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(
-                        sql.Identifier(identity.database),
-                        sql.Identifier(owner),
-                    )
-                )
-                memberships = await connection.execute(
-                    "SELECT member.rolname AS member, granted.rolname AS granted "
-                    "FROM pg_auth_members m JOIN pg_roles member ON member.oid = m.member "
-                    "JOIN pg_roles granted ON granted.oid = m.roleid "
-                    "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
-                    "ORDER BY member.rolname, granted.rolname",
-                    (
-                        [owner, migrator, agent, executor, observer, runtime],
-                        [owner, migrator, agent, executor, observer, runtime],
-                    ),
-                )
-                observed = {(row[0], row[1]) for row in await memberships.fetchall()}
-                if observed != {(migrator, owner)}:
-                    for member, granted in sorted(observed - {(migrator, owner)}):
+                    for role in (owner, migrator, agent, executor, observer, runtime):
                         await connection.execute(
-                            sql.SQL("REVOKE {} FROM {}").format(
-                                sql.Identifier(granted),
-                                sql.Identifier(member),
+                            sql.SQL(
+                                "DO $loom$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles "
+                                "WHERE rolname = {}) THEN CREATE ROLE {}; END IF; END $loom$"
+                            ).format(sql.Literal(role), sql.Identifier(role))
+                        )
+                        await connection.execute(
+                            sql.SQL("ALTER ROLE {} RESET ALL").format(sql.Identifier(role))
+                        )
+                    restricted_nologin = (
+                        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+                        "NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+                    )
+                    restricted_login = (
+                        "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+                        "NOREPLICATION NOBYPASSRLS PASSWORD {}"
+                    )
+                    for role in (owner, executor):
+                        await connection.execute(
+                            sql.SQL("ALTER ROLE {} " + restricted_nologin).format(
+                                sql.Identifier(role)
                             )
                         )
-                    raise PersonalDevCapacityInstallationError(
-                        "protected capacity roles have unexpected memberships"
+                    await connection.execute(
+                        sql.SQL("ALTER ROLE {} " + restricted_login).format(
+                            sql.Identifier(runtime),
+                            sql.Literal(credentials.runtime_password),
+                        )
                     )
+                    credential_roles: tuple[tuple[str, str, str], ...] = (
+                        (migrator, credentials.migrator_password, "INHERIT"),
+                        (agent, credentials.agent_password, "NOINHERIT"),
+                        (observer, credentials.observer_password, "NOINHERIT"),
+                    )
+                    for role, password, inherit in credential_roles:
+                        credential_attributes = (
+                            "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                            f"{inherit} NOREPLICATION NOBYPASSRLS PASSWORD {{}}"
+                        )
+                        await connection.execute(
+                            sql.SQL("ALTER ROLE {} " + credential_attributes).format(
+                                sql.Identifier(role),
+                                sql.Literal(password),
+                            )
+                        )
+                    await connection.execute(
+                        sql.SQL("GRANT {} TO {}").format(
+                            sql.Identifier(owner),
+                            sql.Identifier(migrator),
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
+                            sql.Identifier(identity.database),
+                            protected_roles,
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}, {}, {}").format(
+                            sql.Identifier(identity.database),
+                            sql.Identifier(migrator),
+                            sql.Identifier(agent),
+                            sql.Identifier(observer),
+                            sql.Identifier(runtime),
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(
+                            sql.Identifier(identity.database),
+                            sql.Identifier(owner),
+                        )
+                    )
+                    memberships = await connection.execute(
+                        "SELECT member.rolname AS member, granted.rolname AS granted "
+                        "FROM pg_auth_members m JOIN pg_roles member ON member.oid = m.member "
+                        "JOIN pg_roles granted ON granted.oid = m.roleid "
+                        "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
+                        "ORDER BY member.rolname, granted.rolname",
+                        (
+                            [owner, migrator, agent, executor, observer, runtime],
+                            [owner, migrator, agent, executor, observer, runtime],
+                        ),
+                    )
+                    observed = {(row[0], row[1]) for row in await memberships.fetchall()}
+                    expected_memberships = {(migrator, owner)}
+                    if observed != expected_memberships:
+                        for member, granted in sorted(observed - expected_memberships):
+                            await connection.execute(
+                                sql.SQL("REVOKE {} FROM {}").format(
+                                    sql.Identifier(granted),
+                                    sql.Identifier(member),
+                                )
+                            )
+                        raise PersonalDevCapacityInstallationError(
+                            "protected capacity roles have unexpected memberships"
+                        )
 
             database_admin_url = fixture_database_url(self._admin_url, identity.database)
             async with await psycopg.AsyncConnection.connect(
                 database_admin_url.replace("postgresql+psycopg://", "postgresql://", 1)
             ) as connection:
                 async with connection.transaction():
+                    if self._transient_role_admin:
+                        await connection.execute(
+                            sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(identity.db_role))
+                        )
                     protected_roles = sql.SQL(", ").join(
                         sql.Identifier(role)
                         for role in (owner, migrator, agent, executor, observer, runtime)
@@ -403,6 +630,27 @@ class PsycopgPersonalDevCapacityDatabase:
                             sql.SQL("REVOKE ALL PRIVILEGES ON {} FROM {}").format(
                                 sql.SQL(object_kind),
                                 protected_roles,
+                            )
+                        )
+                    if self._transient_role_admin:
+                        await connection.execute(
+                            sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM PUBLIC").format(
+                                sql.Identifier(identity.database)
+                            )
+                        )
+                        await connection.execute(
+                            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}, {}, {}").format(
+                                sql.Identifier(identity.database),
+                                sql.Identifier(migrator),
+                                sql.Identifier(agent),
+                                sql.Identifier(observer),
+                                sql.Identifier(runtime),
+                            )
+                        )
+                        await connection.execute(
+                            sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(
+                                sql.Identifier(identity.database),
+                                sql.Identifier(owner),
                             )
                         )
                     application_role_result = await connection.execute(
@@ -427,6 +675,8 @@ class PsycopgPersonalDevCapacityDatabase:
                         "ORDER BY nspname"
                     )
                     for schema_name, public_usage in await schemas_result.fetchall():
+                        if self._transient_role_admin and schema_name == "loom_capacity_guard":
+                            continue
                         for object_kind in (
                             "SCHEMA {}",
                             "ALL TABLES IN SCHEMA {}",
@@ -480,7 +730,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "submitted_by_user_id, usage_attributed_user_id, "
                             "usage_attributed_actor, family_key, lifecycle_authority_id, "
                             "submitted_at, started_at, cancellation_requested_at, "
-                            "next_attempt_at, "
+                            "cancellation_observed_at, finished_at, next_attempt_at, "
                             "autoscaler_pool_name, worker_id, attempt_count, "
                             "execution_route_json) "
                             "ON TABLE public.trials TO {}"
@@ -490,7 +740,8 @@ class PsycopgPersonalDevCapacityDatabase:
                         sql.SQL(
                             "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, "
                             "worker_id, claimed_at, pre_start_heartbeat_at, failure_reason, "
-                            "failure_message, attempt_count, next_attempt_at) "
+                            "failure_message, attempt_count, next_attempt_at, "
+                            "cancellation_requested_at, cancellation_observed_at, finished_at) "
                             "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
@@ -711,6 +962,15 @@ class PsycopgPersonalDevCapacityDatabase:
                             "ON TABLE public.execution_admission_reservations TO {}"
                         ).format(sql.Identifier(owner))
                     )
+            if self._transient_role_admin:
+                await self._verify_transient_login_credentials(
+                    identity,
+                    credentials,
+                    migrator=migrator,
+                    agent=agent,
+                    observer=observer,
+                    runtime=runtime,
+                )
         except asyncio.CancelledError:
             await self._seal_migrator(identity, owner=owner, migrator=migrator)
             raise
@@ -733,32 +993,46 @@ class PsycopgPersonalDevCapacityDatabase:
     ) -> None:
         """Remove transient schema authority and credentials between runs."""
 
+        if self._transient_role_admin:
+            return
+
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
                 autocommit=True,
             ) as connection:
-                await connection.execute(
-                    sql.SQL("REVOKE {} FROM {}").format(
-                        sql.Identifier(owner),
-                        sql.Identifier(migrator),
+                roles_result = await connection.execute(
+                    "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                    ([owner, migrator],),
+                )
+                existing = {row[0] for row in await roles_result.fetchall()}
+                if migrator in existing:
+                    await connection.execute(
+                        sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
+                            sql.Identifier(identity.database),
+                            sql.Identifier(migrator),
+                        )
                     )
-                )
-                await connection.execute(
-                    sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(sql.Identifier(migrator))
-                )
-                await connection.execute(
-                    sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
-                        sql.Identifier(identity.database),
-                        sql.Identifier(migrator),
+                if owner in existing:
+                    await connection.execute(
+                        sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
+                            sql.Identifier(identity.database),
+                            sql.Identifier(owner),
+                        )
                     )
-                )
-                await connection.execute(
-                    sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
-                        sql.Identifier(identity.database),
-                        sql.Identifier(owner),
+                if migrator in existing:
+                    if owner in existing:
+                        await connection.execute(
+                            sql.SQL("REVOKE {} FROM {}").format(
+                                sql.Identifier(owner),
+                                sql.Identifier(migrator),
+                            )
+                        )
+                    await connection.execute(
+                        sql.SQL("ALTER ROLE {} NOLOGIN NOCREATEROLE PASSWORD NULL").format(
+                            sql.Identifier(migrator)
+                        )
                     )
-                )
         except Exception:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity migration authority could not be sealed"
@@ -871,46 +1145,51 @@ class PsycopgPersonalDevCapacityDatabase:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity migrations are absent from the trusted image"
             )
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "LOOM_CAPACITY_GUARD_DB_URL": migrator_url,
-                "LOOM_CAPACITY_GUARD_OWNER_ROLE": owner,
-                "LOOM_CAPACITY_GUARD_AGENT_ROLE": agent,
-                "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE": executor,
-                "LOOM_CAPACITY_GUARD_OBSERVER_ROLE": observer,
-                "LOOM_CAPACITY_GUARD_RUNTIME_ROLE": runtime,
-            }
-        )
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "alembic",
-            "-c",
-            str(config_path),
-            "upgrade",
-            "head",
-            cwd=repo_root,
-            env=environment,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        password_free_url, passfile_fd = _migration_url_with_passfile(migrator_url)
         try:
-            await asyncio.wait_for(process.wait(), timeout=self._migration_timeout_seconds)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise PersonalDevCapacityInstallationError(
-                "protected capacity migration timed out"
-            ) from None
-        except asyncio.CancelledError:
-            if process.returncode is None:
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "LOOM_CAPACITY_GUARD_DB_URL": password_free_url,
+                    "LOOM_CAPACITY_GUARD_OWNER_ROLE": owner,
+                    "LOOM_CAPACITY_GUARD_AGENT_ROLE": agent,
+                    "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE": executor,
+                    "LOOM_CAPACITY_GUARD_OBSERVER_ROLE": observer,
+                    "LOOM_CAPACITY_GUARD_RUNTIME_ROLE": runtime,
+                }
+            )
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "alembic",
+                "-c",
+                str(config_path),
+                "upgrade",
+                "head",
+                cwd=repo_root,
+                env=environment,
+                pass_fds=(passfile_fd,),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(process.wait(), timeout=self._migration_timeout_seconds)
+            except TimeoutError:
                 process.kill()
                 await process.wait()
-            raise
-        if process.returncode != 0:
-            raise PersonalDevCapacityInstallationError("protected capacity migration failed")
+                raise PersonalDevCapacityInstallationError(
+                    "protected capacity migration timed out"
+                ) from None
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+                raise
+            if process.returncode != 0:
+                raise PersonalDevCapacityInstallationError("protected capacity migration failed")
+        finally:
+            os.close(passfile_fd)
 
     async def _converge_executor_surface(
         self,
@@ -930,6 +1209,9 @@ class PsycopgPersonalDevCapacityDatabase:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session, session.begin():
                 await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
+                await session.execute(
+                    text("REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard FROM PUBLIC")
+                )
                 await session.execute(
                     text(
                         "REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard "
@@ -966,6 +1248,12 @@ class PsycopgPersonalDevCapacityDatabase:
                             f"loom_capacity_guard FROM {quoted_runtime}"
                         )
                     )
+                await session.execute(
+                    text(
+                        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "
+                        "loom_capacity_guard FROM PUBLIC"
+                    )
+                )
                 await session.execute(
                     text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_executor}")
                 )

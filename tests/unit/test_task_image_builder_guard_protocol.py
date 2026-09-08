@@ -6,7 +6,9 @@ import errno
 import json
 import os
 import socket
+import stat
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -32,6 +34,10 @@ from loom_task_image_builder_guard.protocol import (
 GRANT = UUID("11111111-1111-4111-8111-111111111111")
 EXCHANGE = UUID("22222222-2222-4222-8222-222222222222")
 RESPONSE = UUID("33333333-3333-4333-8333-333333333333")
+MATERIALIZATION = UUID("44444444-4444-4444-8444-444444444444")
+ATTEMPT = UUID("55555555-5555-4555-8555-555555555555")
+OPERATION = UUID("66666666-6666-4666-8666-666666666666")
+CREDENTIAL = UUID("77777777-7777-4777-8777-777777777777")
 DIGEST = "a" * 64
 CURRENT_CREDENTIALS = PeerCredentials(os.getpid(), os.geteuid(), os.getegid())
 
@@ -80,6 +86,309 @@ def test_exchange_request_binds_exact_replay_fields() -> None:
 
     assert request.exchange_id == EXCHANGE
     assert request.proof_sha256 == DIGEST
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (
+            {
+                "schema": "loom.task-image-builder-guard-local/v1",
+                "operation": "renew",
+                "grant_id": str(GRANT),
+                "operation_id": str(OPERATION),
+            },
+            LocalRequest(operation="renew", grant_id=GRANT, operation_id=OPERATION),
+        ),
+        (
+            {
+                "schema": "loom.task-image-builder-guard-local/v1",
+                "operation": "claim",
+                "grant_id": str(GRANT),
+                "operation_id": str(OPERATION),
+            },
+            LocalRequest(operation="claim", grant_id=GRANT, operation_id=OPERATION),
+        ),
+        *(
+            (
+                {
+                    "schema": "loom.task-image-builder-guard-local/v1",
+                    "operation": operation,
+                    "grant_id": str(GRANT),
+                    "operation_id": str(OPERATION),
+                    "materialization_id": str(MATERIALIZATION),
+                    "attempt_id": str(ATTEMPT),
+                    "lease_epoch": 3,
+                },
+                LocalRequest(
+                    operation=operation,
+                    grant_id=GRANT,
+                    operation_id=OPERATION,
+                    materialization_id=MATERIALIZATION,
+                    attempt_id=ATTEMPT,
+                    lease_epoch=3,
+                ),
+            )
+            for operation in ("start", "heartbeat", "bundle", "release")
+        ),
+        (
+            {
+                "schema": "loom.task-image-builder-guard-local/v1",
+                "operation": "fail",
+                "grant_id": str(GRANT),
+                "operation_id": str(OPERATION),
+                "materialization_id": str(MATERIALIZATION),
+                "attempt_id": str(ATTEMPT),
+                "lease_epoch": 3,
+                "failure_kind": "containment",
+            },
+            LocalRequest(
+                operation="fail",
+                grant_id=GRANT,
+                operation_id=OPERATION,
+                materialization_id=MATERIALIZATION,
+                attempt_id=ATTEMPT,
+                lease_epoch=3,
+                failure_kind="containment",
+            ),
+        ),
+        (
+            {
+                "schema": "loom.task-image-builder-guard-local/v1",
+                "operation": "finish",
+                "grant_id": str(GRANT),
+                "operation_id": str(OPERATION),
+                "cleanup": {
+                    "descendant_processes": 0,
+                    "mounts": 0,
+                    "sockets": 0,
+                    "open_files": 0,
+                },
+            },
+            LocalRequest(
+                operation="finish",
+                grant_id=GRANT,
+                operation_id=OPERATION,
+                cleanup={
+                    "descendant_processes": 0,
+                    "mounts": 0,
+                    "sockets": 0,
+                    "open_files": 0,
+                },
+            ),
+        ),
+    ],
+)
+def test_session_and_lease_operations_have_exact_nonsecret_fields(
+    document: dict[str, object],
+    expected: LocalRequest,
+) -> None:
+    assert parse_local_request(_wire(document)) == expected
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (
+            {
+                "schema": "loom.task-image-builder-guard-local/v1",
+                "operation": "registry-credential",
+                "grant_id": str(GRANT),
+                "operation_id": str(OPERATION),
+                "materialization_id": str(MATERIALIZATION),
+                "attempt_id": str(ATTEMPT),
+                "lease_epoch": 3,
+                "component": "sidecar:Postgres_16.2",
+                "predecessor_credential_id": None,
+                "predecessor_generation": None,
+            },
+            LocalRequest(
+                operation="registry-credential",
+                grant_id=GRANT,
+                operation_id=OPERATION,
+                materialization_id=MATERIALIZATION,
+                attempt_id=ATTEMPT,
+                lease_epoch=3,
+                component="sidecar:Postgres_16.2",
+            ),
+        ),
+        (
+            {
+                "schema": "loom.task-image-builder-guard-local/v1",
+                "operation": "publication-candidate",
+                "grant_id": str(GRANT),
+                "operation_id": str(OPERATION),
+                "materialization_id": str(MATERIALIZATION),
+                "attempt_id": str(ATTEMPT),
+                "lease_epoch": 3,
+                "credential_id": str(CREDENTIAL),
+                "credential_generation": 2,
+                "component": "task",
+                "manifest_digest": "sha256:" + "b" * 64,
+                "manifest_size": 512,
+                "oci_file_sha256": "c" * 64,
+                "oci_file_size": 4096,
+                "platform": "linux/arm64",
+            },
+            LocalRequest(
+                operation="publication-candidate",
+                grant_id=GRANT,
+                operation_id=OPERATION,
+                materialization_id=MATERIALIZATION,
+                attempt_id=ATTEMPT,
+                lease_epoch=3,
+                credential_id=CREDENTIAL,
+                credential_generation=2,
+                component="task",
+                manifest_digest="sha256:" + "b" * 64,
+                manifest_size=512,
+                oci_file_sha256="c" * 64,
+                oci_file_size=4096,
+                platform="linux/arm64",
+            ),
+        ),
+    ],
+)
+def test_registry_publication_operations_have_exact_nonsecret_fields(
+    document: dict[str, object],
+    expected: LocalRequest,
+) -> None:
+    assert parse_local_request(_wire(document)) == expected
+
+
+def test_registry_credential_accepts_only_a_complete_predecessor_pair() -> None:
+    document = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "registry-credential",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "component": "task",
+        "predecessor_credential_id": str(CREDENTIAL),
+        "predecessor_generation": 1,
+    }
+
+    request = parse_local_request(_wire(document))
+
+    assert request.predecessor_credential_id == CREDENTIAL
+    assert request.predecessor_generation == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("credential_id", "00000000-0000-0000-0000-000000000000"),
+        ("credential_generation", 513),
+        ("component", "sidecar:bad/name"),
+        ("manifest_digest", "sha256:" + "A" * 64),
+        ("manifest_size", 0),
+        ("oci_file_sha256", "0" * 64),
+        ("oci_file_size", -1),
+        ("platform", "linux/ppc64le"),
+    ],
+)
+def test_publication_candidate_rejects_each_invalid_typed_field(
+    field: str,
+    value: object,
+) -> None:
+    document: dict[str, object] = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "publication-candidate",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "credential_id": str(CREDENTIAL),
+        "credential_generation": 2,
+        "component": "task",
+        "manifest_digest": "sha256:" + "b" * 64,
+        "manifest_size": 512,
+        "oci_file_sha256": "c" * 64,
+        "oci_file_size": 4096,
+        "platform": "linux/arm64",
+    }
+    document[field] = value
+
+    with pytest.raises(GuardError) as caught:
+        parse_local_request(_wire(document))
+
+    assert caught.value.code == "local_request_invalid"
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    ("bearer_token", "repository", "registry_origin", "scope", "actions"),
+)
+def test_registry_publication_operations_reject_caller_selected_authority(
+    forbidden: str,
+) -> None:
+    document: dict[str, object] = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "registry-credential",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "component": "task",
+        "predecessor_credential_id": None,
+        "predecessor_generation": None,
+        forbidden: "must-not-be-accepted",
+    }
+
+    with pytest.raises(GuardError) as caught:
+        parse_local_request(_wire(document))
+
+    assert caught.value.code == "local_request_invalid"
+    assert "must-not-be-accepted" not in str(caught.value)
+
+
+def test_registry_publication_operations_reject_missing_and_duplicate_fields() -> None:
+    document = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": "registry-credential",
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
+        "component": "task",
+        "predecessor_credential_id": None,
+        "predecessor_generation": None,
+    }
+    del document["component"]
+    with pytest.raises(GuardError, match="local_request_invalid"):
+        parse_local_request(_wire(document))
+
+    duplicate = (
+        b'{"schema":"loom.task-image-builder-guard-local/v1",'
+        b'"operation":"registry-credential","operation":"registry-credential"}'
+    )
+    with pytest.raises(GuardError, match="local_request_invalid"):
+        parse_local_request(duplicate)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("renew", "claim", "start", "heartbeat", "bundle", "release", "fail", "finish"),
+)
+def test_local_operations_reject_secret_or_caller_selected_authority(operation: str) -> None:
+    document: dict[str, object] = {
+        "schema": "loom.task-image-builder-guard-local/v1",
+        "operation": operation,
+        "grant_id": str(GRANT),
+        "operation_id": str(OPERATION),
+        "session_token": "loom_tibs_" + "S" * 64,
+    }
+
+    with pytest.raises(GuardError) as caught:
+        parse_local_request(_wire(document))
+
+    assert caught.value.code == "local_request_invalid"
+    assert "loom_tibs_" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -193,6 +502,69 @@ def test_packet_transfers_one_owned_sealed_descriptor() -> None:
                 os.close(received)
     finally:
         os.close(descriptor)
+        sender.close()
+        receiver.close()
+
+
+def test_projected_packet_transfers_exactly_three_ordered_capabilities(
+    tmp_path: Path,
+) -> None:
+    sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    bootstrap = create_sealed_memfd("bootstrap", b"secret", maximum=64)
+    workspace = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    cgroup_path = tmp_path / "build-egress"
+    cgroup_path.mkdir()
+    cgroup = os.open(cgroup_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    received: list[int] = []
+    try:
+        send_packet(
+            sender,
+            b"projected",
+            descriptors=(bootstrap, workspace, cgroup),
+        )
+        payload, ancillary, flags, _address = receiver.recvmsg(
+            64,
+            socket.CMSG_SPACE(array.array("i").itemsize * 3)
+            + socket.CMSG_SPACE(struct.calcsize("3i")),
+            socket.MSG_CMSG_CLOEXEC,
+        )
+        assert payload == b"projected"
+        assert flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) == 0
+        for level, kind, data in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                rights = array.array("i")
+                rights.frombytes(data[: len(data) - len(data) % rights.itemsize])
+                received.extend(rights)
+        assert len(received) == 3
+        assert read_sealed_memfd(received[0], maximum=64) == b"secret"
+        assert stat.S_ISDIR(os.fstat(received[1]).st_mode)
+        assert stat.S_ISDIR(os.fstat(received[2]).st_mode)
+        assert (os.fstat(received[1]).st_dev, os.fstat(received[1]).st_ino) == (
+            os.fstat(workspace).st_dev,
+            os.fstat(workspace).st_ino,
+        )
+        assert (os.fstat(received[2]).st_dev, os.fstat(received[2]).st_ino) == (
+            os.fstat(cgroup).st_dev,
+            os.fstat(cgroup).st_ino,
+        )
+    finally:
+        for descriptor in [*received, bootstrap, workspace, cgroup]:
+            os.close(descriptor)
+        sender.close()
+        receiver.close()
+
+
+def test_projected_packet_rejects_changed_descriptor_order(tmp_path: Path) -> None:
+    sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    bootstrap = create_sealed_memfd("bootstrap", b"secret", maximum=64)
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        with pytest.raises(GuardError) as caught:
+            send_packet(sender, b"projected", descriptors=(directory, bootstrap, directory))
+        assert caught.value.code == "local_descriptor_invalid"
+    finally:
+        os.close(bootstrap)
+        os.close(directory)
         sender.close()
         receiver.close()
 

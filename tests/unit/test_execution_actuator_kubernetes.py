@@ -504,6 +504,32 @@ def test_platform_network_policies_admit_only_execution_units_from_known_nebius_
     )
 
 
+@pytest.mark.parametrize(
+    ("policy_name", "direction", "peer_key", "peer_app"),
+    [
+        ("loom-control-plane", "egress", "to", "loom-minio"),
+        ("loom-minio", "ingress", "from", "loom-control-plane"),
+    ],
+)
+def test_platform_network_policies_allow_canonical_materializer_storage(
+    policy_name: str, direction: str, peer_key: str, peer_app: str
+) -> None:
+    policies = {
+        document["metadata"]["name"]: document
+        for document in yaml.safe_load_all(
+            (_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8")
+        )
+        if document["kind"] == "NetworkPolicy"
+    }
+    # Kubernetes requires both source egress and destination ingress to admit
+    # the materializer's object-store connection. Keep the peer namespace-local.
+    assert any(
+        rule.get("ports") == [{"port": 9000, "protocol": "TCP"}]
+        and {"podSelector": {"matchLabels": {"app": peer_app}}} in rule.get(peer_key, [])
+        for rule in policies[policy_name]["spec"][direction]
+    )
+
+
 def test_platform_network_policies_support_kube_dns_and_coredns_labels() -> None:
     documents = list(
         yaml.safe_load_all((_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8"))

@@ -102,8 +102,12 @@ the fixed libexec entrypoint. It:
 - invokes only the installed runtime installer, release converger, fixed
   conformance program, `/usr/bin/systemctl`, `/usr/sbin/nft`, and the dedicated
   Docker socket as required by the selected operation;
-- emits one canonical JSON receipt on success and a stable secret-free error
-  on failure.
+- emits one canonical JSON receipt on success;
+- after a validated `prepare` request enters the fixed transition boundary,
+  emits one canonical public failure receipt and returns nonzero if the
+  transition fails; and
+- retains the stable secret-free generic error for pre-validation and
+  unexpected failures that cannot safely produce the bounded receipt.
 
 The broker imports no module and executes no script from operator-writable
 staging. All executable assets come from the root-owned authority source.
@@ -297,6 +301,14 @@ condition it can observe and refuses busy removal.
   mismatch.
 - Receipts include request/authority/runtime public identities and transition
   state, but no input path, secret, raw command output, or environment.
+- A `prepare` failure receipt contains only its exact public identities,
+  request UUID, operation, allowlisted error code, fixed failure phase, and
+  `unchanged`, `inert`, or `unproven` cleanup status. It is written and flushed
+  while the lifecycle lock remains held, and the launcher preserves its
+  nonzero status without appending the generic error.
+- The operator transport retains a fully validated failure receipt through
+  atomic no-replace publication. It never converts the receipt to success,
+  retries that request UUID, or advances the failed window to activation.
 
 ## Runbook changes
 
@@ -327,6 +339,8 @@ Testing proceeds red/green and includes:
 - fake-host prepare/stage/activate/status/remove transitions, idempotency, busy
   removal, archive races, asset drift, and compensation at every injected
   failure boundary;
+- exact phase, allowlisted-code, cleanup-status, launcher-status, malformed
+  failure-receipt, and no-clobber transport behavior;
 - secret tests proving values and digests never reach argv, receipts, errors,
   evidence, or retained staging;
 - conformance tests preserving two separate KVM-gVisor sandboxes and all four

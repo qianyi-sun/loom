@@ -213,13 +213,13 @@ def _without_reconciliation_labels(call: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _not_found(kind: str, name: str) -> CommandResult:
+def _not_found(kind: str, name: str, *, stdout: str = "") -> CommandResult:
     message = (
         f"Error response from daemon: network {name} not found\n"
         if kind == "network"
         else f"Error response from daemon: No such container: {name}\n"
     )
-    return CommandResult(1, "", message)
+    return CommandResult(1, stdout, message)
 
 
 @dataclass
@@ -234,6 +234,7 @@ class RecordingDockerRunner:
     managed_networks_after: str = ""
     invalid_create_name: str | None = None
     drifted_inspect_name: str | None = None
+    missing_inspect_stdout: str = ""
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -303,7 +304,11 @@ class RecordingDockerRunner:
             return CommandResult(1, stderr="primary failed")
         if is_reconciliation and call[-1] not in self.present:
             kind = "network" if call[3] == "network" else "container"
-            return _not_found(kind, call[-1])
+            return _not_found(
+                kind,
+                call[-1],
+                stdout=self.missing_inspect_stdout,
+            )
         if (
             not is_cleanup
             and not is_preexisting_check
@@ -317,7 +322,15 @@ class RecordingDockerRunner:
         if is_preexisting_check:
             present = self.present.get(call[-1])
             kind = "network" if call[3] == "network" else "container"
-            return _not_found(kind, call[-1]) if present is None else CommandResult(0, present[1])
+            return (
+                _not_found(
+                    kind,
+                    call[-1],
+                    stdout=self.missing_inspect_stdout,
+                )
+                if present is None
+                else CommandResult(0, present[1])
+            )
         if call[3:5] == ("ps", "-aq"):
             return CommandResult(0, self.managed_containers_after)
         if call[3:6] == ("network", "ls", "-q"):
@@ -416,6 +429,84 @@ def test_runs_fixed_two_sandbox_conformance_without_a_shell() -> None:
     assert all(
         env == {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"} for env in runner.environments
     )
+
+
+@pytest.mark.parametrize(
+    ("observed_cap_add", "accepted"),
+    [
+        (["CAP_SETGID", "CAP_SETUID"], True),
+        (["CAP_SETGID"], False),
+        (["CAP_SETGID", "CAP_SETUID", "CAP_SYS_ADMIN"], False),
+        (["CAP_SETGID", "CAP_SETUID", "CAP_SETUID"], False),
+        (["CAP_SETGID", "setuid"], False),
+        (["SETUID", "CAP_SETUID", "SETGID"], False),
+        ("CAP_SETUID", False),
+        (["CAP_SETGID", 123], False),
+    ],
+)
+def test_create_reconciliation_requires_exact_docker_capability_set(
+    observed_cap_add: object,
+    accepted: bool,
+) -> None:
+    """Catches comparing Docker's canonical capability names as raw CLI spellings or a subset."""
+
+    class DockerCapabilityRunner(RecordingDockerRunner):
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            call = tuple(argv)
+            result = super().run(argv, check=check, env=env)
+            if (
+                result.returncode == 0
+                and "inspect" in call
+                and "--format" in call
+                and call[call.index("--format") + 1] == "{{json .}}"
+                and call[-1] == "loom-native-conformance-buildkit"
+            ):
+                identity = json.loads(result.stdout)
+                host = identity["HostConfig"]
+                assert isinstance(host, dict)
+                host["CapAdd"] = observed_cap_add
+                return CommandResult(
+                    0,
+                    json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n",
+                )
+            return result
+
+    runner = DockerCapabilityRunner()
+    if accepted:
+        assert run_conformance(_inputs(), runner)["status"] == "passed"
+    else:
+        with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+            run_conformance(_inputs(), runner)
+        assert raised.value.stage == "buildkit_create"
+
+
+def test_accepts_empty_json_list_stdout_for_an_exact_missing_inspect() -> None:
+    """Catches rejecting the Docker CLI's exact absent-object response."""
+    runner = RecordingDockerRunner(missing_inspect_stdout="[]\n")
+
+    receipt = run_conformance(_inputs(), runner)
+
+    assert receipt["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ("[]", "[]\nextra", "{}\n", "[{}]\n", "null\n"),
+)
+def test_rejects_any_other_stdout_for_a_missing_inspect(stdout: str) -> None:
+    """Catches broadening absence beyond Docker's two exact response forms."""
+    runner = RecordingDockerRunner(missing_inspect_stdout=stdout)
+
+    with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+        run_conformance(_inputs(), runner)
+
+    assert raised.value.stage == "preconditions"
 
 
 def test_every_docker_call_uses_the_fixed_absolute_executable() -> None:
@@ -661,6 +752,50 @@ def test_verifies_both_platforms_labels_every_container_and_readies_denial_serve
     ) in runner.calls
 
 
+def test_injected_runner_waits_for_asynchronous_readiness_before_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches production busy-polling startup because its injected runner has a different type."""
+
+    class DelayedReadinessRunner(RecordingDockerRunner):
+        elapsed = 0.0
+
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            result = super().run(argv, check=check, env=env)
+            call = tuple(argv)
+            is_buildkit_readiness = call[3:5] == ("exec", BUILDKIT_ID) and call[-2:] == (
+                "debug",
+                "workers",
+            )
+            is_denial_readiness = call[3:5] == ("exec", DENIAL_ID) and call[-2:] == (
+                "-c",
+                conformance._DENIAL_READY_PROGRAM,
+            )
+            if is_buildkit_readiness and self.elapsed < 1:
+                return CommandResult(1, stderr="not ready")
+            if is_denial_readiness and self.elapsed < 2:
+                return CommandResult(1, stderr="not ready")
+            return result
+
+    runner = DelayedReadinessRunner()
+    waits: list[float] = []
+
+    def advance(seconds: float) -> None:
+        waits.append(seconds)
+        runner.elapsed += seconds
+
+    monkeypatch.setattr(conformance.time, "sleep", advance)
+
+    assert run_conformance(_inputs(), runner)["status"] == "passed"
+    assert waits == [1, 1]
+
+
 @pytest.mark.parametrize("platform", ["linux/amd64", "windows/arm64"])
 def test_rejects_any_non_arm64_image_before_container_creation(platform: str) -> None:
     """Catches QEMU/binfmt execution of an image that is not native linux/arm64."""
@@ -670,6 +805,58 @@ def test_rejects_any_non_arm64_image_before_container_creation(platform: str) ->
         run_conformance(_inputs(), runner)
 
     assert all("create" not in call for call in runner.calls)
+
+
+def test_failure_exposes_only_fixed_conformance_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Makes a live failure actionable without exposing command output."""
+
+    class NeverReady(RecordingDockerRunner):
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            result = super().run(argv, check=check, env=env)
+            call = tuple(argv)
+            if "logs" in call or (
+                call[3:5] == ("exec", BUILDKIT_ID) and call[-2:] == ("debug", "workers")
+            ):
+                return CommandResult(1, stderr="private registry token must not escape")
+            return result
+
+    monkeypatch.setattr(conformance.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+        run_conformance(_inputs(), NeverReady())
+
+    assert raised.value.stage == "buildkit_readiness"
+    assert "private registry token" not in str(raised.value)
+
+
+def test_failure_before_first_probe_is_secret_safe_preconditions_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches invocation identity generation escaping the fixed stage boundary."""
+    monkeypatch.setattr(
+        conformance.uuid,
+        "uuid4",
+        lambda: (_ for _ in ()).throw(RuntimeError("private entropy detail")),
+    )
+
+    with pytest.raises(ConformanceError, match=r"^conformance failed$") as raised:
+        run_conformance(_inputs(), RecordingDockerRunner())
+
+    assert raised.value.stage == "preconditions"
+    assert "private entropy detail" not in str(raised.value)
+
+
+def test_conformance_error_rejects_unallowlisted_stage() -> None:
+    with pytest.raises(ValueError, match="conformance stage is invalid"):
+        ConformanceError("conformance failed", stage="private-registry-token")
 
 
 @pytest.mark.parametrize("field", ["managed_containers_after", "managed_networks_after"])
@@ -778,9 +965,11 @@ def test_refuses_existing_exact_name_before_first_create() -> None:
 @pytest.mark.parametrize("failure_number", range(1, 32))
 def test_each_primary_failure_cleans_only_recorded_ids_in_reverse_order(
     failure_number: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catches leaked sandboxes or broad cleanup when a create, start, or probe fails."""
     runner = RecordingDockerRunner(fail_at=failure_number)
+    monkeypatch.setattr(conformance.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(ConformanceError, match="conformance failed"):
         run_conformance(_inputs(), runner)

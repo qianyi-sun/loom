@@ -15,6 +15,12 @@ capacity workflow.
 - **[Task-image builder Phase 1 site convergence](task-image-builder-phase1-site-convergence.md)**
   — inert, check/plan-first prerequisite staging, controller and one-node
   convergence order, receipts, evidence, and the closed Phase 2 boundary.
+- **[Task-image builder Phase 2C supervisor](task-image-builder-phase2c-supervisor.md)**
+  — content-addressed provider release assembly, stage-only installer,
+  conformance, rollback, and the still-closed production boundary.
+- **[Task-image builder Phase 2D1 registry publication](task-image-builder-phase2d1-publication.md)**
+  — merged-but-inactive registry credential and publication candidate
+  invariants, future JWKS ceremony boundaries, and remaining activation gates.
 
 ## Capacity and development environments
 

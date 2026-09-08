@@ -82,3 +82,22 @@ def test_unified_execution_attempt_capacity_mutations_cannot_fall_out_of_invento
     document = json.loads(INVENTORY.read_bytes())
     inventoried_sources = {source for entry in document["entries"] for source in entry["sources"]}
     assert EXECUTION_ATTEMPT_MUTATION_SOURCE_FLOOR <= inventoried_sources
+
+
+def test_cancellation_inventory_tracks_the_shared_protected_first_authority() -> None:
+    document = json.loads(INVENTORY.read_bytes())
+    entries = {entry["id"]: entry for entry in document["entries"]}
+    shared_authority = "src/loom_control_plane/trial_cancellation.py:cancel_trial_under_authority"
+
+    for mutation_path_id in (
+        "single-trial-cancel",
+        "family-finalize-cascade",
+        "batch-user-cancel",
+        "batch-hard-budget-cancel",
+    ):
+        assert shared_authority in entries[mutation_path_id]["sources"]
+    assert entries["family-finalize-cascade"]["sources"] == [
+        "src/loom_control_plane/routes/state.py:_finalize_family",
+        shared_authority,
+        "src/loom_family_orchestrator/main_loop.py:_cancel_trials",
+    ]

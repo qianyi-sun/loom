@@ -1376,6 +1376,7 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # and listing them after the workloads keeps the rendered output
     # naturally ordered for human review (workload, then its policy).
     "network-policies.yaml.j2",
+    "nebius-canonical-access.yaml.j2",
     # Grafana dashboards ConfigMap — auto-discovered by the
     # kube-prometheus-stack sidecar (grafana_dashboard: "1" label).
     # Listed last so removal doesn't break the core apply ordering.
@@ -1960,6 +1961,9 @@ def render_manifests(config: ClusterConfig) -> str:
         lstrip_blocks=True,
     )
     ctx = config.to_render_context()
+    from loom_cli.nebius_canonical_render import nebius_canonical_context
+
+    ctx.update(nebius_canonical_context(config))
     ctx.update(_persistent_storage_context(config))
     ctx.update(_frontend_route_context(config))
     ctx.update(_runtime_environment_context(config))

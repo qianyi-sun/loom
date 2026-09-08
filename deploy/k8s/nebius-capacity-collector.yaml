@@ -95,6 +95,13 @@ spec:
                 - /var/run/loom-projected
                 - --destination
                 - /var/run/loom-owned/credentials
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
               volumeMounts:
                 - name: projected-credentials
                   mountPath: /var/run/loom-projected

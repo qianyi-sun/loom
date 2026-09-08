@@ -23,8 +23,9 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 from loom_cli.capacity_control_plane import (
+    _manager_deployment_with_migration_init,
+    _render_capacity_control_plane_manifests,
     load_capacity_control_plane_profile,
-    render_capacity_control_plane_manifests,
 )
 
 from .final_gate_plan import FinalGatePlan
@@ -62,8 +63,16 @@ _MANAGER_DEPLOYMENT_MANAGER_CONTRACTS = frozenset(
         ("kubectl-client-side-apply", "Update", "apps/v1", None),
         ("kubectl-rollout", "Update", "apps/v1", None),
         (_FIELD_MANAGER, "Update", "apps/v1", None),
-        ("k3s", "Update", "apps/v1", "status"),
     }
+)
+_K3S_DEPLOYMENT_REVISION_FIELDS: tuple[dict[str, object], ...] = (
+    {"f:annotations": {"f:deployment.kubernetes.io/revision": {}}},
+    {
+        "f:annotations": {
+            ".": {},
+            "f:deployment.kubernetes.io/revision": {},
+        }
+    },
 )
 _STATUS_FIELDS = {
     "schema_version",
@@ -594,7 +603,6 @@ class KubernetesProtectedStagingCapacityManagerPolicyComponent:
             "diff",
             "--server-side=true",
             f"--field-manager={_FIELD_MANAGER}",
-            "--validate=strict",
             f"--request-timeout={_REQUEST_TIMEOUT}",
             "-f",
             "-",
@@ -670,15 +678,24 @@ def build_manager_policy_resource_documents(
         f"{container_registry}/loom-capacity-manager@{plan.image_digests['loom-capacity-manager']}"
     )
     routes = tuple(sorted(set(prerequisite.manager_client_cidrs.values())))
-    rendered = render_capacity_control_plane_manifests(
-        load_capacity_control_plane_profile(candidate_root / _PROFILE_PATH),
+    profile = load_capacity_control_plane_profile(candidate_root / _PROFILE_PATH)
+    rendered = _render_capacity_control_plane_manifests(
+        profile,
         manager_image=manager_image,
         authority_incarnation=authority_incarnation,
         execution_policy=prerequisite.execution_policy,
         execution_policy_sha256=prerequisite.execution_policy_sha256,
         external_manager_client_cidrs=routes,
+        include_migration_job=False,
     )
     policy_name = f"loom-capacity-execution-policy-{prerequisite.execution_policy_sha256[:32]}"
+    manager = _manager_deployment_with_migration_init(
+        profile,
+        manager_image=manager_image,
+        authority_incarnation=authority_incarnation,
+        execution_policy_config_map=policy_name,
+        execution_policy_sha256=prerequisite.execution_policy_sha256,
+    )
     expected = {
         ("Namespace", "", "loom-capacity-router"),
         ("ConfigMap", "loom-dev", policy_name),
@@ -703,7 +720,7 @@ def build_manager_policy_resource_documents(
             continue
         if identity in selected:
             raise ValueError("protected manager policy render contains duplicates")
-        desired = copy.deepcopy(document)
+        desired = copy.deepcopy(manager if identity == _MANAGER_IDENTITY else document)
         metadata = desired["metadata"]
         assert isinstance(metadata, dict)
         labels = metadata.get("labels")
@@ -866,8 +883,14 @@ def _safe_owned(
             observed.get("kind") == "Deployment"
             and manager == "k3s"
             and operation == "Update"
+            and entry.get("apiVersion") == "apps/v1"
             and subresource == "status"
-            and set(fields) == {"f:status"}
+            and set(fields) <= {"f:metadata", "f:status"}
+            and isinstance(fields.get("f:status"), dict)
+            and (
+                "f:metadata" not in fields
+                or fields["f:metadata"] in _K3S_DEPLOYMENT_REVISION_FIELDS
+            )
         ):
             continue
         return False

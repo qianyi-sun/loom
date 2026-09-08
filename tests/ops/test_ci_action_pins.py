@@ -81,7 +81,7 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
 
     assert result.errors == ()
     assert result.workflow_count == 12
-    assert result.reference_count == 97
+    assert result.reference_count == 100
     assert set(result.remote_actions) == {
         "actions/attest-build-provenance",
         "actions/checkout",
@@ -121,9 +121,9 @@ def test_release_evidence_trivy_identity_matches_repository_owned_installer() ->
         for step in job.get("steps", [])
         if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
     ]
-    scan_scripts = [
-        step["run"]
-        for job in workflow["jobs"].values()
+    scan_steps = [
+        (job_name, step["run"])
+        for job_name, job in workflow["jobs"].items()
         for step in job.get("steps", [])
         if step.get("name") in {"Scan native image archive", "Scan trusted image archive"}
     ]
@@ -136,7 +136,9 @@ def test_release_evidence_trivy_identity_matches_repository_owned_installer() ->
 
     assert "aquasecurity/trivy-action" not in lock["actions"]
     assert remote_trivy_uses == []
-    assert len(scan_scripts) == 2
+    assert len(scan_steps) == 3
+    assert {job_name for job_name, _ in scan_steps} == {"build", "scanner-cache-build", "publish"}
+    scan_scripts = [script for _, script in scan_steps]
     assert len(installer_scripts) == 1
     assert "python3 scripts/install_trivy.py" in installer_scripts[0]
     assert all("python3 scripts/install_trivy.py" not in script for script in scan_scripts)

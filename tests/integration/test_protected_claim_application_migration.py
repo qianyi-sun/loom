@@ -167,6 +167,81 @@ def test_0128_requeue_trampoline_is_private_and_reversible(
         engine.dispose()
 
 
+def test_0132_retained_requeue_suppression_is_private_and_reversible(
+    isolated_migration_postgres_url: str,
+) -> None:
+    config = _config(isolated_migration_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
+    signature = "public.loom_transform_protected_runtime_trial_requeue()"
+    try:
+        with engine.connect() as connection:
+            definition = connection.execute(
+                text("SELECT pg_get_functiondef(to_regprocedure(:signature))"),
+                {"signature": signature},
+            ).scalar_one()
+            assert "transformed->>'state' = 'retained'" in definition
+            assert "RETURN NULL" in definition
+            assert connection.execute(
+                text("SELECT has_function_privilege('public', :signature, 'EXECUTE')"),
+                {"signature": signature},
+            ).scalar_one() is False
+
+        command.downgrade(config, "0131")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "0131"
+            definition = connection.execute(
+                text("SELECT pg_get_functiondef(to_regprocedure(:signature))"),
+                {"signature": signature},
+            ).scalar_one()
+            assert "transformed->>'state' = 'retained'" not in definition
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            definition = connection.execute(
+                text("SELECT pg_get_functiondef(to_regprocedure(:signature))"),
+                {"signature": signature},
+            ).scalar_one()
+            assert "transformed->>'state' = 'retained'" in definition
+    finally:
+        command.upgrade(config, "head")
+        engine.dispose()
+
+
+def test_0132_refuses_downgrade_before_capacity_guard(
+    isolated_migration_postgres_url: str,
+) -> None:
+    config = _config(isolated_migration_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE SCHEMA loom_capacity_guard"))
+            connection.execute(
+                text(
+                    "CREATE TABLE "
+                    "loom_capacity_guard.executable_terminal_inventory_evidence "
+                    "(evidence_id bigint PRIMARY KEY)"
+                )
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade 0132 while evidence-gated protected recovery is installed",
+        ):
+            command.downgrade(config, "0131")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == _head_revision(config)
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS loom_capacity_guard CASCADE"))
+        command.upgrade(config, "head")
+        engine.dispose()
+
+
 def test_0128_refuses_downgrade_while_protected_claim_can_be_requeued(
     isolated_migration_postgres_url: str,
 ) -> None:
@@ -190,7 +265,7 @@ def test_0128_refuses_downgrade_while_protected_claim_can_be_requeued(
 
         with pytest.raises(
             RuntimeError,
-            match="cannot downgrade 0128 while protected claims can be requeued",
+            match="cannot downgrade 0132 while protected claims can be retained",
         ):
             command.downgrade(config, "0127")
 

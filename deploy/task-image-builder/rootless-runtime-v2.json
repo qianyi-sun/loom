@@ -1,0 +1,52 @@
+{
+  "schema": "loom.task-image-builder-rootless-runtime/v2",
+  "release": "rootless-runtime-v2",
+  "source": {
+    "buildkit": {
+      "version": "v0.32.2",
+      "signed_tag_commit": "991535e0973488b6a429096d21fa13f81f2d89d8",
+      "archive_sha256": "ebc242057b1eee67eb14ead8def52c3770c6793c8c8ac0c53d41983b085360f4"
+    },
+    "rootlesskit": {
+      "version": "v3.1.0",
+      "signed_tag_commit": "62d2101fbbe4f79bc845a337c4e868d27ff602c9",
+      "archive_sha256": "51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8da9340a"
+    }
+  },
+  "toolchain": {
+    "go": "go1.26.7",
+    "image": "golang:1.26-alpine3.23",
+    "image_sha256": "b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57",
+    "x_crypto": "v0.55.0",
+    "reproducible_flags": [
+      "-trimpath",
+      "-buildvcs=false"
+    ]
+  },
+  "architectures": {
+    "amd64": {
+      "platform": "linux/amd64",
+      "members": {
+        "buildctl": "b2dc3eb537b912717670347cf449ca501e769d5a6beeebaad0aab8abb7f495e1",
+        "buildkitd": "0e01e2cac7df591ac129ee86543ac36bc6ef08b50aee8550f5675675208564e7",
+        "buildkit-runc": "b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c",
+        "rootlesskit": "b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db",
+        "rootlessctl": "5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96",
+        "slirp4netns": "e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2",
+        "fuse-overlayfs": "1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90"
+      }
+    },
+    "arm64": {
+      "platform": "linux/arm64",
+      "members": {
+        "buildctl": "8913f65a380be955abe4f5a155970ece8a2b3a26408c16431e806963e6acc97a",
+        "buildkitd": "fded12c1a4ab70a21278dc860a1d000bca68421e9f45a9e0fcf1e1807ae19c03",
+        "buildkit-runc": "1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441",
+        "rootlesskit": "5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2",
+        "rootlessctl": "d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94",
+        "slirp4netns": "fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0",
+        "fuse-overlayfs": "34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23"
+      }
+    }
+  }
+}

@@ -1399,7 +1399,7 @@ async def _load_observation(
     queued_rows = (
         await session.execute(
             select(Trial.requires_caps, Trial.autoscaler_pool_name).where(
-                Trial.state == "queued",
+                Trial.state.in_(("queued", "protected-pending")),
             ),
         )
     ).all()

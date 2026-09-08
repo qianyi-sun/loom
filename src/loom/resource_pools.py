@@ -262,8 +262,9 @@ async def get_resource_pool_summary(
     """Return aggregate and per-pool slot state.
 
     `trial_stmt` lets Monitor apply the same URL-scope filters it uses for
-    state counters. When omitted, global queued/claimed/running trials are used,
-    which is the correct shape for metrics refreshers and CLI default output.
+    state counters. When omitted, global queued/protected-pending/claimed/running
+    trials are used, which is the correct shape for metrics refreshers and CLI
+    default output.
     """
     now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=freshness_sec)
@@ -344,12 +345,14 @@ async def get_resource_pool_summary(
             Trial.requires_caps,
             Trial.claimed_at,
             Trial.pre_start_heartbeat_at,
-        ).where(Trial.state.in_(("queued", "claimed", "running")))
+        ).where(
+            Trial.state.in_(("queued", "protected-pending", "claimed", "running"))
+        )
 
     trial_rows = (await session.execute(trial_stmt)).all()
     queued_tasks = 0
     for state, worker_id, requires_caps, claimed_at, pre_start_heartbeat_at in trial_rows:
-        if state == "queued":
+        if state in {"queued", "protected-pending"}:
             queued_tasks += 1
             for key, pool in pools_by_key.items():
                 if _trial_matches_pool(requires_caps, key):

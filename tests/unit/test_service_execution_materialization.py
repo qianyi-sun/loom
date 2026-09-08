@@ -357,9 +357,9 @@ async def test_materializer_rejects_source_digest_mismatch() -> None:
         )
 
 
-async def test_materializer_loop_recovers_after_control_database_outage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_materializer_loop_recovers_after_control_database_outage() -> None:
+    recovered = asyncio.Event()
+
     class RecoveringMaterializer:
         run_calls = 0
         cleanup_calls = 0
@@ -377,25 +377,284 @@ async def test_materializer_loop_recovers_after_control_database_outage(
 
         async def refresh_metrics(self) -> None:
             self.metric_calls += 1
+            recovered.set()
+            await asyncio.Event().wait()
 
     materializer = RecoveringMaterializer()
-    sleep_calls = 0
-
-    async def retry_sleep(_seconds: float) -> None:
-        nonlocal sleep_calls
-        sleep_calls += 1
-        if sleep_calls == 2:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(
-        "loom_control_plane.service_execution_materializer.asyncio.sleep",
-        retry_sleep,
-    )
-    with pytest.raises(asyncio.CancelledError):
-        await run_service_execution_materializer_loop(
+    loop_task = asyncio.create_task(
+        run_service_execution_materializer_loop(
             materializer=materializer,  # type: ignore[arg-type]
             interval_seconds=0.01,
         )
+    )
+    await recovered.wait()
+    loop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loop_task
     assert materializer.run_calls == 2
     assert materializer.cleanup_calls == 1
     assert materializer.metric_calls == 1
+
+
+async def test_materializer_loop_does_not_retry_an_error_after_shutdown() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    stop = asyncio.Event()
+
+    class ShutdownMaterializer:
+        run_calls = 0
+
+        async def run_once(self) -> bool:
+            self.run_calls += 1
+            started.set()
+            await release.wait()
+            raise OSError("database cancellation translated to a transport error")
+
+        async def cleanup_source_once(self) -> bool:
+            raise AssertionError("shutdown must stop before source cleanup")
+
+        async def refresh_metrics(self) -> None:
+            raise AssertionError("shutdown must stop before metrics refresh")
+
+    materializer = ShutdownMaterializer()
+    loop_task = asyncio.create_task(
+        run_service_execution_materializer_loop(
+            materializer=materializer,  # type: ignore[arg-type]
+            interval_seconds=60.0,
+            stop_event=stop,
+        )
+    )
+    await started.wait()
+    stop.set()
+    release.set()
+
+    await asyncio.wait_for(loop_task, timeout=0.5)
+    assert materializer.run_calls == 1
+
+
+async def test_materializer_loop_preserves_translated_worker_cancellation() -> None:
+    started = asyncio.Event()
+    retry_wait_started = asyncio.Event()
+
+    class ObservableStopEvent(asyncio.Event):
+        async def wait(self) -> bool:
+            retry_wait_started.set()
+            return await super().wait()
+
+    stop = ObservableStopEvent()
+
+    class CancellationTranslatingMaterializer:
+        async def run_once(self) -> bool:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                raise OSError("database driver translated cancellation") from exc
+
+        async def cleanup_source_once(self) -> bool:
+            raise AssertionError("cancelled worker must not start source cleanup")
+
+        async def refresh_metrics(self) -> None:
+            raise AssertionError("cancelled worker must not refresh metrics")
+
+    loop_task = asyncio.create_task(
+        run_service_execution_materializer_loop(
+            materializer=CancellationTranslatingMaterializer(),  # type: ignore[arg-type]
+            interval_seconds=60.0,
+            stop_event=stop,
+        )
+    )
+    await started.wait()
+    loop_task.cancel()
+    retry_observer = asyncio.create_task(retry_wait_started.wait())
+    done, _ = await asyncio.wait(
+        {loop_task, retry_observer},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    cancellation_was_preserved = loop_task in done
+
+    stop.set()
+    with pytest.raises(asyncio.CancelledError):
+        await loop_task
+    if retry_observer.done():
+        await retry_observer
+    else:
+        retry_observer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await retry_observer
+
+    assert cancellation_was_preserved
+
+
+async def test_materializer_loop_does_not_finish_before_workers_are_drained() -> None:
+    all_workers_started = asyncio.Event()
+    release_cancellation = asyncio.Event()
+    delayed_worker_stopped = asyncio.Event()
+    prompt_worker_stopped = asyncio.Event()
+    stop = asyncio.Event()
+
+    class DelayedCancellationMaterializer:
+        run_calls = 0
+
+        async def run_once(self) -> bool:
+            self.run_calls += 1
+            worker_index = self.run_calls
+            if self.run_calls == 2:
+                all_workers_started.set()
+            if worker_index != 1:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    prompt_worker_stopped.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release_cancellation.wait()
+                raise
+            finally:
+                delayed_worker_stopped.set()
+
+        async def cleanup_source_once(self) -> bool:
+            raise AssertionError("cancelled worker must not start source cleanup")
+
+        async def refresh_metrics(self) -> None:
+            raise AssertionError("cancelled worker must not refresh metrics")
+
+    loop_task = asyncio.create_task(
+        run_service_execution_materializer_loop(
+            materializer=DelayedCancellationMaterializer(),  # type: ignore[arg-type]
+            interval_seconds=60.0,
+            concurrency=2,
+            stop_event=stop,
+        )
+    )
+    await all_workers_started.wait()
+    stop.set()
+    loop_task.cancel()
+    await prompt_worker_stopped.wait()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    parent_waited_for_worker = not loop_task.done()
+
+    release_cancellation.set()
+    with pytest.raises(asyncio.CancelledError):
+        await loop_task
+    await asyncio.wait_for(delayed_worker_stopped.wait(), timeout=0.5)
+
+    assert parent_waited_for_worker
+
+
+async def test_materializer_loop_wakes_idle_workers_when_stopped() -> None:
+    idle_cycle_finished = asyncio.Event()
+    stop = asyncio.Event()
+
+    class IdleMaterializer:
+        run_calls = 0
+
+        async def run_once(self) -> bool:
+            self.run_calls += 1
+            return False
+
+        async def cleanup_source_once(self) -> bool:
+            return False
+
+        async def refresh_metrics(self) -> None:
+            idle_cycle_finished.set()
+
+    materializer = IdleMaterializer()
+    loop_task = asyncio.create_task(
+        run_service_execution_materializer_loop(
+            materializer=materializer,  # type: ignore[arg-type]
+            interval_seconds=60.0,
+            stop_event=stop,
+        )
+    )
+    await idle_cycle_finished.wait()
+    stop.set()
+
+    await asyncio.wait_for(loop_task, timeout=0.5)
+    assert materializer.run_calls == 1
+
+
+async def test_materializer_run_does_not_retry_a_translated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeObjectStore(objects={})
+    materializer = ServiceExecutionMaterializer(
+        session_factory=None,  # type: ignore[arg-type]
+        source_store=store,
+        source_bucket="source",
+        canonical_store=store,
+        artifacts_bucket="canonical",
+        trajectories_bucket="trajectories",
+    )
+    operation_started = asyncio.Event()
+    retry_called = False
+
+    async def claim_one() -> object:
+        return object()
+
+    async def load_and_materialize(_claim: object) -> None:
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise OSError("database driver translated cancellation") from exc
+
+    async def retry(_claim: object, _exc: Exception) -> None:
+        nonlocal retry_called
+        retry_called = True
+
+    monkeypatch.setattr(materializer, "claim_one", claim_one)
+    monkeypatch.setattr(materializer, "_load_and_materialize", load_and_materialize)
+    monkeypatch.setattr(materializer, "_retry", retry)
+
+    operation = asyncio.create_task(materializer.run_once())
+    await operation_started.wait()
+    operation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    assert not retry_called
+
+
+async def test_source_cleanup_does_not_retry_a_translated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeObjectStore(objects={})
+    materializer = ServiceExecutionMaterializer(
+        session_factory=None,  # type: ignore[arg-type]
+        source_store=store,
+        source_bucket="source",
+        canonical_store=store,
+        artifacts_bucket="canonical",
+        trajectories_bucket="trajectories",
+    )
+    operation_started = asyncio.Event()
+    retry_called = False
+
+    async def claim_source_cleanup() -> object:
+        return object()
+
+    async def source_cleanup_keys(_claim: object) -> tuple[str, ...]:
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise OSError("object-store driver translated cancellation") from exc
+
+    async def retry_source_cleanup(_claim: object, _exc: Exception) -> None:
+        nonlocal retry_called
+        retry_called = True
+
+    monkeypatch.setattr(materializer, "claim_source_cleanup", claim_source_cleanup)
+    monkeypatch.setattr(materializer, "_source_cleanup_keys", source_cleanup_keys)
+    monkeypatch.setattr(materializer, "_retry_source_cleanup", retry_source_cleanup)
+
+    operation = asyncio.create_task(materializer.cleanup_source_once())
+    await operation_started.wait()
+    operation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    assert not retry_called

@@ -7,12 +7,17 @@ from uuid import UUID
 
 import pytest
 
+from loom_cli.rollout.operator import protected_apply_journal as journal_module
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentFailure,
     ComponentFailureDiagnostic,
+    ComponentIntent,
     ComponentObservation,
     ComponentState,
+    ComponentTerminal,
+    ComponentTerminalRecoveryAuthority,
+    ComponentTerminalRecoveryIntent,
     ProtectedApplyComponent,
     ProtectedApplyJournal,
     ProtectedApplyJournalError,
@@ -65,6 +70,141 @@ class _Backend:
             classify=classify,
             apply=apply,
         )
+
+
+def test_terminal_recovery_authority_digest_is_semantically_bound() -> None:
+    """Break caught: a shaped but forged digest is accepted as terminal recovery authority."""
+    with pytest.raises(ValueError, match="recovery authority is invalid"):
+        ComponentTerminalRecoveryAuthority(
+            schema_version=1,
+            component_id="staging-capacity-credentials",
+            source_authority_incarnation="558afea6-2a37-55a1-9f7c-3399695da966",
+            target_authority_incarnation="00000000-0000-4000-8000-0000000000aa",
+            authority_digest="f" * 64,
+        )
+
+
+def test_terminal_recovery_intent_rejects_cross_component_authority(
+    tmp_path: Path,
+) -> None:
+    """Break caught: one component's recovery authority is replayed onto another terminal."""
+    plan = _plan(tmp_path)
+    component = _Backend().component("manifest-apply", 0)
+    intent = ComponentIntent.build(plan, component, 0)
+    terminal = ComponentTerminal.build(
+        intent,
+        ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest="1" * 64,
+            observed_epoch=plan.starting_mutation_epoch + 1,
+        ),
+        applied=False,
+    )
+    authority = ComponentTerminalRecoveryAuthority.build(
+        component_id="staging-capacity-credentials",
+        source_authority_incarnation="558afea6-2a37-55a1-9f7c-3399695da966",
+        target_authority_incarnation=plan.manager_authority_incarnation,
+    )
+
+    with pytest.raises(ValueError, match="recovery identity is invalid"):
+        ComponentTerminalRecoveryIntent.build(
+            plan=plan,
+            intent=intent,
+            terminal=terminal,
+            authority=authority,
+        )
+
+
+def test_terminal_recovery_intent_accepts_sha256_candidate_ids(tmp_path: Path) -> None:
+    """Break caught: terminal recovery rejects valid SHA-256 Git object IDs."""
+    plan = _plan(tmp_path)
+    component = _Backend().component("staging-capacity-credentials", 0)
+    intent = ComponentIntent.build(plan, component, 0)
+    terminal = ComponentTerminal.build(
+        intent,
+        ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest="1" * 64,
+            observed_epoch=plan.starting_mutation_epoch + 1,
+        ),
+        applied=False,
+    )
+    authority = ComponentTerminalRecoveryAuthority.build(
+        component_id=component.component_id,
+        source_authority_incarnation="558afea6-2a37-55a1-9f7c-3399695da966",
+        target_authority_incarnation=plan.manager_authority_incarnation,
+    )
+
+    payload = ComponentTerminalRecoveryIntent.build(
+        plan=plan,
+        intent=intent,
+        terminal=terminal,
+        authority=authority,
+    ).to_dict()
+    payload["candidate_sha"] = "a" * 64
+    payload["candidate_tree"] = "b" * 64
+    payload["recovery_intent_digest"] = journal_module._hash_json(
+        {key: value for key, value in payload.items() if key != "recovery_intent_digest"}
+    )
+
+    recovery_intent = ComponentTerminalRecoveryIntent.from_dict(payload)
+
+    assert recovery_intent.candidate_sha == "a" * 64
+    assert recovery_intent.candidate_tree == "b" * 64
+
+
+def test_terminal_recovery_never_recreates_a_missing_intent(
+    tmp_path: Path,
+) -> None:
+    """Break caught: replay repairs a deleted recovery intent beside a terminal."""
+    plan = _plan(tmp_path)
+    journal = _journal(tmp_path)
+    state = ComponentState.EXACT
+    evidence = "1" * 64
+    apply_calls = 0
+
+    def classify(_plan):
+        return ComponentObservation(
+            state=state,
+            evidence_digest=evidence,
+            observed_epoch=plan.starting_mutation_epoch + 1,
+        )
+
+    def apply(_plan):
+        nonlocal state, evidence, apply_calls
+        apply_calls += 1
+        state = ComponentState.EXACT
+        evidence = "3" * 64
+
+    authority = ComponentTerminalRecoveryAuthority.build(
+        component_id="staging-capacity-credentials",
+        source_authority_incarnation="558afea6-2a37-55a1-9f7c-3399695da966",
+        target_authority_incarnation=plan.manager_authority_incarnation,
+    )
+    component = ProtectedApplyComponent(
+        component_id="staging-capacity-credentials",
+        implementation_digest="2" * 64,
+        input_fingerprint="3" * 64,
+        classify=classify,
+        apply=apply,
+        terminal_recovery_authority=lambda _plan, _terminal, _observation: authority,
+    )
+    journal.execute(plan, (component,))
+    state = ComponentState.READY
+    evidence = "2" * 64
+    journal.execute(plan, (component,))
+    assert apply_calls == 1
+    component_root = journal.root / "00-staging-capacity-credentials"
+    recovery_intent_path = component_root / "terminal-recovery-intent.json"
+    recovery_intent_path.unlink()
+    state = ComponentState.READY
+    evidence = "2" * 64
+
+    with pytest.raises(ProtectedApplyJournalError):
+        journal.execute(plan, (component,))
+
+    assert not recovery_intent_path.exists()
+    assert apply_calls == 1
 
 
 def _journal(tmp_path: Path) -> ProtectedApplyJournal:
@@ -690,6 +830,204 @@ def test_records_secret_safe_failure_diagnostic_when_a_component_apply_raises(
     assert record["diagnostic"].startswith("unclassified environment-state failure: ValueError at ")
     assert "secret-bearing" not in (root / "failure-diagnostic.json").read_text()
     assert not (root / "terminal.json").exists()
+
+
+def test_repeated_failures_append_diagnostics_without_replacing_legacy_evidence(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a retry's current failure is hidden behind write-once legacy evidence."""
+    journal = _journal(tmp_path)
+    apply_calls = 0
+
+    def classify(_plan):
+        return ComponentObservation(
+            state=ComponentState.READY,
+            evidence_digest="1" * 64,
+            observed_epoch=7,
+        )
+
+    def apply(_plan):
+        nonlocal apply_calls
+        apply_calls += 1
+        if apply_calls == 1:
+            raise ValueError("first secret-bearing failure")
+        raise RuntimeError("second secret-bearing failure")
+
+    component = ProtectedApplyComponent(
+        component_id="environment-state",
+        implementation_digest="2" * 64,
+        input_fingerprint="3" * 64,
+        classify=classify,
+        apply=apply,
+    )
+
+    with pytest.raises(ValueError, match="first secret-bearing failure"):
+        journal.execute(_plan(tmp_path), (component,))
+    with pytest.raises(RuntimeError, match="second secret-bearing failure"):
+        journal.execute(_plan(tmp_path), (component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-environment-state"
+    legacy = json.loads((root / "failure-diagnostic.json").read_text())
+    assert "ValueError" in legacy["diagnostic"]
+    assert "RuntimeError" not in legacy["diagnostic"]
+    entries = root / "failure-diagnostics"
+    assert [path.name for path in sorted(entries.iterdir())] == [
+        "00000000.json",
+        "00000001.json",
+    ]
+    first = json.loads((entries / "00000000.json").read_text())
+    second = json.loads((entries / "00000001.json").read_text())
+    assert (first["component_id"], first["ordinal"], first["sequence"]) == (
+        "environment-state",
+        0,
+        0,
+    )
+    assert (second["component_id"], second["ordinal"], second["sequence"]) == (
+        "environment-state",
+        0,
+        1,
+    )
+    assert "ValueError" in first["diagnostic"]
+    assert "RuntimeError" in second["diagnostic"]
+    assert "secret-bearing" not in legacy["diagnostic"]
+    assert "secret-bearing" not in first["diagnostic"]
+    assert "secret-bearing" not in second["diagnostic"]
+
+    latest = journal_module.read_latest_component_failure_diagnostic(
+        root,
+        service_uid=os.geteuid(),
+    )
+    assert latest is not None
+    assert latest.failure_code == "apply-failed"
+    assert "RuntimeError" in latest.diagnostic
+
+
+def test_latest_failure_diagnostic_falls_back_to_legacy_record(tmp_path: Path) -> None:
+    """Break caught: historical attempts become unreadable after adding the stream."""
+    root = tmp_path / "00-environment-state"
+    root.mkdir(mode=0o700)
+    diagnostic_path = root / "failure-diagnostic.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "component_id": "environment-state",
+                "ordinal": 0,
+                "failure_code": "apply-failed",
+                "diagnostic": "unclassified environment-state failure: RuntimeError",
+            }
+        )
+    )
+    diagnostic_path.chmod(0o600)
+
+    latest = journal_module.read_latest_component_failure_diagnostic(
+        root.resolve(),
+        service_uid=os.geteuid(),
+    )
+
+    assert latest is not None
+    assert latest.failure_code == "apply-failed"
+    assert latest.diagnostic.endswith("RuntimeError")
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "directory-mode",
+        "file-mode",
+        "sequence-gap",
+        "component-id",
+        "ordinal",
+        "sequence",
+        "oversized",
+        "too-many",
+    ],
+)
+def test_latest_failure_diagnostic_rejects_unsafe_or_unbound_stream_entries(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Break caught: unsafe or identity-unbound diagnostic evidence reaches status."""
+    root = tmp_path / "00-environment-state"
+    root.mkdir(mode=0o700)
+    entries = root / "failure-diagnostics"
+    entries.mkdir(mode=0o700)
+
+    def record(sequence: int) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "component_id": "environment-state",
+            "ordinal": 0,
+            "sequence": sequence,
+            "failure_code": "apply-failed",
+            "diagnostic": "unclassified environment-state failure: RuntimeError",
+            "primary_failure_code": None,
+            "compensation_failure_code": None,
+        }
+
+    path = entries / "00000000.json"
+    path.write_text(json.dumps(record(0)))
+    path.chmod(0o600)
+    if corruption == "directory-mode":
+        entries.chmod(0o755)
+    elif corruption == "file-mode":
+        path.chmod(0o644)
+    elif corruption == "sequence-gap":
+        path.rename(entries / "00000001.json")
+    elif corruption in {"component-id", "ordinal", "sequence"}:
+        payload = record(0)
+        if corruption == "component-id":
+            payload["component_id"] = "staging-manifests"
+        elif corruption == "ordinal":
+            payload["ordinal"] = 1
+        else:
+            payload["sequence"] = 1
+        path.write_text(json.dumps(payload))
+        path.chmod(0o600)
+    elif corruption == "oversized":
+        path.write_bytes(b"x" * (256 * 1024 + 1))
+        path.chmod(0o600)
+    else:
+        for sequence in range(1, 1025):
+            extra = entries / f"{sequence:08d}.json"
+            extra.write_text(json.dumps(record(sequence)))
+            extra.chmod(0o600)
+
+    with pytest.raises(ProtectedApplyJournalError):
+        journal_module.read_latest_component_failure_diagnostic(
+            root.resolve(),
+            service_uid=os.geteuid(),
+        )
+
+
+def test_records_failure_diagnostic_when_pre_classification_returns_drifted(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a fail-closed DRIFTED result leaves no current diagnostic."""
+    journal = _journal(tmp_path)
+    component = ProtectedApplyComponent(
+        component_id="environment-state",
+        implementation_digest="7" * 64,
+        input_fingerprint="8" * 64,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.DRIFTED,
+            evidence_digest="9" * 64,
+            observed_epoch=7,
+        ),
+        apply=lambda _plan: None,
+    )
+
+    with pytest.raises(ProtectedApplyJournalError, match="live state drifted"):
+        journal.execute(_plan(tmp_path), (component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-environment-state"
+    latest = journal_module.read_latest_component_failure_diagnostic(
+        root,
+        service_uid=os.geteuid(),
+    )
+    assert latest is not None
+    assert latest.failure_code == "pre-classify-failed"
+    assert latest.diagnostic == "component classified drifted before apply"
 
 
 def test_records_typed_external_supervisor_apply_and_compensation_failures(

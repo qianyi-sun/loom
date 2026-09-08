@@ -40,6 +40,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableProtectedReleaseV2,
+    ExecutableTerminalInventoryEvidenceV2,
     canonical_executable_bytes,
     canonical_executable_digest,
     validate_executable_admission_work_size,
@@ -423,6 +424,64 @@ class DemandReporterClient:
         ):
             raise DemandPublishError("capacity manager bootstrap work binding changed")
         return proposal
+
+    async def get_executable_terminal_inventory_evidence(
+        self,
+        intent_id: UUID,
+    ) -> ExecutableTerminalInventoryEvidenceV2 | None:
+        """Fetch one manager-verified physical terminal witness for this subject."""
+
+        if not isinstance(intent_id, UUID):
+            raise DemandPublishError("terminal inventory intent id must be a UUID")
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{self._configuration.subject_id}/"
+            f"intents/{intent_id}/terminal-inventory-evidence"
+        )
+        try:
+            response = await self._http.get(
+                endpoint,
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager terminal inventory evidence transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                "capacity manager rejected terminal inventory evidence with status "
+                f"{response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError(
+                "capacity manager terminal inventory evidence exceeds its byte bound"
+            )
+        if response.content == b"null":
+            return None
+        try:
+            evidence = ExecutableTerminalInventoryEvidenceV2.model_validate_json(
+                response.content
+            )
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned invalid terminal inventory evidence"
+            ) from exc
+        binding = evidence.binding
+        if (
+            binding.intent_id != intent_id
+            or binding.subject_id != self._configuration.subject_id
+            or binding.subject_incarnation != self._configuration.subject_incarnation
+            or binding.deployment_generation != self._configuration.deployment_generation
+            or binding.candidate.algorithm
+            != self._configuration.candidate_identity_algorithm
+            or binding.candidate.identity != self._configuration.candidate_identity
+            or binding.candidate.publication_sha256
+            != self._configuration.candidate_publication_sha256
+        ):
+            raise DemandPublishError(
+                "capacity manager terminal inventory evidence binding changed"
+            )
+        return evidence
 
     async def publish_executable_bootstrap_acknowledgement(
         self,

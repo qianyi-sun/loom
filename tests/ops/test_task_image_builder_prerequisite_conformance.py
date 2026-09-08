@@ -22,6 +22,7 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/ops/task_image_builder_prerequisite_conformance.py"
 POLICY = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
+RUNTIME = ROOT / "deploy/task-image-builder/rootless-runtime-v2.json"
 SCHEMA = ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v2.schema.json"
 
 
@@ -85,7 +86,7 @@ def _legacy_evidence() -> dict[str, Any]:
                         "bpffs_mounted_root_only": True,
                     },
                     "runtime": {
-                        "release": "rootless-runtime-v1",
+                        "release": policy.runtime["release"],
                         "binary_sha256": runtime["binaries"],
                         "snapshotter": "fuse-overlayfs",
                         "network_driver": "slirp4netns",
@@ -237,9 +238,7 @@ def _fixture_release() -> dict[str, Any]:
 
 
 def _fixture_runtime() -> dict[str, Any]:
-    return json.loads(
-        (ROOT / "deploy/task-image-builder/rootless-runtime-v1.json").read_text(encoding="utf-8")
-    )
+    return CONFORMANCE.load_runtime_manifest(RUNTIME)
 
 
 def _path_digest(path: Path) -> str:
@@ -264,7 +263,7 @@ def _candidate_digest() -> str:
     components = {
         "policy": _path_digest(POLICY),
         "release": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
-        "runtime": _path_digest(ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"),
+        "runtime": _path_digest(RUNTIME),
         **_authority_binding().as_dict(),
     }
     return _fingerprint(components)
@@ -284,7 +283,7 @@ def _host_candidate_digest() -> str:
         {
             "policy": _path_digest(POLICY),
             "release": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
-            "runtime": _path_digest(ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"),
+            "runtime": _path_digest(RUNTIME),
             **_authority_binding().as_dict(),
         }
     )
@@ -832,9 +831,7 @@ def _metadata(observed_at: str) -> dict[str, Any]:
         "policy_file_sha256": _path_digest(POLICY),
         "release_name": "host-release-v2",
         "release_sha256": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
-        "runtime_manifest_sha256": _path_digest(
-            ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
-        ),
+        "runtime_manifest_sha256": _path_digest(RUNTIME),
         **_authority_binding().as_dict(),
     }
 
@@ -951,6 +948,7 @@ def _node_evidence(
     architecture = cluster["architecture"]
     debian_architecture = release["architecture_map"][architecture]
     runtime_binaries = runtime["architectures"][architecture]["binaries"]
+    runtime_release = runtime["release"]
     address = f"192.0.2.{index}" if cluster["id"] == "oldlab" else f"198.51.100.{index}"
     physical = f"host-{cluster['id']}-{index}"
     cgroup_contents = (
@@ -990,7 +988,7 @@ def _node_evidence(
             "command": [
                 "/usr/bin/readelf",
                 "-d",
-                f"/opt/loom-task-builder/releases/rootless-runtime-v1/bin/{name}",
+                f"/opt/loom-task-builder/releases/{runtime_release}/bin/{name}",
             ],
             "returncode": 0,
             "stdout": "There is no dynamic section in this file.\n",
@@ -1178,10 +1176,8 @@ def _node_evidence(
             },
         },
         "runtime": {
-            "release": "rootless-runtime-v1",
-            "manifest_sha256": _path_digest(
-                ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
-            ),
+            "release": runtime_release,
+            "manifest_sha256": _path_digest(RUNTIME),
             "binary_sha256": runtime_binaries,
             "dependency_sha256": {},
             "elf_dynamic_readback": dynamic_readback,
@@ -1304,9 +1300,7 @@ def _complete_evidence() -> dict[str, Any]:
         "policy_file_sha256": _path_digest(POLICY),
         "release_name": "host-release-v2",
         "release_sha256": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
-        "runtime_manifest_sha256": _path_digest(
-            ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
-        ),
+        "runtime_manifest_sha256": _path_digest(RUNTIME),
         **_authority_binding().as_dict(),
         "production_certification_allowed": False,
         "certified_nodes": [],
@@ -1835,7 +1829,7 @@ def test_policy_loader_rejects_mutated_phase_one_authority(
     policy_path = tmp_path / POLICY.name
     policy_path.write_text(source.replace(old, new, 1), encoding="utf-8")
     for source_path in (
-        ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
+        RUNTIME,
         ROOT / "deploy/task-image-builder/host-release-v2.json",
     ):
         (tmp_path / source_path.name).write_bytes(source_path.read_bytes())
@@ -1861,7 +1855,7 @@ def test_policy_loader_rejects_release_manifest_path_separators(
         encoding="utf-8",
     )
     for source_path in (
-        ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
+        RUNTIME,
         ROOT / "deploy/task-image-builder/host-release-v2.json",
     ):
         (tmp_path / source_path.name).write_bytes(source_path.read_bytes())
@@ -1873,9 +1867,7 @@ def test_policy_loader_rejects_release_manifest_path_separators(
 def test_policy_loader_rejects_v1_host_release_contract(tmp_path: Path) -> None:
     policy_path = tmp_path / POLICY.name
     policy_path.write_bytes(POLICY.read_bytes())
-    (tmp_path / "rootless-runtime-v1.json").write_bytes(
-        (ROOT / "deploy/task-image-builder/rootless-runtime-v1.json").read_bytes()
-    )
+    (tmp_path / RUNTIME.name).write_bytes(RUNTIME.read_bytes())
     release = _fixture_release()
     release["schema"] = "loom.task-image-builder-host-release/v1"
     release["release"] = "host-release-v1"
@@ -2406,7 +2398,7 @@ def test_cli_verify_converts_parser_recursion_to_a_generic_error(tmp_path: Path)
 @pytest.mark.parametrize(
     ("target_name", "expected"),
     [
-        ("rootless-runtime-v1.json", "rootless runtime manifest is invalid"),
+        ("rootless-runtime-v2.json", "rootless runtime manifest is invalid"),
         ("host-release-v2.json", "host release is invalid"),
     ],
 )
@@ -2418,7 +2410,7 @@ def test_cli_plan_converts_policy_json_recursion_to_a_generic_error(
     policy_path = tmp_path / POLICY.name
     policy_path.write_bytes(POLICY.read_bytes())
     for source in (
-        ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
+        RUNTIME,
         ROOT / "deploy/task-image-builder/host-release-v2.json",
     ):
         destination = tmp_path / source.name

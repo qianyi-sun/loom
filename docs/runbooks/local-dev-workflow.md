@@ -71,6 +71,16 @@ npm run build
 Docker-touching changes also require the relevant integration or system tests.
 The shared CI planner selects the required lanes from changed paths.
 
+Keep integration fixtures isolated while removing costs unrelated to their
+assertions. The frozen global autoscaling harness creates fresh EC P-256 TLS
+identities for its algorithm-independent lifecycle scenarios, avoiding repeated
+RSA private-key validation costs during readback. It still exercises real
+certificate, issuer, private-key matching, file-permission, and Linux descriptor
+checks. The shared bootstrap helper defaults to RSA; credential metadata,
+mismatched private-key, and wrong-issuer tests explicitly cover both RSA and EC.
+This fixture choice does not change production cryptography or cache validated
+credentials between reads or test cases.
+
 ## Stop or reset
 
 Preserve local volumes:

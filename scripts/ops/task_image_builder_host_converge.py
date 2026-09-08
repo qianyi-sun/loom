@@ -64,7 +64,7 @@ class HostReleasePaths:
 DEFAULT_PATHS = HostReleasePaths(
     policy=ROOT / "deploy/task-image-builder/prerequisites-v1.toml",
     release=ROOT / "deploy/task-image-builder/host-release-v2.json",
-    runtime_manifest=ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
+    runtime_manifest=ROOT / "deploy/task-image-builder/rootless-runtime-v2.json",
     node_installer=(
         ROOT / "deploy/slurm/install-loom-task-image-builder-node-prerequisites.sh"
     ),
@@ -1782,28 +1782,19 @@ class SystemHostBackend:
         required_owner: int = 0,
     ) -> bool:
         manifest_payload = _read_regular(runtime_manifest, "runtime manifest")
-        try:
-            manifest = json.loads(manifest_payload)
-            release_name = manifest["release"]
-            binaries = manifest["architectures"][architecture]["binaries"]
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise HostConvergenceError("runtime manifest is invalid") from exc
-        if (
-            manifest.get("schema") != "loom.task-image-builder-rootless-runtime/v1"
-            or not isinstance(release_name, str)
-            or not release_name
-            or not isinstance(binaries, dict)
-            or not binaries
-            or not all(
-                isinstance(name, str)
-                and name
-                and "/" not in name
-                and isinstance(digest, str)
-                and len(digest) == 64
-                for name, digest in binaries.items()
-            )
-        ):
+        debian_architecture = host_release.ARCHITECTURE_MAP.get(architecture)
+        if debian_architecture is None:
             raise HostConvergenceError("runtime manifest is invalid")
+        try:
+            runtime = host_release.load_runtime_manifest(
+                runtime_manifest,
+                architecture=architecture,
+                debian_architecture=debian_architecture,
+            )
+        except host_release.HostReleaseError as exc:
+            raise HostConvergenceError("runtime manifest is invalid") from exc
+        release_name = runtime.release
+        binaries = dict(runtime.binary_digests)
         release = install_base / "releases" / release_name
         receipt = release / "receipt.json"
         binary_dir = release / "bin"

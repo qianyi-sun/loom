@@ -1306,7 +1306,7 @@ def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:
         ("ConfigMap", "loom-global-execution-witness-v1"),
         ("Service", "loom-capacity-postgres"),
         ("StatefulSet", "loom-capacity-postgres"),
-        ("Job", "loom-capacity-migrate-capacity-0014-aaaaaaaaaa-a68e4a9d64"),
+        ("Job", "loom-capacity-migrate-capacity-0015-aaaaaaaaaa-130fa4e6a7"),
         ("Service", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-manager"),
         ("NetworkPolicy", "capacity-default-deny"),
@@ -1366,7 +1366,7 @@ def test_migration_job_name_binds_the_complete_immutable_spec() -> None:
     job = next(document for document in _documents() if document["kind"] == "Job")
     expected_suffix = hashlib.sha256(
         json.dumps(
-            {"migration_head": "capacity_0014", "spec": job["spec"]},
+            {"migration_head": "capacity_0015", "spec": job["spec"]},
             sort_keys=True,
             separators=(",", ":"),
         ).encode()

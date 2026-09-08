@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from loom_service.batch_runner import _compute_result_status, next_batch_state
+from loom_service.routes.batches import _empty_trial_summary, _result_status_from_trials
 
 
 def _empty() -> dict[str, int]:
@@ -74,6 +77,20 @@ def test_first_in_flight_promotes_submitted_to_running() -> None:
     assert next_batch_state(
         current="submitted", expected=2, counts=counts,
     ) == "running"
+
+
+def test_protected_pending_is_in_flight() -> None:
+    counts = _empty() | {"protected-pending": 1}
+    assert next_batch_state(
+        current="submitted", expected=1, counts=counts,
+    ) == "running"
+
+
+def test_protected_pending_batch_result_remains_active() -> None:
+    trial = SimpleNamespace(state="protected-pending")
+
+    assert "protected-pending" in _empty_trial_summary()
+    assert _result_status_from_trials([trial]) is None
 
 
 def test_result_status_uses_terminal_state_not_reward() -> None:

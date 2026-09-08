@@ -541,6 +541,110 @@ def test_reader_rejects_a_symlink_without_exposing_filesystem_errors(tmp_path: P
         reader()
 
 
+def test_publisher_creates_one_canonical_owner_only_publication(tmp_path: Path) -> None:
+    """Catch publishing mutable, noncanonical, or permission-broadened authority bytes."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    authority_root.chmod(0o700)
+    authority_path = authority_root / "issue-906.json"
+    publisher_type = getattr(module, "InstalledExecutionAuthorityPublisher", None)
+    assert publisher_type is not None
+    publisher = publisher_type(
+        path=authority_path,
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+
+    assert publisher(publication) == publication
+
+    metadata = authority_path.stat(follow_symlinks=False)
+    assert metadata.st_mode & 0o777 == 0o600
+    assert metadata.st_uid == os.geteuid()
+    assert metadata.st_gid == os.getegid()
+    assert metadata.st_nlink == 1
+    assert authority_path.read_bytes() == module.canonical_installed_execution_authority_bytes(
+        publication
+    )
+    assert module.InstalledExecutionAuthorityReader(
+        path=authority_path,
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )() == publication
+
+
+def test_publisher_exact_replay_preserves_the_published_inode(tmp_path: Path) -> None:
+    """Catch replacing an admitted publication during an idempotent replay."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    authority_root.chmod(0o700)
+    authority_path = authority_root / "issue-906.json"
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_path,
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+    publisher(publication)
+    first = authority_path.stat(follow_symlinks=False)
+
+    assert publisher(publication) == publication
+
+    second = authority_path.stat(follow_symlinks=False)
+    assert (second.st_dev, second.st_ino, second.st_ctime_ns) == (
+        first.st_dev,
+        first.st_ino,
+        first.st_ctime_ns,
+    )
+
+
+def test_publisher_rejects_changed_replay_without_replacing_authority(tmp_path: Path) -> None:
+    """Catch overwriting a previously admitted authority with changed evidence."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    authority_root.chmod(0o700)
+    authority_path = authority_root / "issue-906.json"
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_path,
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+    publisher(publication)
+    original = authority_path.read_bytes()
+    changed = replace(publication, desired_fleet_sha256="f" * 64)
+
+    with pytest.raises(ValueError, match="already exists with different evidence"):
+        publisher(changed)
+
+    assert authority_path.read_bytes() == original
+
+
+def test_publisher_rejects_a_symlinked_authority_directory(tmp_path: Path) -> None:
+    """Catch escaping the owner-only publication boundary through its parent path."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    real_root = tmp_path / "real-owner-authority"
+    real_root.mkdir(mode=0o700)
+    real_root.chmod(0o700)
+    linked_root = tmp_path / "owner-authority"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    authority_path = linked_root / "issue-906.json"
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_path,
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+
+    with pytest.raises(ValueError, match="authority directory is unsafe"):
+        publisher(publication)
+
+    assert not (real_root / "issue-906.json").exists()
+
+
 def test_installed_source_combines_owner_controller_credential_and_signed_witness_authority(
     tmp_path: Path,
 ) -> None:

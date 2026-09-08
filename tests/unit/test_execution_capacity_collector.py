@@ -777,6 +777,10 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
     assert pod["nodeSelector"] == {"loom.nebius/node-role": "system"}
     assert "@sha256:" in pod["initContainers"][0]["image"]
     assert pod["containers"][0]["image"] == pod["initContainers"][0]["image"]
+    assert pod["initContainers"][0]["resources"] == {
+        "requests": {"cpu": "10m", "memory": "32Mi"},
+        "limits": {"cpu": "100m", "memory": "64Mi"},
+    }
     assert pod["securityContext"]["runAsUser"] == 65532
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
     assert not {
