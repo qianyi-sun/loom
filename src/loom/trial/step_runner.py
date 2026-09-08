@@ -17,15 +17,18 @@ from datetime import UTC, datetime
 from math import ceil
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from loom.attempt_deadline import AttemptDeadlineExceededError
+from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver, StartOptions
 from loom.errors import AgentError, classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
 from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
 from loom.models.task import StepConfig
 from loom.models.trajectory import (
+    AgentAttemptStartEvent,
     AgentRetryEvent,
+    AgentStepTokenGrantEvent,
     AgentTimeoutEvent,
     StepEndEvent,
     StepStartEvent,
@@ -689,6 +692,7 @@ async def _run_agent_with_retry(
     attempt = 1
     while True:
         try:
+
             async def run_attempt(
                 guarded_trajectory: TrajectoryWriter,
             ) -> None:
@@ -709,23 +713,53 @@ async def _run_agent_with_retry(
                 except AgentError as exc:
                     text_result = classify_failure_message(str(exc))
                     if text_result is not None and text_result[0] == FailureReason.AGENT_TIMEOUT:
-                        raise AttemptDeadlineExceededError(
-                            text_result[1] or str(exc)
-                        ) from exc
+                        raise AttemptDeadlineExceededError(text_result[1] or str(exc)) from exc
                     raise
                 except Exception as exc:
                     failure_reason, failure_message = classify_failure(exc)
                     if failure_reason == FailureReason.AGENT_TIMEOUT:
-                        raise AttemptDeadlineExceededError(
-                            failure_message or str(exc)
-                        ) from exc
+                        raise AttemptDeadlineExceededError(failure_message or str(exc)) from exc
                     raise
+
+            async def record_attempt_started(
+                deadline: AttemptDeadline,
+                attempt_trajectory: TrajectoryWriter,
+            ) -> None:
+                assert deadline.agent_attempt_id is not None
+                await attempt_trajectory.append(
+                    AgentAttemptStartEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=ctx.trial_id,
+                        step_id=step.name,
+                        seq=seq.next(),
+                        agent_attempt_id=deadline.agent_attempt_id,
+                        attempt_deadline_wall_clock=deadline.wall_deadline,
+                    )
+                )
+
+            async def record_step_token_grant(
+                agent_attempt_id: UUID,
+                step_jwt_id: UUID,
+                attempt_trajectory: TrajectoryWriter,
+            ) -> None:
+                await attempt_trajectory.append(
+                    AgentStepTokenGrantEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=ctx.trial_id,
+                        step_id=step.name,
+                        seq=seq.next(),
+                        agent_attempt_id=agent_attempt_id,
+                        step_jwt_id=step_jwt_id,
+                    )
+                )
 
             timeout_diagnostic = await supervise_agent_attempt(
                 agent=ctx.agent,
                 configured_timeout_sec=agent_timeout,
                 trajectory=trajectory,
                 run=run_attempt,
+                on_attempt_started=record_attempt_started,
+                on_step_token_grant=record_step_token_grant,
             )
             if timeout_diagnostic is None:
                 return None
@@ -737,19 +771,12 @@ async def _run_agent_with_retry(
                     trial_id=ctx.trial_id,
                     step_id=step.name,
                     seq=seq.next(),
-                    configured_timeout_sec=(
-                        timeout_diagnostic.configured_timeout_sec
-                    ),
-                    elapsed_monotonic_sec=(
-                        timeout_diagnostic.elapsed_monotonic_sec
-                    ),
-                    cancellation_drain_sec=(
-                        timeout_diagnostic.cancellation_drain_sec
-                    ),
-                    transport_close_required=(
-                        timeout_diagnostic.transport_close_required
-                    ),
+                    configured_timeout_sec=(timeout_diagnostic.configured_timeout_sec),
+                    elapsed_monotonic_sec=(timeout_diagnostic.elapsed_monotonic_sec),
+                    cancellation_drain_sec=(timeout_diagnostic.cancellation_drain_sec),
+                    transport_close_required=(timeout_diagnostic.transport_close_required),
                     task_stopped=timeout_diagnostic.task_stopped,
+                    agent_attempt_id=timeout_diagnostic.agent_attempt_id,
                 )
             )
             if timeout_diagnostic.task_stopped and await _maybe_retry_agent_failure(

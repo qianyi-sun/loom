@@ -396,6 +396,9 @@ terminus2_runtime_provenance: <event-reference>
 batch_submitted_at: <rfc3339>
 attempts:
   - attempt: 1
+    agent_attempt_id: <supervisor-uuid>
+    step_jwt_ids: [<cp-issued-grant-uuid>]
+    gateway_dispatch_receipt_ids: [<internal-receipt-uuid>]
     attempt_started_at: <rfc3339>
     attempt_deadline_wall_clock: <rfc3339>
     deadline_latched_at: <rfc3339>

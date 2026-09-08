@@ -45,6 +45,7 @@ from loom_llm_gateway.attempt_deadline import (
     upstream_timeout,
 )
 from loom_llm_gateway.dialect import DIALECTS
+from loom_llm_gateway.dispatch_audit import request_dispatch_audit
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
@@ -153,6 +154,11 @@ async def google_generate_content_facade(
             settings=settings,
             dialect="facade_google",
             deadline=request_attempt_deadline(request),
+            dispatch_audit=request_dispatch_audit(
+                request,
+                dialect="facade_google",
+                provider_connection_id=connection_id,
+            ),
         )
         upstream_response = outcome.response
     except AttemptDeadlineReachedError as exc:

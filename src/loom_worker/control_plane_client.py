@@ -22,6 +22,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 import httpx
+import jwt
 
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
@@ -50,6 +51,10 @@ class StepTokenGrant:
     token: str
     expires_at: datetime
     attempt_deadline_wall_clock: datetime | None
+    agent_attempt_id: UUID | None = None
+    step_jwt_id: UUID | None = None
+    # Only in-process CLI issuers may construct this; never read from HTTP JSON.
+    local_only: bool = False
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> StepTokenGrant:
@@ -73,10 +78,39 @@ class StepTokenGrant:
             seconds=_STEP_TOKEN_DEADLINE_GRACE_SEC
         ):
             raise ValueError("step-token response does not cover the attempt deadline")
+        raw_attempt_id = payload.get("agent_attempt_id")
+        raw_grant_id = payload.get("step_jwt_id")
+        attempt_id = UUID(str(raw_attempt_id)) if raw_attempt_id is not None else None
+        grant_id = UUID(str(raw_grant_id)) if raw_grant_id is not None else None
+        if attempt_id is not None:
+            if deadline is None or grant_id is None:
+                raise ValueError("step-token response has incomplete agent attempt identity")
+            # Consistency check only: workers do not own the signing key. Gateway
+            # verifies the signature before treating these claims as authority.
+            try:
+                claims = jwt.decode(token[len("loom_step_") :], options={"verify_signature": False})
+                if (
+                    claims.get("agent_attempt_id") != str(attempt_id)
+                    or claims.get("jti") != str(grant_id)
+                    or claims.get("subject_kind") != "trial"
+                    or not claims.get("trial_id")
+                    or claims.get("execution_attempt_id") is not None
+                    or _parse_wall_clock_timestamp(
+                        claims.get("attempt_deadline_wall_clock"),
+                        field_name="signed deadline",
+                    )
+                    != deadline
+                    or claims.get("exp") != int(expires_at.timestamp())
+                ):
+                    raise ValueError("step-token response metadata does not match token claims")
+            except jwt.PyJWTError as exc:
+                raise ValueError("step-token response has malformed identity token") from exc
         return cls(
             token=token,
             expires_at=expires_at,
             attempt_deadline_wall_clock=deadline,
+            agent_attempt_id=attempt_id,
+            step_jwt_id=grant_id,
         )
 
 
@@ -126,6 +160,7 @@ class StepTokenClient(Protocol):
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
+        agent_attempt_id: UUID | None = None,
     ) -> StepTokenGrant: ...
 
 
@@ -335,7 +370,9 @@ class HttpControlPlaneClient:
                     self.executor_worker_credential is not None
                     and self.executor_worker_credential != executor_worker_credential
                 ):
-                    raise ValueError("executor worker credential cannot change after client creation")
+                    raise ValueError(
+                        "executor worker credential cannot change after client creation"
+                    )
                 self.executor_worker_credential = executor_worker_credential
             r = await client.post(
                 "/workers/register",
@@ -1306,6 +1343,7 @@ class HttpControlPlaneClient:
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
+        agent_attempt_id: UUID | None = None,
     ) -> StepTokenGrant:
         """Mint a credential bound to an absolute attempt wall-clock deadline.
 
@@ -1324,10 +1362,23 @@ class HttpControlPlaneClient:
             step_id=step_id,
             ttl_sec=ttl_sec,
             attempt_deadline_wall_clock=deadline,
+            agent_attempt_id=agent_attempt_id,
         )
         grant = StepTokenGrant.from_payload(payload)
         if grant.attempt_deadline_wall_clock != deadline:
             raise ValueError("step-token response changed the attempt deadline")
+        if grant.agent_attempt_id != agent_attempt_id:
+            raise ValueError("step-token response changed the agent attempt identity")
+        if agent_attempt_id is not None:
+            claims = jwt.decode(
+                grant.token[len("loom_step_") :], options={"verify_signature": False}
+            )
+            if (
+                claims.get("team_id") != str(team_id)
+                or claims.get("trial_id") != str(trial_id)
+                or claims.get("step_id") != step_id
+            ):
+                raise ValueError("step-token response changed the requested subject")
         return grant
 
     async def _request_step_token_payload(
@@ -1338,6 +1389,7 @@ class HttpControlPlaneClient:
         step_id: str,
         ttl_sec: int,
         attempt_deadline_wall_clock: datetime | None,
+        agent_attempt_id: UUID | None = None,
     ) -> Mapping[str, Any]:
         client, owned = self._http()
         try:
@@ -1348,9 +1400,9 @@ class HttpControlPlaneClient:
                 "ttl_sec": ttl_sec,
             }
             if attempt_deadline_wall_clock is not None:
-                body["attempt_deadline_wall_clock"] = (
-                    attempt_deadline_wall_clock.isoformat()
-                )
+                body["attempt_deadline_wall_clock"] = attempt_deadline_wall_clock.isoformat()
+            if agent_attempt_id is not None:
+                body["agent_attempt_id"] = str(agent_attempt_id)
             r = await client.post(
                 "/admin/step-tokens",
                 headers=self._headers,
@@ -1510,10 +1562,7 @@ class HttpControlPlaneClient:
                     conflict = r.json()
                 except ValueError:
                     conflict = None
-                if (
-                    isinstance(conflict, Mapping)
-                    and conflict.get("detail") == "worker lost claim"
-                ):
+                if isinstance(conflict, Mapping) and conflict.get("detail") == "worker lost claim":
                     return False
             r.raise_for_status()
             return True
