@@ -194,13 +194,16 @@ async def test_held_request_has_signed_dispatch_audit_without_billable_call(
                 assert row["gateway_http_status"] == 504
                 assert row["dispatch_ordinal"] == 1 and row["attempt"] == 1
                 assert row["purpose"] == "model_call"
+                if path == "/openai/v1/chat/completions":
+                    assert received[0]["headers"].get("x-request-id") == str(row["id"])
                 persisted = repr(row)
                 assert token not in persisted
                 assert "private-content" not in persisted
                 assert "local-placeholder-provider-key" not in persisted
                 assert provider_url not in persisted
                 # Existing provider authentication remains, but no step JWT
-                # or internal Loom audit UUID is forwarded to third parties.
+                # or private execution identity is forwarded to third parties.
+                # The OpenAI facade carries only an opaque per-dispatch trace ID.
                 upstream = repr(received[0])
                 assert token not in upstream
                 assert str(agent_attempt_id) not in upstream and str(grant_id) not in upstream
