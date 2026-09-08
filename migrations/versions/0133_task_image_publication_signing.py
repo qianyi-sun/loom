@@ -15,6 +15,79 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     op.execute("""
+        CREATE TABLE task_image_publication_jobs (
+          operation_id UUID PRIMARY KEY,
+          materialization_attempt_id UUID NOT NULL,
+          materialization_id UUID NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          lease_epoch BIGINT NOT NULL,
+          builder_id VARCHAR(128) NOT NULL,
+          grant_id UUID NOT NULL,
+          canonical_snapshot BYTEA NOT NULL,
+          snapshot_sha256 VARCHAR(64) NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          deadline TIMESTAMPTZ NOT NULL,
+          available_at TIMESTAMPTZ NOT NULL,
+          state VARCHAR(16) NOT NULL,
+          worker_id UUID,
+          worker_generation BIGINT NOT NULL,
+          worker_expires_at TIMESTAMPTZ,
+          failure_code VARCHAR(32),
+          CONSTRAINT task_image_publication_jobs_attempt_uidx UNIQUE (materialization_attempt_id),
+          CONSTRAINT task_image_publication_jobs_attempt_fkey FOREIGN KEY
+            (materialization_attempt_id, materialization_id, attempt_number, lease_epoch, builder_id, grant_id)
+            REFERENCES task_image_materialization_attempts
+            (id, materialization_id, attempt_number, lease_epoch, builder_id, grant_id) ON DELETE RESTRICT,
+          CONSTRAINT task_image_publication_jobs_identity_check CHECK (
+            operation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+            attempt_number BETWEEN 1 AND 9007199254740991 AND
+            lease_epoch BETWEEN 1 AND 9007199254740991 AND
+            worker_generation BETWEEN 0 AND 9007199254740991),
+          CONSTRAINT task_image_publication_jobs_snapshot_check CHECK (
+            octet_length(canonical_snapshot) BETWEEN 1 AND 4194304 AND
+            snapshot_sha256 = encode(sha256(canonical_snapshot), 'hex')),
+          CONSTRAINT task_image_publication_jobs_time_check CHECK (
+            isfinite(created_at) AND isfinite(deadline) AND isfinite(available_at) AND
+            deadline > created_at AND deadline <= created_at + interval '7200 seconds' AND
+            available_at >= created_at AND (worker_expires_at IS NULL OR
+              (isfinite(worker_expires_at) AND worker_expires_at <= deadline))),
+          CONSTRAINT task_image_publication_jobs_state_check CHECK (
+            (state = 'running' AND worker_id IS NOT NULL AND
+              worker_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+              worker_generation > 0 AND worker_expires_at IS NOT NULL AND failure_code IS NULL) OR
+            (state IN ('queued', 'completed') AND worker_id IS NULL AND
+              worker_expires_at IS NULL AND failure_code IS NULL) OR
+            (state = 'failed' AND worker_id IS NULL AND worker_expires_at IS NULL AND failure_code IS NOT NULL AND
+              failure_code IN ('integrity', 'authority_lost', 'verification_failed', 'deadline')))
+        );
+        CREATE INDEX task_image_publication_jobs_work_idx
+          ON task_image_publication_jobs (state, available_at, deadline);
+        CREATE FUNCTION task_image_publication_preserve_job() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+        BEGIN
+          IF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'publication job is retained' USING ERRCODE = '23514';
+          END IF;
+          IF (NEW.operation_id, NEW.materialization_attempt_id, NEW.materialization_id,
+              NEW.attempt_number, NEW.lease_epoch, NEW.builder_id, NEW.grant_id,
+              NEW.canonical_snapshot, NEW.snapshot_sha256, NEW.created_at, NEW.deadline)
+             IS DISTINCT FROM
+             (OLD.operation_id, OLD.materialization_attempt_id, OLD.materialization_id,
+              OLD.attempt_number, OLD.lease_epoch, OLD.builder_id, OLD.grant_id,
+              OLD.canonical_snapshot, OLD.snapshot_sha256, OLD.created_at, OLD.deadline)
+             OR NEW.worker_generation < OLD.worker_generation
+             OR (OLD.state IN ('failed', 'completed') AND NEW IS DISTINCT FROM OLD)
+             OR (NEW.worker_id IS DISTINCT FROM OLD.worker_id AND NEW.worker_id IS NOT NULL
+                 AND NEW.worker_generation <= OLD.worker_generation) THEN
+            RAISE EXCEPTION 'publication job cannot be rewritten' USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER task_image_publication_jobs_preserve
+          BEFORE UPDATE OR DELETE ON task_image_publication_jobs
+          FOR EACH ROW EXECUTE FUNCTION task_image_publication_preserve_job();
+    """)
+    op.execute("""
         CREATE TABLE task_image_publication_state (
           singleton_id INTEGER PRIMARY KEY DEFAULT 1,
           revocation_epoch BIGINT NOT NULL DEFAULT 0,
@@ -170,12 +243,14 @@ def downgrade() -> None:
         LOCK TABLE public.task_image_publication_state IN ACCESS EXCLUSIVE MODE;
         LOCK TABLE public.task_image_publication_keys IN ACCESS EXCLUSIVE MODE;
         LOCK TABLE public.task_image_publication_envelopes IN ACCESS EXCLUSIVE MODE;
+        LOCK TABLE public.task_image_publication_jobs IN ACCESS EXCLUSIVE MODE;
         DO $$ BEGIN
           IF NOT EXISTS (
             SELECT 1 FROM public.task_image_publication_state
             WHERE singleton_id = 1 AND revocation_epoch = 0 AND keyset_version = 0
           ) OR EXISTS (SELECT 1 FROM public.task_image_publication_keys)
-            OR EXISTS (SELECT 1 FROM public.task_image_publication_envelopes) THEN
+            OR EXISTS (SELECT 1 FROM public.task_image_publication_envelopes)
+            OR EXISTS (SELECT 1 FROM public.task_image_publication_jobs) THEN
             RAISE EXCEPTION 'publication authority cannot be discarded'
               USING ERRCODE = '23514';
           END IF;
@@ -183,6 +258,8 @@ def downgrade() -> None:
     """)
     op.execute("""
         DROP TABLE task_image_publication_envelopes;
+        DROP TABLE task_image_publication_jobs;
+        DROP FUNCTION task_image_publication_preserve_job();
         ALTER TABLE task_image_publication_candidates DROP CONSTRAINT
           task_image_publication_candidates_envelope_binding_uidx;
         DROP TABLE task_image_publication_keys;

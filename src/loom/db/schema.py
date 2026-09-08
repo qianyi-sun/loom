@@ -3330,6 +3330,77 @@ class TaskImageRegistryCredentialGeneration(Base):
     recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
+class TaskImagePublicationJob(Base):
+    """Immutable attempt input with independently renewable worker ownership."""
+
+    __tablename__ = "task_image_publication_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "materialization_attempt_id", name="task_image_publication_jobs_attempt_uidx"
+        ),
+        ForeignKeyConstraint(
+            [
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+                "grant_id",
+            ],
+            [
+                "task_image_materialization_attempts." + name
+                for name in (
+                    "id",
+                    "materialization_id",
+                    "attempt_number",
+                    "lease_epoch",
+                    "builder_id",
+                    "grant_id",
+                )
+            ],
+            name="task_image_publication_jobs_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "operation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND attempt_number BETWEEN 1 AND 9007199254740991 AND lease_epoch BETWEEN 1 AND 9007199254740991 AND worker_generation BETWEEN 0 AND 9007199254740991",
+            name="task_image_publication_jobs_identity_check",
+        ),
+        CheckConstraint(
+            "octet_length(canonical_snapshot) BETWEEN 1 AND 4194304 AND snapshot_sha256 = encode(sha256(canonical_snapshot), 'hex')",
+            name="task_image_publication_jobs_snapshot_check",
+        ),
+        CheckConstraint(
+            "isfinite(created_at) AND isfinite(deadline) AND isfinite(available_at) AND deadline > created_at AND deadline <= created_at + interval '7200 seconds' AND available_at >= created_at AND (worker_expires_at IS NULL OR (isfinite(worker_expires_at) AND worker_expires_at <= deadline))",
+            name="task_image_publication_jobs_time_check",
+        ),
+        CheckConstraint(
+            "(state = 'running' AND worker_id IS NOT NULL AND worker_id <> '00000000-0000-0000-0000-000000000000'::uuid AND worker_generation > 0 AND worker_expires_at IS NOT NULL AND failure_code IS NULL) OR (state IN ('queued', 'completed') AND worker_id IS NULL AND worker_expires_at IS NULL AND failure_code IS NULL) OR (state = 'failed' AND worker_id IS NULL AND worker_expires_at IS NULL AND failure_code IS NOT NULL AND failure_code IN ('integrity', 'authority_lost', 'verification_failed', 'deadline'))",
+            name="task_image_publication_jobs_state_check",
+        ),
+        Index("task_image_publication_jobs_work_idx", "state", "available_at", "deadline"),
+    )
+
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    canonical_snapshot: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    deadline: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    worker_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    worker_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    worker_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
 class TaskImagePublicationCandidate(Base):
     """Inert immutable upload evidence awaiting independent verification."""
 
