@@ -158,6 +158,7 @@ class PersonalApplicationMembershipResultV1(StrictV1Model):
     replayed: bool
 
 class CapacityMembershipStore:
+    def __init__(self, management: CapacityManagementStore): ...
     async def apply(self, session, request, *, actor, idempotency_key) -> PersonalApplicationMembershipResultV1: ...
     async def snapshot(self, session, epoch) -> PersonalMembershipSnapshotV1: ...
 
@@ -173,6 +174,15 @@ unique operation and idempotency keys. SQL guards reject update/delete/truncate;
 insertion locks current authority and verifies active V3 manifest, exact namespace,
 writer/execution fence, actor, consecutive revision/previous digest and bounded
 payload. No rewriting the execution/configuration epoch guards.
+
+The nested projection's `expected_configuration_epoch` must equal the immutable
+base configuration epoch; it never predicts a global +1 here. The outer
+`expected_revision` is the membership compare-and-swap. Exact replay requires the
+same authenticated actor, full request and idempotency/operation bindings and a
+still-valid execution fence; it returns its original checkpoint, not today's head.
+Capacity/destroy operations still require an acknowledgement matching the new
+configuration generation while retaining exact candidate/deployment/reporter and
+installed-runtime evidence. Never reuse a base acknowledgement for a new generation.
 
 Use the existing SERIALIZABLE write transaction and authority-lock order. In one
 transaction verify policy/delegation, exact replay or expected revision, derive
