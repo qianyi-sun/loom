@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI, HTTPException
 from pydantic import SecretStr
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
@@ -2433,6 +2433,66 @@ async def test_retry_creates_a_new_attempt_and_finalization_is_idempotent(
 
 
 @pytest.mark.parametrize("cached_trial", [False, True])
+async def test_reservation_cannot_reopen_cancelled_trial(
+    postgres_url: str,
+    cached_trial: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            first = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await enqueue_execution_transition(
+                session,
+                lease_id=first.id,
+                expected_generation=1,
+                desired_state="retry",
+                now=now,
+            )
+            await record_execution_event(
+                session,
+                lease_id=first.id,
+                generation=2,
+                ordinal=1,
+                event_kind="deleted",
+                payload={"resource_release": "complete"},
+                observed_at=now,
+            )
+            await session.commit()
+        async with sessions() as reserve_session:
+            cached = await reserve_session.get(Trial, trial_id) if cached_trial else None
+            cancelled = await cancel_trial_under_authority(
+                session_factory=sessions,
+                protected_store=None,
+                trial_id=trial_id,
+                team_id=None,
+            )
+            assert cancelled is not None and cancelled["state"] == "cancelled"
+            if cached is not None:
+                assert cached.state == "queued"
+            with pytest.raises(ServiceExecutionConflict, match="trial is not reservable"):
+                await _reserve(reserve_session, trial_id=trial_id, target=target, now=now)
+            await reserve_session.commit()
+            trial = await reserve_session.get(Trial, trial_id, populate_existing=True)
+            assert trial is not None and trial.state == "cancelled"
+            assert trial.attempt_count == 1
+            assert (
+                await reserve_session.scalar(
+                    select(func.count())
+                    .select_from(ServiceExecutionLease)
+                    .where(
+                        ServiceExecutionLease.trial_id == trial_id,
+                    )
+                )
+                == 1
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("cached_trial", [False, True])
 async def test_retry_cannot_reopen_cancelled_trial_after_timeout_reclaim(
     postgres_url: str,
     cached_trial: bool,
@@ -2589,6 +2649,110 @@ async def test_finalized_event_cannot_reopen_terminal_trial(
                 observed_at=now,
             )
             assert duplicate and replay.id == event.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("surface", ["retry", "failed"])
+@pytest.mark.parametrize("cached_lease", [False, True])
+async def test_service_execution_reloads_lease_before_projection(
+    postgres_url: str,
+    surface: str,
+    cached_lease: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        async with sessions() as stale_session:
+            cached = (
+                await stale_session.get(ServiceExecutionLease, lease.id) if cached_lease else None
+            )
+            new_state = "cancel"
+            async with sessions() as session:
+                await enqueue_execution_transition(
+                    session,
+                    lease_id=lease.id,
+                    expected_generation=1,
+                    desired_state=new_state,
+                    now=now,
+                )
+                await session.commit()
+            if cached is not None:
+                assert cached.generation == 1
+            with pytest.raises(ServiceExecutionFenceError, match="generation"):
+                if surface == "retry":
+                    await enqueue_execution_transition(
+                        stale_session,
+                        lease_id=lease.id,
+                        expected_generation=1,
+                        desired_state="retry",
+                        now=now,
+                    )
+                else:
+                    await record_execution_event(
+                        stale_session,
+                        lease_id=lease.id,
+                        generation=1,
+                        ordinal=1,
+                        event_kind="failed",
+                        payload={"error_code": "late_failure"},
+                        observed_at=now,
+                    )
+            await stale_session.commit()
+            current = await stale_session.get(
+                ServiceExecutionLease, lease.id, populate_existing=True
+            )
+            assert current is not None and current.generation == 2
+            assert current.desired_state == new_state
+            trial = await stale_session.get(Trial, trial_id, populate_existing=True)
+            assert trial is not None and trial.state == "claimed"
+    finally:
+        await engine.dispose()
+
+
+async def test_finalized_projection_preserves_trial_key_share_compatibility(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            for desired_state in ("start", "finalize"):
+                await enqueue_execution_transition(
+                    session,
+                    lease_id=lease.id,
+                    expected_generation=1,
+                    desired_state=desired_state,
+                    now=now,
+                )
+            await session.commit()
+        async with sessions() as holder, sessions() as session:
+            await holder.execute(
+                select(Trial).where(Trial.id == trial_id).with_for_update(read=True, key_share=True)
+            )
+            # A reference insert holds KEY SHARE until commit. Finalization must
+            # complete while that lock is still held; bound failures at the DB.
+            await session.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="finalized",
+                payload={"trial_state": "materializing", "result": {"reward": 1.0}},
+                observed_at=now,
+            )
+            await session.commit()
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.state == "materializing"
     finally:
         await engine.dispose()
 
