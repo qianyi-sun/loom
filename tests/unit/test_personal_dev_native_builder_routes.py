@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -677,12 +678,14 @@ def test_success_completion_heads_exact_internal_object_before_acknowledgement()
     assert artifact_head.content_type == "application/vnd.loom.personal-dev-build.v1+tar"
 
 
-def test_failure_completion_never_heads_object_store() -> None:
+@pytest.mark.parametrize("runtime_mode", ("operational", "membership-v1"))
+def test_failure_completion_never_heads_object_store(runtime_mode: str) -> None:
     now = datetime.now(UTC)
     grant = _grant(_registration(now))
     store = _Store()
     store.grant = grant
     app, sessions = _app(store, now)
+    app.state.personal_dev_runtime_mode = runtime_mode
     minio = app.state.minio_client
     signer = PersonalDevNativeBuilderSigner(keys={_KEY_ID: _PRIVATE_KEY})
     completion = _completion(now, outcome="failed")

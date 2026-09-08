@@ -134,6 +134,7 @@ def _settings(tmp_path: Path, **overrides):
     registry_auth.chmod(0o640)
     values = {
         "dev_instances_enabled": True,
+        "personal_dev_runtime_mode": "acceptance",
         "personal_dev_builder_enabled": True,
         "personal_dev_candidate_gc_retention_sec": 86400,
         "personal_dev_candidate_gc_lease_sec": 900,
