@@ -183,7 +183,11 @@ async def _active_v3(
     return fixture, active
 
 
-async def _active_v3_with_managed_base(capacity_session: AsyncSession):  # type: ignore[no-untyped-def]
+async def _active_v3_with_managed_base(
+    capacity_session: AsyncSession,
+    *,
+    delegate_base: bool = True,
+):  # type: ignore[no-untyped-def]
     fleet = fleet_with_development_template()
     generic = subject_configuration(fleet)
     base_projection = development_projection(expected_configuration_epoch=1)
@@ -193,7 +197,7 @@ async def _active_v3_with_managed_base(capacity_session: AsyncSession):  # type:
         management_principal_id=DELEGATE,
         development_template_sha256=canonical_digest(fleet.development_subject_template),
         max_subjects=2,
-        managed_base_subject_ids=(managed.subject_id,),
+        managed_base_subject_ids=(managed.subject_id,) if delegate_base else (),
     )
     policy = execution_policy(
         subject_acknowledgements=(
@@ -748,6 +752,134 @@ async def test_managed_base_requires_projection_evidence_and_can_advance_without
     assert canonical_bytes(after.configuration) == canonical_bytes(before.configuration)
     assert after.managed_base_subjects == (managed,)
     assert after.membership.members[0].configuration.configuration_generation == 2
+
+
+@pytest.mark.parametrize(
+    ("delegate_base", "update_base"), ((True, False), (False, False), (True, True))
+)
+async def test_new_owner_admission_preserves_existing_personal_base(
+    capacity_session: AsyncSession, delegate_base: bool, update_base: bool
+) -> None:
+    """Base owners remain valid before and after their first membership event."""
+
+    fixture, active, managed = await _active_v3_with_managed_base(
+        capacity_session, delegate_base=delegate_base
+    )
+    membership = CapacityMembershipStore(fixture.store)
+    before = await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+    revision = 0
+    if update_base:
+        projection = _projection(
+            operation_kind="update",
+            operation_epoch=2,
+            operation_id=UUID(int=20800),
+            subject_id=managed.subject_id,
+            subject_incarnation=managed.subject_incarnation,
+            owner_id=UUID(hex=managed.account_id.removeprefix("dev-owner-")),
+            environment_name=managed.display_name.removeprefix("dev-"),
+            expected_configuration_epoch=2,
+            reporter_incarnation=UUID(int=20801),
+        )
+        result = await membership.apply(
+            capacity_session,
+            _request(active, projection),
+            actor=DELEGATE,
+            idempotency_key=UUID(int=20802),
+        )
+        revision = result.revision
+    bob = _projection(expected_configuration_epoch=2).model_copy(
+        update={"demand_reporter_token_sha256": "8" * 64}
+    )
+    admitted = await membership.apply(
+        capacity_session,
+        _request(active, bob, expected_revision=revision),
+        actor=DELEGATE,
+        idempotency_key=UUID(int=20803),
+    )
+    after = await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+    assert admitted.revision == revision + 1
+    assert canonical_bytes(after.configuration) == canonical_bytes(before.configuration)
+    assert {entry.configuration.subject_id for entry in after.subjects} == {
+        *(entry.configuration.subject_id for entry in before.subjects),
+        BOB_SUBJECT_ID,
+    }
+    assert managed.account_id in {value.account_id for value in after.effective_account_policies}
+    if update_base:
+        excessive = _projection(
+            expected_configuration_epoch=2,
+            operation_id=UUID(int=20804),
+            owner_id=UUID(int=20805),
+            subject_id=UUID(int=20806),
+            subject_incarnation=UUID(int=20807),
+            reporter_incarnation=UUID(int=20808),
+            environment_name="carol",
+        ).model_copy(update={"demand_reporter_token_sha256": "7" * 64})
+        with pytest.raises(ConfigurationConflictError, match="exceeds its subject bound"):
+            await membership.apply(
+                capacity_session,
+                _request(active, excessive, expected_revision=admitted.revision),
+                actor=DELEGATE,
+                idempotency_key=UUID(int=20809),
+            )
+
+
+@pytest.mark.parametrize("schema_version", (2, 3))
+@pytest.mark.parametrize("tamper", (None, "configuration_generation", "payload"))
+async def test_preparation_requires_exact_base_materialization(
+    capacity_session: AsyncSession, schema_version: int, tamper: str | None
+) -> None:
+    """Both preparation versions reject corruption before reaching readiness."""
+
+    fleet = fleet_with_development_template()
+    base = subject_configuration(fleet)
+    delegation = (
+        PersonalMembershipPolicyV1(
+            namespace_id=NAMESPACE_ID,
+            management_principal_id=DELEGATE,
+            development_template_sha256=canonical_digest(fleet.development_subject_template),
+            max_subjects=2,
+        )
+        if schema_version == 3
+        else None
+    )
+    fixture = await setup_execution(
+        capacity_session,
+        fleet=fleet,
+        subjects=(base,),
+        execution_policy=execution_policy(
+            subject_acknowledgements=(execution_acknowledgement(subject=base),),
+            personal_membership=delegation,
+        ),
+    )
+    if tamper is not None:
+        changed = (
+            99
+            if tamper == "configuration_generation"
+            else {
+                **base.model_dump(mode="json"),
+                "display_name": "changed-name",
+            }
+        )
+        await capacity_session.execute(
+            update(CapacitySubject)
+            .where(CapacitySubject.subject_id == base.subject_id)
+            .values(**{tamper: changed})
+        )
+        with pytest.raises(ExecutionConflictError, match="base subject materialization changed"):
+            await fixture.store.prepare_execution_epoch(
+                capacity_session,
+                fixture.request,
+                actor="preparation-operator",
+                idempotency_key=UUID(int=20820),
+            )
+    else:
+        prepared = await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            fixture.request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=20820),
+        )
+        assert prepared.execution_state == "prepared"
 
 
 async def test_allocation_compare_and_swap_observes_cross_session_membership_change(

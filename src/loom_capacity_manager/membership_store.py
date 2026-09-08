@@ -313,7 +313,7 @@ class CapacityMembershipStore:
                     )
                 return _event_result(replay).model_copy(update={"replayed": True})
 
-            await self._management.load_allocation_input(
+            verified_input = await self._management.load_allocation_input(
                 session,
                 WriterFence(
                     authority_incarnation=current.authority_incarnation,
@@ -459,7 +459,11 @@ class CapacityMembershipStore:
                         "personal application identity was already used"
                     )
                 if (
-                    len(policy.managed_base_subject_ids) + len(latest_members) + 1
+                    len(
+                        set(policy.managed_base_subject_ids)
+                        | set(latest_members)
+                        | {projection.subject_id}
+                    )
                     > policy.max_subjects
                 ):
                     raise ConfigurationConflictError(
@@ -536,10 +540,17 @@ class CapacityMembershipStore:
                 raise ConfigurationConflictError(
                     "development owner minimum aggregate exceeds its reservation"
                 )
-            derived_accounts = {
-                value.configuration.account_id: _derive_owner_account(fleet, value.owner_id)
-                for value in latest_members.values()
-            }
+            fleet_account_ids = {value.account_id for value in fleet.account_policies}
+            derived_accounts: dict[str, AccountPolicyV1] = {}
+            for value in verified_input.effective_account_policies:
+                if value.account_id in fleet_account_ids:
+                    continue
+                if value.kind != "owner" or value.owner_id is None:
+                    raise ConfigurationConflictError("personal base owner account is invalid")
+                expected_account = _derive_owner_account(fleet, value.owner_id)
+                if value != expected_account:
+                    raise ConfigurationConflictError("personal base owner account changed")
+                derived_accounts[value.account_id] = expected_account
             derived_accounts[account.account_id] = account
             self._management._validate_activation(
                 fleet,

@@ -229,6 +229,32 @@ def _parse_contract(model: type[_ContractT], payload: dict[str, Any]) -> _Contra
     return model.model_validate_json(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
+def _subject_scalars_match(row: CapacitySubject, subject: SubjectConfigurationV1) -> bool:
+    """Check the full scalar projection, independently of its JSON payload."""
+
+    return all(
+        getattr(row, field) == getattr(subject, field)
+        for field in (
+            "subject_id",
+            "subject_incarnation",
+            "display_name",
+            "account_id",
+            "tier_id",
+            "min_slots",
+            "max_slots",
+            "rollout_surge_slots",
+            "max_pending_slots",
+            "max_pending_jobs",
+            "submission_rate_per_minute",
+            "lifecycle_state",
+            "candidate_generation",
+            "deployment_generation",
+            "configuration_generation",
+            "demand_reporter_incarnation",
+        )
+    )
+
+
 def _deduplicate_observed_commitments(
     values: list[ObservedCommitmentV1],
 ) -> tuple[ObservedCommitmentV1, ...]:
@@ -3572,6 +3598,17 @@ class CapacityManagementStore:
                 subject.subject_id for subject in subjects
             }:
                 raise ExecutionConflictError("prepared base subject materialization changed")
+            subjects_by_id = {subject.subject_id: subject for subject in subjects}
+            for row in materialized:
+                expected_subject = subjects_by_id[row.subject_id]
+                try:
+                    payload = _parse_contract(SubjectConfigurationV1, row.payload)
+                except ValueError as exc:
+                    raise ExecutionConflictError(
+                        "prepared base subject materialization changed"
+                    ) from exc
+                if payload != expected_subject or not _subject_scalars_match(row, expected_subject):
+                    raise ExecutionConflictError("prepared base subject materialization changed")
         if isinstance(request, ExecutionPreparationV3):
             subjects_by_id = {subject.subject_id: subject for subject in subjects}
             for subject_id in request.personal_membership.managed_base_subject_ids:
@@ -4265,24 +4302,7 @@ class CapacityManagementStore:
                 materialized: dict[UUID, SubjectConfigurationV1] = {}
                 for row in materialized_rows:
                     value = _parse_contract(SubjectConfigurationV1, row.payload)
-                    if (
-                        value.subject_id != row.subject_id
-                        or value.subject_incarnation != row.subject_incarnation
-                        or value.display_name != row.display_name
-                        or value.account_id != row.account_id
-                        or value.tier_id != row.tier_id
-                        or value.min_slots != row.min_slots
-                        or value.max_slots != row.max_slots
-                        or value.rollout_surge_slots != row.rollout_surge_slots
-                        or value.max_pending_slots != row.max_pending_slots
-                        or value.max_pending_jobs != row.max_pending_jobs
-                        or value.submission_rate_per_minute != row.submission_rate_per_minute
-                        or value.lifecycle_state != row.lifecycle_state
-                        or value.candidate_generation != row.candidate_generation
-                        or value.deployment_generation != row.deployment_generation
-                        or value.configuration_generation != row.configuration_generation
-                        or value.demand_reporter_incarnation != row.demand_reporter_incarnation
-                    ):
+                    if not _subject_scalars_match(row, value):
                         raise ConfigurationConflictError(
                             "personal membership materialized subject changed"
                         )
