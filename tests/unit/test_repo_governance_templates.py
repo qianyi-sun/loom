@@ -27,7 +27,7 @@ def test_all_non_draft_prs_use_author_neutral_ci_only_auto_merge() -> None:
 
     assert "current `dev` queue head" not in contributing
     assert "current `dev` queue head" not in quickstart
-    assert "For this normal `dev` PR" in pr_template
+    assert "For a normal `dev` PR" in pr_template
 
     for document in (contributing, quickstart, pr_template):
         normalized_document = " ".join(document.split()).lower()
@@ -83,6 +83,7 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
 
     normalized_template = " ".join(pr_template.split())
     assert "succeed on the current head SHA" in normalized_template
+    assert "sole required `repository-checks`" in normalized_template
     assert "author or reviewer" in normalized_template
     assert "only merge authority" in normalized_template
 

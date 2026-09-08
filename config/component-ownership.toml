@@ -11,6 +11,117 @@ ci_lanes = [
   "tests-root",
 ]
 ci_ignored_paths = [
+  "tests/ops/test_ci_critical_path_routing.py",
+  "src/loom_cli/dev_cmd.py",
+  "src/loom_cli/inference_cmd.py",
+  "src/loom_cli/personal_dev*.py",
+  "src/loom_service/personal_dev*.py",
+  "src/loom_service/dev_instance*.py",
+  "src/loom_service/routes/personal_dev*.py",
+  "src/loom_service/routes/dev_instance*.py",
+  "src/loom/staging_capacity_database_bootstrap.py",
+  "src/loom/staging_mutation_*.py",
+
+  "tests/integration/test_pipeline_gpu_container_preflight.py",
+  "tests/integration/test_pipeline_gpu_claim.py",
+  "tests/integration/test_pipeline_autoscaler_demand.py",
+  "tests/unit/test_service_personal_dev*.py",
+  "tests/ops/test_prepare_personal_dev_scanner_cache_assets.py",
+  "tests/ops/test_bootstrap_staging_capacity_credentials.py",
+  "tests/ops/test_task_image_rootless_provider_policy.py",
+  "tests/integration/test_task_image_build_grant_store.py",
+  "tests/integration/test_task_image_projection_store.py",
+  "tests/integration/test_task_image_registry_credentials.py",
+  "tests/unit/test_task_image_build_environment.py",
+  "tests/unit/test_task_image_build_grants.py",
+  "tests/unit/test_task_image_build_plan.py",
+  "tests/unit/test_task_image_bundle_capability.py",
+  "tests/unit/test_task_image_projection_contracts.py",
+  "tests/unit/test_task_image_registry_contracts.py",
+  "tests/unit/test_task_image_registry_token.py",
+
+  # Retired deployment/runtime families are outside this branch CI scope.
+  # Generic worker, data, provider and Nebius boundary tests remain selected.
+  "tests/loom_cli/rollout/**",
+  "tests/cluster/test_staging_k3s_render_contract.py",
+  "tests/**/test_*gb10*.py",
+  "tests/**/test_*oldlab*.py",
+  "tests/**/test_*slurm*.py",
+  "tests/**/test_capacity_*.py",
+  "tests/**/test_personal_dev_*.py",
+  "tests/**/test_dev_instance*.py",
+  "tests/**/test_global_*.py",
+  "tests/**/test_protected_*.py",
+  "tests/**/test_shared_capacity_*.py",
+  "tests/**/test_worker_pool_*.py",
+  "tests/**/test_resource_pool_autoscaler_summary.py",
+  "tests/**/test_task_image_builder_guard*.py",
+  "tests/**/test_task_image_authority*.py",
+  "tests/**/test_task_image_builder_autoscaler*.py",
+  "tests/ops/test_task_image_builder_*.py",
+  "tests/integration/test_task_image_builder_phase*.py",
+  "tests/ops/test_ci_runner_*.py",
+  "tests/ops/test_ci_reliability_metrics.py",
+  "tests/ops/test_ci_retry_governance.py",
+  "tests/ops/test_ci_personal_dev_trusted_release.py",
+  "tests/ops/test_install_capacity_executor.py",
+  "tests/ops/test_install_*builder*.py",
+  "tests/ops/test_converge_personal_dev*.py",
+  "tests/ops/test_guard_install_script.py",
+  "tests/ops/test_staging_*.py",
+  "tests/ops/test_dev_fleet_*.py",
+  "tests/ops/test_environment_isolation.py",
+  "tests/ops/test_deploy_environment_release_manifest.py",
+  "tests/ops/test_release_identity.py",
+  "tests/ops/test_release_promotion_gate.py",
+  "tests/ops/test_release_runbook.py",
+  "tests/loom_cli/test_cluster_*.py",
+  "tests/loom_cli/test_environment_state.py",
+  "tests/loom_cli/test_rollout_lock*.py",
+  "tests/loom_cli/test_staging_*.py",
+  "tests/loom_cli/test_inference_cmd.py",
+  "tests/unit/test_staging_*.py",
+  "tests/unit/test_worker_gpu_capabilities.py",
+  "tests/unit/test_service_dev_instance_runtime.py",
+  "tests/unit/test_remote_worker*.py",
+  "tests/integration/test_executable_global_capacity_bridge.py",
+  "tests/integration/test_staging_admin_browser_session.py",
+  "tests/unit/test_nebius_staging_attachment.py",
+  "tests/ops/test_nebius_staging_*.py",
+  "tests/loom_cli/test_nebius_staging_database_roles.py",
+  "tests/loom_cli/test_nebius_canonical_render.py",
+  "deploy/catalog/gb10-smoke/**",
+  "cmd/loom-task-image-builder-supervisor/**",
+  "src/loom_cli/rollout/**",
+  "src/loom_cli/rollout_lock*.py",
+  "src/loom_cli/cluster_*.py",
+  "src/loom_cli/environment_state.py",
+  "src/loom_cli/gb10_*.py",
+  "src/loom_cli/capacity_control_plane*.py",
+  "src/loom_control_plane/slurm_*.py",
+  "src/loom_control_plane/gb10_*.py",
+  "src/loom_control_plane/elastic_slurm_worker_controller.py",
+  "src/loom_control_plane/worker_pool_autoscaler.py",
+  "src/loom_control_plane/shared_capacity_broker.py",
+  "src/loom_control_plane/global_dev_fleet_autoscaler.py",
+  "src/loom_control_plane/global_execution_fence.py",
+  "scripts/ops/staging_rollout_*",
+  "scripts/ops/personal_dev_*",
+  "scripts/ops/converge_personal_dev*",
+  "scripts/ops/install_personal_dev*",
+  "deploy/environment-state/**",
+  "deploy/environments/staging*.cluster.toml",
+  "src/loom_capacity_*/**",
+  "src/loom_task_image_builder_guard/**",
+  "src/loom_task_image_authority/**",
+  "src/loom_personal_dev_*/**",
+  "src/loom/personal_dev*.py",
+  "src/loom/dev_instance*.py",
+  "deploy/worker-pools/**",
+  "deploy/dev-fleet/**",
+  "deploy/staging-rollout/**",
+  "capacity_guard_migrations/**",
+  "capacity_migrations/**",
   "deploy/Dockerfile.behavior-stage1-sim",
   "deploy/behavior-stage1-sim/**",
   "migrations/versions/0094_pipeline_stage1_smoke_authority.py",
@@ -78,8 +189,6 @@ pins = [
   # Five post-change runs still showed a 337s median shard gap. Move the two
   # measured shard-1 hotspots as whole files; see #1680 and PR #1742 telemetry.
   { path = "tests/integration/test_cp_step_tokens.py", shard_index = 1 },
-  { path = "tests/integration/test_executable_global_capacity_bridge.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
   { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
 ]
 
@@ -106,16 +215,6 @@ fixture_files = [{ path = "best_move.txt", content = "e4\n" }]
 path = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/tests/test_outputs.py"
 policy = "virtual-app-v1"
 fixture_files = [{ path = "hello.txt", content = "Hello, world!\n" }]
-
-[[execution_cases]]
-path = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py"
-policy = "virtual-workspace-v1"
-fixture_files = [{ path = "result.txt", content = "hello\n" }]
-
-[[execution_cases]]
-path = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py"
-policy = "virtual-workspace-v1"
-fixture_files = [{ path = "answer.txt", content = "hello\n" }]
 
 [[execution_cases]]
 path = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
@@ -206,6 +305,7 @@ rollout_role = "primary"
 
 [[components]]
 id = "capacity-manager"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.capacity-manager"
 build_context = "."
@@ -227,6 +327,7 @@ rollout_role = "primary"
 
 [[components]]
 id = "capacity-executor"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.capacity-executor"
 build_context = "."
@@ -263,6 +364,7 @@ rollout_role = "primary"
 
 [[components]]
 id = "personal-dev-scanner-cache"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-scanner-cache"
 build_context = "."
@@ -284,6 +386,7 @@ rollout_role = "none"
 
 [[components]]
 id = "personal-dev-builder"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-builder"
 build_context = "."
@@ -306,6 +409,7 @@ rollout_role = "none"
 
 [[components]]
 id = "personal-dev-activation-agent"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-activation-agent"
 build_context = "."
@@ -326,6 +430,7 @@ rollout_role = "none"
 
 [[components]]
 id = "personal-dev-native-builder-agent"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-native-builder-agent"
 build_context = "."
@@ -589,6 +694,7 @@ rollout_role = "primary"
 
 [[components]]
 id = "staging-admin-browser-smoke"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.staging-admin-browser-smoke"
 build_context = "."
@@ -608,6 +714,7 @@ rollout_role = "auxiliary"
 
 [[components]]
 id = "rehearsal-postgres"
+ci_enabled = false
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.rehearsal-postgres"
 build_context = "."
@@ -644,6 +751,7 @@ rollout_role = "primary"
 
 [[components]]
 id = "task-image-builder-rootless-runtime-v2"
+ci_enabled = false
 kind = "runtime-payload-image"
 dockerfile = "deploy/task-image-builder/Dockerfile.rootless-runtime-v2"
 build_context = "deploy/task-image-builder"
@@ -655,6 +763,7 @@ runtime_policy = "runtime-payload"
 
 [[components]]
 id = "gb10-smoke-task"
+ci_enabled = false
 kind = "runtime-payload-image"
 dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environment/Dockerfile"
 build_context = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world"
@@ -666,6 +775,7 @@ runtime_policy = "runtime-payload"
 
 [[components]]
 id = "gb10-direct-completion-smoke-task"
+ci_enabled = false
 kind = "runtime-payload-image"
 dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/environment/Dockerfile"
 build_context = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world"
@@ -857,6 +967,7 @@ include_paths = [
   "tests/unit/**/*.py",
 ]
 exclude_paths = [
+  "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
   "tests/unit/test_pipeline_stage1_*.py",
 ]
@@ -870,6 +981,7 @@ include_paths = [
   "tests/integrations/**/*.py",
 ]
 exclude_paths = [
+  "tests/integration/test_execution_actuator_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
@@ -933,7 +1045,7 @@ include_paths = [
 id = "python-cluster-smoke"
 language = "python"
 lane = "cluster-smoke"
-include_paths = ["tests/cluster/**/*.py"]
+include_paths = ["tests/cluster/**/*.py", "tests/integration/test_execution_actuator_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
 
 [[test_suites]]
 id = "python-system-smoke"

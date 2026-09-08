@@ -198,6 +198,7 @@ def _slurm_registration_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
+@pytest.mark.legacy_pool
 async def test_register_links_exact_active_slurm_worker_job(cp_setup, postgres_url):  # type: ignore[no-untyped-def]
     app, raw = cp_setup
     _seed_slurm_worker_job(postgres_url)
@@ -216,6 +217,7 @@ async def test_register_links_exact_active_slurm_worker_job(cp_setup, postgres_u
         engine.dispose()
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("payload_overrides", "job_overrides", "expected_status"),
     [

@@ -10,9 +10,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPLICIT_NON_CANCELLABLE_WORKFLOWS = {
     ".github/workflows/ci-retry.yml": "classified-ci-retry-${{ inputs.source_run_id }}",
-    ".github/workflows/ci-runner-route-publisher.yml": (
-        "ci-runner-route-publisher-${{ inputs.signature }}"
-    ),
     ".github/workflows/deploy-environment.yml": "deploy-${{ inputs.environment }}",
     ".github/workflows/main-promotion-gate.yml": (
         "main-promotion-gate-${{ inputs.candidate_sha }}"
@@ -47,15 +44,11 @@ def test_mutating_workflows_are_serialized_without_cancellation(
     }
 
 
-def test_trusted_image_publication_is_outside_pr_cancellation_scope() -> None:
+def test_reusable_images_have_no_independent_cancellation_or_publication() -> None:
     workflow = _workflow(".github/workflows/images.yml")
-    cancellation = " ".join(
-        str(workflow["concurrency"]["cancel-in-progress"]).split()
-    )
-
-    assert "github.event_name == 'pull_request'" in cancellation
-    assert "workflow_dispatch" not in cancellation
-    assert "push" not in cancellation
+    assert "concurrency" not in workflow
+    assert set(workflow[True]) == {"workflow_call"}
+    assert "publish" not in workflow["jobs"]
 
 
 def test_cancellable_macos_workflow_has_no_write_authority() -> None:

@@ -20,34 +20,28 @@ from scripts import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_PAYLOAD_PATHS = {
-    "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py",
-    "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py",
-    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
-    "tb2-task-chess-best-move/tests/test_best_move.py",
-    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
-    "tb2-task-hello-world/tests/test_outputs.py",
+    "tests/fixtures/tasks/multi-step-3/tests/test_phase1.py",
+    "tests/fixtures/tasks/multi-step-3/tests/test_phase3.py",
+    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-chess-best-move/tests/test_best_move.py",
     "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py",
-    "tests/fixtures/tasks/family-runs-dev/smoke/tests/test_result.py",
+    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/tests/test_outputs.py",
     "tests/fixtures/tasks/hello-world/tests/test_result.py",
     "tests/fixtures/tasks/in-box-cli/tests/test_out.py",
+    "tests/fixtures/tasks/family-runs-dev/smoke/tests/test_result.py",
     "tests/fixtures/tasks/large-artifact/tests/test_payload.py",
-    "tests/fixtures/tasks/multi-step-3/tests/test_phase1.py",
     "tests/fixtures/tasks/multi-step-3/tests/test_phase2.py",
-    "tests/fixtures/tasks/multi-step-3/tests/test_phase3.py",
 }
 
 SAMPLE_PAYLOAD = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
 
 EXPECTED_CASE_FIXTURES = {
-    "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py": {
-        "answer.txt"
+    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-chess-best-move/tests/test_best_move.py": {
+        "best_move.txt"
     },
-    "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py": {"result.txt"},
-    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
-    "tb2-task-chess-best-move/tests/test_best_move.py": {"best_move.txt"},
-    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
-    "tb2-task-hello-world/tests/test_outputs.py": {"hello.txt"},
-    "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py": {".ready", "ok.txt"},
+    "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/tests/test_outputs.py": {
+        "hello.txt"
+    },
+    "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py": {"ok.txt", ".ready"},
     "tests/fixtures/tasks/family-runs-dev/smoke/tests/test_result.py": {"result.txt"},
     "tests/fixtures/tasks/hello-world/tests/test_result.py": {"result.txt"},
     "tests/fixtures/tasks/in-box-cli/tests/test_out.py": {"out.txt"},

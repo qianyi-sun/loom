@@ -268,7 +268,7 @@ const BACKENDS_RESPONSE = {
   items: [
     {
       name: "docker",
-      description: "Docker execution on the GB10 or OLDLAB worker pools.",
+      description: "Docker execution on the configured worker pools.",
       available: true,
       cold_start_available: false,
       cold_start_pools: [],

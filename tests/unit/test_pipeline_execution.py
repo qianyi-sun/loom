@@ -180,6 +180,7 @@ def test_container_pid_limit_comes_from_the_frozen_resource_profile(tmp_path: Pa
     assert _container_spec(payload, paths).limits.pids == 173  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_stage1_runtime_registration_advertises_dedicated_claim_feature(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

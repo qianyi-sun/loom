@@ -16,13 +16,17 @@ git switch -c codex/nebius-<issue>-<change> origin/codex/nebius-main
 gh pr create --base codex/nebius-main
 ```
 
-The branch uses the same four direct GitHub Actions checks (app 15368):
-`repository-checks`, `images-gate`, `cluster-smoke-gate`, `staging-smoke-gate`.
-Require the current head and current integration base, strict checks, PR-only
-squash merges, linear history, no bypass, no force push, and no branch deletion.
-A trusted collaborator enables GitHub-native auto-merge; there is no custom
-merge controller or additional required check. The initial branch seed contains
-this charter and contribution guidance only, before protection is installed.
+The branch requires one direct GitHub Actions result (app 15368):
+`repository-checks`. One CI workflow plans changed paths and aggregates all
+selected jobs, including reusable image, Kubernetes and system checks. Failure,
+cancellation or an unexpected skip blocks this result. Require the current
+head and current integration base, strict checks, PR-only squash merges,
+linear history, no bypass, no force push, and no branch deletion. A trusted
+collaborator enables GitHub-native auto-merge; there is no custom merge
+controller or extra approval gate.
+
+The initial seed used the inherited four checks. This CI simplification changes
+only the Nebius integration ruleset after the single aggregate is verified.
 
 `dev` remains the repository default and the lane for unrelated work and
 existing-service repairs. Its protection and `main` promotion policy are not
@@ -47,6 +51,39 @@ lane. Do not merely broaden their authority to deploy this experimental branch
 onto existing staging. Implement candidate-bound Nebius build/publication and
 deployment against the new branch's independently identified target first.
 Branch creation does not claim that this deployment wiring already exists.
+
+## CI scope and remaining delivery work
+
+CI uses explicit GitHub-hosted runners temporarily; #1798 owns Nebius-hosted
+runner provisioning and immutable candidate publication/deployment. Hosted CI
+passing is not proof that all CI compute already runs on Nebius. PR validation
+has no OLDLAB/GB10 runner leases, localhost package mirrors, Slurm smoke,
+personal-dev builders, capacity-manager/executor images or legacy rollout
+checks. The image reusable workflow builds and scans; it cannot publish. Server image and Linux locked-install
+validation target the current Nebius AMD64 execution classes. GB10-motivated
+ARM64 server builds are removed; the independent macOS client lock check stays.
+This does not claim ARM64 workload parity: any such required workload remains
+part of the explicit compatibility inventory and acceptance under #1550.
+
+`config/component-ownership.toml` is the shared source for active test paths,
+image matrices and payload cases. `ci_ignored_paths` also filters executable
+lane selection. Mixed Python suites mark only retired-pool cases `legacy_pool`;
+CI excludes that marker. Generic worker, durable data, migration, API, provider,
+frontend, benchmark and Nebius rejection-boundary coverage remains active.
+Mypy keeps strict checking. Frontend coverage thresholds remain unchanged;
+Python total coverage is an opt-in diagnostic, not a merge threshold. Active
+imports of historical modules are still type-checked until runtime decoupling.
+
+Ordinary Python runs do not instrument coverage or exchange coverage artifacts.
+Use `ci:coverage-summary` for a report. Removing old-platform suites changes
+the measured population, so the inherited aggregate 70% floor is not retained
+or made green by excluding uncovered active code. Functional test failures
+still block admission.
+
+The Kubernetes lane exercises real disposable Kubernetes API operations and
+execution; system smoke retains the local Compose user flow. Both are
+credential-free checks, not live Nebius end-to-end acceptance. Deployment and
+public-endpoint acceptance remain separate work under #1798 and #1538.
 
 ## Terminal architecture
 
@@ -99,7 +136,7 @@ Loom success.
 | #1798 | Exact-branch artifacts, independent deployment/CI route and acceptance runner |
 | #1538 | End-to-end pure Nebius acceptance and recovery evidence |
 | #1553 | Drain and retire all Loom OLDLAB/GB10 dependencies and obsolete paths |
-| #1547 | Keep outstanding Daytona credential/resource retirement separate |
+| #1547 | Keep outstanding retired-provider credential/resource retirement separate |
 
 Completed child implementation is not invalidated automatically. Expanded live
 acceptance stays open in the parent/owning issues. Do not close a series issue

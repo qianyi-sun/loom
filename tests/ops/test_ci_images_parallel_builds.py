@@ -1,8 +1,9 @@
+"""Executable contracts for the reusable native image build and scan lane."""
+
 from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -13,303 +14,148 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _condition(expression: str, values: dict[str, str], *, cancelled: bool = False) -> bool:
-    """Evaluate the Boolean-only job guards, including GitHub's implicit success guard."""
-    status_function = "cancelled()" in expression or "always()" in expression
-    if not status_function and any(
-        value != "success" for key, value in values.items() if key.endswith(".result")
-    ):
-        return False
-    expression = re.sub(
-        r"(?:github|needs)\.[A-Za-z0-9_.-]+", lambda match: repr(values[match[0]]), expression
-    )
-    expression = expression.replace("cancelled()", str(cancelled)).replace("always()", "True")
-    expression = expression.replace("&&", " and ").replace("||", " or ")
-    expression = re.sub(r"!(?!=)", " not ", expression).strip()
-    return bool(eval(f"({expression})", {"__builtins__": {}, "contains": lambda a, b: b in a}))
+def _workflow() -> dict[str, Any]:
+    return yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
 
 
-def _jobs() -> dict[str, Any]:
-    return yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())["jobs"]
+def _step(name: str) -> dict[str, Any]:
+    return next(step for step in _workflow()["jobs"]["build"]["steps"] if step.get("name") == name)
 
 
-def test_ordinary_images_start_without_scanner_assets() -> None:
-    jobs = _jobs()
-    assert "personal-dev-scanner-cache-assets" not in jobs["build"]["needs"]
-    assert "personal-dev-scanner-cache-assets" in jobs["scanner-cache-build"]["needs"]
-    assert "scanner-cache-build" in jobs["images-gate"]["needs"]
+def _environment(tmp_path: Path) -> dict[str, str]:
+    # Only native CPU detection is synthetic; execute the actual manifest validator.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    uname = bin_dir / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'x86_64\\n'\n")
+    uname.chmod(0o755)
+    return {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "IMAGE_NAME": "service",
+        "IMAGE_DIGEST_NAME": "loom-service",
+        "DOCKERFILE": "deploy/Dockerfile.service",
+        "BUILD_CONTEXT": ".",
+        "EVENT_NAME": "pull_request",
+        "REF_NAME": "codex/nebius-ci",
+        "PR_NUMBER": "123",
+        "HEAD_SHA": "a" * 40,
+        "BASE_SHA": "b" * 40,
+        "ARCHITECTURE": "amd64",
+        "PLATFORM": "linux/amd64",
+    }
 
 
-@pytest.mark.parametrize(
-    "images",
-    [[], ["service"], ["personal-dev-scanner-cache"], ["service", "personal-dev-scanner-cache"]],
-)
-def test_matrix_partition_preserves_each_selected_native_build(
-    tmp_path: Path, images: list[str]
-) -> None:
-    native = [
-        {"image": image, "architecture": arch, "platform": f"linux/{arch}"}
-        for image in images
-        for arch in ("amd64", "arm64")
-    ]
-    step = next(step for step in _jobs()["plan"]["steps"] if step.get("id") == "build-matrices")
-    output = tmp_path / "output"
+def test_reusable_images_only_build_and_scan_the_callers_native_matrix() -> None:
+    workflow = _workflow()
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers) == {"workflow_call"}
+    assert triggers["workflow_call"]["inputs"]["native_builds"]["required"] is True
+    assert set(workflow["jobs"]) == {"trivy-binary", "build"}
+    build = workflow["jobs"]["build"]
+    assert build["needs"] == "trivy-binary"
+    assert build["strategy"]["matrix"]["include"] == "${{ fromJSON(inputs.native_builds) }}"
+    assert build["strategy"]["fail-fast"] is False
+    assert build["runs-on"] == "ubuntu-24.04"
+    for job in workflow["jobs"].values():
+        assert job["if"] == "inputs.native_builds != '[]'"
+        assert job["permissions"] == {"contents": "read"}
+        assert "continue-on-error" not in job
+    # No always()/cancelled() override: a failed binary dependency must skip the build.
+    assert "always()" not in build["if"]
+
+
+@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch"])
+def test_valid_native_inputs_pass_the_actual_shell_validation(tmp_path: Path, event: str) -> None:
+    env = _environment(tmp_path)
+    env.update(EVENT_NAME=event, PR_NUMBER="123" if event == "pull_request" else "")
     result = subprocess.run(
-        ["bash"],
-        input=step["run"],
-        text=True,
-        capture_output=True,
-        env={**os.environ, "NATIVE_BUILDS": json.dumps(native), "GITHUB_OUTPUT": str(output)},
-        check=False,
+        ["bash"], input=_step("Validate image build inputs")["run"],
+        cwd=ROOT, text=True, capture_output=True, env=env, check=False,
     )
     assert result.returncode == 0, result.stderr
-    partition = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    ordinary = json.loads(partition["ordinary_builds"])
-    scanner = json.loads(partition["scanner_cache_builds"])
-    assert ordinary == [row for row in native if row["image"] != "personal-dev-scanner-cache"]
-    assert scanner == [row for row in native if row["image"] == "personal-dev-scanner-cache"]
-    assert len(ordinary) + len(scanner) == len(native)
-
-
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "push", "workflow_dispatch"])
-def test_docs_plan_emits_empty_native_matrix_before_partition(tmp_path: Path, event: str) -> None:
-    """Exercise the real checked-out image planner when it selects no image work."""
-    steps = _jobs()["plan"]["steps"]
-    select = next(step for step in steps if step.get("id") == "plan")
-    partition = next(step for step in steps if step.get("id") == "build-matrices")
-    changed = tmp_path / "changed"
-    changed.write_text("docs/architecture/personal-dev-scanner-cache-preparation.md\n")
-    output = tmp_path / "output"
-    env = {
-        **os.environ,
-        "EVENT_NAME": event,
-        "REQUIRED": "false",
-        "UNOWNED_RUNTIME": "false",
-        "TRUSTED_PUBLISH": "true" if event == "workflow_dispatch" else "false",
-        "CHANGED_FILES": str(changed),
-        "GITHUB_OUTPUT": str(output),
-    }
-    planned = subprocess.run(
-        ["bash"],
-        input=select["run"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
-    assert planned.returncode == 0, planned.stderr
-    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert values["required"] == "false"
-    assert values["images"] == values["native_builds"] == "[]"
-    split = subprocess.run(
-        ["bash"],
-        input=partition["run"],
-        text=True,
-        capture_output=True,
-        env={**env, "NATIVE_BUILDS": values["native_builds"]},
-        check=False,
-    )
-    assert split.returncode == 0, split.stderr
-    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert values["ordinary_builds"] == values["scanner_cache_builds"] == "[]"
 
 
 @pytest.mark.parametrize(
-    "images",
-    [[], ["service"], ["personal-dev-scanner-cache"], ["service", "personal-dev-scanner-cache"]],
-)
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch", "push"])
-@pytest.mark.parametrize("fault", [None, "ordinary", "scanner", "publish"])
-def test_gate_enforces_both_selected_build_results(
-    images: list[str], event: str, fault: str | None
-) -> None:
-    ordinary_selected = any(image != "personal-dev-scanner-cache" for image in images)
-    scanner_selected = "personal-dev-scanner-cache" in images
-    publish = event == "push"
-    ordinary = "success" if ordinary_selected and not publish else "skipped"
-    scanner = "success" if scanner_selected and not publish else "skipped"
-    publish_result = "success" if images and publish else "skipped"
-    env = {
-        **os.environ,
-        "EVENT_NAME": event,
-        "TRUSTED_PUBLISH": "false",
-        "PLAN_RESULT": "success",
-        "GATE_MODE": "full",
-        "REQUIRED": "true" if images else "false",
-        "STANDARD_IMAGES": json.dumps([{"image": image} for image in images]),
-        "BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
-        "SCANNER_BUILD_RESULT": "failure" if fault == "scanner" else scanner,
-        "PUBLISH_RESULT": "failure" if fault == "publish" else publish_result,
-        "MANIFEST_RESULT": publish_result,
-        "PERSONAL_DEV_RELEASE_RESULT": "skipped",
-    }
-    step = _jobs()["images-gate"]["steps"][0]
-    result = subprocess.run(
-        ["bash"], input=step["run"], text=True, capture_output=True, env=env, check=False
-    )
-    assert (result.returncode == 0) == (fault is None), result.stderr
-
-
-@pytest.mark.parametrize("job", ["build", "scanner-cache-build"])
-def test_parallel_builds_keep_native_scan_and_untrusted_permissions(job: str) -> None:
-    jobs = _jobs()
-    build = jobs[job]
-    assert build["permissions"] == {"contents": "read"}
-    assert build["strategy"]["fail-fast"] is False
-    assert "github.event_name != 'push'" in build["if"]
-    assert "needs.plan.outputs.trusted_publish != 'true'" in build["if"]
-    assert build["steps"] == jobs["build"]["steps"]
-    scripts = "\n".join(step.get("run", "") for step in build["steps"])
-    assert "scripts/validate_trivy_release_report.py" in scripts
-    assert 'test "$(verify_scanner_cache_assets)" = "$scanner_cache_before"' in scripts
-    assert "--cache-to" not in scripts
-    assert "--push" not in scripts
-
-
-@pytest.mark.parametrize("result_name", ["BUILD_RESULT", "SCANNER_BUILD_RESULT"])
-@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
-def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
-    result_name: str, result: str
-) -> None:
-    env = {
-        **os.environ,
-        "EVENT_NAME": "pull_request",
-        "TRUSTED_PUBLISH": "false",
-        "PLAN_RESULT": "success",
-        "GATE_MODE": "full",
-        "REQUIRED": "true",
-        "STANDARD_IMAGES": '[{"image":"service"},{"image":"personal-dev-scanner-cache"}]',
-        "BUILD_RESULT": "success",
-        "SCANNER_BUILD_RESULT": "success",
-        "PUBLISH_RESULT": "skipped",
-        "MANIFEST_RESULT": "skipped",
-        "PERSONAL_DEV_RELEASE_RESULT": "skipped",
-        result_name: result,
-    }
-    completed = subprocess.run(
-        ["bash"],
-        input=_jobs()["images-gate"]["steps"][0]["run"],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
-    assert completed.returncode != 0
-
-
-@pytest.mark.parametrize("scanner_selected", [False, True])
-@pytest.mark.parametrize("asset_result", ["success", "skipped", "failure", "cancelled"])
-@pytest.mark.parametrize("prerequisite", [None, "plan", "trivy-binary"])
-def test_trusted_publish_requires_successful_selected_dependencies(
-    scanner_selected: bool, asset_result: str, prerequisite: str | None
-) -> None:
-    images = ["service", "personal-dev-scanner-cache"] if scanner_selected else ["service"]
-    values = {
-        "github.event_name": "push",
-        "github.ref": "refs/heads/dev",
-        "needs.plan.result": "success",
-        "needs.trivy-binary.result": "success",
-        "needs.personal-dev-scanner-cache-assets.result": asset_result,
-        "needs.plan.outputs.trusted_publish": "false",
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": json.dumps(
-            [{"image": image} for image in images], separators=(",", ":")
-        ),
-    }
-    expression = _jobs()["publish"]["if"]
-    expected = asset_result == "success" or (asset_result == "skipped" and not scanner_selected)
-    for result in ("failure", "skipped", "cancelled"):
-        if prerequisite:
-            values[f"needs.{prerequisite}.result"] = result
-        assert _condition(expression, values) == (expected and prerequisite is None)
-        assert not _condition(expression, values, cancelled=True)
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
+    ("name", "value"),
     [
-        ("github.event_name", "pull_request"),
-        ("github.event_name", "merge_group"),
-        ("github.event_name", "workflow_dispatch"),
-        ("github.ref", "refs/heads/feature"),
-        ("needs.plan.outputs.gate_mode", "filtered"),
-        ("needs.plan.outputs.required", "false"),
-        ("needs.plan.outputs.images", "[]"),
+        ("IMAGE_NAME", "$(touch injected)"),
+        ("DOCKERFILE", "deploy/Dockerfile.worker"),
+        ("BUILD_CONTEXT", "../outside"),
+        ("HEAD_SHA", "a" * 39),
+        ("BASE_SHA", "not-a-sha"),
+        ("REF_NAME", "branch;touch injected"),
+        ("PR_NUMBER", "0"),
+        ("EVENT_NAME", "push"),
+        ("ARCHITECTURE", "arm64"),
+        ("PLATFORM", "linux/arm64"),
     ],
 )
-def test_optional_assets_do_not_bypass_existing_publish_authority(key: str, value: str) -> None:
-    values = {
-        "github.event_name": "push",
-        "github.ref": "refs/heads/dev",
-        "needs.plan.result": "success",
-        "needs.trivy-binary.result": "success",
-        "needs.personal-dev-scanner-cache-assets.result": "skipped",
-        "needs.plan.outputs.trusted_publish": "false",
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": '[{"image":"service"}]',
-        key: value,
-    }
-    assert not _condition(_jobs()["publish"]["if"], values)
-
-
-@pytest.mark.parametrize("event", ["pull_request", "push", "workflow_dispatch", "merge_group"])
-def test_asset_preparation_is_absent_when_scanner_image_is_not_selected(event: str) -> None:
-    values = {
-        "github.event_name": event,
-        "needs.plan.result": "success",
-        "needs.trivy-binary.result": "success",
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": '[{"image":"service"}]',
-    }
-    assert not _condition(_jobs()["personal-dev-scanner-cache-assets"]["if"], values)
-
-
-@pytest.mark.parametrize("job", ["build", "scanner-cache-build"])
-@pytest.mark.parametrize("failed_dependency", ["plan", "trivy-binary", "specific"])
-def test_untrusted_builds_do_not_run_after_required_dependency_failure(
-    job: str, failed_dependency: str
+def test_untrusted_inputs_fail_before_build_or_shell_expansion(
+    tmp_path: Path, name: str, value: str,
 ) -> None:
-    selected = _jobs()[job]
-    values = {f"needs.{dependency}.result": "success" for dependency in selected["needs"]}
-    values.update(
-        {
-            "github.event_name": "pull_request",
-            "needs.plan.outputs.trusted_publish": "false",
-            "needs.plan.outputs.gate_mode": "full",
-            "needs.plan.outputs.required": "true",
-            "needs.plan.outputs.ordinary_builds": '[{"image":"service"}]',
-            "needs.plan.outputs.scanner_cache_builds": '[{"image":"personal-dev-scanner-cache"}]',
-        }
+    env = _environment(tmp_path)
+    sentinel = tmp_path / "injected"
+    env[name] = value.replace("touch injected", f"touch {sentinel}")
+    result = subprocess.run(
+        ["bash"], input=_step("Validate image build inputs")["run"],
+        cwd=ROOT, text=True, capture_output=True, env=env, check=False,
     )
-    dependency = failed_dependency
-    if dependency == "specific":
-        dependency = "image-route" if job == "build" else "personal-dev-scanner-cache-assets"
-    assert _condition(selected["if"], values)
-    for result in ("failure", "skipped", "cancelled"):
-        values[f"needs.{dependency}.result"] = result
-        assert not _condition(selected["if"], values)
+    assert result.returncode != 0
+    assert not sentinel.exists()
 
 
-@pytest.mark.parametrize("publish_result", ["success", "failure", "cancelled", "skipped"])
-def test_manifest_requires_publish_success_when_optional_assets_are_skipped(
-    publish_result: str,
-) -> None:
-    values = {
-        "github.event_name": "workflow_dispatch",
-        "github.ref": "refs/heads/main",
-        "needs.plan.result": "success",
-        "needs.publish.result": publish_result,
-        "needs.plan.outputs.trusted_publish": "true",
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": '[{"image":"service"}]',
-        # Include the indirect skipped dependency to protect against implicit status propagation.
-        "needs.personal-dev-scanner-cache-assets.result": "skipped",
-    }
-    condition = _jobs()["publish-manifest"]["if"]
-    assert _condition(condition, values) == (publish_result == "success")
-    assert not _condition(condition, values, cancelled=True)
+def test_arm_matrix_is_rejected_even_on_matching_native_hardware(tmp_path: Path) -> None:
+    env = _environment(tmp_path)
+    (tmp_path / "bin" / "uname").write_text("#!/bin/sh\nprintf 'aarch64\\n'\n")
+    env.update(ARCHITECTURE="arm64", PLATFORM="linux/arm64")
+    result = subprocess.run(
+        ["bash"], input=_step("Validate image build inputs")["run"],
+        cwd=ROOT, text=True, capture_output=True, env=env, check=False,
+    )
+    assert result.returncode != 0
+
+
+def test_build_uses_exact_head_and_local_archive_without_publication(tmp_path: Path) -> None:
+    env = _environment(tmp_path)
+    capture = tmp_path / "docker-argv.json"
+    docker = tmp_path / "bin" / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\nimport json, os, sys\n"
+        "with open(os.environ['CAPTURE_ARGV'], 'w') as stream:\n"
+        "    json.dump(sys.argv[1:], stream)\n"
+    )
+    docker.chmod(0o755)
+    env["CAPTURE_ARGV"] = str(capture)
+    result = subprocess.run(
+        ["bash"], input=_step("Build without registry or cache write authority")["run"],
+        cwd=ROOT, text=True, capture_output=True, env=env, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    args = json.loads(capture.read_text())
+    assert args[:2] == ["buildx", "build"]
+    assert args[args.index("--platform") + 1] == "linux/amd64"
+    assert args[args.index("--build-arg") + 1] == "LOOM_BUILD_SHA=" + "a" * 40
+    assert args[args.index("--output") + 1] == "type=docker,dest=/tmp/service-amd64.docker.tar"
+    assert args[-1] == "."
+    assert set(args).isdisjoint({"--push", "--cache-to"})
+
+
+def test_scan_is_job_local_and_uses_verified_binary_and_controlled_policy() -> None:
+    build = _workflow()["jobs"]["build"]
+    names = [step.get("name") for step in build["steps"]]
+    assert names.index("Verify distributed Trivy binary") < names.index("Scan native image archive")
+    assert names.index("Build without registry or cache write authority") < names.index("Scan native image archive")
+    verify = _step("Verify distributed Trivy binary")["run"]
+    assert "sha256sum --check trivy.sha256" in verify
+    scan = _step("Scan native image archive")
+    assert scan["env"]["ARCHIVE"].endswith(".docker.tar")
+    assert '--input "$ARCHIVE"' in scan["run"]
+    assert "scripts/validate_trivy_release_report.py" in scan["run"]
+    assert "scripts/write_trivy_release_policy.py" in _step("Generate controlled Trivy policy")["run"]
+    assert all("upload-artifact" not in step.get("uses", "") for step in build["steps"])
+    scripts = "\n".join(step.get("run", "") for step in build["steps"])
+    assert "docker login" not in scripts
+    assert "--cache-to" not in scripts
+    assert "--push" not in scripts
+    assert "secrets." not in json.dumps(build)

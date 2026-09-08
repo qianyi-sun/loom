@@ -27,6 +27,7 @@ concurrency:
 
 jobs:
   main-promotion-gate:
+    if: github.ref == 'refs/heads/dev'
     name: main-promotion-gate
     runs-on: ubuntu-latest
     timeout-minutes: 5

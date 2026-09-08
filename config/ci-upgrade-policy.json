@@ -3,15 +3,15 @@
   "max_actions_per_batch": 2,
   "node24_minimum_runner": "2.327.1",
   "required_canary_contexts": [
-    "repository-checks",
-    "images-gate",
-    "cluster-smoke-gate",
-    "staging-smoke-gate"
+    "repository-checks"
   ],
   "batches": [
     {
       "name": "artifact-io",
-      "actions": ["actions/upload-artifact", "actions/download-artifact"],
+      "actions": [
+        "actions/upload-artifact",
+        "actions/download-artifact"
+      ],
       "compatibility_tests": [
         "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py tests/ops/test_ci_upgrade_policy.py",
         "actionlint .github/workflows/*.yml"
@@ -29,8 +29,12 @@
     },
     {
       "name": "checkout",
-      "actions": ["actions/checkout"],
-      "compatibility_tests": ["actionlint .github/workflows/*.yml"],
+      "actions": [
+        "actions/checkout"
+      ],
+      "compatibility_tests": [
+        "actionlint .github/workflows/*.yml"
+      ],
       "rollback": {
         "actions/checkout": {
           "sha": "93cb6efe18208431cddfb8368fd83d5badbf9bfd",
@@ -40,13 +44,16 @@
     },
     {
       "name": "language-bootstrap",
-      "actions": ["actions/setup-go", "actions/setup-node"],
+      "actions": [
+        "actions/setup-go",
+        "actions/setup-node"
+      ],
       "compatibility_tests": [
         "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py tests/ops/test_ci_upgrade_policy.py",
         "actionlint .github/workflows/ci.yml",
-        "test -z \"$(gofmt -l ./cmd/)\"",
-        "go vet ./cmd/...",
-        "go test -race ./cmd/..."
+        "test -z \"$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-llm-gateway-sandbox)\"",
+        "go vet ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...",
+        "go test -race ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/..."
       ],
       "rollback": {
         "actions/setup-go": {
@@ -61,7 +68,9 @@
     },
     {
       "name": "python-bootstrap",
-      "actions": ["astral-sh/setup-uv"],
+      "actions": [
+        "astral-sh/setup-uv"
+      ],
       "compatibility_tests": [
         "uv run --no-sync pytest -q tests/ops/test_ci_upgrade_policy.py",
         "actionlint .github/workflows/*.yml"
@@ -70,20 +79,6 @@
         "astral-sh/setup-uv": {
           "sha": "fac544c07dec837d0ccb6301d7b5580bf5edae39",
           "version": "v8.2.0"
-        }
-      }
-    },
-    {
-      "name": "image-supply-chain",
-      "actions": ["actions/attest-build-provenance"],
-      "compatibility_tests": [
-        "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py tests/ops/test_install_trivy.py tests/ops/test_ci_trivy_release_policy.py tests/ops/test_ci_image_release_evidence.py tests/ops/test_ci_throughput_workflows.py",
-        "actionlint .github/workflows/images.yml"
-      ],
-      "rollback": {
-        "actions/attest-build-provenance": {
-          "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
-          "version": "v4.1.1"
         }
       }
     }

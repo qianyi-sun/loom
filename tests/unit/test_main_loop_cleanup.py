@@ -27,10 +27,10 @@ from loom_worker.runner_pool import RunnerPool
 def test_runtime_identity_labels_allow_legacy_settings() -> None:
     """Pre-containment workers remain valid and intentionally unlabelled."""
     assert ml._runtime_identity_labels(_FakeSettings()) == ()  # type: ignore[arg-type]
-    assert ml._slurm_gpu_device_ids(_FakeSettings()) == ()  # type: ignore[arg-type]
     assert ml._worker_cgroup_parent(_FakeSettings()) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_required_worker_cgroup_parent_fails_closed_when_missing() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True
@@ -40,6 +40,7 @@ def test_required_worker_cgroup_parent_fails_closed_when_missing() -> None:
         ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_required_worker_cgroup_parent_accepts_slurm_scope() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True
@@ -49,6 +50,7 @@ def test_required_worker_cgroup_parent_accepts_slurm_scope() -> None:
     assert ml._worker_cgroup_parent(settings) == ("/system.slice/slurmstepd.scope/job_123")  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_required_worker_cgroup_parent_accepts_guard_slice() -> None:
     # Docker's systemd driver takes the guard-owned slice unit, not a path.
     settings = _FakeSettings()
@@ -59,6 +61,7 @@ def test_required_worker_cgroup_parent_accepts_guard_slice() -> None:
     assert ml._worker_cgroup_parent(settings) == "loom-job-123.slice"  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_required_worker_cgroup_parent_accepts_guard_slice_for_array_base() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True
@@ -68,6 +71,7 @@ def test_required_worker_cgroup_parent_accepts_guard_slice_for_array_base() -> N
     assert ml._worker_cgroup_parent(settings) == "loom-job-123.slice"  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_required_worker_cgroup_parent_rejects_mismatched_slice() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True
@@ -78,6 +82,7 @@ def test_required_worker_cgroup_parent_rejects_mismatched_slice() -> None:
         ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 def test_required_worker_cgroup_parent_rejects_missing_slurm_job_id() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True
@@ -88,6 +93,7 @@ def test_required_worker_cgroup_parent_rejects_missing_slurm_job_id() -> None:
         ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("parent", "job_id", "match"),
     [
@@ -127,6 +133,7 @@ def test_required_worker_cgroup_parent_rejects_unbound_scope(
         ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("parent", "job_id"),
     [
@@ -1388,3 +1395,8 @@ async def test_runtime_bucket_bootstrap_creates_required_runtime_buckets() -> No
 
 # Suppress pytest's "unused" warning on the helper.
 _ = pytest
+
+
+@pytest.mark.legacy_pool
+def test_slurm_gpu_identity_allows_legacy_settings() -> None:
+    assert ml._slurm_gpu_device_ids(_FakeSettings()) == ()  # type: ignore[arg-type]

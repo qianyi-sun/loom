@@ -5,6 +5,7 @@ import json
 from uuid import uuid4
 
 import httpx
+import pytest
 
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
@@ -26,7 +27,7 @@ class _Settings:
 class _RegistrationSettings:
     hostname = "worker-host"
     max_concurrent = 3
-    pool_name = "oldlab"
+    pool_name = "worker-pool"
     sandbox_identity = "production"
     candidate_sha = "a" * 40
     slurm_job_id = "40740"
@@ -37,7 +38,7 @@ class _RegistrationSettings:
 class _LegacyRegistrationSettings:
     hostname = "worker-host"
     max_concurrent = 3
-    pool_name = "oldlab"
+    pool_name = "worker-pool"
     executor_worker_credential = None
 
 
@@ -239,7 +240,7 @@ async def test_register_worker_with_retry_retries_control_plane_dns_failure() ->
                 "version": "0.0.1",
                 "capabilities": ml._DEFAULT_CAPS,  # type: ignore[attr-defined]
                 "max_concurrent": 3,
-                "pool_name": "oldlab",
+                "pool_name": "worker-pool",
             }
             if attempts < 3:
                 request = httpx.Request("POST", "http://loom-control-plane/workers/register")
@@ -311,6 +312,7 @@ async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
     assert attempts == 1
 
 
+@pytest.mark.legacy_pool
 async def test_register_worker_with_retry_forwards_launcher_credential() -> None:
     recorded: dict[str, object] = {}
 
@@ -356,6 +358,7 @@ async def test_pipeline_registration_advertises_both_work_kinds(monkeypatch) -> 
     assert recorded["supported_work_kinds"] == ["trial", "execution_attempt"]
 
 
+@pytest.mark.legacy_pool
 async def test_register_worker_with_retry_passes_complete_slurm_provenance() -> None:
     registered = False
 
@@ -368,7 +371,7 @@ async def test_register_worker_with_retry_passes_complete_slurm_provenance() -> 
                 "version": "0.0.1",
                 "capabilities": ml._DEFAULT_CAPS,  # type: ignore[attr-defined]
                 "max_concurrent": 3,
-                "pool_name": "oldlab",
+                "pool_name": "worker-pool",
                 "sandbox_identity": "production",
                 "candidate_sha": "a" * 40,
                 "slurm_job_id": "40740",
@@ -384,11 +387,12 @@ async def test_register_worker_with_retry_passes_complete_slurm_provenance() -> 
     assert registered
 
 
+@pytest.mark.legacy_pool
 async def test_register_worker_with_retry_rejects_partial_slurm_provenance() -> None:
     class _PartialRegistrationSettings:
         hostname = "worker-host"
         max_concurrent = 3
-        pool_name = "oldlab"
+        pool_name = "worker-pool"
         sandbox_identity = "production"
         candidate_sha = "a" * 40
         slurm_job_id = "40740"

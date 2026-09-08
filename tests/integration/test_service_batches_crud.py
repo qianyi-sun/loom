@@ -2670,6 +2670,7 @@ async def test_post_rejects_mixed_service_and_legacy_without_capacity(
     assert "no healthy autoscaled pool" in response.json()["detail"]
 
 
+@pytest.mark.legacy_pool
 async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
@@ -2787,6 +2788,7 @@ async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
         sync_engine.dispose()
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("policy_values", "task_cpu_arch"),
     [

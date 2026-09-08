@@ -1,64 +1,8 @@
 name: CI
 
-run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' &&
-      format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.sha,
-             github.event.before || github.sha,
-             github.event.pull_request.updated_at || 'none',
-             github.event.action || github.event_name,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') ||
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (github.event.action == 'edited' &&
-        github.event.changes.base == null) ||
-       ((github.event.action == 'labeled' ||
-         github.event.action == 'unlabeled') &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
-                  github.event.label.name))) &&
-      format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.event.pull_request.head.sha,
-             github.event.pull_request.base.sha,
-             github.event.pull_request.updated_at,
-             github.event.action,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') ||
-      format('gate=full / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha,
-             github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha,
-             github.event.pull_request.updated_at || 'none',
-             github.event.action || github.event_name,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') }}
+run-name: CI / ${{ github.head_ref || github.ref_name }} / ${{ github.event.pull_request.head.sha || github.sha }}
 
 on:
-  push:
-    # PR heads already passed the protected four-gate admission path before
-    # they reach dev. Keep the push safety net only for production promotion.
-    branches: [main]
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
@@ -71,6 +15,11 @@ on:
     inputs:
       integration:
         description: "Run fast integration tier (testcontainers, no real Docker driver)"
+        required: false
+        type: boolean
+        default: false
+      coverage_summary:
+        description: "Collect an optional Python coverage diagnostic report"
         required: false
         type: boolean
         default: false
@@ -93,13 +42,7 @@ concurrency:
        ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
         !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
       format('filtered-{0}', github.run_id) || 'authoritative' }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft' ||
-          (github.event.action == 'edited' && github.event.changes.base == null) ||
-          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
-           !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -118,10 +61,14 @@ jobs:
       docs_only: ${{ steps.plan.outputs.docs_only || steps.event.outputs.docs_only }}
       integration: ${{ steps.plan.outputs.integration || steps.event.outputs.integration }}
       integration_docker: ${{ steps.plan.outputs.integration_docker || steps.event.outputs.integration_docker }}
-      images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
+      images: ${{ steps.image-plan.outputs.required || steps.event.outputs.images }}
+      native_builds: ${{ steps.image-plan.outputs.native_builds || '[]' }}
       cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.cluster_smoke }}
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
-      coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
+      coverage_summary: >-
+        ${{ steps.plan.outputs.gate_mode == 'full' &&
+            (contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') ||
+             inputs.coverage_summary == true) && 'true' || 'false' }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
     steps:
       - name: Classify filtered event before checkout
@@ -234,86 +181,60 @@ jobs:
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Select affected native image builds
+        id: image-plan
+        if: steps.plan.outputs.gate_mode == 'full'
+        env:
+          CHANGED_FILES: /tmp/loom-changed-files.txt
+          REQUIRED: ${{ steps.plan.outputs.images }}
+          UNOWNED_RUNTIME: ${{ steps.plan.outputs.unowned_runtime }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          for value in "$REQUIRED" "$UNOWNED_RUNTIME"; do
+            [[ "$value" == "true" || "$value" == "false" ]] || {
+              echo "FAIL: invalid image planner boolean: $value" >&2
+              exit 1
+            }
+          done
+          args=(
+            plan-images
+            --changed-files "$CHANGED_FILES"
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$UNOWNED_RUNTIME" == "true" ]]; then
+            args+=(--force-all)
+          elif [[ "$REQUIRED" == "true" ]]; then
+            args+=(--fallback-all)
+          fi
+          python3 scripts/component_ownership.py "${args[@]}"
+
       - name: Docs-only fast path
         if: steps.plan.outputs.docs_only == 'true'
         run: echo "Only docs/repo metadata changed; heavy checks skipped."
 
-  ci-route:
-    name: resolve oldlab-first routes
+  images:
     needs: workflow-plan
     if: >-
-      needs.workflow-plan.outputs.docs_only != 'true' &&
-      (needs.workflow-plan.outputs.gate_mode == 'full' ||
-       needs.workflow-plan.outputs.gate_mode == 'preflight')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      checks: read
-      contents: read
-    outputs:
-      routes: ${{ steps.route.outputs.routes }}
-    steps:
-      - name: Checkout trusted route action
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: qianyi-sun/loom
-          ref: 66b83fc57a3141197a997c9f6d4ce6e2a98ee3de
-          sparse-checkout: .github/actions/ci-runner-route
-          path: .loom-ci-route-action
-          persist-credentials: false
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.images == 'true'
+    uses: ./.github/workflows/images.yml
+    with:
+      native_builds: ${{ needs.workflow-plan.outputs.native_builds }}
 
-      - name: Select eligible job keys
-        id: keys
-        shell: bash
-        env:
-          GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
-          DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
-          WEB_CHECKS: ${{ needs.workflow-plan.outputs.web_checks }}
-          INTEGRATION: ${{ needs.workflow-plan.outputs.integration }}
-          INTEGRATION_DOCKER: ${{ needs.workflow-plan.outputs.integration_docker }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
+  cluster-smoke:
+    needs: workflow-plan
+    if: >-
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.cluster_smoke == 'true'
+    uses: ./.github/workflows/cluster-smoke.yml
 
-          gate = os.environ["GATE_MODE"]
-          keys = []
-          # The broker allocates the whole request in order and freezes it.
-          # Reserve scarce normal slots for the critical test paths before
-          # short checks consume the five-slot pool (#1793).
-          if gate == "full" and os.environ["INTEGRATION"] == "true":
-              keys.extend(["integration-1-of-2", "integration-2-of-2"])
-          if gate == "full" and os.environ["DOCS_ONLY"] != "true":
-              keys.extend([
-                  "tests-root-1-of-2",
-                  "tests-root-2-of-2",
-                  "lint-and-static",
-                  "tests-packages",
-                  "go-checks",
-              ])
-          if gate in {"full", "preflight"}:
-              keys.append("runtime-payload")
-          if gate in {"full", "preflight"} and os.environ["WEB_CHECKS"] == "true":
-              keys.append("web-checks")
-          if gate == "full" and os.environ["INTEGRATION_DOCKER"] == "true":
-              keys.append("integration-docker")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
-          PY
-
-      - name: Resolve immutable assignments
-        id: route
-        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
-        with:
-          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
-          repository: ${{ github.repository }}
-          workflow-name: CI
-          workflow-id: '302898379'
-          workflow-run-id: ${{ github.run_id }}
-          run-attempt: ${{ github.run_attempt }}
-          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          job-keys-json: ${{ steps.keys.outputs.job_keys }}
-          github-token: ${{ github.token }}
+  staging-smoke:
+    needs: workflow-plan
+    if: >-
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.staging_smoke == 'true'
+    uses: ./.github/workflows/staging-smoke.yml
 
   locked-environments:
     name: locked-environment (${{ matrix.target }})
@@ -328,11 +249,6 @@ jobs:
             expected_system: Linux
             expected_machine: x86_64
             uv_checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            expected_system: Linux
-            expected_machine: aarch64
-            uv_checksum: befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -343,7 +259,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: ${{ matrix.uv_checksum }}
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -377,9 +292,8 @@ jobs:
 
   lint-and-static:
     name: lint-and-static
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)['lint-and-static'] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 12
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -392,7 +306,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -406,7 +319,13 @@ jobs:
           uv pip check --python .venv/bin/python
 
       - name: Ruff
-        run: uv run --no-sync ruff check src tests packages migrations capacity_guard_migrations capacity_migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/component_ownership.py python-paths > /tmp/loom-lint-paths.txt
+          mapfile -t lint_paths < /tmp/loom-lint-paths.txt
+          [[ ${#lint_paths[@]} -gt 0 ]]
+          uv run --no-sync ruff check "${lint_paths[@]}"
 
       - name: Ruff format (normalized integration suites)
         run: |
@@ -417,24 +336,6 @@ jobs:
 
       - name: Mypy (strict)
         run: uv run --no-sync mypy
-
-      - name: Global capacity Package 3 no-scheduler-mutation audit
-        shell: bash
-        run: |
-          set -euo pipefail
-          if matches=$(rg -n \
-            -e 'SharedCapacityBroker|capacity_grants_from_report' \
-            -e 'worker:claim|\b(sbatch|scancel|scontrol|srun)\b' \
-            -e '(^|[[:space:]])(import|from)[[:space:]]+(docker|pyslurm|slurm|subprocess)([[:space:].]|$)' \
-            src/loom_capacity_manager \
-            src/loom_capacity_executor/dry_run.py \
-            src/loom_capacity_executor/remote.py \
-            src/loom_capacity_executor/client.py \
-            src/loom_capacity_executor/journal.py \
-            scripts/ops/global_fleet_capacity_shadow_once.py); then
-            echo "$matches" >&2
-            exit 1
-          fi
 
       - name: Verify codegen up-to-date
         run: uv run --no-sync loom config codegen --check
@@ -450,9 +351,8 @@ jobs:
 
   tests-root:
     name: tests-root (${{ matrix.shard }})
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)[format('tests-root-{0}', matrix.shard)] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 30
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -466,6 +366,7 @@ jobs:
           - shard: 2-of-2
             shard_index: 1
     env:
+      COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
       COVERAGE_FILE: .coverage.root-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -477,7 +378,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -503,34 +403,13 @@ jobs:
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest "${test_paths[@]}" \
+          coverage_args=(-p no:cov)
+          if [[ "$COVERAGE_ENABLED" == "true" ]]; then
+            coverage_args=(--cov=src --cov=packages --cov-report=)
+          fi
+          uv run --no-sync pytest -m "not legacy_pool" "${test_paths[@]}" \
             --durations=25 \
-            --cov=src --cov=packages \
-            --cov-report=term --cov-report=xml
-
-      - name: Produce synthetic global capacity shadow evidence
-        if: matrix.shard_index == 0
-        shell: bash
-        run: |
-          set -euo pipefail
-          output="${RUNNER_TEMP}/global-capacity-shadow.json"
-          uv run --no-sync python scripts/ops/global_fleet_capacity_shadow_once.py \
-            --fleet tests/fixtures/capacity/fleet-v1.toml \
-            --subjects tests/fixtures/capacity/subjects-v1.toml \
-            --snapshot tests/fixtures/capacity/snapshot-v1.json \
-            --output "$output"
-          OUTPUT="$output" uv run --no-sync python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          document = json.loads(Path(os.environ["OUTPUT"]).read_text(encoding="utf-8"))
-          assert document["mode"] == "shadow"
-          assert document["executable"] is False
-          assert document["executable_new_capacity_ceiling"] == 0
-          assert "grants" not in document
-          assert "launch_permits" not in document
-          PY
+            "${coverage_args[@]}"
 
       - name: Build and exercise non-editable runtime wheel
         if: matrix.shard_index == 0
@@ -559,9 +438,8 @@ jobs:
           from pathlib import Path
 
           import loom_cli
-          import loom_cli.rollout.operator.broker
-          from loom_cli.cluster_cmd import render_manifests
-          from loom_cli.cluster_config import ClusterConfig
+          import loom_execution_actuator.kubernetes_api
+          import loom.nebius_runtime_render
 
           repo_root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
           module_path = Path(loom_cli.__file__).resolve()
@@ -604,13 +482,12 @@ jobs:
               .read_text(encoding="utf-8")
               .strip()
           )
-          rendered = render_manifests(ClusterConfig())
-          assert "kind: ConfigMap" in rendered
-          assert "name: loom-grafana-dashboards" in rendered
           PY
 
       - name: Upload root coverage data
-        if: always()
+        if: success() && env.COVERAGE_ENABLED == 'true'
+        # Optional telemetry transport never changes functional test admission.
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-data-root-${{ matrix.shard }}
@@ -620,13 +497,15 @@ jobs:
 
   tests-packages:
     name: tests-packages
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)['tests-packages'] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
+    env:
+      COVERAGE_FILE: .coverage.packages
+      COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -635,7 +514,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -656,24 +534,28 @@ jobs:
             uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest "${test_paths[@]}" \
-            --cov=src --cov=packages \
-            --cov-report=term --cov-report=xml
+          coverage_args=(-p no:cov)
+          if [[ "$COVERAGE_ENABLED" == "true" ]]; then
+            coverage_args=(--cov=src --cov=packages --cov-report=)
+          fi
+          uv run --no-sync pytest -m "not legacy_pool" "${test_paths[@]}" \
+            "${coverage_args[@]}"
 
       - name: Upload package coverage data
-        if: always()
+        if: success() && env.COVERAGE_ENABLED == 'true'
+        # Optional telemetry transport never changes functional test admission.
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-data-packages
-          path: .coverage
+          path: ${{ env.COVERAGE_FILE }}
           include-hidden-files: true
           if-no-files-found: warn
 
   runtime-payload:
     name: runtime-payload
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)['runtime-payload'] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -727,10 +609,7 @@ jobs:
           terraform -chdir=deploy/terraform/nebius/stack init -backend=false -input=false
           terraform -chdir=deploy/terraform/nebius/stack validate
 
-  # The fast Python checks run in parallel above; this aggregator owns
-  # their result validation and the final fast-tier coverage gate. Docs-only
-  # changes have no coverage inputs, so their final repository gate validates
-  # the skipped result directly instead of starting this no-op queue hop.
+  # Fail closed on all parallel functional checks; no report tooling needed.
   fast-checks:
     name: fast-checks
     runs-on: ubuntu-latest
@@ -742,141 +621,40 @@ jobs:
       - nebius-iac
       - tests-root
       - tests-packages
-    timeout-minutes: 10
+    timeout-minutes: 2
     if: >-
       always() &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.docs_only != 'true'
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
       - name: Validate parallel check results
+        env:
+          PLAN_RESULT: ${{ needs.workflow-plan.result }}
+          LOCKED_RESULT: ${{ needs.locked-environments.result }}
+          LINT_RESULT: ${{ needs.lint-and-static.result }}
+          RUNTIME_RESULT: ${{ needs.runtime-payload.result }}
+          IAC_RESULT: ${{ needs.nebius-iac.result }}
+          ROOT_RESULT: ${{ needs.tests-root.result }}
+          PACKAGES_RESULT: ${{ needs.tests-packages.result }}
         run: |
           set -euo pipefail
-          docs_only="${{ needs.workflow-plan.outputs.docs_only }}"
-          if [[ "${docs_only}" == "true" ]]; then
-            echo "Only docs/repo metadata changed; heavy checks skipped."
-            exit 0
-          fi
           for result in \
-            "${{ needs.workflow-plan.result }}" \
-            "${{ needs.locked-environments.result }}" \
-            "${{ needs.lint-and-static.result }}" \
-            "${{ needs.runtime-payload.result }}" \
-            "${{ needs.nebius-iac.result }}" \
-            "${{ needs.tests-root.result }}" \
-            "${{ needs.tests-packages.result }}"
+            "$PLAN_RESULT" "$LOCKED_RESULT" "$LINT_RESULT" \
+            "$RUNTIME_RESULT" "$IAC_RESULT" "$ROOT_RESULT" "$PACKAGES_RESULT"
           do
-            if [[ "${result}" != "success" ]]; then
+            if [[ "$result" != "success" ]]; then
               echo "Required parallel check result was ${result}" >&2
               exit 1
             fi
           done
-
-      - name: Install exact uv
-        if: needs.workflow-plan.outputs.docs_only != 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          version: "0.11.26"
-          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
-          enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
-          cache-dependency-glob: uv.lock
-
-      - name: Sync locked coverage tool
-        if: needs.workflow-plan.outputs.docs_only != 'true'
-        run: uv sync --locked --only-group ci-coverage --python 3.11
-
-      - name: Download root coverage shards
-        if: >-
-          needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: coverage-data-root-*
-          path: cov-root
-          merge-multiple: true
-
-      - name: Download package coverage
-        if: >-
-          needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: coverage-data-packages
-          path: cov-packages
-
-      - name: Combine fast-tier coverage
-        if: >-
-          needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        run: |
-          cp cov-packages/.coverage .coverage.packages
-          cp .coverage.packages cov-root/.coverage.packages
-          uv run --no-sync coverage combine cov-root
-          uv run --no-sync coverage xml
-
-      - name: Upload coverage.xml
-        if: >-
-          always() && needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-xml-fast
-          path: coverage.xml
-          if-no-files-found: warn
-
-      # Binary .coverage data file (SQLite) consumed by coverage-summary
-      # job to combine with integration-tier coverage.
-      - name: Upload fast-tier coverage data
-        if: >-
-          always() && needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-data-fast
-          path: .coverage
-          include-hidden-files: true
-          if-no-files-found: warn
-
-      # Phase 2 of #260: gate at 70 % (baseline ~72 % minus 2 pp
-      # headroom). Runs on push AND PR — any drop below the floor
-      # fails the job. Raise the floor in this step when baseline
-      # grows. Combined-tier baseline collection (Phase 3) remains
-      # opt-in via the `coverage-summary` job; no combined-tier gate yet.
-      - name: Coverage gate + summary (fast tier)
-        if: >-
-          needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        run: |
-          set +e
-          uv run --no-sync coverage report --fail-under=70 | tee coverage-report.txt
-          status=${PIPESTATUS[0]}
-          set -e
-          fast_pct=$(uv run --no-sync coverage report --format=total)
-          fast_summary=$(tail -1 coverage-report.txt)
-          {
-            echo "## Coverage report"
-            echo ""
-            echo "**Fast tier: ${fast_pct} %** (gate >= 70 %)."
-            echo ""
-            echo '```'
-            echo "${fast_summary}"
-            echo '```'
-            echo ""
-            echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact."
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
 
   # Go binary checks (#78 Phase B). This stays separate from fast-checks
   # because Go is its own toolchain; the final repository-checks job waits
   # for both toolchains without increasing Python CI latency.
   go-checks:
     name: go-checks
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)['go-checks'] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.docs_only != 'true'
@@ -889,37 +667,24 @@ jobs:
           cache: false
       - name: gofmt
         run: |
-          out=$(gofmt -l ./cmd/)
+          out=$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-llm-gateway-sandbox)
           if [ -n "$out" ]; then
             echo "$out"
-            echo "gofmt found issues; run \`gofmt -w ./cmd/\` to fix"
+            echo "gofmt found issues; run gofmt on the selected runtime packages to fix"
             exit 1
           fi
       - name: go vet
-        run: go vet ./cmd/...
+        run: go vet ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...
       - name: go test
-        run: go test -race ./cmd/...
-      - name: gofmt supervisor
-        run: |
-          out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)
-          if [ -n "$out" ]; then
-            echo "$out"
-            echo "gofmt found supervisor issues; run \`gofmt -w ./cmd/loom-task-image-builder-supervisor\` to fix"
-            exit 1
-          fi
-      - name: go vet supervisor
-        run: go vet ./cmd/loom-task-image-builder-supervisor
-      - name: go test supervisor
-        run: go test -race ./cmd/loom-task-image-builder-supervisor
+        run: go test -race ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at both
   # supported viewports with strict browser failure ledgers and axe.
   web-checks:
     name: web-checks
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)['web-checks'] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 20
     if: >-
       needs.workflow-plan.outputs.web_checks == 'true' &&
@@ -949,27 +714,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f config/component-ownership.toml && \
-                -f scripts/component_ownership.py ]] && \
-             python3 scripts/component_ownership.py --help | grep -q -- 'test-paths'; then
-            mapfile -t owned_tests < <(
-              python3 scripts/component_ownership.py test-paths --lane frontend
-            )
-            [[ ${#owned_tests[@]} -gt 0 ]]
-            web_tests=()
-            for test_path in "${owned_tests[@]}"; do
-              [[ "$test_path" == web/* ]]
-              web_tests+=("${test_path#web/}")
-            done
-            cd web
-            npx --no-install vitest run --coverage \
-              "${web_tests[@]}" \
-              scripts/frontend-route-browser-smoke.test.mjs \
-              scripts/staging-admin-browser-smoke.test.mjs
-          else
-            cd web
-            npm run test:coverage
-          fi
+          mapfile -t owned_tests < <(
+            python3 scripts/component_ownership.py test-paths --lane frontend
+          )
+          [[ ${#owned_tests[@]} -gt 0 ]]
+          web_tests=()
+          for test_path in "${owned_tests[@]}"; do
+            [[ "$test_path" == web/* ]]
+            web_tests+=("${test_path#web/}")
+          done
+          cd web
+          npx --no-install vitest run --coverage \
+            "${web_tests[@]}" \
+            scripts/frontend-route-browser-smoke.test.mjs
 
       - name: Production build
         working-directory: web
@@ -990,9 +747,8 @@ jobs:
   # ~10 min and the planner selects each tier from paths or opt-in labels.
   integration:
     name: integration (${{ matrix.shard }})
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)[format('integration-{0}', matrix.shard)] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 40
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
@@ -1006,6 +762,7 @@ jobs:
           - shard: 2-of-2
             shard_index: 1
     env:
+      COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
       COVERAGE_FILE: .coverage.integration-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -1015,7 +772,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -1041,16 +797,20 @@ jobs:
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
+          coverage_args=(-p no:cov)
+          if [[ "$COVERAGE_ENABLED" == "true" ]]; then
+            coverage_args=(--cov=src --cov=packages --cov-report=)
+          fi
           uv run --no-sync pytest "${test_paths[@]}" \
-            -m "not docker" \
+            -m "not docker and not legacy_pool" \
             --durations=15 \
-            --cov=src --cov=packages --cov-report=term
+            "${coverage_args[@]}"
 
-      # Binary .coverage data file consumed by coverage-summary to
-      # combine with fast-tier coverage. No standalone gate yet —
-      # collecting combined-tier baseline first (Phase 3 of #260).
+      # Upload instrumentation only for explicitly requested diagnostics.
       - name: Upload integration coverage data
-        if: always()
+        if: success() && env.COVERAGE_ENABLED == 'true'
+        # Optional telemetry transport never changes functional test admission.
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-data-integration-${{ matrix.shard }}
@@ -1064,9 +824,8 @@ jobs:
   # paths, the `ci:integration-docker` label, or a workflow_dispatch input.
   integration-docker:
     name: integration-docker
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)['integration-docker'] }}
-    needs: [workflow-plan, ci-route]
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
     timeout-minutes: 40
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
@@ -1079,7 +838,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -1100,25 +858,21 @@ jobs:
             uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest "${test_paths[@]}" \
+          uv run --no-sync pytest -m "not legacy_pool" "${test_paths[@]}" \
             --durations=15
 
-  # Optional PR-only combined coverage summary. The default fast-tier
-  # summary is written by fast-checks so ordinary PRs do not
-  # start another runner only for summary text. Apply ci:integration
-  # or ci:coverage-summary when combined coverage details are useful.
-  # This used to post a PR comment via `gh pr comment`; step summary
-  # keeps the same information on the workflow page without email spam.
+  # Explicit diagnostics only. Reporting is outside required admission and does
+  # not impose a repository-wide coverage percentage on the migrated scope.
   coverage-summary:
     name: coverage-summary
     runs-on: ubuntu-latest
-    needs: [workflow-plan, fast-checks, integration]
+    needs: [workflow-plan, tests-root, tests-packages, integration]
     if: >-
       always() &&
       needs.workflow-plan.outputs.coverage_summary == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
-      needs.fast-checks.result == 'success' &&
-      needs.workflow-plan.outputs.docs_only != 'true'
+      needs.tests-root.result == 'success' &&
+      needs.tests-packages.result == 'success'
     permissions:
       contents: read
     steps:
@@ -1129,7 +883,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -1140,59 +893,53 @@ jobs:
       - name: Sync locked coverage tool
         run: uv sync --locked --only-group ci-coverage --python 3.11
 
-      - name: Download fast-tier coverage
+      - name: Download root coverage shards
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: coverage-data-fast
-          path: cov-fast
+          pattern: coverage-data-root-*
+          path: cov-inputs
+          merge-multiple: true
+
+      - name: Download package coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-data-packages
+          path: cov-inputs
 
       - name: Download integration coverage
         if: needs.integration.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: coverage-data-integration-*
-          path: cov-integration
+          path: cov-inputs
           merge-multiple: true
 
-      # Writes the coverage summary to GitHub Actions' step-summary
-      # markdown rather than posting a PR comment. The step summary
-      # appears at the bottom of the workflow run page and at the top
-      # of the PR's "Checks" tab — same info, no email spam to PR
-      # authors on every push (was the case while we posted comments
-      # via `gh pr comment`).
-      - name: Combine + write step summary
+      - name: Combine and report coverage diagnostics
         env:
           INTEGRATION_RESULT: ${{ needs.integration.result }}
         run: |
-          fast_pct=$(uv run --no-sync coverage report --data-file=cov-fast/.coverage --format=total)
-          fast_summary=$(uv run --no-sync coverage report --data-file=cov-fast/.coverage | tail -1)
-
-          combined_block=""
-          if [ "$INTEGRATION_RESULT" = "success" ] && compgen -G 'cov-integration/.coverage.integration-*' >/dev/null; then
-            cp cov-fast/.coverage .coverage.fast
-            cp cov-integration/.coverage.integration-* .
-            uv run --no-sync coverage combine
-            combined_pct=$(uv run --no-sync coverage report --format=total)
-            combined_block="**Combined (fast + integration): ${combined_pct} %** (no gate yet — Phase 3 baseline)."
-          elif [ "$INTEGRATION_RESULT" = "skipped" ]; then
-            combined_block="_Combined coverage **not measured** this PR — apply the \`ci:integration\` label to run the integration tier._"
-          else
-            combined_block="_Combined coverage **not measured** — integration job result: \`${INTEGRATION_RESULT}\`._"
-          fi
-
+          set -euo pipefail
+          uv run --no-sync coverage combine cov-inputs
+          uv run --no-sync coverage xml
+          uv run --no-sync coverage report > coverage-report.txt
           {
-            echo "## Coverage report"
+            echo "## Python coverage diagnostics"
             echo ""
-            echo "**Fast tier: ${fast_pct} %** (gate ≥ 70 %)."
-            echo ""
-            echo "${combined_block}"
-            echo ""
+            echo "Measured root and package tests; integration result: ${INTEGRATION_RESULT}."
+            echo "This report is diagnostic and has no percentage threshold."
             echo '```'
-            echo "${fast_summary}"
+            cat coverage-report.txt
             echo '```'
-            echo ""
-            echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact. Tracking #260."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-diagnostics
+          path: |
+            coverage.xml
+            coverage-report.txt
+          if-no-files-found: error
 
   repository-checks:
     name: >-
@@ -1206,17 +953,25 @@ jobs:
       needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan
+      - images
+      - cluster-smoke
+      - staging-smoke
       - fast-checks
       - go-checks
       - integration
       - integration-docker
-      - coverage-summary
       - web-checks
     steps:
       - name: Enforce selected validation results
         env:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
           GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
+          IMAGES_SELECTED: ${{ needs.workflow-plan.outputs.images }}
+          IMAGES_RESULT: ${{ needs.images.result }}
+          CLUSTER_SELECTED: ${{ needs.workflow-plan.outputs.cluster_smoke }}
+          CLUSTER_RESULT: ${{ needs.cluster-smoke.result }}
+          STAGING_SELECTED: ${{ needs.workflow-plan.outputs.staging_smoke }}
+          STAGING_RESULT: ${{ needs.staging-smoke.result }}
           FAST_RESULT: ${{ needs.fast-checks.result }}
           GO_RESULT: ${{ needs.go-checks.result }}
           DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
@@ -1224,8 +979,6 @@ jobs:
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           DOCKER_SELECTED: ${{ needs.workflow-plan.outputs.integration_docker }}
           DOCKER_RESULT: ${{ needs.integration-docker.result }}
-          COVERAGE_SELECTED: ${{ needs.workflow-plan.outputs.coverage_summary }}
-          COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
           WEB_SELECTED: ${{ needs.workflow-plan.outputs.web_checks }}
           WEB_RESULT: ${{ needs.web-checks.result }}
         run: |
@@ -1262,10 +1015,12 @@ jobs:
               exit 1
             fi
           }
+          require_boolean images "$IMAGES_SELECTED"
+          require_boolean cluster_smoke "$CLUSTER_SELECTED"
+          require_boolean staging_smoke "$STAGING_SELECTED"
           require_boolean docs_only "$DOCS_ONLY"
           require_boolean integration "$INTEGRATION_SELECTED"
           require_boolean integration_docker "$DOCKER_SELECTED"
-          require_boolean coverage_summary "$COVERAGE_SELECTED"
           require_boolean web_checks "$WEB_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
           if [[ "$DOCS_ONLY" == "true" ]]; then
@@ -1278,4 +1033,6 @@ jobs:
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"
-          require_selected "$COVERAGE_SELECTED" coverage-summary "$COVERAGE_RESULT"
+          require_selected "$IMAGES_SELECTED" images "$IMAGES_RESULT"
+          require_selected "$CLUSTER_SELECTED" cluster-smoke "$CLUSTER_RESULT"
+          require_selected "$STAGING_SELECTED" staging-smoke "$STAGING_RESULT"

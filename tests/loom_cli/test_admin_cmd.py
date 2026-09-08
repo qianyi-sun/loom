@@ -627,6 +627,7 @@ def test_rotate_json_mode_skips_checklist(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.legacy_pool
 def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -695,6 +696,7 @@ def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
     assert "<redacted>" in out
 
 
+@pytest.mark.legacy_pool
 def test_slurm_workers_status_json_format_emits_raw_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -717,6 +719,7 @@ def test_slurm_workers_status_json_format_emits_raw_json(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -783,6 +786,7 @@ def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
     assert "loom_w_secret" not in out
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_json_format_emits_raw_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -800,6 +804,7 @@ def test_gb10_workers_status_json_format_emits_raw_json(
     assert json.loads(capsys.readouterr().out) == payload
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_fails_before_cp_when_admin_token_fingerprint_drifts(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -835,6 +840,7 @@ def test_gb10_workers_status_fails_before_cp_when_admin_token_fingerprint_drifts
     assert stale_admin_token not in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -903,6 +909,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     assert "env-old" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -953,6 +960,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
     assert "missing active node report" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1013,6 +1021,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
     assert "apply_state=unavailable" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1073,6 +1082,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
     assert "max=4/10" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1143,6 +1153,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
     assert "loom-staging-b453057/deploy" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_without_source_provenance(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1213,6 +1224,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_status_gets_cp_decisions(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1280,6 +1292,7 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
     assert "decision=scale_up" in out
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_status_text_shows_no_safe_node_details(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1337,6 +1350,7 @@ def test_worker_pool_autoscaler_status_text_shows_no_safe_node_details(
     assert "details=oldlab-1:insufficient_memory,oldlab-2:cpu_load_high" in out
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1646,7 +1660,7 @@ def test_execution_resource_profile_calibrate_and_bind_use_admin_surfaces(
             "--target-id",
             "nebius-eu",
             "--source-pool-id",
-            "oldlab",
+            "calibration-source",
             "--source-architecture",
             "x86_64",
             "--resource-profile",
@@ -1745,6 +1759,7 @@ def _environment_state_unit_without_rollout_guard(
     )
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_apply_puts_profile_resources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1792,6 +1807,7 @@ def test_environment_state_apply_puts_profile_resources(
     assert "Applied environment state staging" in capsys.readouterr().out
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_fails_with_actionable_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1875,6 +1891,7 @@ def test_environment_state_check_fails_with_actionable_drift(
     assert "gb10_worker_pool_desired_states[staging/gb10].image_tag" in err
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_json_reports_autoscaler_blockers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1997,6 +2014,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
     ]
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2099,6 +2117,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     assert "external_slurm_runner_prerequisites[production/oldlab].env_file" in err
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_drifts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2146,6 +2165,7 @@ def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_dr
     assert stale_admin_token not in err
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_passes_worker_token_without_leaking_secret(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

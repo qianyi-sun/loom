@@ -181,6 +181,7 @@ def test_register_rejects_partial_or_overcommitted_cache_snapshot(
     assert overcommitted.status_code == 400
 
 
+@pytest.mark.legacy_pool
 def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
     app,
     worker_token,

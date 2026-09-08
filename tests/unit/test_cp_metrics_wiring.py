@@ -58,16 +58,6 @@ def test_metrics_objects_exposed_to_registry() -> None:
         "loom_workers_active",
         "loom_queue_depth",
         "loom_trials_inflight",
-        "loom_slurm_worker_desired_slots",
-        "loom_slurm_worker_active_slots",
-        "loom_slurm_worker_pending_slots",
-        "loom_slurm_worker_stale_slots",
-        "loom_slurm_worker_running_jobs",
-        "loom_slurm_worker_pending_jobs",
-        "loom_slurm_worker_stale_jobs",
-        "loom_slurm_worker_failed_submissions",
-        "loom_slurm_worker_cancelled_pending_jobs",
-        "loom_slurm_worker_idle_exits",
         "loom_worker_pool_total_slots",
         "loom_worker_pool_occupied_slots",
         "loom_worker_pool_free_slots",
@@ -76,9 +66,6 @@ def test_metrics_objects_exposed_to_registry() -> None:
         "loom_worker_pool_pending_slots",
         "loom_worker_pool_draining_slots",
         "loom_worker_pool_draining_workers",
-        "loom_worker_pool_autoscaler_decision",
-        "loom_worker_pool_autoscaler_error",
-        "loom_worker_pool_autoscaler_idle_seconds",
         "loom_worker_reclaim",   # counter → exposed as ..._total
         "loom_state_patch",      # counter → exposed as ..._total
         "loom_trials_state",     # counter → exposed as ..._total
@@ -109,6 +96,7 @@ def test_crash_detector_imports_worker_reclaim_total() -> None:
     assert hasattr(cd_module, "WORKER_RECLAIM_TOTAL")
 
 
+@pytest.mark.legacy_pool
 def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
     import loom_control_plane.metrics_refresher as refresher_module
 
@@ -126,7 +114,34 @@ def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
     assert hasattr(refresher_module, "WORKER_TOKENS_STALE_COUNT")
 
 
+@pytest.mark.legacy_pool
 def test_control_plane_app_imports_elastic_slurm_controller_loop() -> None:
     import loom_control_plane.app as app_module
 
     assert hasattr(app_module, "run_elastic_slurm_worker_controller_loop")
+
+
+@pytest.mark.legacy_pool
+def test_legacy_pool_metrics_objects_exposed_to_registry() -> None:
+    from loom_control_plane import metrics  # noqa: F401
+
+    names = {metric.name for metric in REGISTRY.collect()}
+    expected = {
+        "loom_slurm_worker_desired_slots",
+        "loom_slurm_worker_active_slots",
+        "loom_slurm_worker_pending_slots",
+        "loom_slurm_worker_stale_slots",
+        "loom_slurm_worker_running_jobs",
+        "loom_slurm_worker_pending_jobs",
+        "loom_slurm_worker_stale_jobs",
+        "loom_slurm_worker_failed_submissions",
+        "loom_slurm_worker_cancelled_pending_jobs",
+        "loom_slurm_worker_idle_exits",
+        "loom_worker_pool_autoscaler_decision",
+        "loom_worker_pool_autoscaler_error",
+        "loom_worker_pool_autoscaler_idle_seconds",
+    }
+    for stem in expected:
+        assert stem in names or f"{stem}_total" in names or any(
+            name.startswith(stem) for name in names
+        ), f"metric stem {stem!r} not in registered names"

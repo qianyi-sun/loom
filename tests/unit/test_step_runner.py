@@ -101,6 +101,7 @@ async def context(tmp_path: Path) -> TrialContext:
     )
 
 
+@pytest.mark.legacy_pool
 def test_isolated_verifier_inherits_slurm_cgroup_parent(
     context: TrialContext,
 ) -> None:

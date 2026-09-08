@@ -3,16 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from scripts.check_ci_upgrade_policy import check_upgrade_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_repository_upgrade_policy_is_complete() -> None:
-    assert check_upgrade_policy(
-        policy_file=REPO_ROOT / "config" / "ci-upgrade-policy.json",
-        lock_file=REPO_ROOT / "config" / "ci-actions-lock.json",
-    ) == ()
+    assert (
+        check_upgrade_policy(
+            policy_file=REPO_ROOT / "config" / "ci-upgrade-policy.json",
+            lock_file=REPO_ROOT / "config" / "ci-actions-lock.json",
+        )
+        == ()
+    )
 
 
 def test_setup_go_node24_upgrade_is_exact_and_rollbackable() -> None:
@@ -39,33 +43,34 @@ def test_setup_go_node24_upgrade_is_exact_and_rollbackable() -> None:
         "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py "
         "tests/ops/test_ci_upgrade_policy.py",
         "actionlint .github/workflows/ci.yml",
-        'test -z "$(gofmt -l ./cmd/)"',
-        "go vet ./cmd/...",
-        "go test -race ./cmd/...",
+        'test -z "$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-llm-gateway-sandbox)"',
+        "go vet ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...",
+        "go test -race ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...",
     ]
 
 
-def test_image_supply_chain_upgrade_has_real_previous_release_rollbacks() -> None:
-    policy = json.loads(
-        (REPO_ROOT / "config/ci-upgrade-policy.json").read_text(encoding="utf-8"),
-    )
-    image_batch = next(
-        batch for batch in policy["batches"] if batch["name"] == "image-supply-chain"
+@pytest.mark.parametrize(
+    "contexts",
+    [
+        [],
+        ["repository-checks", "repository-checks"],
+        ["repository-checks", "images-gate", "cluster-smoke-gate", "staging-smoke-gate"],
+        "repository-checks",
+        [{"name": "repository-checks"}],
+    ],
+)
+def test_canary_context_drift_fails_closed(tmp_path: Path, contexts: object) -> None:
+    policy = json.loads((REPO_ROOT / "config/ci-upgrade-policy.json").read_text())
+    policy["required_canary_contexts"] = contexts
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy))
+
+    errors = check_upgrade_policy(
+        policy_file=path,
+        lock_file=REPO_ROOT / "config/ci-actions-lock.json",
     )
 
-    assert image_batch["compatibility_tests"] == [
-        "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py "
-        "tests/ops/test_install_trivy.py tests/ops/test_ci_trivy_release_policy.py "
-        "tests/ops/test_ci_image_release_evidence.py "
-        "tests/ops/test_ci_throughput_workflows.py",
-        "actionlint .github/workflows/images.yml",
-    ]
-    assert image_batch["rollback"] == {
-        "actions/attest-build-provenance": {
-            "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
-            "version": "v4.1.1",
-        }
-    }
+    assert any("required canary contexts must be exactly" in error for error in errors)
 
 
 def test_batch_larger_than_two_fails_closed(tmp_path: Path) -> None:
@@ -79,12 +84,7 @@ def test_batch_larger_than_two_fails_closed(tmp_path: Path) -> None:
         "schema_version": 1,
         "max_actions_per_batch": 2,
         "node24_minimum_runner": "2.327.1",
-        "required_canary_contexts": [
-            "repository-checks",
-            "images-gate",
-            "cluster-smoke-gate",
-            "staging-smoke-gate",
-        ],
+        "required_canary_contexts": ["repository-checks"],
         "batches": [
             {
                 "name": "too-wide",
@@ -110,12 +110,7 @@ def test_missing_action_and_rollback_fail_closed(tmp_path: Path) -> None:
         "schema_version": 1,
         "max_actions_per_batch": 2,
         "node24_minimum_runner": "2.327.1",
-        "required_canary_contexts": [
-            "repository-checks",
-            "images-gate",
-            "cluster-smoke-gate",
-            "staging-smoke-gate",
-        ],
+        "required_canary_contexts": ["repository-checks"],
         "batches": [
             {
                 "name": "bad",

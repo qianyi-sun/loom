@@ -1,230 +1,17 @@
 name: staging-smoke
 
-run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' &&
-      format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.sha,
-             github.event.before || github.sha,
-             github.event.pull_request.updated_at || 'none',
-             github.event.action || github.event_name,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') ||
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (github.event.action == 'edited' &&
-        github.event.changes.base == null) ||
-       ((github.event.action == 'labeled' ||
-         github.event.action == 'unlabeled') &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
-                  github.event.label.name))) &&
-      format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.event.pull_request.head.sha,
-             github.event.pull_request.base.sha,
-             github.event.pull_request.updated_at,
-             github.event.action,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') ||
-      format('gate=full / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha,
-             github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha,
-             github.event.pull_request.updated_at || 'none',
-             github.event.action || github.event_name,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') }}
-
-# Runs the manifest-owned Compose system contract for selected PRs. Candidate
-# deployment and live k3s readiness are separately authorized protected
-# acceptance; this required PR context does not claim live-staging evidence.
-#
-# Trigger model:
-#   - workflow_dispatch (manual)
-#   - PRs selected by changed paths or the additive `staging-smoke` label
-#
-# Expected runtime: bounded by the manifest-owned system suite.
-
+# Disposable application lifecycle smoke; no live environment credentials.
+# Selection and admission are owned by the calling CI workflow.
 on:
-  workflow_dispatch:
-  pull_request:
-    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
-  merge_group:
-    types: [checks_requested]
+  workflow_call:
 
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    staging-smoke-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (github.event.action == 'edited' && github.event.changes.base == null) ||
-       ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
-      format('filtered-{0}', github.run_id) || 'authoritative' }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft' ||
-          (github.event.action == 'edited' && github.event.changes.base == null) ||
-          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
-           !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
-
 jobs:
-  plan:
-    name: staging smoke plan
-    runs-on: ubuntu-latest
-    outputs:
-      required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
-      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
-    steps:
-      - name: Classify filtered event before checkout
-        id: event
-        shell: bash
-        env:
-          FILTERED_EVENT: >-
-            ${{ github.event_name == 'pull_request' &&
-                (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft' ||
-                 (github.event.action == 'edited' &&
-                  github.event.changes.base == null) ||
-                 ((github.event.action == 'labeled' ||
-                   github.event.action == 'unlabeled') &&
-                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
-                            github.event.label.name))) }}
-        run: |
-          set -euo pipefail
-          if [[ "$FILTERED_EVENT" == "true" ]]; then
-            {
-              echo 'checkout_required=false'
-              echo 'gate_mode=filtered'
-              echo 'required=false'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        if: steps.event.outputs.checkout_required == 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Plan required staging smoke validation
-        id: plan
-        if: steps.event.outputs.checkout_required == 'true'
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          PR_ACTION: ${{ github.event.action }}
-          PR_ACTION_LABEL: ${{ github.event.label.name }}
-          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
-          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
-        run: |
-          set -euo pipefail
-          case "$EVENT_NAME" in
-            pull_request)
-              git diff --name-only "$BASE_SHA...$HEAD_SHA" \
-                > /tmp/loom-changed-files.txt
-              ;;
-            merge_group)
-              git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-                > /tmp/loom-changed-files.txt
-              ;;
-            workflow_dispatch)
-              git show --pretty=format: --name-only "$HEAD_SHA" \
-                > /tmp/loom-changed-files.txt
-              PR_LABELS_JSON='["staging-smoke"]'
-              ;;
-            *)
-              echo "Unsupported event: $EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
-          sort -u -o /tmp/loom-changed-files.txt /tmp/loom-changed-files.txt
-          if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
-            PR_LABELS_JSON='[]'
-          fi
-          python3 scripts/plan_ci_validations.py \
-            --changed-files /tmp/loom-changed-files.txt \
-            --labels-json "$PR_LABELS_JSON" \
-            --event-name "$EVENT_NAME" \
-            --pull-request-action "$PR_ACTION" \
-            --pull-request-action-label "$PR_ACTION_LABEL" \
-            --pull-request-draft "$PR_DRAFT" \
-            --pull-request-base-changed "$PR_BASE_CHANGED" \
-            --github-output "$GITHUB_OUTPUT"
-
-  staging-route:
-    name: resolve oldlab-first staging route
-    needs: plan
-    if: >-
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      checks: read
-      contents: read
-    outputs:
-      routes: ${{ steps.route.outputs.routes }}
-    steps:
-      - name: Checkout trusted route action
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: qianyi-sun/loom
-          ref: 66b83fc57a3141197a997c9f6d4ce6e2a98ee3de
-          sparse-checkout: .github/actions/ci-runner-route
-          path: .loom-ci-route-action
-          persist-credentials: false
-
-      - name: Resolve immutable assignment
-        id: route
-        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
-        with:
-          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
-          repository: ${{ github.repository }}
-          workflow-name: staging-smoke
-          workflow-id: '302898388'
-          workflow-run-id: ${{ github.run_id }}
-          run-attempt: ${{ github.run_attempt }}
-          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          job-keys-json: '["system-smoke"]'
-          github-token: ${{ github.token }}
-
   system-smoke:
     name: manifest-owned system smoke
-    needs: [plan, staging-route]
-    if: >-
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true'
-    runs-on: >-
-      ${{ fromJSON(needs.staging-route.outputs.routes)['system-smoke'] }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -236,7 +23,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -244,7 +30,7 @@ jobs:
       - name: Sync system-smoke dependencies
         run: |
           uv python install 3.11
-          uv sync --locked --all-packages --extra dev --extra cluster --extra rollout --python 3.11
+          uv sync --locked --all-packages --extra dev --extra cluster --python 3.11
           uv pip check --python .venv/bin/python
 
       - name: Pytest — manifest-owned system smoke lane
@@ -257,7 +43,7 @@ jobs:
             uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"
+          uv run --no-sync pytest -m "not legacy_pool" --timeout=1200 "${test_paths[@]}"
 
       - name: Show system-smoke compose diagnostics
         if: failure()
@@ -290,40 +76,3 @@ jobs:
           timeout 60s docker compose -f deploy/docker-compose.test.yml \
             --profile worker --profile task-image-builder \
             down -v --remove-orphans
-
-  staging-smoke-gate:
-    name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
-          github.event_name == 'push' && 'staging-smoke-gate-push' ||
-          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
-          'staging-smoke-gate-filtered' }}
-    runs-on: ubuntu-latest
-    if: always() && needs.plan.outputs.gate_mode != 'filtered'
-    needs: [plan, system-smoke]
-    steps:
-      - name: Enforce selected staging smoke results
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-          GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
-          REQUIRED: ${{ needs.plan.outputs.required }}
-          SYSTEM_SMOKE_RESULT: ${{ needs.system-smoke.result }}
-        run: |
-          set -euo pipefail
-          [[ "$PLAN_RESULT" == "success" ]] || exit 1
-          case "$GATE_MODE" in
-            full|filtered) ;;
-            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
-          esac
-          if [[ "$GATE_MODE" == "filtered" ]]; then
-            [[ "$SYSTEM_SMOKE_RESULT" == "skipped" ]] || exit 1
-            exit 0
-          fi
-          case "$REQUIRED" in
-            true|false) ;;
-            *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
-          esac
-          if [[ "$REQUIRED" == "true" ]]; then
-            [[ "$SYSTEM_SMOKE_RESULT" == "success" ]] || exit 1
-          else
-            [[ "$SYSTEM_SMOKE_RESULT" == "skipped" || "$SYSTEM_SMOKE_RESULT" == "success" ]] || exit 1
-          fi

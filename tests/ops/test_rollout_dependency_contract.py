@@ -3,6 +3,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +22,7 @@ def test_rollout_extra_installs_benchmark_sibling_packages() -> None:
     assert sources["loom-benchmark-terminal-bench-2"] == {"workspace": True}
 
 
+@pytest.mark.legacy_pool
 def test_cluster_rollout_workflows_sync_rollout_extra() -> None:
     workflow_paths = [
         ROOT / ".github/workflows/cluster-smoke.yml",
@@ -50,6 +52,7 @@ def test_integration_jobs_install_terminal_bench_sibling_independent_of_cache() 
         assert "uv sync --locked --all-packages" in install_step["run"]
 
 
+@pytest.mark.legacy_pool
 def test_operator_runbook_bootstraps_rollout_extra() -> None:
     runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
 
@@ -58,6 +61,7 @@ def test_operator_runbook_bootstraps_rollout_extra() -> None:
     assert "packages/loom-benchmark-terminal-bench-2" in runbook
 
 
+@pytest.mark.legacy_pool
 def test_protected_staging_operator_runbook_is_merged_only_and_complete() -> None:
     runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
 
@@ -83,6 +87,7 @@ def test_protected_staging_operator_runbook_is_merged_only_and_complete() -> Non
     assert "Never use these direct\nmutation commands against shared staging" in runbook
 
 
+@pytest.mark.legacy_pool
 def test_current_staging_rollout_docs_preserve_acceptance_boundary() -> None:
     architecture = (ROOT / "docs/architecture/staging-rollout.md").read_text(
         encoding="utf-8",

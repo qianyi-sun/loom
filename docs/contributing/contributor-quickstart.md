@@ -1,5 +1,9 @@
 # Contributor quickstart
 
+> Full-Nebius series: branch from and target `codex/nebius-main`. Its sole
+> required result is `repository-checks`, aggregating all selected validation.
+> The normal `dev` workflow below retains its existing four checks.
+
 For people working on Loom itself, not just running it. End-user
 docs live in [`user-guide.md`](../user-guide.md) +
 [`operator-runbook.md`](../runbooks/operator-runbook.md).
@@ -147,18 +151,16 @@ report. Runtime Markdown outside that boundary, executable files in `docs/`,
 and unknown non-document paths do not take the fast path; unknown runtime paths
 select all heavy lanes until they gain an explicit owner.
 
-Rollout and production-release authority paths are fail-closed owners: changes
-under `src/loom_cli/rollout/` and their tests, installed staging-rollout assets,
-deployment/release workflows, or release evidence verification select every
-heavy lane. The selected `cluster-smoke-gate` validates environment isolation
-and renders and audits both the staging and production cluster profiles. These
-checks are credential-free candidate evidence; real Yibu-backed tasks and live
-environment readiness remain staging promotion gates rather than PR jobs.
+On `codex/nebius-main`, retired pool/rollout paths are outside the active
+manifest scope. Kubernetes checks exercise the Nebius renderer and disposable
+execution API; system smoke exercises local Compose. Neither claims live
+Nebius acceptance. Image validation builds and scans without publishing;
+branch-bound publication and deployment remain #1798.
 
-For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
-ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
-parallel jobs, then it combines their coverage artifacts, applies the 70%
-fast-tier gate, and writes the default fast-tier coverage summary.
+For non-document changes, `fast-checks` aggregates functional results from
+parallel static checks, root-test shards, package tests and runtime contracts.
+Ordinary Python tests run without coverage instrumentation. Add
+`ci:coverage-summary` for an optional diagnostic report, with no merge threshold.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op
@@ -214,13 +216,13 @@ or critical violations. Its exact request/response fixtures are local-only and
 contain no deployment credentials.
 
 ```bash
-uv run --no-sync ruff check src tests packages migrations
+mapfile -t lint_paths < <(uv run --no-sync python scripts/component_ownership.py python-paths)
+uv run --no-sync ruff check "${lint_paths[@]}"
 uv run --no-sync mypy
 mapfile -t root_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root)
-uv run --no-sync pytest "${root_tests[@]}" --cov=src --cov=packages --cov-report=term
+uv run --no-sync pytest -m "not legacy_pool" "${root_tests[@]}"
 mapfile -t package_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages)
-uv run --no-sync pytest "${package_tests[@]}" --cov=src --cov=packages --cov-append --cov-report=term
-uv run --no-sync coverage report --fail-under=70
+uv run --no-sync pytest -m "not legacy_pool" "${package_tests[@]}"
 ```
 
 Local verification should use Python 3.11, matching the `repository-checks`
@@ -348,45 +350,17 @@ never enters `ci-aws`, and a missing or skipped real-AWS run is not represented
 as cloud validation. Real AWS evidence belongs to a separately protected,
 trusted post-merge/release workflow rather than the required PR context.
 
-## Coverage gates
+## Optional Python coverage
 
-- **Fast tier:** gated at **70 %** via
-  `coverage report --fail-under=70` in CI. Drops below fail
-  `fast-checks`, which makes the final `repository-checks` gate fail for
-  non-document changes. `fast-checks` also writes the default fast-tier
-  coverage summary to the GitHub Actions step summary; docs-only PRs skip it
-  because they produce no coverage inputs.
-- **Combined fast + integration:** measured and posted to the GitHub Actions
-  step summary only on PRs labelled `ci:integration` or
-  `ci:coverage-summary`. It is reported but is not a required threshold.
-- `coverage.xml` ships as a workflow artifact for external tools.
+The Nebius branch has no total Python coverage merge threshold. Ordinary tests
+run without instrumentation or coverage artifact transfers. Request
+`ci:coverage-summary` for diagnostics; the report does not replace or weaken
+functional checks. Frontend Vitest coverage thresholds remain unchanged.
 
-To reproduce the protected fast coverage gate locally, run the equivalent
-serial form of the two pytest coverage steps, then run the threshold check.
-CI runs these pytest commands in parallel and combines their coverage data in
-`fast-checks` while independent integration lanes are still running. The final
-`repository-checks` job validates the selected result instead of recomputing
-coverage. Local serial runs need `--cov-append` on the second command:
-
-```bash
-rm -f .coverage coverage.xml
-uv run --no-sync pytest \
-  tests/unit tests/contract tests/property tests/loom_cli tests/ops \
-  --cov=src --cov=packages \
-  --cov-report=term --cov-report=xml
-uv run --no-sync pytest \
-  packages/loom-launcher/tests \
-  packages/loom-benchmarks/tests \
-  packages/loom-benchmark-terminal-bench-2/tests \
-  --cov=src --cov=packages --cov-append \
-  --cov-report=term --cov-report=xml
-uv run --no-sync coverage report --fail-under=70
-```
-
-The first pytest command alone is not the fast coverage gate: it measures the
-package source directories in `--cov=packages` before the sibling package tests
-have appended their coverage, so it can report a lower partial total. The gate
-is the final `coverage report` after both pytest commands have completed.
+To measure locally, append `--cov=src --cov=packages --cov-report=term` to the
+manifest-selected root test command, then use `--cov-append` for the selected
+package command. Preserve `-m "not legacy_pool"` in both. Historical dev-lane
+coverage totals are not comparable to the retired-platform test population.
 
 ## Workflow
 

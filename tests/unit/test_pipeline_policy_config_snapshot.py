@@ -20,6 +20,7 @@ from loom_control_plane.worker_pool_autoscaler import (
 )
 
 
+@pytest.mark.legacy_pool
 def test_exact_three_policy_snapshots_are_stable_and_disabled_separately() -> None:
     registry = PolicyConfigRegistry.load(resource_profiles=load_resource_profiles())
     records = registry.list()
@@ -34,6 +35,7 @@ def test_exact_three_policy_snapshots_are_stable_and_disabled_separately() -> No
     assert all("enabled" not in record.snapshot.model_fields_set for record in records)
 
 
+@pytest.mark.legacy_pool
 def test_gpu_clusters_and_digests_are_disjoint_while_host7_remains_inventory() -> None:
     registry = PolicyConfigRegistry.load(resource_profiles=load_resource_profiles())
     gb10 = registry.get("behavior-gpu-gb10")
@@ -47,6 +49,7 @@ def test_gpu_clusters_and_digests_are_disjoint_while_host7_remains_inventory() -
     assert PolicyConfigRegistry.load(resource_profiles=load_resource_profiles()).get("behavior-gpu-gb10").policy_config_sha256 == first_digest
 
 
+@pytest.mark.legacy_pool
 def test_gb10_checked_in_surface_is_complete_quarantined_and_disabled() -> None:
     plan = Path("deploy/worker-pools/gb10/worker-plan.csv").read_text()
     assert len(plan.splitlines()) == 16
@@ -62,6 +65,7 @@ def test_gb10_checked_in_surface_is_complete_quarantined_and_disabled() -> None:
     assert "LOOM_AUTOSCALER_DESIRED_SLOTS=0" in controller
 
 
+@pytest.mark.legacy_pool
 def test_driver_constraints_are_derived_from_attested_platform_contracts() -> None:
     image = "registry.example.com/loom/sim@sha256:" + "a" * 64
     records: dict[tuple[str, str], ImageRuntimeRecord] = {}

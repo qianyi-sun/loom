@@ -215,7 +215,35 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 python_version = "3.11"
 strict = true
 mypy_path = ["packages/loom-bundle-checksum"]
-files = ["packages/loom-bundle-checksum/loom_bundle_checksum", "src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_task_image_authority", "src/loom_task_image_builder_guard", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen", "src/loom_capacity_guard", "src/loom_capacity_agent", "src/loom_capacity_manager", "src/loom_capacity_executor", "src/loom_capacity_pool_controller", "src/loom_capacity_pool_executor", "src/loom_execution_actuator", "src/loom_execution_capacity_collector"]
+# Nebius integration checks active platform entrypoints. Retired pool/host
+# infrastructure stays in the checkout for migration history, outside recursive
+# discovery. Imports from active modules are still followed and type-checked;
+# this is not an error suppression or an import-isolation guarantee.
+files = [
+  "packages/loom-bundle-checksum/loom_bundle_checksum",
+  "src/loom",
+  "src/loom_llm_gateway",
+  "src/loom_control_plane",
+  "src/loom_worker",
+  "src/loom_benchmark_tool",
+  "src/loom_service",
+  "src/loom_cli",
+  "src/loom_drivers",
+  "src/loom_egress_xds",
+  "src/loom_family_orchestrator",
+  "src/loom_pipeline_orchestrator",
+  "src/loom_listen",
+  "src/loom_execution_actuator",
+  "src/loom_execution_capacity_collector",
+]
+exclude = [
+  '^src/loom_cli/rollout/',
+  '^src/loom_(capacity_[^/]+|task_image_authority|task_image_builder_guard|personal_dev_[^/]+)/',
+  '^src/loom_cli/(cluster_[^/]+|capacity_control_plane[^/]*|gb10_[^/]+|personal_dev[^/]*|rollout_lock[^/]*|environment_state|dev_cmd|inference_cmd)\.py$',
+  '^src/(loom|loom_service|loom_service/routes)/(personal_dev[^/]*|dev_instance[^/]*)\.py$',
+  '^src/loom_control_plane/(gb10_[^/]+|slurm_[^/]+|elastic_slurm_worker_controller|worker_pool_autoscaler|shared_capacity_broker|global_dev_fleet_autoscaler|global_execution_fence)\.py$',
+  '^src/loom/staging_(capacity_database_bootstrap|mutation_[^/]+)\.py$',
+]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package
@@ -287,19 +315,51 @@ module = [
 ]
 ignore_missing_imports = true
 
+[tool.coverage.run]
+# Match the retired infrastructure scope rather than lowering the shared-code
+# coverage floor. Generic worker, service, durable DB contracts, execution
+# actuator and Nebius capacity collector remain measured.
+omit = [
+  "*/loom_cli/rollout/*",
+  "*/loom_capacity_*/*",
+  "*/loom_task_image_authority/*",
+  "*/loom_task_image_builder_guard/*",
+  "*/loom_personal_dev_*/*",
+  "*/loom_cli/cluster_*.py",
+  "*/loom_cli/capacity_control_plane*.py",
+  "*/loom_cli/gb10_*.py",
+  "*/loom_cli/personal_dev*.py",
+  "*/loom_cli/rollout_lock*.py",
+  "*/loom_cli/environment_state.py",
+  "*/loom_cli/dev_cmd.py",
+  "*/loom_cli/inference_cmd.py",
+  "*/loom/personal_dev*.py",
+  "*/loom/dev_instance*.py",
+  "*/loom_service/personal_dev*.py",
+  "*/loom_service/dev_instance*.py",
+  "*/loom_service/routes/personal_dev*.py",
+  "*/loom_service/routes/dev_instance*.py",
+  "*/loom_control_plane/gb10_*.py",
+  "*/loom_control_plane/slurm_*.py",
+  "*/loom_control_plane/elastic_slurm_worker_controller.py",
+  "*/loom_control_plane/worker_pool_autoscaler.py",
+  "*/loom_control_plane/shared_capacity_broker.py",
+  "*/loom_control_plane/global_dev_fleet_autoscaler.py",
+  "*/loom_control_plane/global_execution_fence.py",
+  "*/loom/staging_capacity_database_bootstrap.py",
+  "*/loom/staging_mutation_*.py",
+]
+
 [tool.coverage.paths]
-# Coverage shards can run on GitHub-hosted or oldlab ephemeral runners while
-# the aggregation jobs intentionally remain GitHub-hosted. Normalize both
-# checkout roots before combining their binary coverage data.
+# Normalize the hosted runner checkout roots before combining shard data.
+# Dedicated Nebius runner paths can be added when that runner contract exists.
 source = [
   "src",
   "/home/runner/work/*/*/src",
-  "/opt/actions-runner/_work/*/*/src",
 ]
 packages = [
   "packages",
   "/home/runner/work/*/*/packages",
-  "/opt/actions-runner/_work/*/*/packages",
 ]
 
 [tool.pytest.ini_options]
@@ -329,8 +389,9 @@ timeout = 60
 # `anyio` portal shutdown that the thread-method timer can't interrupt.
 timeout_method = "signal"
 markers = [
+  "legacy_pool: OLDLAB/GB10/Slurm-specific case retained for migration history; excluded from Nebius integration CI.",
   "swe_bench_smoke: SWE-Bench Verified end-to-end smoke; pulls ~5GB per-instance images. Opt-in via LOOM_RUN_SWE_BENCH_SMOKE=1.",
   "docker: integration tests that spin up real Docker containers via the host daemon (DockerDriver, network-policy, trial-e2e, subprocess-agent). Excluded from the default integration CI tier; run via the `integration-docker` workflow job or `pytest -m docker` locally.",
   "integration: PgBouncer + Postgres container integration tests. Require Docker; skip with `-m 'not integration'` in environments without Docker.",
-  "cluster_smoke: mutation-free tests for the checked-in live k3s render contract. Run via the `cluster-smoke` CI job or `pytest -m cluster_smoke` locally.",
+  "cluster_smoke: credential-free Nebius runtime and disposable Kubernetes execution contracts. Run via the `cluster-smoke` CI job.",
 ]
