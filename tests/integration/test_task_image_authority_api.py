@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -1063,6 +1064,61 @@ async def test_v2_candidate_route_persists_and_replays_mandatory_evidence(
     assert request.base_resolution.solve_ref not in metrics
 
 
+async def test_v2_candidate_invalid_evidence_is_redacted_and_never_persisted(
+    authority_api: _ApiContext,
+    postgres_url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    materialization_id = await _seed_materialization(postgres_url)
+    build_session = _renewed_session(authority_api)
+    authority_api.now[0] = NOW + timedelta(seconds=14)
+    claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
+        _post(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/materializations/claim",
+            _claim_request(build_session),
+        ).content
+    )
+    credential = TaskImageRegistryCredentialV1.model_validate_json(
+        _put(
+            authority_api,
+            f"/v1/projections/{GRANT_ID}/materializations/{materialization_id}/registry-credential",
+            _registry_credential_request(build_session, claim),
+        ).content
+    )
+    payload = _publication_candidate_request_v2(build_session, claim, credential).model_dump(
+        mode="json"
+    )
+    private_evidence = "private raw evidence / must never be logged"
+    payload["base_resolution"]["solve_ref"] = private_evidence
+    path = f"/v2/projections/{GRANT_ID}/materializations/{materialization_id}/publication-candidate"
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        response = authority_api.client.put(path, headers=_HEADERS, json=payload)
+        metrics = authority_api.client.get("/metrics").text
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid task-image authority contract"}
+    assert any(record.name == "httpx" and "422" in record.getMessage() for record in caplog.records)
+    for surface in (response.text, caplog.text, metrics):
+        for secret in (build_session.session_token, _BEARER, private_evidence):
+            assert secret not in surface
+    engine = create_async_engine(postgres_url)
+    try:
+        async with async_sessionmaker(engine)() as session:
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(TaskImagePublicationCandidate)
+                )
+                == 0
+            )
+            row = await session.get(TaskImageMaterialization, materialization_id)
+            assert row is not None
+            assert row.registry_images == {}
+            assert row.ready_at is None
+    finally:
+        await engine.dispose()
+
+
 async def test_registry_credential_route_is_unavailable_without_a_signer(
     authority_api: _ApiContext,
     postgres_url: str,
@@ -1672,16 +1728,21 @@ async def test_streamed_body_is_replayed_as_one_bounded_message() -> None:
     ]
 
 
-async def test_concurrency_limiter_rejects_work_instead_of_queueing_unboundedly() -> (
-    None
-):
+@pytest.mark.parametrize("first_version,second_version", [(1, 1), (1, 2), (2, 1), (2, 2)])
+@pytest.mark.parametrize("cancel_first", [False, True])
+async def test_concurrency_limiter_rejects_work_instead_of_queueing_unboundedly(
+    first_version: int,
+    second_version: int,
+    cancel_first: bool,
+) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
 
     async def downstream(scope: Any, receive: Any, send: Any) -> None:
-        del scope, receive
-        entered.set()
-        await release.wait()
+        del receive
+        if scope["path"] not in {"/healthz", "/metrics"}:
+            entered.set()
+            await release.wait()
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
@@ -1690,7 +1751,13 @@ async def test_concurrency_limiter_rejects_work_instead_of_queueing_unboundedly(
         requests_per_second=10,
         concurrency=1,
     )
-    scope = {"type": "http", "path": "/v1/projections/x/challenge"}
+    scopes = [
+        {
+            "type": "http",
+            "path": f"/v{version}/projections/x/materializations/y/publication-candidate",
+        }
+        for version in (first_version, second_version)
+    ]
 
     async def receive() -> dict[str, object]:
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -1704,35 +1771,71 @@ async def test_concurrency_limiter_rejects_work_instead_of_queueing_unboundedly(
     async def second_send(message: dict[str, object]) -> None:
         second_messages.append(message)
 
-    first = asyncio.create_task(middleware(scope, receive, first_send))
-    await entered.wait()
-    await middleware(scope, receive, second_send)
-    release.set()
-    await first
+    first = asyncio.create_task(middleware(scopes[0], receive, first_send))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        for path in ("/healthz", "/metrics"):
+            await asyncio.wait_for(
+                middleware({"type": "http", "path": path}, receive, second_send),
+                timeout=1,
+            )
+            assert second_messages[0]["status"] == 204
+            second_messages.clear()
+        await asyncio.wait_for(middleware(scopes[1], receive, second_send), timeout=1)
+    finally:
+        if cancel_first:
+            first.cancel()
+        release.set()
+        if cancel_first:
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            await first
 
-    assert first_messages[0]["status"] == 204
+    if not cancel_first:
+        assert first_messages[0]["status"] == 204
     assert second_messages[0]["status"] == 503
     assert second_messages[1]["body"] == (
         b'{"detail":"task-image authority concurrency exhausted"}'
     )
+    second_messages.clear()
+    await asyncio.wait_for(middleware(scopes[1], receive, second_send), timeout=1)
+    assert second_messages[0]["status"] == 204
 
 
+@pytest.mark.parametrize("first_version,second_version", [(1, 1), (1, 2), (2, 1), (2, 2)])
 async def test_rate_limiter_bounds_mutations_per_process(
     authority_api: _ApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+    first_version: int,
+    second_version: int,
 ) -> None:
+    monotonic = [0.0]
+    monkeypatch.setattr(api, "time", SimpleNamespace(monotonic=lambda: monotonic[0]))
     settings = authority_api.settings.model_copy(update={"request_rate_limit_per_second": 1})
     limited_app = create_app(settings)
     payload = _request().model_dump(mode="json")
-    path = f"/v1/projections/{GRANT_ID}/challenge"
+    paths = [
+        f"/v{version}/projections/{GRANT_ID}/materializations/{_CLAIM_ID}/publication-candidate"
+        for version in (first_version, second_version)
+    ]
     with TestClient(limited_app) as client:
         first = client.put(
-            path,
+            paths[0],
             headers={"Authorization": "Bearer wrong-first-private-token"},
             json=payload,
         )
         second = client.put(
-            path,
+            paths[1],
             headers={"Authorization": "Bearer wrong-second-private-token"},
+            json=payload,
+        )
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/metrics").status_code == 200
+        monotonic[0] = 1.01
+        recovered = client.put(
+            paths[1],
+            headers={"Authorization": "Bearer wrong-third-private-token"},
             json=payload,
         )
 
@@ -1740,6 +1843,7 @@ async def test_rate_limiter_bounds_mutations_per_process(
     assert second.status_code == 429
     assert second.json() == {"detail": "task-image authority rate limited"}
     assert "wrong-second-private-token" not in second.text
+    assert recovered.status_code == 401
 
 
 async def test_attestation_equivocation_commits_quarantine_before_bounded_conflict(

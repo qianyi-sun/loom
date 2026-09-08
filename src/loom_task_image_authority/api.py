@@ -219,7 +219,7 @@ class AuthorityTrafficLimitMiddleware:
         self._in_flight = 0
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+        if scope["type"] != "http" or not scope.get("path", "").startswith(("/v1/", "/v2/")):
             await self.app(scope, receive, send)
             return
 
