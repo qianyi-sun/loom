@@ -265,6 +265,9 @@ async def _locked_tb21_registration_preflight(
             manifest=manifest,
             prepared_tasks=prepared_tasks,
         )
+        for task_row in existing_tasks:
+            if task_row.config:
+                await ensure_task_image_materializations(session, task_row=task_row)
         return True
     colliding = await session.scalar(
         select(TaskRow.id).where(

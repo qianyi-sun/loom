@@ -554,6 +554,17 @@ async def test_deployment_fence_canary_retires_before_claim_when_owner_setup_fai
     assert authorization.consumed_at is None
 
 
+def _published_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
 def _stage_output_for_lease(
     app: FastAPI,
     *,
@@ -578,7 +589,7 @@ def _stage_output_for_lease(
             TaskRowDraft(
                 id=f"{task_set_id}/tasks/{task_name}",
                 checksum=f"checksum-{task_name}",
-                config={"task": {"id": task_name}},
+                config=_published_task_config(task_name),
                 source=f"s3://{app.state.settings.artifacts_bucket}/{output_prefix}/",
             ),
         ],
@@ -1254,7 +1265,7 @@ async def test_materialization_heartbeats_while_blocked_in_threaded_work(
                 TaskRowDraft(
                     id=f"{task_set_id}/tasks/heartbeat-owner",
                     checksum="heartbeat-checksum",
-                    config={"task": {"id": "heartbeat-owner"}},
+                    config=_published_task_config("heartbeat-owner"),
                     source="s3://staged/heartbeat-owner/",
                 ),
             ],
@@ -1358,7 +1369,7 @@ async def test_cancelled_materializer_cannot_publish_after_blocking_work_resumes
                 TaskRowDraft(
                     id=f"{task_set_id}/tasks/cancelled-owner",
                     checksum="cancelled-checksum",
-                    config={"task": {"id": "cancelled-owner"}},
+                    config=_published_task_config("cancelled-owner"),
                     source="s3://staged/cancelled-owner/",
                 ),
             ],
@@ -1492,7 +1503,7 @@ async def test_crash_after_staged_upload_leaves_only_orphaned_generation_output(
                 TaskRowDraft(
                     id=f"{task_set_id}/tasks/crash-after-upload",
                     checksum="crash-after-upload-checksum",
-                    config={"task": {"id": "crash-after-upload"}},
+                    config=_published_task_config("crash-after-upload"),
                     source=(
                         f"s3://{app.state.settings.artifacts_bucket}/"
                         f"{output_key.rsplit('/', 1)[0]}/"

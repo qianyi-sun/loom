@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.license_policy import tags_with_license_execution_policy
+from loom.task_image_materialization import ensure_task_image_materializations
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
@@ -280,29 +281,34 @@ async def run_import(
                 getattr(adapter, "license_execution_policy", None),
             )
             async with session_factory() as session:
-                await session.execute(
-                    pg_insert(TaskRow)
-                    .values(
-                        id=converted.task_id,
-                        checksum=converted.checksum,
-                        config=cfg,
-                        source=source_uri,
-                        license=converted.license_spdx,
-                        benchmark_id=adapter.name,
-                        tags=tags,
+                task_row = (
+                    await session.execute(
+                        pg_insert(TaskRow)
+                        .values(
+                            id=converted.task_id,
+                            checksum=converted.checksum,
+                            config=cfg,
+                            source=source_uri,
+                            license=converted.license_spdx,
+                            benchmark_id=adapter.name,
+                            tags=tags,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["id"],
+                            set_={
+                                "checksum": converted.checksum,
+                                "config": cfg,
+                                "source": source_uri,
+                                "license": converted.license_spdx,
+                                "benchmark_id": adapter.name,
+                                "tags": tags,
+                            },
+                        )
+                        .returning(TaskRow)
+                        .execution_options(populate_existing=True),
                     )
-                    .on_conflict_do_update(
-                        index_elements=["id"],
-                        set_={
-                            "checksum": converted.checksum,
-                            "config": cfg,
-                            "source": source_uri,
-                            "license": converted.license_spdx,
-                            "benchmark_id": adapter.name,
-                            "tags": tags,
-                        },
-                    ),
-                )
+                ).scalar_one()
+                await ensure_task_image_materializations(session, task_row=task_row)
                 await session.commit()
             stats["converted"] += 1
             stats["warnings"] += len(converted.warnings)

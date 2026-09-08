@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import tomllib
 from copy import deepcopy
 
 import pytest
+import tomli_w
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -118,6 +120,7 @@ async def test_registration_queues_and_reregistration_restores_retired_images(
         await register()
         async with sessions() as session:
             task = (await session.scalars(select(Task))).one()
+            original_config = deepcopy(task.config)
             images = list(await session.scalars(select(TaskImageMaterialization)))
             assert images, "registered Dockerfile task has no durable image prerequisites"
             assert all(row.state == "queued" and row.task_id == task.id for row in images)
@@ -150,5 +153,31 @@ async def test_registration_queues_and_reregistration_restores_retired_images(
             assert result.inserted == 0 and result.unchanged == 1
         elif writer == "sync":
             assert result.tasks["team-evals"].unchanged == 1
+        if writer in {"sync", "publish"}:
+            bundle_dir = bundle if writer == "sync" else root / "tasks" / "app-path-missing"
+            instruction = bundle_dir / "instruction.md"
+            instruction.write_text(instruction.read_text() + "New task revision.\n")
+            task_toml = bundle_dir / "task.toml"
+            changed_config = tomllib.loads(task_toml.read_text())
+            changed_config["task"]["name"] += " v2"
+            task_toml.write_text(tomli_w.dumps(changed_config))
+            await register()
+            async with sessions() as session:
+                current_task = (await session.scalars(select(Task))).one()
+                assert current_task.config != original_config
+                images = list(await session.scalars(select(TaskImageMaterialization)))
+                current = [row for row in images if row.id not in before]
+                assert len(current) == len(before)
+                assert all(
+                    row.task_checksum == current_task.checksum.removeprefix("sha256:")
+                    and row.task_config == current_task.config
+                    and row.state == "queued"
+                    for row in current
+                )
+                assert {
+                    row.id: (row.materialization_key, row.task_checksum, row.cpu_arch)
+                    for row in images
+                    if row.id in before
+                } == before
     finally:
         await engine.dispose()

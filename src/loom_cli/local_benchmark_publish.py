@@ -31,6 +31,7 @@ from loom.task_bundle_compat import (
     collect_task_dir_compatibility_issues,
     format_compatibility_issues,
 )
+from loom.task_image_materialization import ensure_task_image_materializations
 from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
@@ -200,29 +201,34 @@ async def publish_local_benchmark(
                 else:
                     unchanged += 1
 
-                await session.execute(
-                    pg_insert(TaskRow)
-                    .values(
-                        id=task_id,
-                        checksum=checksum,
-                        config=raw_cfg,
-                        source=source,
-                        source_provenance=source_provenance,
-                        license=entry.license_spdx,
-                        benchmark_id=entry.id,
+                task_row = (
+                    await session.execute(
+                        pg_insert(TaskRow)
+                        .values(
+                            id=task_id,
+                            checksum=checksum,
+                            config=raw_cfg,
+                            source=source,
+                            source_provenance=source_provenance,
+                            license=entry.license_spdx,
+                            benchmark_id=entry.id,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["id"],
+                            set_={
+                                "checksum": checksum,
+                                "config": raw_cfg,
+                                "source": source,
+                                "source_provenance": source_provenance,
+                                "license": entry.license_spdx,
+                                "benchmark_id": entry.id,
+                            },
+                        )
+                        .returning(TaskRow)
+                        .execution_options(populate_existing=True),
                     )
-                    .on_conflict_do_update(
-                        index_elements=["id"],
-                        set_={
-                            "checksum": checksum,
-                            "config": raw_cfg,
-                            "source": source,
-                            "source_provenance": source_provenance,
-                            "license": entry.license_spdx,
-                            "benchmark_id": entry.id,
-                        },
-                    ),
-                )
+                ).scalar_one()
+                await ensure_task_image_materializations(session, task_row=task_row)
 
             await session.commit()
     finally:
