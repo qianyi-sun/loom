@@ -23,16 +23,30 @@ from loom.db.schema import (
 from loom_task_image_authority.contracts import (
     TaskImagePublicationCandidateRequestV2,
     TaskImageSessionRenewalV1,
+    canonical_authority_sha256,
 )
+from loom_task_image_authority.materializations import claim_session_materialization
+from loom_task_image_authority.registry_credentials import record_session_publication_candidate_v2
 from loom_task_image_authority.store import (
     authorize_task_image_build_session,
+    complete_task_image_projection,
+    exchange_task_image_bootstrap,
     renew_task_image_build_session,
+    request_task_image_projection,
 )
+from tests.integration.test_task_image_authority_materializations import _queued_materialization
 from tests.integration.test_task_image_candidate_v2 import _prepared, _record
 from tests.integration.test_task_image_projection_store import (
     NEXT_SESSION_ID,
     RENEWAL_ID,
+    _attachment,
     _attestation,
+    _exchange,
+    _MemorySecretStore,
+    _principal,
+    _proof,
+    _release_grant,
+    _request,
 )
 from tests.integration.test_task_image_registry_credential_migration import _config
 from tests.integration.test_task_image_registry_credentials import (
@@ -132,6 +146,247 @@ async def _blocked(blocker, pid, task):
                 await task
                 pytest.fail("operation did not wait for the required row lock")
             await asyncio.sleep(0.01)
+
+
+async def _independent_publication_chain(session, issuer, *, operation_id, job_id):
+    """Issue/authenticate the entire real chain; only fixture identities vary."""
+    grant_id = uuid4()
+    await _release_grant(session, grant_id=grant_id, job_id=job_id)
+    principal = _principal()
+    path = f"/sys/fs/cgroup/system.slice/slurmstepd.scope/job_{job_id}/step_batch"
+    inode = 987654 + int(job_id)
+    request = _request(
+        grant_id=grant_id,
+        request_id=uuid4(),
+        slurm_job_id=job_id,
+        cgroup_path=path,
+        cgroup_inode=inode,
+    )
+    challenge = await request_task_image_projection(
+        session,
+        principal=principal,
+        request=request,
+        now=NOW + timedelta(seconds=4),
+        challenge_nonce_factory=uuid4,
+    )
+    root = f"{path}/loom-builder"
+    proof = _proof(
+        grant_id=grant_id,
+        proof_id=uuid4(),
+        request_id=request.request_id,
+        request_sha256=canonical_authority_sha256(request),
+        challenge_nonce=challenge.challenge_nonce,
+        slurm_job_id=job_id,
+        cgroup_path=path,
+        cgroup_inode=inode,
+        attachment=_attachment(
+            cgroup_inode=inode,
+            containment_root=root,
+            trusted_service_cgroup=f"{root}/trusted-service",
+            build_egress_cgroup=f"{root}/build-egress",
+        ),
+    )
+    secrets = _MemorySecretStore()
+    receipt = await complete_task_image_projection(
+        session,
+        principal=principal,
+        proof=proof,
+        now=NOW + timedelta(seconds=6),
+        secret_store=secrets,
+        bootstrap_token_factory=lambda: "loom_tibp_" + uuid4().hex + uuid4().hex,
+    )
+    build_session = await exchange_task_image_bootstrap(
+        session,
+        principal=principal,
+        request=_exchange(receipt, grant_id=grant_id, exchange_id=uuid4()),
+        now=NOW + timedelta(seconds=8),
+        secret_store=secrets,
+        session_token_factory=lambda: "loom_tibs_" + uuid4().hex + uuid4().hex,
+    )
+    authorization = await authorize_task_image_build_session(
+        session,
+        grant_id=grant_id,
+        session_id=build_session.session_id,
+        session_generation=build_session.generation,
+        raw_session_token=build_session.session_token,
+        now=NOW + timedelta(seconds=9),
+    )
+    row = await _queued_materialization(session, task_id=f"publication-contention/{job_id}")
+    claimed = await claim_session_materialization(
+        session,
+        authorization=authorization,
+        claim_id=uuid4(),
+        now=NOW + timedelta(seconds=10),
+        lease_seconds=300,
+    )
+    assert claimed is not None and claimed[0].id == row.id
+    attempt = await session.scalar(
+        select(TaskImageMaterializationAttempt).where(
+            TaskImageMaterializationAttempt.materialization_id == row.id
+        )
+    )
+    _, credential = await _issue_first(
+        session,
+        authorization=authorization,
+        build_session=build_session,
+        secrets=secrets,
+        row=row,
+        attempt=attempt,
+        issuer=issuer,
+        request_id=uuid4(),
+        credential_id_factory=uuid4,
+    )
+    legacy = _candidate_request(
+        authorization,
+        build_session,
+        row,
+        attempt,
+        credential_id=credential.credential_id,
+        credential_generation=credential.generation,
+        operation_id=uuid4(),
+    )
+    candidate_request = TaskImagePublicationCandidateRequestV2.model_validate(
+        dict(
+            legacy.model_dump(),
+            schema_version=2,
+            base_resolution={
+                "schema": "loom.task-image-base-resolution/v1",
+                "solve_ref": f"solve-{job_id}",
+                "platform": legacy.platform,
+                "output_digest": legacy.manifest_digest,
+                "observed_base_digests": [],
+            },
+        )
+    )
+    acknowledgement = await record_session_publication_candidate_v2(
+        session,
+        authorization=authorization,
+        request=candidate_request,
+        now=NOW + timedelta(seconds=12),
+        candidate_id_factory=uuid4,
+    )
+    return dict(
+        authorization=authorization,
+        operation_id=operation_id,
+        materialization_id=row.id,
+        attempt_id=attempt.id,
+        lease_epoch=attempt.lease_epoch,
+        registry_origin="https://registry.example:5443",
+        clock=lambda: NOW + timedelta(seconds=14),
+    ), acknowledgement
+
+
+@pytest.mark.parametrize("winner_commits", [True, False], ids=["commit", "rollback"])
+@pytest.mark.parametrize("waiter_expires", [False, True], ids=["live", "expired"])
+async def test_cross_grant_operation_insert_contention(
+    registry_authority_session, registry_issuer, winner_commits, waiter_expires
+):
+    s = store()
+    operation_id = uuid4()
+    async with registry_authority_session() as setup:
+        first_args, first_candidate = await _independent_publication_chain(
+            setup, registry_issuer, operation_id=operation_id, job_id="12345"
+        )
+        second_args, second_candidate = await _independent_publication_chain(
+            setup, registry_issuer, operation_id=operation_id, job_id="12346"
+        )
+        await setup.commit()
+    for field in ("grant_id", "session_id"):
+        assert getattr(first_args["authorization"], field) != getattr(
+            second_args["authorization"], field
+        )
+    for field in ("materialization_id", "attempt_id"):
+        assert first_args[field] != second_args[field]
+    assert first_candidate.candidate_id != second_candidate.candidate_id
+    now = NOW + timedelta(seconds=14)
+    second_args["clock"] = lambda: now
+    surviving_job = None
+    async with registry_authority_session() as first, registry_authority_session() as second:
+        winner = await s.submit_publication_job(first, **first_args)
+        assert winner.snapshot.components[0].candidate == first_candidate
+        first_pid = await first.scalar(text("SELECT pg_backend_pid()"))
+        second_pid = await second.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(s.submit_publication_job(second, **second_args))
+        try:
+            await _blocked(first, second_pid, task)
+            activity = (
+                await first.execute(
+                    text(
+                        "SELECT query, wait_event_type, wait_event, pg_blocking_pids(pid) "
+                        "FROM pg_stat_activity WHERE pid = :pid"
+                    ),
+                    {"pid": second_pid},
+                )
+            ).one()
+            # The preflight SELECT has already observed no committed job. The
+            # independent chain must now wait on the INSERT's global unique key.
+            assert activity.query.startswith("INSERT INTO task_image_publication_jobs ")
+            assert "ON CONFLICT DO NOTHING" in activity.query
+            assert activity.wait_event_type == "Lock" and activity.wait_event == "transactionid"
+            assert activity.pg_blocking_pids == [first_pid]
+            if waiter_expires:
+                now = second_args["authorization"].attestation_expires_at + timedelta(
+                    microseconds=1
+                )
+            if winner_commits:
+                await first.commit()
+                surviving_job = winner
+            else:
+                await first.rollback()
+            if waiter_expires:
+                with pytest.raises(s.PublicationJobAuthorizationError):
+                    await task
+                # Rejected transactions require rollback, including an INSERT
+                # which succeeded after the competing insertion was rolled back.
+                await second.rollback()
+            elif winner_commits:
+                with pytest.raises(s.PublicationJobConflictError):
+                    await task
+                # Unlike an IntegrityError, ON CONFLICT does not abort the
+                # caller's transaction: both a read and write still succeed.
+                assert await second.scalar(text("SELECT 42")) == 42
+                await second.execute(
+                    text(
+                        "CREATE TEMP TABLE publication_contention_probe (value INTEGER) ON COMMIT DROP"
+                    )
+                )
+                await second.execute(text("INSERT INTO publication_contention_probe VALUES (42)"))
+                assert (
+                    await second.scalar(text("SELECT value FROM publication_contention_probe"))
+                    == 42
+                )
+                await second.commit()
+            else:
+                surviving_job = await task
+                assert surviving_job.snapshot.components[0].candidate == second_candidate
+                assert surviving_job.snapshot.grant_id == str(second_args["authorization"].grant_id)
+                assert surviving_job.snapshot.attempt_id == str(second_args["attempt_id"])
+                assert surviving_job.snapshot.materialization_id == str(
+                    second_args["materialization_id"]
+                )
+                assert surviving_job.deadline == NOW + timedelta(seconds=3614)
+                await second.commit()
+        finally:
+            await first.rollback()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await second.rollback()
+    async with registry_authority_session() as session:
+        stored = list(await session.scalars(select(TaskImagePublicationJob)))
+        assert len(stored) == (0 if surviving_job is None else 1)
+        if surviving_job is not None:
+            assert await s.read_publication_job(session, operation_id=operation_id) == surviving_job
+            assert stored[0].canonical_snapshot == s.canonical_snapshot_bytes(
+                surviving_job.snapshot
+            )
+            assert stored[0].deadline == surviving_job.deadline
+        for materialization_id in (
+            first_args["materialization_id"],
+            second_args["materialization_id"],
+        ):
+            row = await session.get(TaskImageMaterialization, materialization_id)
+            assert row.ready_at is None and not row.registry_images
 
 
 @pytest.mark.parametrize("conflict", [False, True])
