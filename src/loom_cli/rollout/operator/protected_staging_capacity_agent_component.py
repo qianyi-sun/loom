@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -32,8 +33,18 @@ _QUERY_TIMEOUT_SECONDS = 30.0
 _MUTATION_TIMEOUT_SECONDS = 60.0
 _ROLLOUT_TIMEOUT_SECONDS = 660.0
 _LOCAL_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CONFIGURATION_KEY = "reporter-configuration.json"
+_CONFIGURATION_ANNOTATION = "loom.carin.dev/reporter-configuration-sha256"
+_CREDENTIAL_KEYS = (
+    "ca.pem",
+    "certificate.pem",
+    "database-url",
+    "private-key.pem",
+    "reporter-token",
+)
 _EXPECTED = (
     ("Secret", _NAME),
+    ("ConfigMap", _NAME),
     ("Deployment", _NAME),
     ("NetworkPolicy", "loom-capacity-agent-egress"),
     ("NetworkPolicy", "loom-capacity-agent-postgres-ingress"),
@@ -86,6 +97,7 @@ class _Sources:
 class _Snapshot:
     state: ComponentState
     evidence_digest: str
+    legacy_configuration: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +128,13 @@ class KubernetesProtectedStagingCapacityAgentComponent:
         if self._sources(plan).digest != before_sources.digest:
             raise RuntimeError("protected staging capacity agent authority changed before apply")
         documents = _documents(before_sources.manifest)
+        secret = _with_legacy_configuration(
+            documents[("Secret", _NAME)], before.legacy_configuration
+        )
         foundation = _encode_documents(
             (
-                documents[("Secret", _NAME)],
+                secret,
+                documents[("ConfigMap", _NAME)],
                 documents[("NetworkPolicy", "loom-capacity-agent-egress")],
                 documents[("NetworkPolicy", "loom-capacity-agent-postgres-ingress")],
             )
@@ -145,7 +161,10 @@ class KubernetesProtectedStagingCapacityAgentComponent:
         if after_sources.digest != before_sources.digest:
             raise RuntimeError("protected staging capacity agent authority changed after apply")
         after = self._snapshot(plan, sources=after_sources)
-        if after.state is not ComponentState.EXACT or not self._one_ready_candidate_pod(plan):
+        configuration_digest = _configuration_digest(documents[("ConfigMap", _NAME)])
+        if after.state is not ComponentState.EXACT or not self._one_ready_candidate_pod(
+            plan, configuration_digest=configuration_digest
+        ):
             raise RuntimeError("protected staging capacity agent did not converge")
         if self._sources(plan).digest != after_sources.digest:
             raise RuntimeError("protected staging capacity agent authority changed after readback")
@@ -159,7 +178,7 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                 "--namespace",
                 _NAMESPACE,
                 "get",
-                "secret,deployments,networkpolicies",
+                "secret,configmaps,deployments,networkpolicies",
                 f"--selector={_COMPONENT_LABEL}={_COMPONENT_VALUE}",
                 "--show-managed-fields",
                 "--output=json",
@@ -212,8 +231,15 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                     _hash_json({"sources": effective.digest, "resource": key, "status": "unsafe"}),
                 )
         secret = observed[("Secret", _NAME)]
+        legacy_configuration = None
         if secret is not None:
-            secret_status = self._diff(_encode_document(desired[("Secret", _NAME)]))
+            secret_data = cast(dict[str, object], secret["data"])
+            legacy_configuration = cast(str | None, secret_data.get(_CONFIGURATION_KEY))
+            secret_status = self._diff(
+                _encode_document(
+                    _with_legacy_configuration(desired[("Secret", _NAME)], legacy_configuration)
+                )
+            )
             if secret_status == 1:
                 return _Snapshot(
                     ComponentState.DRIFTED,
@@ -227,6 +253,10 @@ class KubernetesProtectedStagingCapacityAgentComponent:
             if observed_item is None or self._diff(_encode_document(desired[key])) == 1:
                 mutable_drift = True
         state = ComponentState.READY if mutable_drift or secret is None else ComponentState.EXACT
+        if state is ComponentState.EXACT and not self._one_ready_candidate_pod(
+            plan, configuration_digest=_configuration_digest(desired[("ConfigMap", _NAME)])
+        ):
+            state = ComponentState.READY
         return _Snapshot(
             state,
             _hash_json(
@@ -243,6 +273,7 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                     "state": state.value,
                 }
             ),
+            legacy_configuration=legacy_configuration,
         )
 
     def _sources(self, plan: FinalGatePlan) -> _Sources:
@@ -322,9 +353,14 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                 "certificate.pem": _b64(tls["certificate.pem"]),
                 "database-url": _b64(database_url),
                 "private-key.pem": _b64(tls["private-key.pem"]),
-                "reporter-configuration.json": _b64(canonical_bytes(configuration)),
                 "reporter-token": _b64(token.encode("ascii")),
             },
+        }
+        configuration_map: dict[str, object] = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": _NAME, "namespace": _NAMESPACE, "labels": labels},
+            "data": {_CONFIGURATION_KEY: canonical_bytes(configuration).decode("ascii")},
         }
         command = [
             "python",
@@ -358,7 +394,12 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                 "strategy": {"type": "Recreate"},
                 "selector": {"matchLabels": {"app.kubernetes.io/name": _NAME}},
                 "template": {
-                    "metadata": {"labels": labels},
+                    "metadata": {
+                        "labels": labels,
+                        "annotations": {
+                            _CONFIGURATION_ANNOTATION: _configuration_digest(configuration_map)
+                        },
+                    },
                     "spec": {
                         "automountServiceAccountToken": False,
                         "enableServiceLinks": False,
@@ -383,6 +424,8 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                                     "/var/run/loom-capacity-projected",
                                     "--destination",
                                     "/run/loom-capacity/files",
+                                    "--configuration-sha256",
+                                    _configuration_digest(configuration_map),
                                 ],
                                 "securityContext": restricted,
                                 "volumeMounts": [
@@ -430,7 +473,31 @@ class KubernetesProtectedStagingCapacityAgentComponent:
                         "volumes": [
                             {
                                 "name": "projected",
-                                "secret": {"secretName": _NAME, "defaultMode": 0o440},
+                                "projected": {
+                                    "defaultMode": 0o440,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "name": _NAME,
+                                                "items": [
+                                                    {"key": key, "path": key}
+                                                    for key in _CREDENTIAL_KEYS
+                                                ],
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "name": _NAME,
+                                                "items": [
+                                                    {
+                                                        "key": _CONFIGURATION_KEY,
+                                                        "path": _CONFIGURATION_KEY,
+                                                    }
+                                                ],
+                                            }
+                                        },
+                                    ],
+                                },
                             },
                             {"name": "runtime", "emptyDir": {"medium": "Memory"}},
                             {
@@ -485,7 +552,9 @@ class KubernetesProtectedStagingCapacityAgentComponent:
         return cast(
             str,
             yaml.safe_dump_all(
-                (secret, deployment, egress, ingress), sort_keys=True, explicit_start=True
+                (secret, configuration_map, deployment, egress, ingress),
+                sort_keys=True,
+                explicit_start=True,
             ),
         ).encode("ascii")
 
@@ -544,7 +613,7 @@ class KubernetesProtectedStagingCapacityAgentComponent:
             timeout_seconds=_MUTATION_TIMEOUT_SECONDS,
         )
 
-    def _one_ready_candidate_pod(self, plan: FinalGatePlan) -> bool:
+    def _one_ready_candidate_pod(self, plan: FinalGatePlan, *, configuration_digest: str) -> bool:
         payload = self.runner.capture_stdout(
             (
                 "kubectl",
@@ -565,6 +634,11 @@ class KubernetesProtectedStagingCapacityAgentComponent:
             if not isinstance(pods, list) or len(pods) != 1:
                 return False
             pod = _object(json.dumps(pods[0]).encode(), label="agent pod")
+            metadata = pod.get("metadata")
+            if not isinstance(metadata, dict) or not isinstance(metadata.get("annotations"), dict):
+                return False
+            if metadata["annotations"].get(_CONFIGURATION_ANNOTATION) != configuration_digest:
+                return False
             status, spec = pod.get("status"), pod.get("spec")
             if (
                 not isinstance(status, dict)
@@ -634,6 +708,22 @@ def _egress(
 
 def _b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
+
+
+def _configuration_digest(configuration_map: Mapping[str, object]) -> str:
+    data = cast(dict[str, str], configuration_map["data"])
+    return hashlib.sha256(data[_CONFIGURATION_KEY].encode("ascii")).hexdigest()
+
+
+def _with_legacy_configuration(
+    secret: Mapping[str, object], legacy_configuration: str | None
+) -> dict[str, object]:
+    """Retain unused immutable legacy data, never project or treat it as authority."""
+    result = deepcopy(dict(secret))
+    if legacy_configuration is not None:
+        data = cast(dict[str, object], result["data"])
+        data[_CONFIGURATION_KEY] = legacy_configuration
+    return result
 
 
 def _documents(payload: bytes) -> dict[tuple[str, str], dict[str, object]]:
@@ -720,8 +810,8 @@ def _safe_owned(observed: Mapping[str, object], desired: Mapping[str, object]) -
             or not isinstance(desired_data, dict)
             or not all(isinstance(key, str) for key in data)
             or not all(isinstance(key, str) for key in desired_data)
-            or {key for key in data if isinstance(key, str)}
-            != {key for key in desired_data if isinstance(key, str)}
+            or not all(isinstance(value, str) for value in data.values())
+            or set(data) not in (set(desired_data), set(desired_data) | {_CONFIGURATION_KEY})
         ):
             return False
     owners = metadata["managedFields"]

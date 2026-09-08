@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -86,9 +88,16 @@ def _read_existing_destination(destination: Path) -> dict[str, bytes]:
         os.close(directory)
 
 
-def copy_projected_credentials(source: Path, destination: Path) -> None:
+def copy_projected_credentials(
+    source: Path, destination: Path, *, configuration_sha256: str | None = None
+) -> None:
     """Copy the exact projected file set without permitting an external target."""
 
+    if configuration_sha256 is not None and (
+        re.fullmatch(r"[0-9a-f]{64}", configuration_sha256) is None
+        or configuration_sha256 == "0" * 64
+    ):
+        raise ValueError("projected configuration digest is invalid")
     source_root = source.resolve(strict=True)
     if not source_root.is_dir():
         raise ValueError("projected credential source must be a directory")
@@ -124,6 +133,13 @@ def copy_projected_credentials(source: Path, destination: Path) -> None:
             )
         finally:
             os.close(source_descriptor)
+
+    if (
+        configuration_sha256 is not None
+        and hashlib.sha256(source_payloads["reporter-configuration.json"]).hexdigest()
+        != configuration_sha256
+    ):
+        raise ValueError("projected configuration digest does not match")
 
     if destination.exists():
         if _read_existing_destination(destination) != source_payloads:
@@ -171,8 +187,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare owner-only capacity credentials")
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--configuration-sha256")
     arguments = parser.parse_args()
-    copy_projected_credentials(arguments.source, arguments.destination)
+    copy_projected_credentials(
+        arguments.source,
+        arguments.destination,
+        configuration_sha256=arguments.configuration_sha256,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point
