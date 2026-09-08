@@ -164,6 +164,9 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         Path("src/loom_service/personal_dev_lifecycle.py"): {
             "loom_capacity_agent.client",
         },
+        Path("src/loom_service/personal_dev_membership.py"): {
+            "loom_capacity_agent.client",
+        },
     }
     wired_sources = {
         path: path.read_text(encoding="utf-8")
