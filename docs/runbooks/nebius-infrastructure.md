@@ -437,6 +437,69 @@ secret store; this attachment does not introduce a copied user/provider login.
 
 ### Canonical staging side: opt-in protected render
 
+#### Persistent host transport prerequisite
+
+`scripts/ops/nebius_private_link.py` owns only `wg-loom-nb` on the existing
+deployment-access gateway and the existing staging host. It does not deploy the
+attachment, expose PostgreSQL, route cluster CIDRs, or change default routes.
+Install the reviewed script through the authorized root installation path;
+never use a developer-owned startup unit to bypass protected staging rollout.
+
+On each host, run `sudo python3 nebius_private_link.py prepare`. This creates
+or reuses a root-only local WireGuard identity and emits **only its public key**.
+Exchange these public keys; never copy the private keys between hosts. Select
+two non-overlapping RFC1918 `/32` transport addresses after checking both hosts'
+routes, both clusters' address pools, and the dedicated UDP listener port.
+
+On the public Nebius gateway, configure the peer without an endpoint:
+
+```bash
+sudo python3 nebius_private_link.py configure \
+  --address "$GATEWAY_TRANSPORT_ADDRESS" \
+  --peer-address "$STAGING_TRANSPORT_ADDRESS" \
+  --peer-public-key "$STAGING_WIREGUARD_PUBLIC_KEY"
+```
+
+On staging, use the gateway's Terraform-owned fixed public allocation:
+
+```bash
+sudo python3 nebius_private_link.py configure \
+  --address "$STAGING_TRANSPORT_ADDRESS" \
+  --peer-address "$GATEWAY_TRANSPORT_ADDRESS" \
+  --peer-public-key "$GATEWAY_WIREGUARD_PUBLIC_KEY" \
+  --endpoint "$GATEWAY_FIXED_PUBLIC_IPV4:51871"
+```
+
+The standard `wg-quick@wg-loom-nb` system service is enabled at boot. Only the
+peer `/32` is allowed; staging sends a 25-second keepalive to preserve its NAT
+mapping. No short-lived browser session or copied user kubeconfig is involved.
+These are WireGuard's standard [keepalive](https://www.wireguard.com/quickstart/)
+and [systemd service](https://git.zx2c4.com/wireguard-tools/tree/src/systemd/wg-quick%40.service)
+mechanisms, not a new tunnel supervisor. Reapplying identical configuration
+does not restart the interface or rotate its identity. Failed changed-config
+activation restores the prior managed configuration and unit enable/active state.
+An unmanaged configuration or active interface is never adopted. A per-interface
+lock serializes key preparation and reconciliation.
+
+Before acceptance, verify a fresh handshake, a peer-only route, bidirectional
+reachability, and recovery after restarting **only this dedicated unit** on each
+host. Do not reboot a shared staging host for this test. Keep private keys and
+configuration in root-only recovery storage; a gateway replacement requires
+restoring its identity or reconciling its new public key on the peer. To disable
+only this transport, use `sudo systemctl disable --now wg-quick@wg-loom-nb`;
+retain the configuration/key for recovery and do not flush firewall tables.
+
+Host transport is not application connectivity. Before attachment activation,
+separately install narrowly bound service proxies/routes and validate the actual
+DB, canonical store, Control Plane and model endpoints from the Nebius Pod
+network. Their TLS identity, renewal and network-policy source addresses must
+match the real path. Do not expose a service on a public wildcard listener,
+disable certificate verification, assume PgBouncer speaks TLS, or claim that
+a WireGuard handshake proves canonical persistence. The Pod-facing Loom Gateway
+must remain in Nebius to preserve direct peer-IP/lease verification.
+
+#### Canonical render configuration
+
 The canonical render profile is
 `deploy/environments/staging.multinode.cluster.toml`, selected by
 `deploy/environments/staging.toml`. Its checked-in default remains disabled.
