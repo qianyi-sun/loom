@@ -67,3 +67,43 @@ func TestGoPublicationCandidateV2PythonHandoffHelper(t *testing.T) {
 		t.Fatalf("ack = %#v, want exact Python V2 acknowledgement", ack)
 	}
 }
+
+// This runs against the real Python GuardService under the same required CI
+// helper policy as V2 candidate handoff; ordinary pinned Go suites have no Python.
+func TestGoPublicationStatusPythonHandoffHelper(t *testing.T) {
+	if os.Getenv("LOOM_GO_V2_HELPER") != "1" {
+		t.Skip("cross-language helper is driven by the Python integration fixture")
+	}
+	useTestProtocolPolicy(t)
+	socketPath := os.Getenv("LOOM_GO_V2_SOCKET")
+	fd, err := strconv.Atoi(os.Getenv("LOOM_GO_V2_SESSION_FD"))
+	if err != nil || socketPath == "" {
+		t.Fatal("cross-language helper environment invalid")
+	}
+	syscall.CloseOnExec(fd)
+	current, err := NewSecretBuffer(fd, maxSecretBytes)
+	if err != nil {
+		t.Fatal("current session unavailable")
+	}
+	defer current.Close()
+	binding := publicationStatusBinding{
+		GrantID:           "11111111-1111-1111-1111-111111111111",
+		OperationID:       "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+		MaterializationID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		AttemptID:         "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+		LeaseEpoch:        1, CandidateSetSHA256: strings.Repeat("2", 64), ComponentCount: 128,
+	}
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	submitted, err := client.PublicationSubmit(context.Background(), binding, current)
+	if err != nil || submitted == nil || submitted.State != "completed" || submitted.Receipt == nil {
+		t.Fatalf("submit failed: %v", err)
+	}
+	binding.PinnedSnapshotSHA256 = submitted.SnapshotSHA256
+	polled, err := client.PublicationPoll(context.Background(), binding, current)
+	if err != nil || polled == nil || polled.Receipt == nil || *polled.Receipt != *submitted.Receipt {
+		t.Fatalf("poll receipt changed: %v", err)
+	}
+	if polled.SnapshotSHA256 != strings.Repeat("1", 64) || polled.Receipt.PublicationSetSHA256 != strings.Repeat("3", 64) {
+		t.Fatal("status binding differs from Python fixture")
+	}
+}

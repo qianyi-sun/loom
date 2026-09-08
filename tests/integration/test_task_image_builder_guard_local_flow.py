@@ -199,6 +199,14 @@ def test_real_unix_seqpacket_registry_publication_keeps_authority_inert(
 def test_go_v2_candidate_handoff_reaches_actual_python_service(
     tmp_path: Path,
 ) -> None:
+    _go_handoff_reaches_actual_python_service(tmp_path, publication_status=False)
+
+
+def test_go_publication_status_handoff_reaches_actual_python_service(tmp_path: Path) -> None:
+    _go_handoff_reaches_actual_python_service(tmp_path, publication_status=True)
+
+
+def _go_handoff_reaches_actual_python_service(tmp_path: Path, *, publication_status: bool) -> None:
     helper_value = os.environ.get("LOOM_GO_V2_TEST_BINARY")
     if helper_value is None:
         if os.environ.get("LOOM_GO_V2_TEST_REQUIRED") == "1":
@@ -249,7 +257,8 @@ def test_go_v2_candidate_handoff_reaches_actual_python_service(
             [
                 str(helper),
                 "-test.v",
-                "-test.run=^TestGoPublicationCandidateV2PythonHandoffHelper$",
+                "-test.run=^TestGoPublicationStatusPythonHandoffHelper$"
+                if publication_status else "-test.run=^TestGoPublicationCandidateV2PythonHandoffHelper$",
             ],
             check=False,
             capture_output=True,
@@ -270,28 +279,41 @@ def test_go_v2_candidate_handoff_reaches_actual_python_service(
     assert SESSION_TOKEN not in completed.stdout
     assert SESSION_TOKEN not in completed.stderr
     operation, authority_request = service.authority.requests[-1]
-    assert operation == "publication-candidate-v2"
-    assert authority_request["schema_version"] == 2
-    assert authority_request["base_resolution"] == {
-        "schema": "loom.task-image-base-resolution/v1",
-        "solve_ref": "solve-python-handoff",
-        "platform": "linux/arm64",
-        "output_digest": "sha256:" + "1" * 64,
-        "observed_base_digests": ["sha256:" + "3" * 64],
-    }
+    if publication_status:
+        assert [item[0] for item in service.authority.requests[-2:]] == [
+            "publication-submit", "publication-poll",
+        ]
+        assert set(authority_request) == {
+            "schema_version", "grant_id", "session_id", "session_generation", "session_token",
+            "operation_id", "materialization_id", "attempt_id", "lease_epoch",
+        }
+        assert authority_request["schema_version"] == 1
+        assert authority_request["session_token"] == SESSION_TOKEN
+    else:
+        assert operation == "publication-candidate-v2"
+        assert authority_request["schema_version"] == 2
+        assert authority_request["base_resolution"] == {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "solve-python-handoff",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + "1" * 64,
+            "observed_base_digests": ["sha256:" + "3" * 64],
+        }
     assert ledger.get(GRANT) is not None
     ledger.close()
 
 
+@pytest.mark.parametrize("publication_status", [False, True])
 def test_go_v2_candidate_handoff_required_mode_fails_without_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    publication_status: bool,
 ) -> None:
     monkeypatch.delenv("LOOM_GO_V2_TEST_BINARY", raising=False)
     monkeypatch.setenv("LOOM_GO_V2_TEST_REQUIRED", "1")
 
     with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as raised:
-        test_go_v2_candidate_handoff_reaches_actual_python_service(tmp_path)
+        _go_handoff_reaches_actual_python_service(tmp_path, publication_status=publication_status)
 
     assert isinstance(raised.value, pytest.fail.Exception)
     assert str(raised.value) == "LOOM_GO_V2_TEST_BINARY is required"
