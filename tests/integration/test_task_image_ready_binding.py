@@ -12,9 +12,11 @@ from loom_control_plane.task_image_materializations import (
     claim_task_image_materialization,
     claim_task_image_registry_gc,
     complete_task_image_materialization,
+    record_task_image_publication,
     retry_task_image_materialization,
     start_task_image_materialization,
 )
+from tests.integration import test_task_image_publication_completion as completion_fixtures
 from tests.integration.test_task_image_authority_materializations import _queued_materialization
 from tests.integration.test_task_image_publication_completion import (
     _complete,
@@ -34,14 +36,46 @@ from tests.integration.test_task_image_registry_credentials import (
 
 @pytest.mark.parametrize("legacy_history", [False, True])
 async def test_legacy_gc_does_not_claim_rootless_ready(
-    registry_authority_session, registry_issuer, legacy_history
+    registry_authority_session, registry_issuer, legacy_history, monkeypatch
 ):
+    if legacy_history:
+
+        async def queued_after_phase1(session):
+            row = await _queued_materialization(session)
+            claimed = await claim_task_image_materialization(
+                session, builder_id="phase1", cpu_arch="arm64"
+            )
+            assert claimed is row
+            await start_task_image_materialization(
+                session, materialization_id=row.id, builder_id="phase1", lease_epoch=row.lease_epoch
+            )
+            images = {"task": "registry.example:5443/loom/task-images/legacy@sha256:" + "c" * 64}
+            await record_task_image_publication(
+                session,
+                materialization_id=row.id,
+                builder_id="phase1",
+                attempt_count=row.attempt_count,
+                lease_epoch=row.lease_epoch,
+                component="task",
+                registry_image=images["task"],
+            )
+            await complete_task_image_materialization(
+                session,
+                materialization_id=row.id,
+                builder_id="phase1",
+                lease_epoch=row.lease_epoch,
+                registry_images=images,
+            )
+            await retry_task_image_materialization(session, materialization_id=row.id)
+            return row
+
+        monkeypatch.setattr(completion_fixtures, "_queued_materialization", queued_after_phase1)
     async with registry_authority_session() as session:
         values = await _signed_job(session, registry_issuer)
         await _complete(session, values)
         row = (await session.scalars(select(TaskImageMaterialization))).one()
-        if legacy_history:
-            row.registry_image_history = [{"registry_images": {"task": "legacy"}}]
+        assert bool(row.registry_image_history) is legacy_history
+        history = list(row.registry_image_history)
         await session.commit()
         before = (dict(row.registry_images), row.ready_at, row.unreferenced_at, row.updated_at)
         for _ in range(2):
@@ -52,6 +86,7 @@ async def test_legacy_gc_does_not_claim_rootless_ready(
             await session.commit()
         await session.refresh(row)
         assert row.state == "ready"
+        assert row.registry_image_history == history
         assert (row.registry_images, row.ready_at, row.unreferenced_at, row.updated_at) == before
         assert row.ready_publication_operation_id == UUID(values[0].operation_id)
         stored = await session.get(TaskImagePublicationJob, row.ready_publication_operation_id)
@@ -96,8 +131,6 @@ async def test_retry_and_phase1_completion_preserve_historical_rootless_receipt(
         await session.refresh(row)
         assert row.registry_images == images and row.ready_at == ready_at
         assert row.ready_publication_operation_id is None
-        assert await claim_task_image_registry_gc(session, gc_id="legacy-gc", grace_hours=0) is None
-        await session.commit()
         claimed = await claim_task_image_registry_gc(session, gc_id="legacy-gc", grace_hours=0)
         assert claimed is not None and claimed.id == row.id and claimed.state == "retiring"
 

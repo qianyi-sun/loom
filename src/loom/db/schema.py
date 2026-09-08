@@ -2149,6 +2149,22 @@ class TaskImageMaterialization(Base):
 
     __tablename__ = "task_image_materializations"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["ready_publication_operation_id", "id"],
+            [
+                "task_image_publication_jobs.operation_id",
+                "task_image_publication_jobs.materialization_id",
+            ],
+            name="task_image_materializations_ready_publication_fkey",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        CheckConstraint(
+            "ready_publication_operation_id IS NULL OR "
+            "(state = 'ready' AND jsonb_typeof(registry_images) = 'object' "
+            "AND registry_images <> '{}'::jsonb AND ready_at IS NOT NULL)",
+            name="task_image_materializations_ready_publication_check",
+        ),
         CheckConstraint(
             "materialization_key ~ '^[0-9a-f]{64}$'",
             name="task_image_materializations_key_check",
@@ -2250,6 +2266,10 @@ class TaskImageMaterialization(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
         default=dict,
+    )
+    ready_publication_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=True,
     )
     registry_image_history: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB,
@@ -3335,6 +3355,11 @@ class TaskImagePublicationJob(Base):
 
     __tablename__ = "task_image_publication_jobs"
     __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "materialization_id",
+            name="task_image_publication_jobs_materialization_uidx",
+        ),
         UniqueConstraint(
             "materialization_attempt_id", name="task_image_publication_jobs_attempt_uidx"
         ),

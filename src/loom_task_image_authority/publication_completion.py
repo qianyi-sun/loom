@@ -315,6 +315,7 @@ async def complete_publication_job(
     row.registry_images = validate_task_image_registry_images(
         images, expected_components=set(images), require_complete=True
     )
+    row.ready_publication_operation_id = stored.operation_id
     row.state, row.claimed_by, row.lease_expires_at = "ready", None, None
     row.ready_at = row.finished_at = row.updated_at = now
     stored.state, stored.worker_id, stored.worker_expires_at = "completed", None, None

@@ -47,6 +47,7 @@ def test_0135_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
             "TaskImagePublicationKey",
             "TaskImagePublicationEnvelope",
             "TaskImagePublicationJob",
+            "TaskImageMaterialization",
         ):
             model = getattr(schema, model_name)
             actual = {column["name"] for column in inspect(engine).get_columns(model.__tablename__)}
@@ -69,9 +70,20 @@ def test_0135_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
             "task_image_publication_candidates",
         }
         assert all(item["options"]["ondelete"] == "RESTRICT" for item in foreign_keys)
+        binding = next(
+            item
+            for item in inspect(engine).get_foreign_keys("task_image_materializations")
+            if item["name"] == "task_image_materializations_ready_publication_fkey"
+        )
+        assert binding["constrained_columns"] == ["ready_publication_operation_id", "id"]
+        assert binding["referred_columns"] == ["operation_id", "materialization_id"]
+        assert binding["options"]["ondelete"] == "RESTRICT"
         command.downgrade(config, "0134")
         assert not set(TABLES) & set(inspect(engine).get_table_names())
         assert "task_image_publication_evidence" in inspect(engine).get_table_names()
+        assert "ready_publication_operation_id" not in {
+            item["name"] for item in inspect(engine).get_columns("task_image_materializations")
+        }
         command.upgrade(config, "0135")
     finally:
         engine.dispose()

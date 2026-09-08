@@ -14,6 +14,16 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    # Acquire every preexisting table touched by DDL/FKs before retaining any
+    # incompatible lock. Fail fast on a busy service, rather than waiting on a
+    # parent while holding audit locks needed by its in-flight transaction.
+    op.execute("""
+        LOCK TABLE public.task_image_materializations,
+          public.task_image_materialization_attempts,
+          public.task_image_registry_credentials,
+          public.task_image_publication_candidates
+          IN ACCESS EXCLUSIVE MODE NOWAIT;
+    """)
     # Issuance is the durable pre-push inventory, even before a candidate exists.
     # Keep published 0131 unchanged; protect both existing and future audit rows.
     op.execute("""
@@ -59,6 +69,7 @@ def upgrade() -> None:
               AND receipt_sha256 = encode(sha256(canonical_receipt), 'hex')) OR
             (state <> 'completed' AND completed_at IS NULL AND canonical_receipt IS NULL AND receipt_sha256 IS NULL)),
           CONSTRAINT task_image_publication_jobs_attempt_uidx UNIQUE (materialization_attempt_id),
+          CONSTRAINT task_image_publication_jobs_materialization_uidx UNIQUE (operation_id, materialization_id),
           CONSTRAINT task_image_publication_jobs_attempt_fkey FOREIGN KEY
             (materialization_attempt_id, materialization_id, attempt_number, lease_epoch, builder_id, grant_id)
             REFERENCES task_image_materialization_attempts
@@ -111,6 +122,40 @@ def upgrade() -> None:
         CREATE TRIGGER task_image_publication_jobs_preserve
           BEFORE UPDATE OR DELETE ON task_image_publication_jobs
           FOR EACH ROW EXECUTE FUNCTION task_image_publication_preserve_job();
+    """)
+    op.execute("""
+        ALTER TABLE task_image_materializations
+          ADD COLUMN ready_publication_operation_id UUID,
+          ADD CONSTRAINT task_image_materializations_ready_publication_fkey
+            FOREIGN KEY (ready_publication_operation_id, id)
+            REFERENCES task_image_publication_jobs (operation_id, materialization_id)
+            ON DELETE RESTRICT,
+          ADD CONSTRAINT task_image_materializations_ready_publication_check CHECK (
+            ready_publication_operation_id IS NULL OR
+            (state = 'ready' AND jsonb_typeof(registry_images) = 'object'
+             AND registry_images <> '{}'::jsonb AND ready_at IS NOT NULL));
+        CREATE FUNCTION task_image_materialization_preserve_ready() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+        BEGIN
+          IF OLD.ready_publication_operation_id IS NOT NULL THEN
+            IF NEW.ready_publication_operation_id IS NULL THEN
+              IF NEW.registry_images <> '{}'::jsonb OR NEW.ready_at IS NOT NULL
+                 OR NEW.state = 'ready' THEN
+                RAISE EXCEPTION 'publication ownership requires a full ready reset'
+                  USING ERRCODE = '23514';
+              END IF;
+            ELSIF (NEW.ready_publication_operation_id, NEW.registry_images, NEW.ready_at)
+                IS DISTINCT FROM
+                (OLD.ready_publication_operation_id, OLD.registry_images, OLD.ready_at) THEN
+              RAISE EXCEPTION 'bound publication readiness cannot be rewritten'
+                USING ERRCODE = '23514';
+            END IF;
+          END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER task_image_materializations_preserve_ready
+          BEFORE UPDATE ON task_image_materializations
+          FOR EACH ROW EXECUTE FUNCTION task_image_materialization_preserve_ready();
     """)
     op.execute("""
         CREATE TABLE task_image_publication_state (
@@ -273,7 +318,8 @@ def downgrade() -> None:
           public.task_image_publication_envelopes,
           public.task_image_publication_jobs,
           public.task_image_registry_credentials,
-          public.task_image_publication_candidates
+          public.task_image_publication_candidates,
+          public.task_image_materializations
           IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
           IF NOT EXISTS (
@@ -290,6 +336,12 @@ def downgrade() -> None:
         END $$;
     """)
     op.execute("""
+        DROP TRIGGER task_image_materializations_preserve_ready ON task_image_materializations;
+        DROP FUNCTION task_image_materialization_preserve_ready();
+        ALTER TABLE task_image_materializations
+          DROP CONSTRAINT task_image_materializations_ready_publication_fkey,
+          DROP CONSTRAINT task_image_materializations_ready_publication_check,
+          DROP COLUMN ready_publication_operation_id;
         DROP TABLE task_image_publication_envelopes;
         DROP TABLE task_image_publication_jobs;
         DROP FUNCTION task_image_publication_preserve_job();

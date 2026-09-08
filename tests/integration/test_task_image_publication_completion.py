@@ -27,6 +27,7 @@ from loom.db.schema import (
     TaskImagePublicationState,
     TaskImageRegistryCredentialGeneration,
 )
+from loom_control_plane.task_image_materializations import retry_task_image_materialization
 from loom_task_image_authority.contracts import (
     TaskImagePublicationCandidateRequestV2,
     TaskImageSessionRenewalV1,
@@ -126,7 +127,14 @@ async def _queued_job(
         lease_seconds=lease_seconds,
     )
     assert claimed is not None
-    attempt = (await session.scalars(select(TaskImageMaterializationAttempt))).one()
+    attempt = (
+        await session.scalars(
+            select(TaskImageMaterializationAttempt).where(
+                TaskImageMaterializationAttempt.materialization_id == row.id,
+                TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+            )
+        )
+    ).one()
     for name in names:
         credential = await issue_session_registry_credential(
             session,
@@ -753,7 +761,7 @@ async def test_completed_receipt_constraints_and_terminal_retention(
 
         # Later materialization history cannot rewrite the immutable job timestamp.
         row = (await session.scalars(select(TaskImageMaterialization))).one()
-        row.ready_at = NOW + timedelta(days=1)
+        await retry_task_image_materialization(session, materialization_id=row.id)
         await session.commit()
         assert (
             await completion().replay_completed_publication(
