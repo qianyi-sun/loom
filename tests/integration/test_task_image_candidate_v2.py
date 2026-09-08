@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 import rfc8785
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import TaskImageMaterialization, TaskImagePublicationCandidate
@@ -272,6 +272,14 @@ async def test_v2_candidate_replay_rejects_corrupted_stored_metadata(
     async with registry_authority_session() as session:
         authorization, row, request, _ = await _prepared(session, registry_issuer)
         await _record(session, authorization, request)
+        # Inject DB-owner corruption only into this isolated database, then
+        # restore the audit guard before checking application-level rejection.
+        await session.execute(
+            text(
+                "ALTER TABLE task_image_publication_candidates "
+                "DISABLE TRIGGER task_image_publication_candidates_preserve"
+            )
+        )
         stored = (await session.scalars(select(TaskImagePublicationCandidate))).one()
         payload = json.loads(json.dumps(stored.response_json))
         if corruption == "missing":
@@ -291,6 +299,12 @@ async def test_v2_candidate_replay_rejects_corrupted_stored_metadata(
             payload["base_resolution"]["observed_base_digests"] = None
         stored.response_json = payload
         await session.flush()
+        await session.execute(
+            text(
+                "ALTER TABLE task_image_publication_candidates "
+                "ENABLE TRIGGER task_image_publication_candidates_preserve"
+            )
+        )
         with pytest.raises(TaskImageSessionMaterializationConflictError):
             await _record(session, authorization, request)
         assert row.ready_at is None and not row.registry_images

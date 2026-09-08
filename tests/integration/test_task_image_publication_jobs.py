@@ -621,6 +621,19 @@ async def test_replay_revalidates_frozen_semantics(
     async with registry_authority_session() as session:
         job, values = await _submit(session, registry_issuer)
         await session.commit()
+        audit_table = (
+            "task_image_registry_credentials"
+            if corruption.startswith("credential_")
+            else "task_image_publication_candidates"
+            if not corruption.startswith("plan_")
+            else None
+        )
+        if audit_table is not None:
+            # DB-owner corruption injection only in this disposable database;
+            # restore the exact audit guard before exercising application replay.
+            await session.execute(
+                text(f"ALTER TABLE {audit_table} DISABLE TRIGGER {audit_table}_preserve")
+            )
         if corruption.startswith("plan_"):
             attempt = await session.scalar(select(TaskImageMaterializationAttempt))
             payload = json.loads(json.dumps(attempt.claim_plan_json))
@@ -656,6 +669,10 @@ async def test_replay_revalidates_frozen_semantics(
                 candidate.response_json = payload
                 candidate.response_sha256 = hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
         await session.flush()
+        if audit_table is not None:
+            await session.execute(
+                text(f"ALTER TABLE {audit_table} ENABLE TRIGGER {audit_table}_preserve")
+            )
         with pytest.raises((s.PublicationJobConflictError, ValueError, RuntimeError)):
             await s.submit_publication_job(session, **values)
         assert (
@@ -780,7 +797,14 @@ async def test_clean_preloaded_rows_refresh_under_lock(
     async with registry_authority_session() as worker, registry_authority_session() as writer:
         cached = await worker.scalar(select(model))
         assert cached is not None
+        # Fault injection in the isolated DB; normal writes are trigger-rejected.
+        immutable = model in (TaskImageRegistryCredentialGeneration, TaskImagePublicationCandidate)
+        if immutable:
+            table = model.__tablename__
+            await writer.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {table}_preserve"))
         await writer.execute(update(model).values(**values))
+        if immutable:
+            await writer.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {table}_preserve"))
         await writer.commit()
         with pytest.raises((s.PublicationJobConflictError, RuntimeError)):
             await s.submit_publication_job(worker, **args)

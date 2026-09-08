@@ -18,7 +18,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
-from sqlalchemy import delete, func, null, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.exceptions import StarletteDeprecationWarning
@@ -29,17 +29,11 @@ with warnings.catch_warnings():
 
 from loom.db.schema import (
     Secret,
-    TaskImageBuildContainmentAttestation,
-    TaskImageBuildGrant,
-    TaskImageBuildGrantEvent,
     TaskImageBuildProjection,
     TaskImageBuildProjectionEvent,
-    TaskImageBuildSessionGeneration,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
-    TaskImageMaterializationOperationEvent,
     TaskImagePublicationCandidate,
-    TaskImagePublicationEvidence,
     TaskImageRegistryCredentialGeneration,
 )
 from loom.task_image_materialization import task_image_materialization_key
@@ -211,50 +205,6 @@ def _settings(
     return TaskImageAuthoritySettings(**values)
 
 
-async def _clear_authority_rows(database_url: str) -> None:
-    engine = create_async_engine(database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with factory() as session:
-            await session.execute(delete(TaskImagePublicationCandidate))
-            await session.execute(delete(TaskImageRegistryCredentialGeneration))
-            await session.execute(delete(TaskImageMaterializationOperationEvent))
-            await session.execute(delete(TaskImagePublicationEvidence))
-            await session.execute(delete(TaskImageMaterializationAttempt))
-            await session.execute(delete(TaskImageMaterialization))
-            await session.execute(delete(TaskImageBuildProjectionEvent))
-            await session.execute(
-                update(TaskImageBuildProjection)
-                .where(TaskImageBuildProjection.session_id.is_not(None))
-                .values(
-                    state="projected",
-                    exchange_id=None,
-                    exchange_json=null(),
-                    exchange_sha256=None,
-                    session_id=None,
-                    session_generation=None,
-                    session_token_hash=None,
-                    session_secret_ref=None,
-                    session_json=null(),
-                    session_sha256=None,
-                    session_issued_at=None,
-                    session_expires_at=None,
-                    revoked_at=None,
-                    revoke_reason=None,
-                    expired_at=None,
-                )
-            )
-            await session.execute(delete(TaskImageBuildSessionGeneration))
-            await session.execute(delete(TaskImageBuildContainmentAttestation))
-            await session.execute(delete(TaskImageBuildProjection))
-            await session.execute(delete(TaskImageBuildGrantEvent))
-            await session.execute(delete(TaskImageBuildGrant))
-            await session.execute(delete(Secret).where(Secret.ref.like("loom://task-image-%")))
-            await session.commit()
-    finally:
-        await engine.dispose()
-
-
 async def _seed_released_grant(database_url: str) -> None:
     engine = create_async_engine(database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -328,14 +278,13 @@ class _ApiContext:
 @pytest.fixture
 async def authority_api(
     tmp_path: Path,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     registry_token_issuer: DistributionRegistryTokenIssuer,
 ) -> AsyncIterator[_ApiContext]:
-    await _clear_authority_rows(postgres_url)
-    await _seed_released_grant(postgres_url)
+    await _seed_released_grant(isolated_migration_postgres_url)
     settings = _settings(
         tmp_path,
-        postgres_url,
+        isolated_migration_postgres_url,
         bundle_public_https_origin="https://objects.example",
         bundle_expected_bucket="loom-bundles",
         bundle_url_expiry_seconds=600,
@@ -371,17 +320,14 @@ async def authority_api(
         credential_id_factory=lambda: _REGISTRY_CREDENTIAL_ID,
         candidate_id_factory=lambda: _CANDIDATE_ID,
     )
-    try:
-        with TestClient(app) as client:
-            yield _ApiContext(
-                client=client,
-                app=app,
-                now=current_now,
-                settings=settings,
-                bundle_backend=bundle_backend,
-            )
-    finally:
-        await _clear_authority_rows(postgres_url)
+    with TestClient(app) as client:
+        yield _ApiContext(
+            client=client,
+            app=app,
+            now=current_now,
+            settings=settings,
+            bundle_backend=bundle_backend,
+        )
 
 
 def _put(
@@ -692,9 +638,9 @@ async def test_authority_routes_drive_the_exact_projection_lifecycle_and_replays
 
 async def test_session_routes_drive_claim_bundle_and_lease_operations(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
 
     authority_api.now[0] = NOW + timedelta(seconds=14)
@@ -824,7 +770,7 @@ async def test_session_routes_drive_claim_bundle_and_lease_operations(
     assert claim_replay_after_release.status_code == 200
     assert claim_replay_after_release.json() == claim_response.json()
 
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with engine.begin() as connection:
             await connection.execute(
@@ -869,9 +815,9 @@ async def test_session_routes_drive_claim_bundle_and_lease_operations(
 
 async def test_registry_routes_issue_exact_credentials_and_record_only_inert_candidates(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     authority_api.now[0] = NOW + timedelta(seconds=14)
     claim_response = _post(
@@ -916,7 +862,7 @@ async def test_registry_routes_issue_exact_credentials_and_record_only_inert_can
         candidate_response.content
     )
 
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             row = await session.get(TaskImageMaterialization, materialization_id)
@@ -974,9 +920,9 @@ async def test_registry_routes_issue_exact_credentials_and_record_only_inert_can
 
 async def test_v2_candidate_route_persists_and_replays_mandatory_evidence(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     authority_api.now[0] = NOW + timedelta(seconds=14)
     claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
@@ -1007,7 +953,7 @@ async def test_v2_candidate_route_persists_and_replays_mandatory_evidence(
         first.content
     )
     assert response.base_resolution == request.base_resolution
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             row = await session.get(
@@ -1068,10 +1014,10 @@ async def test_v2_candidate_route_persists_and_replays_mandatory_evidence(
 
 async def test_v2_candidate_invalid_evidence_is_redacted_and_never_persisted(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     authority_api.now[0] = NOW + timedelta(seconds=14)
     claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
@@ -1104,7 +1050,7 @@ async def test_v2_candidate_invalid_evidence_is_redacted_and_never_persisted(
     for surface in (response.text, caplog.text, metrics):
         for secret in (build_session.session_token, _BEARER, private_evidence):
             assert secret not in surface
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with async_sessionmaker(engine)() as session:
             assert (
@@ -1123,9 +1069,9 @@ async def test_v2_candidate_invalid_evidence_is_redacted_and_never_persisted(
 
 async def test_registry_credential_route_is_unavailable_without_a_signer(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     authority_api.now[0] = NOW + timedelta(seconds=14)
     claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
@@ -1156,11 +1102,11 @@ async def test_registry_credential_route_is_unavailable_without_a_signer(
 
 async def test_registry_signer_failure_is_rolled_back_and_redacted(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     authority_api.now[0] = NOW + timedelta(seconds=14)
     claim = TaskImageMaterializationClaimResponseV1.model_validate_json(
@@ -1200,7 +1146,7 @@ async def test_registry_signer_failure_is_rolled_back_and_redacted(
     assert private_failure not in metrics.text
     assert private_failure not in caplog.text
 
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with AsyncSession(engine) as session:
             assert (
@@ -1214,10 +1160,10 @@ async def test_registry_signer_failure_is_rolled_back_and_redacted(
 
 async def test_materialization_routes_bind_session_path_attempt_and_guard_identity(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     tmp_path: Path,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     path = f"/v1/projections/{GRANT_ID}/materializations/claim"
     valid_claim = _claim_request(build_session)
@@ -1303,9 +1249,9 @@ async def test_materialization_routes_bind_session_path_attempt_and_guard_identi
 
 async def test_bundle_route_fails_closed_without_provider_and_redacts_backend_errors(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    materialization_id = await _seed_materialization(postgres_url)
+    materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     claim_response = _post(
         authority_api,
@@ -1378,7 +1324,7 @@ async def test_bundle_route_fails_closed_without_provider_and_redacts_backend_er
 
 async def test_oversized_claim_response_is_rejected_before_a_lease_is_committed(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
     oversized_config: dict[str, object] = {
         "schema_version": "1",
@@ -1400,7 +1346,7 @@ async def test_oversized_claim_response_is_rejected_before_a_lease_is_committed(
         "verifier": {"name": "pytest"},
     }
     materialization_id = await _seed_materialization(
-        postgres_url,
+        isolated_migration_postgres_url,
         task_config=oversized_config,
     )
     build_session = _renewed_session(authority_api)
@@ -1414,7 +1360,7 @@ async def test_oversized_claim_response_is_rejected_before_a_lease_is_committed(
     assert response.status_code == 503
     assert response.json() == {"detail": "task-image authority unavailable"}
     assert "component-126" not in response.text
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with AsyncSession(engine) as session:
             row = await session.get(TaskImageMaterialization, materialization_id)
@@ -1850,7 +1796,7 @@ async def test_rate_limiter_bounds_mutations_per_process(
 
 async def test_attestation_equivocation_commits_quarantine_before_bounded_conflict(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
     assert (
         _put(
@@ -1891,7 +1837,7 @@ async def test_attestation_equivocation_commits_quarantine_before_bounded_confli
     assert response.status_code == 409
     assert response.json() == {"detail": "task-image authority conflict"}
 
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with AsyncSession(engine) as session:
             row = await session.scalar(
@@ -1919,7 +1865,7 @@ async def test_attestation_equivocation_commits_quarantine_before_bounded_confli
 
 async def test_secret_store_failure_rolls_back_projection_and_redacts_failure(
     authority_api: _ApiContext,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1947,7 +1893,7 @@ async def test_secret_store_failure_rolls_back_projection_and_redacts_failure(
     assert "synthetic-private-keyring-failure" not in response.text
     assert "synthetic-private-keyring-failure" not in caplog.text
 
-    engine = create_async_engine(postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with AsyncSession(engine) as session:
             row = await session.scalar(
@@ -2015,7 +1961,7 @@ async def test_metrics_are_aggregate_only_and_never_expose_authority_inputs(
 
 async def test_startup_fails_closed_for_invalid_keyring_and_schema(
     tmp_path: Path,
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
     invalid_keyring = {
         "schema_version": 1,
@@ -2024,7 +1970,7 @@ async def test_startup_fails_closed_for_invalid_keyring_and_schema(
     }
     keyring_settings = _settings(
         tmp_path,
-        postgres_url,
+        isolated_migration_postgres_url,
         keyring_document=invalid_keyring,
     )
     keyring_app = create_app(keyring_settings)
@@ -2035,7 +1981,9 @@ async def test_startup_fails_closed_for_invalid_keyring_and_schema(
         assert keyring_app.state.ready is False
 
     empty_database_url = (
-        make_url(postgres_url).set(database="postgres").render_as_string(hide_password=False)
+        make_url(isolated_migration_postgres_url)
+        .set(database="postgres")
+        .render_as_string(hide_password=False)
     )
     schema_settings = _settings(tmp_path, empty_database_url)
     schema_app = create_app(schema_settings)

@@ -9,21 +9,13 @@ from uuid import UUID, uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import delete, func, null, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
-    TaskImageBuildContainmentAttestation,
-    TaskImageBuildGrant,
-    TaskImageBuildGrantEvent,
-    TaskImageBuildProjection,
-    TaskImageBuildProjectionEvent,
-    TaskImageBuildSessionGeneration,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
-    TaskImageMaterializationOperationEvent,
     TaskImagePublicationCandidate,
-    TaskImagePublicationEvidence,
     TaskImageRegistryCredentialGeneration,
 )
 from loom_task_image_authority.contracts import (
@@ -77,48 +69,13 @@ CANDIDATE_ID = UUID("66666666-7777-4777-8777-666666666666")
 
 @pytest.fixture
 async def registry_authority_session(
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine(postgres_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    # Audit is immutable: isolate committed test rows instead of deleting them.
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
-        yield factory
+        yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
-        async with factory() as session:
-            await session.execute(delete(TaskImagePublicationCandidate))
-            await session.execute(delete(TaskImageRegistryCredentialGeneration))
-            await session.execute(delete(TaskImageMaterializationOperationEvent))
-            await session.execute(delete(TaskImagePublicationEvidence))
-            await session.execute(delete(TaskImageMaterializationAttempt))
-            await session.execute(delete(TaskImageMaterialization))
-            await session.execute(delete(TaskImageBuildProjectionEvent))
-            await session.execute(
-                update(TaskImageBuildProjection)
-                .where(TaskImageBuildProjection.session_id.is_not(None))
-                .values(
-                    state="projected",
-                    exchange_id=None,
-                    exchange_json=null(),
-                    exchange_sha256=None,
-                    session_id=None,
-                    session_generation=None,
-                    session_token_hash=None,
-                    session_secret_ref=None,
-                    session_json=null(),
-                    session_sha256=None,
-                    session_issued_at=None,
-                    session_expires_at=None,
-                    revoked_at=None,
-                    revoke_reason=None,
-                    expired_at=None,
-                )
-            )
-            await session.execute(delete(TaskImageBuildSessionGeneration))
-            await session.execute(delete(TaskImageBuildContainmentAttestation))
-            await session.execute(delete(TaskImageBuildProjection))
-            await session.execute(delete(TaskImageBuildGrantEvent))
-            await session.execute(delete(TaskImageBuildGrant))
-            await session.commit()
         await engine.dispose()
 
 

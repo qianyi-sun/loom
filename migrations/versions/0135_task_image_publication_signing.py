@@ -14,6 +14,21 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    # Issuance is the durable pre-push inventory, even before a candidate exists.
+    # Keep published 0131 unchanged; protect both existing and future audit rows.
+    op.execute("""
+        CREATE FUNCTION task_image_registry_preserve_audit() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+        BEGIN
+          RAISE EXCEPTION 'task-image registry audit is immutable' USING ERRCODE = '23514';
+        END $$;
+        CREATE TRIGGER task_image_registry_credentials_preserve
+          BEFORE UPDATE OR DELETE OR TRUNCATE ON task_image_registry_credentials
+          FOR EACH STATEMENT EXECUTE FUNCTION task_image_registry_preserve_audit();
+        CREATE TRIGGER task_image_publication_candidates_preserve
+          BEFORE UPDATE OR DELETE OR TRUNCATE ON task_image_publication_candidates
+          FOR EACH STATEMENT EXECUTE FUNCTION task_image_registry_preserve_audit();
+    """)
     op.execute("""
         CREATE TABLE task_image_publication_jobs (
           operation_id UUID PRIMARY KEY,
@@ -248,19 +263,27 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Empty, inactive installations are reversible. Once publication authority
     # exists, rollback must preserve its keys, epochs and immutable audit trail.
-    # Serialize the check with the same state-first order as publication writes.
+    # Acquire the entire state-first set without waiting: application readers
+    # and writers have different table-access orders. A busy database must abort
+    # this downgrade and release all acquired locks, never form a deadlock that
+    # could choose a legitimate publication transaction as its victim.
     op.execute("""
-        LOCK TABLE public.task_image_publication_state IN ACCESS EXCLUSIVE MODE;
-        LOCK TABLE public.task_image_publication_keys IN ACCESS EXCLUSIVE MODE;
-        LOCK TABLE public.task_image_publication_envelopes IN ACCESS EXCLUSIVE MODE;
-        LOCK TABLE public.task_image_publication_jobs IN ACCESS EXCLUSIVE MODE;
+        LOCK TABLE public.task_image_publication_state,
+          public.task_image_publication_keys,
+          public.task_image_publication_envelopes,
+          public.task_image_publication_jobs,
+          public.task_image_registry_credentials,
+          public.task_image_publication_candidates
+          IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
           IF NOT EXISTS (
             SELECT 1 FROM public.task_image_publication_state
             WHERE singleton_id = 1 AND revocation_epoch = 0 AND keyset_version = 0
           ) OR EXISTS (SELECT 1 FROM public.task_image_publication_keys)
             OR EXISTS (SELECT 1 FROM public.task_image_publication_envelopes)
-            OR EXISTS (SELECT 1 FROM public.task_image_publication_jobs) THEN
+            OR EXISTS (SELECT 1 FROM public.task_image_publication_jobs)
+            OR EXISTS (SELECT 1 FROM public.task_image_registry_credentials)
+            OR EXISTS (SELECT 1 FROM public.task_image_publication_candidates) THEN
             RAISE EXCEPTION 'publication authority cannot be discarded'
               USING ERRCODE = '23514';
           END IF;
@@ -278,4 +301,9 @@ def downgrade() -> None:
         DROP FUNCTION task_image_publication_preserve_key();
         DROP FUNCTION task_image_publication_preserve_state();
         DROP FUNCTION task_image_publication_lock_state();
+        DROP TRIGGER task_image_publication_candidates_preserve
+          ON task_image_publication_candidates;
+        DROP TRIGGER task_image_registry_credentials_preserve
+          ON task_image_registry_credentials;
+        DROP FUNCTION task_image_registry_preserve_audit();
     """)
