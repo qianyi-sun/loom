@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -210,6 +211,10 @@ class _Cluster:
                 if document is None:
                     continue
                 metadata = document["metadata"]
+                prior = self.objects.get((document["kind"], metadata["name"]))
+                if prior is not None and prior.get("immutable") is True:
+                    if prior.get("data") != document.get("data"):
+                        raise RuntimeError("immutable data cannot be changed")
                 metadata.update(
                     {
                         "uid": "18fbc43f-2113-4fd7-8c7d-4cfc6c85d800",
@@ -245,6 +250,63 @@ def _component(
         reporter_tls_reader=lambda: reporter_tls,
         postgres_ca_reader=lambda: postgres_ca,
     )
+
+
+def test_new_generation_updates_configuration_without_changing_immutable_credentials(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a new rollout rewrites the immutable credential Secret."""
+    cluster = _Cluster()
+    component = _component(cluster)
+    old = _plan(tmp_path)
+    component.apply(old)
+    credentials = deepcopy(cluster.objects[("Secret", "loom-capacity-agent")]["data"])
+    old_template = deepcopy(cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"])
+    new = replace(old, starting_mutation_epoch=old.starting_mutation_epoch + 1)
+
+    assert component.classify(new)[0] is ComponentState.READY
+    component.apply(new)
+    assert component.classify(new)[0] is ComponentState.EXACT
+    assert cluster.objects[("Secret", "loom-capacity-agent")]["data"] == credentials
+    configuration = cluster.objects[("ConfigMap", "loom-capacity-agent")]["data"]
+    assert json.loads(configuration["reporter-configuration.json"])["configuration_generation"] == 9
+    assert cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"] != old_template
+
+
+def test_legacy_combined_secret_migrates_without_deletion_or_projecting_stale_configuration(
+    tmp_path: Path,
+) -> None:
+    """Break caught: legacy immutable Secrets cannot roll over or still supply old config."""
+    cluster = _Cluster()
+    component = _component(cluster)
+    old = _plan(tmp_path)
+    component.apply(old)
+    legacy = cluster.objects[("Secret", "loom-capacity-agent")]
+    configuration = cluster.objects.pop(("ConfigMap", "loom-capacity-agent"), None)
+    if configuration is not None:
+        legacy["data"]["reporter-configuration.json"] = base64.b64encode(
+            configuration["data"]["reporter-configuration.json"].encode("ascii")
+        ).decode("ascii")
+    original_data = deepcopy(legacy["data"])
+    deployment = cluster.objects[("Deployment", "loom-capacity-agent")]
+    deployment["spec"]["template"]["spec"]["volumes"][0] = {
+        "name": "projected",
+        "secret": {"secretName": "loom-capacity-agent", "defaultMode": 0o440},
+    }
+    new = replace(old, starting_mutation_epoch=old.starting_mutation_epoch + 1)
+
+    assert component.classify(new)[0] is ComponentState.READY
+    component.apply(new)
+    assert component.classify(new)[0] is ComponentState.EXACT
+    assert legacy["data"] == original_data
+    assert cluster.objects[("Secret", "loom-capacity-agent")]["data"] == original_data
+    projected = cluster.objects[("Deployment", "loom-capacity-agent")]["spec"]["template"]["spec"]["volumes"][0]["projected"]
+    secret_keys = {item["key"] for item in projected["sources"][0]["secret"]["items"]}
+    assert "reporter-configuration.json" not in secret_keys
+    assert projected["sources"][1]["configMap"]["items"] == [
+        {"key": "reporter-configuration.json", "path": "reporter-configuration.json"}
+    ]
+    assert not any("delete" in argv for argv, _ in cluster.calls)
 
 
 def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
