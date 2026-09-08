@@ -146,7 +146,8 @@ func TestGuardClientPublicationCandidateV2RejectsInexactAcknowledgementWithoutAc
 			return []byte(strings.Replace(valid, `solve_1-abc`, `other-solve`, 1)), nil
 		},
 		"substituted platform": func(*testing.T) ([]byte, []int) {
-			return []byte(strings.Replace(valid, `"platform":"linux/arm64"`, `"platform":"linux/amd64"`, 1)), nil
+			mutatedEvidence := strings.Replace(evidence.JSON(), `"platform":"linux/arm64"`, `"platform":"linux/amd64"`, 1)
+			return []byte(strings.Replace(valid, evidence.JSON(), mutatedEvidence, 1)), nil
 		},
 		"substituted root": func(*testing.T) ([]byte, []int) {
 			return []byte(strings.Replace(valid, `"output_digest":"`+v2ManifestDigest+`"`, `"output_digest":"sha256:`+strings.Repeat("d", 64)+`"`, 1)), nil
@@ -260,10 +261,9 @@ func TestGuardClientPublicationCandidateV2HonorsOutboundPacketCap(t *testing.T) 
 func TestGuardClientPublicationCandidateV2HonorsInboundPacketCap(t *testing.T) {
 	useTestProtocolPolicy(t)
 	requestEvidence := protocolV2Evidence(t, 0)
-	responseEvidence := protocolV2Evidence(t, 128)
-	response := protocolV2Response(t, responseEvidence.JSON())
+	response := append(protocolV2Response(t, requestEvidence.JSON()), []byte(strings.Repeat(" ", 4096))...)
 	if len(response) <= 4096 {
-		t.Fatalf("128-observation response size = %d, want >4096", len(response))
+		t.Fatalf("padded response size = %d, want >4096", len(response))
 	}
 	socketPath := testSocketPath(t)
 	server := startSeqpacketServer(t, socketPath, func(connFD int) {

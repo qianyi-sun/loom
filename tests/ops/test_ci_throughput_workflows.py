@@ -202,6 +202,42 @@ def test_ci_wires_phase2c_supervisor_go_checks_explicitly() -> None:
     assert steps["go test supervisor"] == ("go test -race ./cmd/loom-task-image-builder-supervisor")
 
 
+def test_go_checks_executes_required_python_go_v2_handoff() -> None:
+    steps = _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
+    step_by_name = {step.get("name"): step for step in steps}
+
+    setup_uv = step_by_name["Install uv"]
+    assert setup_uv["uses"] == ("astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39")
+    assert setup_uv["with"] == {
+        "version": "0.11.26",
+        "checksum": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
+        "manifest-file": OLDLAB_UV_MANIFEST,
+        "enable-cache": True,
+        "save-cache": (
+            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
+        ),
+        "cache-dependency-glob": "uv.lock",
+    }
+    assert step_by_name["Set up Python 3.11"]["run"] == "uv python install 3.11"
+    assert step_by_name["Sync locked workspace"]["run"] == (
+        "uv sync --locked --all-packages --extra dev --python 3.11"
+    )
+    assert step_by_name["Build Go V2 handoff test binary"]["run"] == (
+        'go test -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
+        "./cmd/loom-task-image-builder-supervisor"
+    )
+    handoff = step_by_name["Python-Go V2 handoff"]
+    assert handoff["env"] == {
+        "LOOM_GO_V2_TEST_BINARY": ("${{ runner.temp }}/loom-task-image-builder-supervisor.test"),
+        "LOOM_GO_V2_TEST_REQUIRED": "1",
+    }
+    assert handoff["run"] == (
+        "uv run --no-sync pytest "
+        "tests/integration/test_task_image_builder_guard_local_flow.py::"
+        "test_go_v2_candidate_handoff_reaches_actual_python_service"
+    )
+
+
 def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> None:
     workflow = _workflow(".github/workflows/images.yml")
     route_step = next(

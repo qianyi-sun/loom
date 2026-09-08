@@ -201,6 +201,8 @@ def test_go_v2_candidate_handoff_reaches_actual_python_service(
 ) -> None:
     helper_value = os.environ.get("LOOM_GO_V2_TEST_BINARY")
     if helper_value is None:
+        if os.environ.get("LOOM_GO_V2_TEST_REQUIRED") == "1":
+            pytest.fail("LOOM_GO_V2_TEST_BINARY is required")
         pytest.skip("LOOM_GO_V2_TEST_BINARY not configured")
     helper = Path(helper_value)
     assert helper.is_file()
@@ -267,7 +269,7 @@ def test_go_v2_candidate_handoff_reaches_actual_python_service(
     assert failure == []
     assert SESSION_TOKEN not in completed.stdout
     assert SESSION_TOKEN not in completed.stderr
-    operation, authority_request = service.authority.requests[-1]  # type: ignore[attr-defined]
+    operation, authority_request = service.authority.requests[-1]
     assert operation == "publication-candidate-v2"
     assert authority_request["schema_version"] == 2
     assert authority_request["base_resolution"] == {
@@ -279,3 +281,17 @@ def test_go_v2_candidate_handoff_reaches_actual_python_service(
     }
     assert ledger.get(GRANT) is not None
     ledger.close()
+
+
+def test_go_v2_candidate_handoff_required_mode_fails_without_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("LOOM_GO_V2_TEST_BINARY", raising=False)
+    monkeypatch.setenv("LOOM_GO_V2_TEST_REQUIRED", "1")
+
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as raised:
+        test_go_v2_candidate_handoff_reaches_actual_python_service(tmp_path)
+
+    assert isinstance(raised.value, pytest.fail.Exception)
+    assert str(raised.value) == "LOOM_GO_V2_TEST_BINARY is required"
