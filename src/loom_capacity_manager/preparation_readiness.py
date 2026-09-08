@@ -25,6 +25,11 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
     canonical_inventory_confirmation_journal_head,
 )
+from loom_capacity_manager.membership_contracts import (
+    ExecutionPreparationPolicyV3,
+    ExecutionPreparationV3,
+    parse_execution_preparation,
+)
 from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityCandidate,
@@ -560,9 +565,7 @@ async def _load_prepared_execution_readiness(
                 blockers.append("manager-not-prepared")
                 execution = None
             try:
-                preparation = ExecutionPreparationV2.model_validate_json(
-                    json.dumps(epoch.manifest_payload)
-                )
+                preparation = parse_execution_preparation(json.dumps(epoch.manifest_payload))
             except ValueError:
                 blockers.append("manager-not-prepared")
             if preparation is not None and (
@@ -593,6 +596,13 @@ async def _load_prepared_execution_readiness(
                 != execution_policy.executable_new_capacity_rate_per_minute
                 or preparation.rollback_evidence_sha256 != execution_policy.rollback_evidence_sha256
                 or preparation.legacy_writer_fences != execution_policy.legacy_writer_fences
+                or isinstance(preparation, ExecutionPreparationV3)
+                != isinstance(execution_policy, ExecutionPreparationPolicyV3)
+                or (
+                    isinstance(preparation, ExecutionPreparationV3)
+                    and isinstance(execution_policy, ExecutionPreparationPolicyV3)
+                    and preparation.personal_membership != execution_policy.personal_membership
+                )
             ):
                 blockers.append("manager-not-prepared")
             if preparation is None or preparation.executors != execution_policy.executors:

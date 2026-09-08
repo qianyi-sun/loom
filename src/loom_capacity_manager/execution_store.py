@@ -15,7 +15,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_capacity_manager.allocator import ExecutableEpochV2
 from loom_capacity_manager.contracts import (
     MICROTOKENS_PER_LAUNCH,
     JointMatchingWitnessV1,
@@ -58,7 +57,6 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableTerminalInventoryEvidenceV2,
     ExecutionContextV2,
     ExecutionFenceV2,
-    ExecutionPreparationV2,
     PreparedExecutorBindingV2,
     StrictV2Model,
     canonical_executable_admission_work_bytes,
@@ -66,6 +64,13 @@ from loom_capacity_manager.executable_contracts import (
     canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
+from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
+from loom_capacity_manager.membership_execution import parse_executable_epoch
+from loom_capacity_manager.membership_execution_store import (
+    allocation_subject_is_current,
+    resolve_allocation_reporter,
+    resolve_allocation_subject,
+)
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAllocation,
@@ -94,7 +99,11 @@ from loom_capacity_manager.models import (
     CapacityWorkerProfile,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
-from loom_capacity_manager.store import CapacityStoreError, ExecutionConflictError
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    CapacityStoreError,
+    ExecutionConflictError,
+)
 from loom_capacity_manager.topology import TopologyInfeasible, TopologySearchLimit, pack_topology
 
 _EXECUTION_NAMESPACE = UUID("82e6e16b-6c44-4af2-894b-af8fbb3fead2")
@@ -107,9 +116,7 @@ def _admission_closure_id(
 ) -> UUID:
     """Derive a PostgreSQL-verifiable closure identity from exact manager evidence."""
 
-    preimage = (
-        f"admission-closure:{proposal_id}:{proposal_digest}:{close_reason}"
-    ).encode("ascii")
+    preimage = (f"admission-closure:{proposal_id}:{proposal_digest}:{close_reason}").encode("ascii")
     return UUID(hashlib.sha256(preimage).hexdigest()[:32])
 
 
@@ -138,9 +145,7 @@ def _assert_admission_work_response_bound(
                 )
             )
     except ValueError as exc:
-        raise ExecutionConflictError(
-            "admission work exceeds its response byte bound"
-        ) from exc
+        raise ExecutionConflictError("admission work exceeds its response byte bound") from exc
 
 
 class _ExecutorFenceError(RuntimeError):
@@ -858,9 +863,7 @@ class CapacityExecutionStore:
                             subject_id=binding.subject_id,
                             subject_incarnation=binding.subject_incarnation,
                             execution_epoch=binding.execution.execution_epoch,
-                            execution_manifest_sha256=(
-                                binding.execution.execution_manifest_sha256
-                            ),
+                            execution_manifest_sha256=(binding.execution.execution_manifest_sha256),
                             executor_id=binding.executor_id,
                             executor_incarnation=binding.executor_incarnation,
                             pool_id=binding.pool_id,
@@ -871,12 +874,8 @@ class CapacityExecutionStore:
                             journal_digest=inventory.journal_digest,
                             physical_kind=record.physical_kind,
                             physical_identity=record.physical_identity,
-                            controller_evidence_sha256=(
-                                record.controller_evidence_sha256
-                            ),
-                            terminal_evidence_sha256=(
-                                record.terminal_evidence_sha256
-                            ),
+                            controller_evidence_sha256=(record.controller_evidence_sha256),
+                            terminal_evidence_sha256=(record.terminal_evidence_sha256),
                             evidence_digest=canonical_executable_digest(evidence),
                             evidence_payload=evidence.model_dump(
                                 mode="json",
@@ -899,13 +898,6 @@ class CapacityExecutionStore:
         """Return one durable terminal witness only to its exact current reporter."""
 
         async with _write_transaction(session):
-            await self._exact_subject_reporter(
-                session,
-                subject_id=subject_id,
-                subject_incarnation=subject_incarnation,
-                reporter_incarnation=reporter_incarnation,
-                operation="terminal inventory evidence",
-            )
             row = (
                 await session.execute(
                     select(CapacityExecutableTerminalInventoryEvidence)
@@ -919,9 +911,7 @@ class CapacityExecutionStore:
                         CapacityExecutableTerminalInventoryEvidence.subject_id == subject_id,
                         CapacityExecutableTerminalInventoryEvidence.subject_incarnation
                         == subject_incarnation,
-                        CapacityExecutableIntent.state.in_(
-                            ("terminal", "closing", "released")
-                        ),
+                        CapacityExecutableIntent.state.in_(("terminal", "closing", "released")),
                         CapacityExecutableIntent.inventory_sequence
                         == CapacityExecutableTerminalInventoryEvidence.inventory_sequence,
                         CapacityExecutableIntent.terminal_kind
@@ -944,6 +934,14 @@ class CapacityExecutionStore:
                 raise ExecutionConflictError(
                     "stored terminal inventory evidence is invalid"
                 ) from exc
+            await self._exact_subject_reporter(
+                session,
+                subject_id=subject_id,
+                subject_incarnation=subject_incarnation,
+                reporter_incarnation=reporter_incarnation,
+                operation="terminal inventory evidence",
+                historical_binding=evidence.binding,
+            )
             if (
                 evidence.binding.intent_id != row.intent_id
                 or evidence.binding.subject_id != row.subject_id
@@ -954,15 +952,11 @@ class CapacityExecutionStore:
                 or evidence.journal_digest != row.journal_digest
                 or evidence.record.physical_kind != row.physical_kind
                 or evidence.record.physical_identity != row.physical_identity
-                or evidence.record.controller_evidence_sha256
-                != row.controller_evidence_sha256
-                or evidence.record.terminal_evidence_sha256
-                != row.terminal_evidence_sha256
+                or evidence.record.controller_evidence_sha256 != row.controller_evidence_sha256
+                or evidence.record.terminal_evidence_sha256 != row.terminal_evidence_sha256
                 or canonical_executable_digest(evidence) != row.evidence_digest
             ):
-                raise ExecutionConflictError(
-                    "stored terminal inventory evidence binding changed"
-                )
+                raise ExecutionConflictError("stored terminal inventory evidence binding changed")
             return evidence
 
     async def next_pool_work(
@@ -1023,8 +1017,36 @@ class CapacityExecutionStore:
                     break
                 released_any = False
                 for current in ordered:
+                    current_allocation = await session.get(
+                        CapacityAllocationEpoch, current.allocation_epoch
+                    )
+                    if current_allocation is None:
+                        raise ExecutionConflictError("intent allocation is unavailable")
+                    membership_current = await self._membership_target_current(
+                        session, epoch, current_allocation, subject_id=current.subject_id
+                    )
+                    if not membership_current:
+                        if current.state == "proposed":
+                            current.state = "released"
+                            current.released_at = now
+                            released_any = True
+                            continue
+                        if current.state in {
+                            "accepted",
+                            "bootstrap-acknowledged",
+                            "launch-ready",
+                            "permitted",
+                            "observed",
+                            "terminal",
+                        }:
+                            return await self._new_close(
+                                session,
+                                current,
+                                command_sequence=context.executor.command_high_water + 1,
+                            )
                     if (
-                        latest_epoch is not None
+                        membership_current
+                        and latest_epoch is not None
                         and current.allocation_epoch != latest_epoch.allocation_epoch
                     ):
                         if current.state == "proposed":
@@ -1043,25 +1065,23 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
-                        if (
-                            authority.execution_state == "drain-only"
-                            and current.state in {"observed", "terminal"}
-                        ):
+                        if authority.execution_state == "drain-only" and current.state in {
+                            "observed",
+                            "terminal",
+                        }:
                             return await self._new_close(
                                 session,
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
-                        if (
-                            authority.execution_state != "drain-only"
-                            or current.state != "closing"
-                        ):
+                        if authority.execution_state != "drain-only" or current.state != "closing":
                             continue
                     increase_allowed = (
                         authority.execution_state == "active"
                         and authority.executable_new_capacity_ceiling > 0
                         and not authority.increase_freeze
                         and latest_increase_allowed
+                        and membership_current
                     )
                     if current.state in {
                         "accepted",
@@ -1128,12 +1148,12 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
+                        await self._assert_increase_eligible(session, context, current=current)
                         if (
                             current.permit_payload is None
                             or current.permit_expires_at is None
                             or current.permit_expires_at <= now
                         ):
-                            await self._assert_increase_eligible(session, context, current=current)
                             permit = await self._new_permit(session, current, now)
                             current.permit_id = permit.permit_id
                             current.permit_epoch = permit.permit_epoch
@@ -1236,7 +1256,6 @@ class CapacityExecutionStore:
                 acceptance.execution,
                 self._executor_binding_from_acceptance(acceptance),
             )
-            del context
             rows = await self._locked_intent_by_tranche(session, acceptance.tranche_id)
             first = rows[0]
             if any(
@@ -1265,6 +1284,11 @@ class CapacityExecutionStore:
             if replay is None:
                 if any(row.state != "proposed" for row in rows):
                     raise ExecutionConflictError("reservation proposal is not current")
+                pinned = await session.get(CapacityAllocationEpoch, first.allocation_epoch)
+                if pinned is None or not await self._membership_target_current(
+                    session, context.epoch, pinned, subject_id=first.subject_id
+                ):
+                    raise ExecutionConflictError("reservation subject generation was superseded")
                 accepted_at = await _database_now(session)
                 for row in rows:
                     row.state = "accepted"
@@ -1317,7 +1341,7 @@ class CapacityExecutionStore:
                 json.dumps(row.binding_payload)
             ):
                 raise ExecutionConflictError("bootstrap proposal intent binding changed")
-            self._assert_central_launch_order(locked_intents, row)
+            await self._assert_central_launch_order(session, locked_intents, row)
             payload = {
                 "intent_id": str(row.intent_id),
                 "proposal_epoch": proposal.proposal_epoch,
@@ -1395,7 +1419,7 @@ class CapacityExecutionStore:
                         CapacityDemandReporter.subject_id == subject_id,
                         CapacityDemandReporter.subject_incarnation == subject_incarnation,
                         CapacityDemandReporter.reporter_incarnation == reporter_incarnation,
-                        CapacityDemandReporter.state == "current",
+                        CapacityDemandReporter.state.in_(("current", "fenced")),
                     )
                     .with_for_update(read=True)
                 )
@@ -1436,9 +1460,28 @@ class CapacityExecutionStore:
                     session, proposal.intent_id, lock=False
                 )
                 if latest is not None and latest.id == proposal.id:
-                    return ExecutableBootstrapProposalV2.model_validate_json(
+                    contract = ExecutableBootstrapProposalV2.model_validate_json(
                         json.dumps(proposal.proposal_payload)
                     )
+                    allocation = await self._allocation_for_binding(session, contract.binding)
+                    _, pinned_acknowledgement = await resolve_allocation_subject(
+                        session,
+                        epoch,
+                        allocation,
+                        subject_id=subject_id,
+                        require_current=False,
+                    )
+                    if pinned_acknowledgement.reporter_incarnation != reporter_incarnation:
+                        continue
+                    await self._exact_subject_reporter(
+                        session,
+                        subject_id=subject_id,
+                        subject_incarnation=subject_incarnation,
+                        reporter_incarnation=reporter_incarnation,
+                        operation="bootstrap work",
+                        historical_binding=contract.binding,
+                    )
+                    return contract
             return None
 
     async def next_subject_admission_plan(
@@ -1456,13 +1499,6 @@ class CapacityExecutionStore:
             epoch = None
             if authority.execution_state in {"active", "drain-only"}:
                 epoch = await self._lock_current_epoch(session, authority)
-            await self._exact_subject_reporter(
-                session,
-                subject_id=subject_id,
-                subject_incarnation=subject_incarnation,
-                reporter_incarnation=reporter_incarnation,
-                operation="admission plan",
-            )
             latest = (
                 None
                 if epoch is None
@@ -1508,10 +1544,19 @@ class CapacityExecutionStore:
             except ValueError as exc:
                 raise ExecutionConflictError("stored admission plan is invalid") from exc
             _assert_admission_work_response_bound(proposal)
+            anchor = proposal.shapes[0].binding
+            await self._exact_subject_reporter(
+                session,
+                subject_id=subject_id,
+                subject_incarnation=subject_incarnation,
+                reporter_incarnation=reporter_incarnation,
+                operation="admission plan",
+                historical_binding=anchor,
+            )
             intents = await self._locked_intent_by_tranche(session, row.tranche_id)
-            close_reason: Literal[
-                "expired", "allocation-superseded", "manager-closed"
-            ] | None = None
+            close_reason: Literal["expired", "allocation-superseded", "manager-closed"] | None = (
+                None
+            )
             if row.expires_at <= now:
                 close_reason = "expired"
             elif (
@@ -1522,6 +1567,9 @@ class CapacityExecutionStore:
                 or row.allocation_epoch != latest.allocation_epoch
                 or latest.input_valid_until is None
                 or latest.input_valid_until <= now
+                or not await self._membership_target_current(
+                    session, epoch, latest, subject_id=subject_id
+                )
             ):
                 close_reason = "allocation-superseded"
             elif any(intent.state in {"closing", "released"} for intent in intents):
@@ -1620,18 +1668,14 @@ class CapacityExecutionStore:
                 acknowledgement.protected_admission_sha256,
             )
             if actual_binding != expected_binding:
-                raise ExecutionConflictError(
-                    "admission closure acknowledgement binding changed"
-                )
+                raise ExecutionConflictError("admission closure acknowledgement binding changed")
             expected_closure_id = _admission_closure_id(
                 proposal.proposal_id,
                 proposal_row.proposal_digest,
                 acknowledgement.close_reason,
             )
             if acknowledgement.closure_id != expected_closure_id:
-                raise ExecutionConflictError(
-                    "admission closure acknowledgement identity changed"
-                )
+                raise ExecutionConflictError("admission closure acknowledgement identity changed")
 
             authority = await self._lock_authority(session)
             epoch = None
@@ -1648,6 +1692,7 @@ class CapacityExecutionStore:
                 subject_incarnation=acknowledgement.subject_incarnation,
                 reporter_incarnation=acknowledgement.reporter_incarnation,
                 operation="admission closure acknowledgement",
+                historical_binding=anchor,
             )
             intents = await self._locked_intent_by_tranche(
                 session,
@@ -1673,21 +1718,24 @@ class CapacityExecutionStore:
                 epoch is not None
                 and latest is not None
                 and proposal_row.execution_epoch == epoch.execution_epoch
-                and proposal_row.execution_manifest_sha256
-                == epoch.execution_manifest_sha256
+                and proposal_row.execution_manifest_sha256 == epoch.execution_manifest_sha256
                 and proposal_row.allocation_epoch == latest.allocation_epoch
                 and latest.input_valid_until is not None
                 and latest.input_valid_until > now
+                and await self._membership_target_current(
+                    session, epoch, latest, subject_id=acknowledgement.subject_id
+                )
             )
             reason_is_durable = (
-                acknowledgement.close_reason == "expired"
-                and proposal_row.expires_at <= now
-            ) or (
-                acknowledgement.close_reason == "allocation-superseded"
-                and not allocation_is_current
-            ) or (
-                acknowledgement.close_reason == "manager-closed"
-                and any(intent.state in {"closing", "released"} for intent in intents)
+                (acknowledgement.close_reason == "expired" and proposal_row.expires_at <= now)
+                or (
+                    acknowledgement.close_reason == "allocation-superseded"
+                    and not allocation_is_current
+                )
+                or (
+                    acknowledgement.close_reason == "manager-closed"
+                    and any(intent.state in {"closing", "released"} for intent in intents)
+                )
             )
             if not reason_is_durable:
                 raise ExecutionConflictError(
@@ -1781,9 +1829,7 @@ class CapacityExecutionStore:
                         row.acknowledgement_digest,
                         True,
                     )
-                raise ExecutionConflictError(
-                    "admission closure was already acknowledged"
-                )
+                raise ExecutionConflictError("admission closure was already acknowledged")
             session.add(
                 CapacityExecutableAdmissionClosureAcknowledgement(
                     idempotency_key=idempotency_key,
@@ -1795,9 +1841,7 @@ class CapacityExecutionStore:
                     subject_id=acknowledgement.subject_id,
                     subject_incarnation=acknowledgement.subject_incarnation,
                     reporter_incarnation=acknowledgement.reporter_incarnation,
-                    protected_admission_sha256=(
-                        acknowledgement.protected_admission_sha256
-                    ),
+                    protected_admission_sha256=(acknowledgement.protected_admission_sha256),
                     close_reason=acknowledgement.close_reason,
                     disposition_kind=acknowledgement.disposition_kind,
                     disposition_digest=acknowledgement.disposition_digest,
@@ -1863,7 +1907,7 @@ class CapacityExecutionStore:
                     json.dumps(replay_intent.binding_payload)
                 ):
                     raise ExecutionConflictError("bootstrap acknowledgement binding changed")
-                self._assert_central_launch_order(replay_intents, replay_intent)
+                await self._assert_central_launch_order(session, replay_intents, replay_intent)
                 if (
                     replay.intent_id != replay_intent.intent_id
                     or replay.acknowledgement_digest != digest
@@ -1893,15 +1937,14 @@ class CapacityExecutionStore:
             )
             latest: CapacityAllocationEpoch | None = None
             if not retained_drain:
-                latest = await self._locked_latest_sealed_allocation_epoch(
-                    session, context.epoch
-                )
-            reporter = await self._exact_subject_reporter(
+                latest = await self._locked_latest_sealed_allocation_epoch(session, context.epoch)
+            pinned_allocation = await self._allocation_for_binding(session, acknowledgement.binding)
+            reporter = await resolve_allocation_reporter(
                 session,
+                context.epoch,
+                pinned_allocation,
                 subject_id=acknowledgement.binding.subject_id,
-                subject_incarnation=acknowledgement.binding.subject_incarnation,
                 reporter_incarnation=acknowledgement.reporter_incarnation,
-                operation="bootstrap acknowledgement",
             )
             allocation_intents = await self._locked_allocation_intents(
                 session,
@@ -1930,18 +1973,18 @@ class CapacityExecutionStore:
                 raise ExecutionConflictError("bootstrap acknowledgement binding changed")
             if row.state != "accepted":
                 raise ExecutionConflictError("bootstrap acknowledgement intent is not accepted")
-            superseded_cleanup = (
-                context.authority.execution_state == "active"
-                and latest is not None
-                and latest.allocation_epoch > row.allocation_epoch
+            superseded_cleanup = context.authority.execution_state == "active" and (
+                (latest is not None and latest.allocation_epoch > row.allocation_epoch)
+                or not await self._membership_target_current(
+                    session, context.epoch, pinned_allocation, subject_id=row.subject_id
+                )
             )
             if (
                 not retained_drain
                 and not superseded_cleanup
                 and (
                     latest is None
-                    or latest.allocation_epoch
-                    != acknowledgement.binding.execution.allocation_epoch
+                    or latest.allocation_epoch != acknowledgement.binding.execution.allocation_epoch
                     or latest.input_valid_until is None
                     or latest.input_valid_until <= now
                     or acknowledgement.binding.execution
@@ -1955,19 +1998,12 @@ class CapacityExecutionStore:
                 raise ExecutionConflictError("bootstrap allocation changed or expired")
             if reporter.subject_id != row.subject_id:
                 raise ExecutionConflictError("bootstrap acknowledgement reporter changed")
-            try:
-                preparation = ExecutionPreparationV2.model_validate_json(
-                    json.dumps(context.epoch.manifest_payload)
-                )
-            except ValueError as exc:
-                raise ExecutionConflictError("execution preparation manifest is invalid") from exc
-            subject_acknowledgement = next(
-                (
-                    item
-                    for item in preparation.subject_acknowledgements
-                    if item.subject_id == row.subject_id
-                ),
-                None,
+            _, subject_acknowledgement = await resolve_allocation_subject(
+                session,
+                context.epoch,
+                pinned_allocation,
+                subject_id=row.subject_id,
+                require_current=not retained_drain and not superseded_cleanup,
             )
             if (
                 subject_acknowledgement is None
@@ -2108,8 +2144,7 @@ class CapacityExecutionStore:
                 raise ExecutionConflictError("admission proposal was already acknowledged")
             proposal_row = (
                 await session.execute(
-                    select(CapacityExecutableAdmissionProposal)
-                    .where(
+                    select(CapacityExecutableAdmissionProposal).where(
                         CapacityExecutableAdmissionProposal.proposal_id
                         == acknowledgement.proposal_id
                     )
@@ -2164,9 +2199,7 @@ class CapacityExecutionStore:
                 reporter_incarnation=acknowledgement.reporter_incarnation,
                 operation="admission acknowledgement",
             )
-            intents = await self._locked_intent_by_tranche(
-                session, proposal_row.tranche_id
-            )
+            intents = await self._locked_intent_by_tranche(session, proposal_row.tranche_id)
             trusted_tranche_id = proposal_row.tranche_id
             locked_proposal_row = (
                 await session.execute(
@@ -2188,8 +2221,7 @@ class CapacityExecutionStore:
             except ValueError as exc:
                 raise ExecutionConflictError("stored admission plan is invalid") from exc
             if (
-                canonical_executable_digest(locked_proposal)
-                != locked_proposal_row.proposal_digest
+                canonical_executable_digest(locked_proposal) != locked_proposal_row.proposal_digest
                 or locked_proposal != proposal
                 or locked_proposal_row.tranche_id != trusted_tranche_id
             ):
@@ -2212,6 +2244,13 @@ class CapacityExecutionStore:
                 )
             ):
                 raise ExecutionConflictError("admission allocation changed or expired")
+            await resolve_allocation_subject(
+                session,
+                epoch,
+                latest,
+                subject_id=acknowledgement.subject_id,
+                require_current=True,
+            )
             expected_assignments = {
                 (
                     item.allowance_id,
@@ -2285,17 +2324,13 @@ class CapacityExecutionStore:
                     admission_incarnation=acknowledgement.admission_incarnation,
                     tranche_id=acknowledgement.tranche_id,
                     execution_epoch=acknowledgement.execution.execution_epoch,
-                    execution_manifest_sha256=(
-                        acknowledgement.execution.execution_manifest_sha256
-                    ),
+                    execution_manifest_sha256=(acknowledgement.execution.execution_manifest_sha256),
                     allocation_epoch=acknowledgement.execution.allocation_epoch,
                     subject_id=acknowledgement.subject_id,
                     subject_incarnation=acknowledgement.subject_incarnation,
                     pool_id=acknowledgement.pool_id,
                     reporter_incarnation=acknowledgement.reporter_incarnation,
-                    protected_admission_sha256=(
-                        acknowledgement.protected_admission_sha256
-                    ),
+                    protected_admission_sha256=(acknowledgement.protected_admission_sha256),
                     proposal_digest=acknowledgement.proposal_digest,
                     prepared_plan_digest=acknowledgement.prepared_plan_digest,
                     acknowledgement_digest=digest,
@@ -2378,7 +2413,7 @@ class CapacityExecutionStore:
                 if row.permit_expires_at <= now:
                     raise ExecutionConflictError("launch permit expired")
                 deadlines = await self._assert_increase_eligible(session, context, current=row)
-                self._assert_central_launch_order(locked_intents, row)
+                await self._assert_central_launch_order(session, locked_intents, row)
                 pending_deadline = await self._assert_pending_limits(session, context, row)
                 deadlines = replace(
                     deadlines,
@@ -2586,7 +2621,7 @@ class CapacityExecutionStore:
             raise ValueError("protected release actor is invalid")
         digest = canonical_executable_digest(release)
         async with _write_transaction(session):
-            await self._locked_execution_context(
+            context = await self._locked_execution_context(
                 session,
                 release.binding.execution,
                 self._executor_binding_from_contract(release.binding),
@@ -2628,18 +2663,14 @@ class CapacityExecutionStore:
                 and release.protected_registration_epoch <= prior.protected_registration_epoch
             ):
                 raise ExecutionConflictError("protected release registration epoch must advance")
-            reporter = (
-                await session.execute(
-                    select(CapacityDemandReporter).where(
-                        CapacityDemandReporter.subject_id == row.subject_id,
-                        CapacityDemandReporter.subject_incarnation == row.subject_incarnation,
-                        CapacityDemandReporter.reporter_incarnation == release.reporter_incarnation,
-                        CapacityDemandReporter.state == "current",
-                    )
-                )
-            ).scalar_one_or_none()
-            if reporter is None:
-                raise ExecutionConflictError("protected release reporter changed")
+            allocation = await self._allocation_for_binding(session, release.binding)
+            await resolve_allocation_reporter(
+                session,
+                context.epoch,
+                allocation,
+                subject_id=row.subject_id,
+                reporter_incarnation=release.reporter_incarnation,
+            )
             if row.bootstrap_registration_epoch != release.bootstrap_registration_epoch:
                 raise ExecutionConflictError("protected release bootstrap binding changed")
             payload = release.model_dump(mode="json", exclude_none=False)
@@ -2993,15 +3024,19 @@ class CapacityExecutionStore:
         now = await _database_now(session)
         if epoch_row.input_valid_until is None or epoch_row.input_valid_until <= now:
             return None
-        complete = epoch_row.complete_payload
+        try:
+            complete = parse_executable_epoch(json.dumps(epoch_row.complete_payload)).model_dump(
+                mode="json"
+            )
+        except ValueError as exc:
+            raise ExecutionConflictError("executable allocation payload is invalid") from exc
         ranks = tuple(complete.get("hypothetical_launch_rank", ()))
         existing = tuple(
             (
                 await session.execute(
                     select(CapacityExecutableIntent)
                     .where(
-                        CapacityExecutableIntent.execution_epoch
-                        == context.epoch.execution_epoch,
+                        CapacityExecutableIntent.execution_epoch == context.epoch.execution_epoch,
                         CapacityExecutableIntent.allocation_epoch == epoch_row.allocation_epoch,
                     )
                     .order_by(CapacityExecutableIntent.launch_rank)
@@ -3011,6 +3046,13 @@ class CapacityExecutionStore:
             .all()
         )
         by_rank = {item.launch_rank: item for item in existing}
+        eligible_ranks = []
+        for rank in ranks:
+            if rank["rank"] in by_rank or await self._membership_target_current(
+                session, context.epoch, epoch_row, subject_id=UUID(rank["subject_id"])
+            ):
+                eligible_ranks.append(rank)
+        ranks = tuple(eligible_ranks)
         first_missing_index = next(
             (index for index, rank in enumerate(ranks) if rank["rank"] not in by_rank),
             None,
@@ -3021,9 +3063,7 @@ class CapacityExecutionStore:
         if first_missing.get("pool_id") != context.executor.pool_id:
             return None
         earlier = tuple(
-            by_rank.get(rank["rank"])
-            for rank in ranks
-            if rank["rank"] < first_missing["rank"]
+            by_rank.get(rank["rank"]) for rank in ranks if rank["rank"] < first_missing["rank"]
         )
         if any(
             item is None
@@ -3149,8 +3189,7 @@ class CapacityExecutionStore:
                         "shape-"
                         + hashlib.sha256(
                             (
-                                f"{allocation.subject_id}:{allocation.pool_id}:"
-                                f"{item['shape_id']}"
+                                f"{allocation.subject_id}:{allocation.pool_id}:{item['shape_id']}"
                             ).encode()
                         ).hexdigest()[:24]
                         + "-"
@@ -3906,16 +3945,48 @@ class CapacityExecutionStore:
         return earliest_fresh_until
 
     @staticmethod
-    def _assert_central_launch_order(
+    async def _assert_central_launch_order(
+        session: AsyncSession,
         locked_intents: tuple[CapacityExecutableIntent, ...],
         target: CapacityExecutableIntent,
     ) -> None:
         earlier = tuple(item for item in locked_intents if item.launch_rank < target.launch_rank)
-        if len(earlier) != target.launch_rank - 1 or any(
+        if any(
             item.state not in {"submitting-unknown", "observed", "terminal", "closing", "released"}
             for item in earlier
         ):
             raise ExecutionConflictError("an earlier global launch is unresolved")
+        if len(earlier) == target.launch_rank - 1:
+            return
+        epoch = await session.get(CapacityExecutionEpoch, target.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, target.allocation_epoch)
+        if (
+            epoch is None
+            or allocation is None
+            or not isinstance(
+                CapacityManagementStore._execution_preparation_from_row(epoch),
+                ExecutionPreparationV3,
+            )
+        ):
+            raise ExecutionConflictError("an earlier global launch is unresolved")
+        try:
+            payload = parse_executable_epoch(json.dumps(allocation.complete_payload))
+        except ValueError as exc:
+            raise ExecutionConflictError("global launch order evidence is invalid") from exc
+        ranks = tuple(
+            rank for rank in payload.hypothetical_launch_rank if rank.rank < target.launch_rank
+        )
+        if len(ranks) != target.launch_rank - 1:
+            raise ExecutionConflictError("global launch order evidence is incomplete")
+        existing_ranks = {item.launch_rank for item in earlier}
+        for rank in ranks:
+            if (
+                rank.rank not in existing_ranks
+                and await CapacityExecutionStore._membership_target_current(
+                    session, epoch, allocation, subject_id=rank.subject_id
+                )
+            ):
+                raise ExecutionConflictError("an earlier global launch is unresolved")
 
     @staticmethod
     async def _current_subject(
@@ -3923,6 +3994,26 @@ class CapacityExecutionStore:
         epoch: CapacityExecutionEpoch,
         allocation: CapacityAllocation,
     ) -> CapacitySubject:
+        if isinstance(
+            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
+        ):
+            allocation_epoch = await session.get(
+                CapacityAllocationEpoch, allocation.allocation_epoch
+            )
+            if allocation_epoch is None:
+                raise ExecutionConflictError("allocation subject generation is unavailable")
+            pinned, _ = await resolve_allocation_subject(
+                session,
+                epoch,
+                allocation_epoch,
+                subject_id=allocation.subject_id,
+                require_current=True,
+            )
+            if (
+                pinned.subject_incarnation != allocation.subject_incarnation
+                or pinned.deployment_generation != allocation.deployment_generation
+            ):
+                raise ExecutionConflictError("allocation subject generation changed")
         row = (
             await session.execute(
                 select(CapacitySubject).where(
@@ -3937,6 +4028,40 @@ class CapacityExecutionStore:
         if row is None:
             raise ExecutionConflictError("subject lifecycle changed")
         return row
+
+    @staticmethod
+    async def _allocation_for_binding(
+        session: AsyncSession,
+        binding: ExecutableIntentBindingV2,
+    ) -> CapacityAllocationEpoch:
+        allocation = await session.get(CapacityAllocationEpoch, binding.execution.allocation_epoch)
+        if allocation is None:
+            raise ExecutionConflictError("bound allocation is unavailable")
+        try:
+            payload = parse_executable_epoch(json.dumps(allocation.complete_payload))
+        except ValueError as exc:
+            raise ExecutionConflictError("bound allocation evidence is invalid") from exc
+        if payload.execution != binding.execution:
+            raise ExecutionConflictError("bound allocation fence changed")
+        return allocation
+
+    @staticmethod
+    async def _membership_target_current(
+        session: AsyncSession,
+        epoch: CapacityExecutionEpoch,
+        allocation: CapacityAllocationEpoch,
+        *,
+        subject_id: UUID,
+    ) -> bool:
+        if not isinstance(
+            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
+        ):
+            return True
+        if epoch.state != "active":
+            return False
+        return await allocation_subject_is_current(
+            session, epoch, allocation, subject_id=subject_id
+        )
 
     @staticmethod
     async def _current_candidate(
@@ -3990,7 +4115,33 @@ class CapacityExecutionStore:
         subject_incarnation: UUID,
         reporter_incarnation: UUID,
         operation: str,
+        historical_binding: ExecutableIntentBindingV2 | None = None,
     ) -> CapacityDemandReporter:
+        if historical_binding is not None:
+            if (
+                historical_binding.subject_id != subject_id
+                or historical_binding.subject_incarnation != subject_incarnation
+            ):
+                raise ExecutionConflictError(f"{operation} historical reporter changed")
+            epoch = await session.get(
+                CapacityExecutionEpoch, historical_binding.execution.execution_epoch
+            )
+            if epoch is None:
+                raise ExecutionConflictError(f"{operation} historical execution is unavailable")
+            if isinstance(
+                CapacityManagementStore._execution_preparation_from_row(epoch),
+                ExecutionPreparationV3,
+            ):
+                allocation = await CapacityExecutionStore._allocation_for_binding(
+                    session, historical_binding
+                )
+                return await resolve_allocation_reporter(
+                    session,
+                    epoch,
+                    allocation,
+                    subject_id=subject_id,
+                    reporter_incarnation=reporter_incarnation,
+                )
         reporter = (
             await session.execute(
                 select(CapacityDemandReporter)
@@ -4034,7 +4185,14 @@ class CapacityExecutionStore:
         allocation_intents: tuple[CapacityExecutableIntent, ...],
         allocation_epoch: CapacityAllocationEpoch,
     ) -> CapacityExecutableAdmissionProposal:
-        self._assert_central_launch_order(allocation_intents, intent)
+        await resolve_allocation_subject(
+            session,
+            context.epoch,
+            allocation_epoch,
+            subject_id=intent.subject_id,
+            require_current=True,
+        )
+        await self._assert_central_launch_order(session, allocation_intents, intent)
         existing = (
             await session.execute(
                 select(CapacityExecutableAdmissionProposal)
@@ -4046,8 +4204,7 @@ class CapacityExecutionStore:
             if (
                 existing.expires_at <= now
                 or existing.reporter_incarnation != acknowledgement.reporter_incarnation
-                or existing.protected_admission_sha256
-                != acknowledgement.protected_admission_sha256
+                or existing.protected_admission_sha256 != acknowledgement.protected_admission_sha256
             ):
                 raise ExecutionConflictError("admission proposal changed or expired")
             try:
@@ -4063,9 +4220,7 @@ class CapacityExecutionStore:
             (index for index, row in enumerate(intents) if row.intent_id == intent.intent_id),
             None,
         )
-        if target_index is None or any(
-            row.state == "accepted" for row in intents[:target_index]
-        ):
+        if target_index is None or any(row.state == "accepted" for row in intents[:target_index]):
             raise ExecutionConflictError("executor bootstrap launch order changed")
         if (
             allocation_epoch.allocation_epoch != intent.allocation_epoch
@@ -4073,16 +4228,13 @@ class CapacityExecutionStore:
             or not allocation_epoch.executable
             or not allocation_epoch.sealed
             or allocation_epoch.execution_epoch != intent.execution_epoch
-            or allocation_epoch.execution_manifest_sha256
-            != intent.execution_manifest_sha256
+            or allocation_epoch.execution_manifest_sha256 != intent.execution_manifest_sha256
             or allocation_epoch.input_valid_until is None
             or allocation_epoch.input_valid_until <= now
         ):
             raise ExecutionConflictError("admission allocation changed or expired")
         try:
-            complete = ExecutableEpochV2.model_validate_json(
-                json.dumps(allocation_epoch.complete_payload)
-            )
+            complete = parse_executable_epoch(json.dumps(allocation_epoch.complete_payload))
         except ValueError as exc:
             raise ExecutionConflictError("executable allocation payload is invalid") from exc
         expected_fence = self._fence_from_rows(
@@ -4147,25 +4299,17 @@ class CapacityExecutionStore:
         ).scalar_one_or_none()
         if pool is None or profile.pool_generation != pool.pool_generation:
             raise ExecutionConflictError("admission pool protocol changed")
-        try:
-            preparation = ExecutionPreparationV2.model_validate_json(
-                json.dumps(context.epoch.manifest_payload)
-            )
-        except ValueError as exc:
-            raise ExecutionConflictError("execution preparation manifest is invalid") from exc
-        subject_acknowledgement = next(
-            (
-                item
-                for item in preparation.subject_acknowledgements
-                if item.subject_id == intent.subject_id
-            ),
-            None,
+        _, subject_acknowledgement = await resolve_allocation_subject(
+            session,
+            context.epoch,
+            allocation_epoch,
+            subject_id=intent.subject_id,
+            require_current=True,
         )
         if (
             subject_acknowledgement is None
             or subject_acknowledgement.subject_incarnation != intent.subject_incarnation
-            or subject_acknowledgement.reporter_incarnation
-            != acknowledgement.reporter_incarnation
+            or subject_acknowledgement.reporter_incarnation != acknowledgement.reporter_incarnation
             or subject_acknowledgement.protected_admission_sha256
             != acknowledgement.protected_admission_sha256
         ):
@@ -4232,11 +4376,7 @@ class CapacityExecutionStore:
             allowance_binding = bindings_by_shape.get(allowance.shape_instance_id)
             slot_key = slot_by_attempt.get(allowance.attempt_id)
             prefix = f"{allowance.shape_instance_id}-slot-"
-            if (
-                allowance_binding is None
-                or slot_key is None
-                or not slot_key.startswith(prefix)
-            ):
+            if allowance_binding is None or slot_key is None or not slot_key.startswith(prefix):
                 raise ExecutionConflictError("admission allowance is uncovered")
             slot_token = slot_key.removeprefix(prefix)
             if len(slot_token) != 8 or not slot_token.isdigit():
@@ -4268,17 +4408,13 @@ class CapacityExecutionStore:
             f"{intent.execution_epoch}:{intent.allocation_epoch}:{intent.tranche_id}:"
             f"{intent.subject_id}:{intent.subject_incarnation}:{intent.pool_id}"
         )
-        lease_not_after = min(
-            bootstrap_proposal.expires_at, allocation_epoch.input_valid_until
-        )
+        lease_not_after = min(bootstrap_proposal.expires_at, allocation_epoch.input_valid_until)
         if lease_not_after <= now:
             raise ExecutionConflictError("admission proposal expiry is invalid")
         proposal = ExecutableAdmissionPlanProposalV2(
             proposal_id=uuid5(_EXECUTION_NAMESPACE, f"admission-proposal:{stable}"),
             plan_id=uuid5(_EXECUTION_NAMESPACE, f"admission-plan:{stable}"),
-            admission_incarnation=uuid5(
-                _EXECUTION_NAMESPACE, f"admission-incarnation:{stable}"
-            ),
+            admission_incarnation=uuid5(_EXECUTION_NAMESPACE, f"admission-incarnation:{stable}"),
             reporter_incarnation=acknowledgement.reporter_incarnation,
             protected_admission_sha256=acknowledgement.protected_admission_sha256,
             manager_input_digest=complete.input_digest,

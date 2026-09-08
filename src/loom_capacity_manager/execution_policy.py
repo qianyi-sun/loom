@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES
 from loom_capacity_manager.executable_contracts import ExecutionPreparationPolicyV2
+from loom_capacity_manager.membership_contracts import parse_execution_preparation_policy
 
 MAX_EXECUTION_POLICY_BYTES = MAX_CONTRACT_BYTES
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -91,7 +92,7 @@ def load_execution_preparation_policy(
     ):
         raise _invalid()
     try:
-        return ExecutionPreparationPolicyV2.model_validate_json(payload)
+        return parse_execution_preparation_policy(payload)
     except (ValidationError, ValueError):
         raise _invalid() from None
 

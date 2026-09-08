@@ -411,10 +411,12 @@ def isolated_capacity_migration_url(postgres_url: str) -> Iterator[str]:
 
 def test_reintegrated_capacity_history_has_one_exact_head() -> None:
     script = ScriptDirectory.from_config(_capacity_config_without_database())
-    assert tuple(script.get_heads()) == ("capacity_0015",)
+    assert tuple(script.get_heads()) == ("capacity_0017",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0015")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0017")
     ) == (
+        "capacity_0017",
+        "capacity_0016",
         "capacity_0015",
         "capacity_0014",
         "capacity_0013",
@@ -443,12 +445,18 @@ def test_reintegrated_capacity_history_has_one_exact_head() -> None:
     prepared_abort = script.get_revision("capacity_0013")
     protected_admission = script.get_revision("capacity_0014")
     terminal_inventory = script.get_revision("capacity_0015")
+    personal_membership = script.get_revision("capacity_0016")
+    membership_execution = script.get_revision("capacity_0017")
     assert prepared_abort is not None
     assert protected_admission is not None
     assert terminal_inventory is not None
+    assert personal_membership is not None
+    assert membership_execution is not None
     assert prepared_abort.path.endswith("capacity_0013_prepared_abort_evidence.py")
     assert protected_admission.path.endswith("capacity_0014_protected_admission_plan.py")
     assert terminal_inventory.path.endswith("capacity_0015_terminal_inventory_evidence.py")
+    assert personal_membership.path.endswith("capacity_0016_personal_membership_events.py")
+    assert membership_execution.path.endswith("capacity_0017_personal_membership_execution.py")
 
 
 def test_capacity_0008_adds_bridge_completion_and_only_patches_accepted_release_guard(

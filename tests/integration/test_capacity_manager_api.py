@@ -1388,6 +1388,8 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v1/config-activations", ("POST",)),
         ("/v1/configuration-rollbacks", ("POST",)),
         ("/v1/development-projections/{subject_id}", ("PUT",)),
+        ("/v1/personal-memberships/checkpoint", ("GET",)),
+        ("/v1/personal-memberships/{subject_id}", ("PUT",)),
         ("/v1/reports/demand/{subject_id}", ("PUT",)),
         (
             "/v1/reports/protected-releases/{subject_id}/{shape_instance_id}",
@@ -1412,6 +1414,7 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
             ("POST",),
         ),
         ("/v2/execution-preparations", ("POST",)),
+        ("/v3/execution-preparations", ("POST",)),
         ("/v2/executors/{pool_id}/registration", ("PUT",)),
         ("/v2/execution-preparations/{execution_epoch}/abort", ("POST",)),
         ("/v2/execution-preparations/{execution_epoch}/activate", ("POST",)),

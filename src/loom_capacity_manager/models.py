@@ -876,6 +876,79 @@ class CapacityDevelopmentProjection(Base):
     )
 
 
+class CapacityPersonalMembershipEvent(Base):
+    """Immutable checkpoint for one active personal-membership mutation."""
+
+    __tablename__ = "capacity_personal_membership_events"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND writer_epoch > 0 AND revision > 0 "
+            "AND configuration_generation > 0 AND deployment_generation > 0",
+            name="capacity_personal_membership_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND request_digest ~ '^[0-9a-f]{64}$' "
+            "AND previous_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND head_sha256 ~ '^[0-9a-f]{64}$'",
+            name="capacity_personal_membership_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(actor) BETWEEN 1 AND 128",
+            name="capacity_personal_membership_actor_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(request_payload) = 'object' "
+            "AND jsonb_typeof(result_payload) = 'object' "
+            "AND octet_length(request_payload::text) <= 8388608 "
+            "AND octet_length(result_payload::text) <= 8388608",
+            name="capacity_personal_membership_payload_check",
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "revision",
+            name="capacity_personal_membership_epoch_revision_key",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            name="capacity_personal_membership_operation_key",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="capacity_personal_membership_idempotency_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("capacity_execution_epochs.execution_epoch", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    authority_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    namespace_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    previous_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    head_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    owner_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    configuration_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class CapacityDemandSnapshot(Base):
     __tablename__ = "capacity_demand_snapshots"
     __table_args__ = (
