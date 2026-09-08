@@ -90,6 +90,15 @@ class ContainmentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageConfig:
+    root: Path
+    mount_device: str
+    project_id: int
+    byte_limit: int
+    inode_limit: int
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceConfig:
     attestation_interval_seconds: int
     attestation_lifetime_seconds: int
@@ -107,6 +116,7 @@ class GuardConfigValue:
     commands: CommandConfig
     slurm: SlurmConfig
     containment: ContainmentConfig
+    storage: StorageConfig
     service: ServiceConfig
 
 
@@ -121,4 +131,5 @@ __all__ = [
     "ProtocolConfig",
     "ServiceConfig",
     "SlurmConfig",
+    "StorageConfig",
 ]

@@ -581,6 +581,54 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("0 failed")).toBeInTheDocument();
   });
 
+  it("counts protected pending trials as active in benchmark rollups", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      state: "running",
+      benchmark_summary: [
+        {
+          benchmark_id: "humaneval",
+          display_name: "HumanEval",
+          metric_name: "score",
+          expected_trial_count: 2,
+          completed_trial_count: 0,
+          platform_failed_count: 0,
+          aggregate_reward: null,
+          trial_summary: {
+            queued: 0,
+            "protected-pending": 2,
+            claimed: 0,
+            running: 0,
+            succeeded: 0,
+            failed: 0,
+            cancelled: 0,
+          },
+        },
+        {
+          benchmark_id: "mbpp",
+          display_name: "MBPP",
+          metric_name: "score",
+          expected_trial_count: 1,
+          completed_trial_count: 1,
+          platform_failed_count: 0,
+          aggregate_reward: 1,
+          trial_summary: {
+            queued: 0,
+            "protected-pending": 0,
+            claimed: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 0,
+            cancelled: 0,
+          },
+        },
+      ],
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText("0 succeeded · 2 active")).toBeInTheDocument();
+  });
+
   it("does not add benchmark-result clutter for single-benchmark batches", async () => {
     mockBatch({
       ...BATCH_BODY,

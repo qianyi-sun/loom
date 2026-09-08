@@ -13,6 +13,8 @@ from loom.db.schema import TaskImageBuildGrant, TaskImageBuildGrantEvent
 from loom_control_plane.task_image_build_environment import (
     RootlessBuildResourceRequestV1,
     SlurmBuildEnvironmentPolicyV1,
+    SlurmBuildGrantV1,
+    SlurmBuildGrantV2,
     SlurmBuildInventoryV1,
     SlurmBuildJobObservationV1,
     canonical_request_sha256,
@@ -28,6 +30,7 @@ from loom_control_plane.task_image_build_grants import (
 )
 from loom_task_image_authority.contracts import (
     TaskImageBuildGrantAuthorityV1,
+    TaskImageBuildGrantAuthorityV2,
     canonical_authority_sha256,
 )
 
@@ -63,7 +66,7 @@ def _policy() -> SlurmBuildEnvironmentPolicyV1:
 def _authority(
     policy: SlurmBuildEnvironmentPolicyV1,
     **changes: object,
-) -> TaskImageBuildGrantAuthorityV1:
+) -> TaskImageBuildGrantAuthorityV2:
     values: dict[str, object] = {
         "purpose": "production",
         "shadow_campaign_id": None,
@@ -72,7 +75,9 @@ def _authority(
         "slurm_cluster_id": policy.slurm_cluster_id,
         "cpu_arch": policy.cpu_arch,
         "slurm_request_sha256": canonical_request_sha256(policy.request_identity()),
+        "schema_version": 2,
         "builder_release_sha256": "2" * 64,
+        "supervisor_executable_sha256": "6" * 64,
         "build_policy_sha256": "3" * 64,
         "containment_policy_sha256": "4" * 64,
         "resource_profile_sha256": "5" * 64,
@@ -80,7 +85,7 @@ def _authority(
         "expires_at": _NOW + timedelta(hours=2),
     }
     values.update(changes)
-    return TaskImageBuildGrantAuthorityV1.model_validate(values)
+    return TaskImageBuildGrantAuthorityV2.model_validate(values)
 
 
 def _grant(grant_id: UUID | None = None, **authority_changes: object):
@@ -148,9 +153,7 @@ async def test_submission_invocation_is_journaled_exactly_once_before_external_c
         await session.commit()
         assert row.state == "issued"
         assert row.journal_sequence == 1
-        assert row.authority_spec == grant.authority.model_dump(
-            mode="json", exclude_none=False
-        )
+        assert row.authority_spec == grant.authority.model_dump(mode="json", exclude_none=False)
         assert row.authority_sha256 == canonical_authority_sha256(grant.authority)
         assert row.grant_expires_at == grant.authority.expires_at
 
@@ -230,16 +233,46 @@ async def test_issuance_rejects_environment_expiry_or_stored_authority_drift(
             _stored_grant(row)
 
 
+async def test_stored_grant_preserves_legacy_v1_for_historical_replay(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    legacy_authority = TaskImageBuildGrantAuthorityV1.model_validate(
+        {
+            key: value
+            for key, value in grant.authority.model_dump(mode="python").items()
+            if key != "supervisor_executable_sha256"
+        }
+        | {
+            "schema_version": 1,
+            "builder_release_sha256": grant.authority.supervisor_executable_sha256,
+        }
+    )
+    async with grant_session() as session:
+        row = await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=30,
+            now=_NOW,
+        )
+        row.authority_spec = legacy_authority.model_dump(mode="json", exclude_none=False)
+        row.authority_sha256 = canonical_authority_sha256(legacy_authority)
+
+        stored = _stored_grant(row)
+
+        assert isinstance(stored, SlurmBuildGrantV1)
+        assert not isinstance(stored, SlurmBuildGrantV2)
+        assert stored.schema_version == "loom.task-image-build-grant/v1"
+        assert stored.authority == legacy_authority
+
+
 async def test_issuance_revalidates_unchecked_grant_copies_before_persistence(
     grant_session: async_sessionmaker[AsyncSession],
 ) -> None:
     grant = _grant()
     forged = grant.model_copy(
-        update={
-            "authority": grant.authority.model_copy(
-                update={"pool_id": "staging-gb10-other"}
-            )
-        }
+        update={"authority": grant.authority.model_copy(update={"pool_id": "staging-gb10-other"})}
     )
     async with grant_session() as session:
         with pytest.raises(ValidationError, match="authority digest"):

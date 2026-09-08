@@ -1025,6 +1025,49 @@ class ExecutableExecutorInventoryV2(StrictV2Model):
         return self
 
 
+class ExecutableTerminalInventoryEvidenceV2(StrictV2Model):
+    """One manager-verified terminal record from an exact executor inventory."""
+
+    binding: ExecutableIntentBindingV2
+    inventory_execution: ExecutionContextV2
+    inventory_sequence: PositiveQuantity
+    inventory_digest: Digest
+    journal_sequence: Quantity
+    journal_digest: Digest
+    record: ExecutableInventoryRecordV2
+    observed_at: datetime
+    executable: Literal[True] = True
+
+    _observed_at_utc = field_validator("observed_at")(_utc_time)
+
+    @model_validator(mode="after")
+    def _exact_terminal_binding(self) -> ExecutableTerminalInventoryEvidenceV2:
+        _validate_journal_head(self.journal_sequence, self.journal_digest)
+        proof = self.record.ownership_proof
+        if (
+            self.record.state != "terminal"
+            or self.record.terminal_evidence_sha256 is None
+            or proof is None
+            or self.record.authority_scope != "dedicated-loom-association"
+        ):
+            raise ValueError(
+                "terminal inventory evidence requires one authenticated terminal record"
+            )
+        inventory_execution = self.inventory_execution.model_dump(mode="python")
+        binding_execution = self.binding.execution.model_dump(
+            mode="python",
+            exclude={"allocation_epoch", "executable"},
+        )
+        if (
+            proof.metadata.binding != self.binding
+            or inventory_execution != binding_execution
+            or self.record.resources != self.binding.resources
+            or self.record.node_ids != self.binding.node_ids
+        ):
+            raise ValueError("terminal inventory evidence binding changed")
+        return self
+
+
 class ExecutableReservationAcceptanceV2(StrictV2Model):
     """Executor acceptance of one exact executable proposal."""
 
@@ -1328,6 +1371,7 @@ __all__ = [
     "ExecutableReservationAcceptanceV2",
     "ExecutableReservationProposalV2",
     "ExecutableSubmissionRecoveryV2",
+    "ExecutableTerminalInventoryEvidenceV2",
     "ExecutionActivationV2",
     "ExecutionAuthorityV2",
     "ExecutionContextV2",

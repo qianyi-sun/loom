@@ -2519,7 +2519,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0027"
+    assert version == "guard_0029"
     assert evidence == 1
 
 
@@ -2571,7 +2571,10 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
     try:
         async with _owner_session(capacity_guard_database) as (_, _, blocker):
             await blocker.execute(
-                text("LOCK TABLE loom_capacity_guard.executable_claim_leases IN ACCESS SHARE MODE")
+                text(
+                    "LOCK TABLE loom_capacity_guard.executable_admission_authority "
+                    "IN ACCESS SHARE MODE"
+                )
             )
             downgrade_task = asyncio.create_task(
                 asyncio.to_thread(command.downgrade, config, "guard_0019")
@@ -2581,7 +2584,6 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
                 application_name=application_name,
                 task=downgrade_task,
             )
-
             writer_task = asyncio.create_task(replay_preparation())
             assert await _backend_waited_for_lock(
                 capacity_guard_database,

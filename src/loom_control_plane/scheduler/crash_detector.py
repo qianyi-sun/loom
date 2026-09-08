@@ -14,10 +14,17 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import LlmCall, Task, Trial, TrialEvent, Worker
+from loom.db.schema import (
+    ExecutionAdmissionReservation,
+    LlmCall,
+    Task,
+    Trial,
+    TrialEvent,
+    Worker,
+)
 from loom.trial.stale_running import StaleRunningDecision, evaluate_stale_running_trial
 from loom_control_plane.metrics import WORKER_RECLAIM_TOTAL
 
@@ -150,6 +157,16 @@ async def reclaim_stale_running_trials(
             .outerjoin(Worker, Worker.id == Trial.worker_id)
             .where(Trial.state == "running")
             .where(Trial.started_at.is_not(None))
+            .where(
+                ~exists()
+                .where(ExecutionAdmissionReservation.trial_id == Trial.id)
+                .where(ExecutionAdmissionReservation.execution_role == "attempt")
+                .where(
+                    ExecutionAdmissionReservation.owner_kind
+                    == "protected_worker_claim"
+                )
+                .where(ExecutionAdmissionReservation.state == "active")
+            )
         )
     ).all()
     if not rows:

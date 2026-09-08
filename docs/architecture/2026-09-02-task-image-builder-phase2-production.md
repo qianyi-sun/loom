@@ -280,7 +280,10 @@ The guard crash policy stays pinned and deny-capable; a missing fresh
 attestation stops renewal and new work.
 
 Guard cleanup requires both terminal Slurm evidence and an empty allocation
-cgroup. Ambiguous cleanup leaves links pinned and marks only
+cgroup. The project-owned job-root inode is the only permitted quota usage
+before its empty directory is deleted; the guard then proves zero usage and
+clears the quota limits before removing policy or cgroup state. Ambiguous
+cleanup leaves links pinned and marks only
 `loom_rootless_buildkit` unavailable on that node. It never drains the Slurm
 node or changes unrelated jobs automatically.
 
@@ -291,6 +294,14 @@ submitted batch script. It validates the installed release and allocation,
 obtains the sealed bootstrap, maintains the short-lived session, claims work,
 starts/stops BuildKit, and reports typed evidence. It never calls Slurm
 administration APIs.
+
+The composite provider-release digest and native supervisor ELF digest are
+separate authority values. The former selects the content-addressed release
+directory; the latter authenticates the opened `/proc/<pid>/exe`. After
+containment, the guard passes open quota-workspace and `build-egress` cgroup
+directory descriptors to the supervisor alongside the sealed bootstrap. Bundle
+writes and `CLONE_INTO_CGROUP` consume those descriptors directly, so no
+allocation-controlled or post-validation pathname can redirect either action.
 
 RootlessKit uses only the pinned `slirp4netns` driver with host-loopback
 disabled, IPv6 enabled, sandbox enabled, and seccomp enabled. BuildKit uses only

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import psycopg
 import pytest
@@ -16,6 +19,8 @@ from psycopg.errors import InsufficientPrivilege
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+import loom.personal_dev_capacity_runtime as capacity_runtime_module
+import loom_cli.rollout.operator.protected_staging_capacity_database_component as capacity_database_component_module
 from loom.dev_instance import derive_identity
 from loom.personal_dev_capacity import (
     PersonalDevCapacityAvailability,
@@ -29,11 +34,16 @@ from loom.personal_dev_capacity_runtime import (
     _new_credentials,
     _role_names,
 )
+from loom.staging_capacity_database_bootstrap import staging_capacity_identity
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableIntentBindingV2,
     ExecutionFenceV2,
+)
+from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+    KubernetesProtectedStagingCapacityDatabaseComponent,
+    build_staging_reporter_configuration_for_candidate,
 )
 
 
@@ -77,6 +87,876 @@ def _active_binding(subject_id: UUID, subject_incarnation: UUID) -> ExecutableIn
         resources=ResourceVectorV1(slots=1, cpu_millicores=1000, memory_bytes=1024),
         node_ids=("oldlab-node-01",),
     )
+
+
+def _staging_seed(credentials) -> dict[str, object]:
+    return {
+        "agent_database_password": credentials.agent_password,
+        "agent_incarnation": str(uuid5(NAMESPACE_URL, "loom:staging:capacity-agent:v1")),
+        "authority_incarnation": str(uuid5(NAMESPACE_URL, "loom:staging:capacity-authority:v1")),
+        "migrator_database_password": credentials.migrator_password,
+        "observer_database_password": credentials.observer_password,
+        "reporter_incarnation": str(credentials.reporter_incarnation),
+        "reporter_token": credentials.reporter_token,
+        "runtime_database_password": credentials.runtime_password,
+        "schema_version": 1,
+        "subject_id": str(uuid5(NAMESPACE_URL, "loom:staging:capacity-subject")),
+        "subject_incarnation": str(uuid5(NAMESPACE_URL, "loom:staging:capacity-subject:v1")),
+    }
+
+
+def test_capacity_guard_passfile_handles_short_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: accepting a partial kernel write as a complete private passfile."""
+
+    real_write = os.write
+
+    def short_write(fd: int, payload: bytes) -> int:
+        return real_write(fd, payload[: max(1, len(payload) // 2)])
+
+    monkeypatch.setattr(capacity_runtime_module.os, "write", short_write)
+    password_free_url, fd = capacity_runtime_module._migration_url_with_passfile(
+        "postgresql://migrator:secret-password@postgres.example.test:5432/loom"
+    )
+    try:
+        assert "secret-password" not in password_free_url
+        assert os.read(fd, 4096) == (b"postgres.example.test:5432:loom:migrator:secret-password\n")
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_compensation_shutdown_observation_rejects_null_role_validity(
+    postgres_url: str,
+) -> None:
+    """Break caught: SQL three-valued logic accepting an unset role validity."""
+
+    identity = staging_capacity_identity()
+    owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+    protected = (owner, migrator, agent, executor, observer, runtime)
+    connection_url = (
+        make_url(postgres_url)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    async with await psycopg.AsyncConnection.connect(
+        connection_url,
+        autocommit=True,
+    ) as connection:
+        try:
+            for role in reversed(protected):
+                await connection.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+                )
+            for role in protected:
+                inherit = psycopg.sql.SQL("INHERIT" if role == migrator else "NOINHERIT")
+                await connection.execute(
+                    psycopg.sql.SQL(
+                        "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "{} NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+                    ).format(psycopg.sql.Identifier(role), inherit)
+                )
+                if role != agent:
+                    await connection.execute(
+                        psycopg.sql.SQL("ALTER ROLE {} VALID UNTIL 'infinity'").format(
+                            psycopg.sql.Identifier(role)
+                        )
+                    )
+
+            result = await connection.execute(
+                capacity_database_component_module._COMPENSATION_SHUTDOWN_SQL
+            )
+
+            assert await result.fetchone() == (
+                {"credentials_disabled": False, "sessions_terminated": True},
+            )
+        finally:
+            for role in reversed(protected):
+                await connection.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+                )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "active_role",
+    ["loom_cap_staging_owner", "loom_cap_staging_executor"],
+)
+async def test_full_compensation_covers_every_protected_role_session(
+    postgres_url: str,
+    active_role: str,
+) -> None:
+    """Break caught: full compensation accepting a live owner or executor session."""
+
+    identity = staging_capacity_identity()
+    owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+    protected = (owner, migrator, agent, executor, observer, runtime)
+    assert active_role in protected
+    password = f"protected-session-{uuid4().hex}"
+    connection_url = (
+        make_url(postgres_url)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    active_url = (
+        make_url(postgres_url)
+        .set(username=active_role, password=password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+
+    class PayloadRunner:
+        environment: ClassVar[dict[str, str]] = {}
+
+        def __init__(self) -> None:
+            self.payloads: list[bytes] = []
+
+        def run_checked(
+            self,
+            _argv,
+            *,
+            env,
+            input_payload,
+            timeout_seconds,
+        ) -> None:
+            assert env == self.environment
+            assert input_payload is not None
+            assert timeout_seconds == 60.0
+            self.payloads.append(input_payload)
+
+    active_connection: psycopg.AsyncConnection | None = None
+    async with await psycopg.AsyncConnection.connect(
+        connection_url,
+        autocommit=True,
+    ) as connection:
+        try:
+            await connection.execute("DROP DATABASE IF EXISTS loom WITH (FORCE)")
+            for role in reversed(protected):
+                await connection.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+                )
+            await connection.execute("CREATE DATABASE loom")
+            await connection.execute("REVOKE ALL PRIVILEGES ON DATABASE loom FROM PUBLIC")
+            for role in protected:
+                login = psycopg.sql.SQL("LOGIN" if role == active_role else "NOLOGIN")
+                inherit = psycopg.sql.SQL("INHERIT" if role == migrator else "NOINHERIT")
+                role_password = (
+                    psycopg.sql.Literal(password)
+                    if role == active_role
+                    else psycopg.sql.SQL("NULL")
+                )
+                await connection.execute(
+                    psycopg.sql.SQL(
+                        "CREATE ROLE {} {} NOSUPERUSER NOCREATEDB NOCREATEROLE {} "
+                        "NOREPLICATION NOBYPASSRLS PASSWORD {} VALID UNTIL 'infinity'"
+                    ).format(
+                        psycopg.sql.Identifier(role),
+                        login,
+                        inherit,
+                        role_password,
+                    )
+                )
+
+            active_connection = await psycopg.AsyncConnection.connect(
+                active_url,
+                autocommit=True,
+            )
+            backend_result = await active_connection.execute("SELECT pg_backend_pid()")
+            backend_row = await backend_result.fetchone()
+            assert backend_row is not None
+            backend_pid = backend_row[0]
+            await connection.execute(
+                psycopg.sql.SQL(
+                    "ALTER ROLE {} NOLOGIN PASSWORD NULL VALID UNTIL 'infinity'"
+                ).format(psycopg.sql.Identifier(active_role))
+            )
+
+            before = await connection.execute(
+                capacity_database_component_module._COMPENSATION_SHUTDOWN_SQL
+            )
+            assert await before.fetchone() == (
+                {"credentials_disabled": True, "sessions_terminated": False},
+            )
+
+            runner = PayloadRunner()
+            component = KubernetesProtectedStagingCapacityDatabaseComponent(
+                runner=runner,  # type: ignore[arg-type]
+                container_registry="registry.example.test/loom",
+                seed_reader=lambda: {},
+            )
+            component._verify_transient_authority_sealed(
+                preserve_runtime_credentials=False,
+                durable_runtime_credentials=True,
+            )
+            assert len(runner.payloads) == 1
+            with pytest.raises(
+                psycopg.errors.RaiseException,
+                match="protected staging capacity transient authority is not sealed",
+            ):
+                await connection.execute(runner.payloads[0].decode("utf-8"))
+            await connection.rollback()
+
+            component._terminate_transient_sessions(preserve_runtime_credentials=False)
+            assert len(runner.payloads) == 2
+            with pytest.raises(
+                psycopg.errors.RaiseException,
+                match="protected staging capacity transient sessions remain",
+            ):
+                await connection.execute(runner.payloads[1].decode("utf-8"))
+            await connection.rollback()
+
+            component._terminate_transient_sessions(preserve_runtime_credentials=False)
+            assert len(runner.payloads) == 3
+            await connection.execute(runner.payloads[2].decode("utf-8"))
+
+            after = await connection.execute(
+                capacity_database_component_module._COMPENSATION_SHUTDOWN_SQL
+            )
+            assert await after.fetchone() == (
+                {"credentials_disabled": True, "sessions_terminated": True},
+            )
+            retained = await connection.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = %s",
+                (backend_pid,),
+            )
+            assert await retained.fetchone() == (0,)
+        finally:
+            if active_connection is not None:
+                with suppress(Exception):
+                    await active_connection.close()
+            await connection.rollback()
+            await connection.execute("DROP DATABASE IF EXISTS loom WITH (FORCE)")
+            for role in reversed(protected):
+                await connection.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+                )
+
+
+@pytest.mark.asyncio
+async def test_staging_peer_arm_composes_with_converge_seal_retry_and_replacement(
+    postgres_url: str,
+) -> None:
+    """Catch retries sending application-role ACL mutations to the protected schema."""
+
+    credentials = _new_credentials()
+    seed = _staging_seed(credentials)
+    identity = staging_capacity_identity()
+    owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+    protected = (owner, migrator, agent, executor, observer, runtime)
+    parsed = make_url(postgres_url)
+    application_password = f"loom-app-{uuid4().hex}"
+    cluster_url = (
+        parsed.set(database="template1")
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    loom_admin_url = (
+        parsed.set(database="loom")
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    loom_application_url = (
+        parsed.set(database="loom", username="loom", password=application_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+
+    class PayloadRunner:
+        environment: ClassVar[dict[str, str]] = {}
+
+        def __init__(self) -> None:
+            self.payloads: list[bytes] = []
+
+        def run_checked(
+            self,
+            _argv,
+            *,
+            env,
+            input_payload,
+            timeout_seconds,
+        ) -> None:
+            assert env == self.environment
+            assert input_payload is not None
+            assert timeout_seconds == 60.0
+            self.payloads.append(input_payload)
+
+    runner = PayloadRunner()
+    component = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: seed,
+    )
+    component._arm_transient_migrator(seed)
+    component._seal_transient_migrator()
+    arm_payload, *seal_payloads = runner.payloads
+    assert len(seal_payloads) == 6
+
+    async with await psycopg.AsyncConnection.connect(
+        cluster_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute("DROP DATABASE IF EXISTS loom WITH (FORCE)")
+        for role in (*reversed(protected), "loom", "postgres"):
+            await connection.execute(
+                psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+            )
+        await connection.execute("CREATE ROLE postgres SUPERUSER NOLOGIN")
+        await connection.execute(
+            psycopg.sql.SQL(
+                "CREATE ROLE loom LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
+            ).format(psycopg.sql.Literal(application_password))
+        )
+        await connection.execute("CREATE DATABASE loom OWNER loom")
+
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
+        cfg.set_main_option("script_location", str(repo_root / "migrations"))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            loom_application_url.replace("postgresql://", "postgresql+psycopg://", 1),
+        )
+        command.upgrade(cfg, "head")
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            await connection.execute(arm_payload.decode("utf-8"))
+
+        configuration = build_staging_reporter_configuration_for_candidate(
+            candidate_sha="a" * 40,
+            artifact_bundle_digest="b" * 64,
+            mutation_epoch=41,
+            seed=seed,
+        )
+        migrator_url = (
+            parsed.set(
+                database="loom",
+                username=migrator,
+                password=credentials.migrator_password,
+            )
+            .render_as_string(hide_password=False)
+            .replace("postgresql+psycopg://", "postgresql://", 1)
+        )
+        installation = await PsycopgPersonalDevCapacityDatabase(
+            migrator_url,
+            transient_role_admin=True,
+        ).converge_protected(
+            identity=identity,
+            credentials=credentials,
+            configuration=configuration,
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            for seal_payload in seal_payloads:
+                await connection.execute(seal_payload.decode("utf-8"))
+
+            await connection.execute("GRANT USAGE ON SCHEMA loom_capacity_guard TO PUBLIC")
+            await connection.execute(arm_payload.decode("utf-8"))
+
+        retry_installation = await PsycopgPersonalDevCapacityDatabase(
+            migrator_url,
+            transient_role_admin=True,
+        ).converge_protected(
+            identity=identity,
+            credentials=credentials,
+            configuration=configuration,
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            for seal_payload in seal_payloads:
+                await connection.execute(seal_payload.decode("utf-8"))
+
+        assert retry_installation == installation
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            await connection.execute(arm_payload.decode("utf-8"))
+
+        replacement_configuration = build_staging_reporter_configuration_for_candidate(
+            candidate_sha="c" * 40,
+            artifact_bundle_digest="d" * 64,
+            mutation_epoch=42,
+            seed=seed,
+        )
+        replacement_installation = await PsycopgPersonalDevCapacityDatabase(
+            migrator_url,
+            transient_role_admin=True,
+        ).converge_protected(
+            identity=identity,
+            credentials=credentials,
+            configuration=replacement_configuration,
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            for seal_payload in seal_payloads:
+                await connection.execute(seal_payload.decode("utf-8"))
+
+        assert replacement_configuration.reporter_incarnation != configuration.reporter_incarnation
+        assert (
+            replacement_installation.protected_admission_sha256
+            != installation.protected_admission_sha256
+        )
+
+        runtime_url = (
+            parsed.set(
+                database="loom",
+                username=runtime,
+                password=credentials.runtime_password,
+            )
+            .render_as_string(hide_password=False)
+            .replace("postgresql+psycopg://", "postgresql://", 1)
+        )
+        async with await psycopg.AsyncConnection.connect(runtime_url) as runtime_connection:
+            registration = await runtime_connection.execute(
+                "SELECT loom_capacity_guard.current_protected_runtime_registration()"
+            )
+            row = await registration.fetchone()
+            assert row is not None
+            assert row[0]["candidate_digest"] == "d" * 64
+            assert row[0]["reporter_incarnation"] == str(
+                replacement_configuration.reporter_incarnation
+            )
+
+        async with await psycopg.AsyncConnection.connect(loom_admin_url) as connection:
+            revision = await connection.execute(
+                "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+            )
+            assert (await revision.fetchone())[0].startswith("guard_")
+            roles = await connection.execute(
+                "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                "rolcreaterole, rolreplication, rolbypassrls, rolpassword IS NOT NULL, "
+                "COALESCE(rolvaliduntil = 'infinity'::timestamptz, false) "
+                "FROM pg_authid WHERE rolname = ANY(%s) ORDER BY rolname",
+                ([*protected, "loom"],),
+            )
+            assert await roles.fetchall() == sorted(
+                [
+                    ("loom", True, False, False, False, False, False, False, True, False),
+                    (owner, False, False, False, False, False, False, False, False, True),
+                    (migrator, False, True, False, False, False, False, False, False, True),
+                    (agent, True, False, False, False, False, False, False, True, True),
+                    (executor, False, False, False, False, False, False, False, False, True),
+                    (observer, True, False, False, False, False, False, False, True, True),
+                    (runtime, True, False, False, False, False, False, False, True, True),
+                ]
+            )
+            memberships = await connection.execute(
+                "SELECT member.rolname, granted.rolname "
+                "FROM pg_auth_members membership "
+                "JOIN pg_roles member ON member.oid = membership.member "
+                "JOIN pg_roles granted ON granted.oid = membership.roleid "
+                "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s)",
+                (list(protected), list(protected)),
+            )
+            assert await memberships.fetchall() == []
+            privileges = await connection.execute(
+                "SELECT has_database_privilege(%s, 'loom', 'CONNECT'), "
+                "has_database_privilege(%s, 'loom', 'CREATE'), "
+                "has_database_privilege(%s, 'loom', 'TEMPORARY'), "
+                "has_database_privilege(%s, 'loom', 'CREATE')",
+                (migrator, migrator, migrator, owner),
+            )
+            assert await privileges.fetchone() == (False, False, False, False)
+            sessions = await connection.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = %s",
+                (migrator,),
+            )
+            assert await sessions.fetchone() == (0,)
+            public_guard_usage = await connection.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_namespace AS namespace "
+                "CROSS JOIN LATERAL aclexplode(COALESCE("
+                "namespace.nspacl, acldefault('n', namespace.nspowner)"
+                ")) AS privilege "
+                "WHERE namespace.nspname = 'loom_capacity_guard' "
+                "AND privilege.grantee = 0 AND privilege.privilege_type = 'USAGE'"
+                ")"
+            )
+            assert await public_guard_usage.fetchone() == (False,)
+            details_result = await connection.execute(
+                capacity_database_component_module._DETAIL_SQL
+            )
+            details_row = await details_result.fetchone()
+            assert details_row is not None
+            details = details_row[0]
+            assert details["active_protected_sessions"] == {
+                agent: 0,
+                executor: 0,
+                migrator: 0,
+                observer: 0,
+                owner: 0,
+                runtime: 0,
+            }
+            assert details["database_privileges"] == {
+                agent: {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+                executor: {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                migrator: {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                observer: {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+                owner: {
+                    "acl": [],
+                    "connect": False,
+                    "create": False,
+                    "temporary": False,
+                },
+                runtime: {
+                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                },
+            }
+            await connection.execute("GRANT CONNECT ON DATABASE loom TO PUBLIC")
+            public_details_result = await connection.execute(
+                capacity_database_component_module._DETAIL_SQL
+            )
+            public_details_row = await public_details_result.fetchone()
+            assert public_details_row is not None
+            assert public_details_row[0]["database_privileges"] == {
+                role: {
+                    "acl": (
+                        [
+                            {
+                                "grantable": False,
+                                "grantor": "loom",
+                                "privilege": "CONNECT",
+                            }
+                        ]
+                        if role in (agent, observer, runtime)
+                        else []
+                    ),
+                    "connect": True,
+                    "create": False,
+                    "temporary": False,
+                }
+                for role in protected
+            }
+            await connection.execute("REVOKE CONNECT ON DATABASE loom FROM PUBLIC")
+            assert details["roles"][migrator]["credential_validity"] == "infinite"
+            for role in (agent, observer, runtime):
+                assert details["roles"][role]["credential_validity"] == "infinite"
+
+        target_authority = UUID("841e79c2-8a76-4eeb-af56-f6d03bcb1bd8")
+        target_seed = {**seed, "authority_incarnation": str(target_authority)}
+        repair_plan = SimpleNamespace(
+            candidate_sha="c" * 40,
+            artifact_bundle_digest="d" * 64,
+            starting_mutation_epoch=42,
+            manager_authority_incarnation=str(target_authority),
+        )
+
+        class DirectPostgresRunner:
+            environment: ClassVar[dict[str, str]] = {}
+
+            def __init__(self) -> None:
+                self.fail_before_commit = False
+                self.lose_committed_response = False
+
+            def _connect(self):
+                return psycopg.connect(loom_admin_url, autocommit=True)
+
+            def capture_stdout(self, argv, *, env, timeout_seconds) -> bytes:
+                assert env == self.environment
+                assert timeout_seconds == 30.0
+                with self._connect() as direct:
+                    direct.execute("SET SESSION AUTHORIZATION postgres")
+                    result = direct.execute(argv[-1])
+                    row = result.fetchone()
+                    assert row is not None and len(row) == 1
+                    value = row[0]
+                    if isinstance(value, (dict, list)):
+                        return json.dumps(value, sort_keys=True).encode("ascii")
+                    return f"{value}\n".encode("ascii")
+
+            def run_checked(
+                self,
+                _argv,
+                *,
+                env,
+                input_payload,
+                timeout_seconds,
+            ) -> None:
+                assert env == self.environment
+                assert input_payload is not None
+                assert timeout_seconds == 60.0
+                payload = input_payload
+                if self.fail_before_commit:
+                    self.fail_before_commit = False
+                    payload = payload.removesuffix(b"COMMIT;\n") + b"SELECT 1 / 0;\nCOMMIT;\n"
+                with self._connect() as direct:
+                    direct.execute("SET SESSION AUTHORIZATION postgres")
+                    direct.execute(payload.decode("ascii"))
+                if self.lose_committed_response:
+                    self.lose_committed_response = False
+                    raise RuntimeError("injected committed response loss")
+
+        direct_runner = DirectPostgresRunner()
+        repair = KubernetesProtectedStagingCapacityDatabaseComponent(
+            runner=direct_runner,  # type: ignore[arg-type]
+            container_registry="registry.example.test/loom",
+            seed_reader=lambda: target_seed,
+        )
+        repair._disable_transient_credentials(preserve_runtime_credentials=False)
+        repair._terminate_transient_sessions(preserve_runtime_credentials=False)
+        repair._remove_transient_authority()
+        repair._verify_transient_authority_sealed(
+            preserve_runtime_credentials=False,
+            durable_runtime_credentials=True,
+        )
+        target_fence, target_registration, _, _ = repair._authority_rebind_bindings(
+            repair_plan,  # type: ignore[arg-type]
+            target_seed,
+        )
+        assert repair._authority_rebind_foundation_exact()
+        assert repair._authority_rebind_triggers_exact()
+        assert (
+            len(
+                repair._certify_authority_rebind_audits(
+                    expected_fence=target_fence,
+                    expected_registration=target_registration,
+                    committed=False,
+                ).rows
+            )
+            == 4
+        )
+
+        async with await psycopg.AsyncConnection.connect(
+            loom_admin_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("SET SESSION AUTHORIZATION postgres")
+            timestamp = await connection.execute(
+                "SELECT updated_at FROM loom_capacity_guard.authority_state WHERE singleton_id = 1"
+            )
+            original_updated_at = (await timestamp.fetchone())[0]
+            digest = await connection.execute(
+                "SELECT payload_digest FROM loom_capacity_guard.audit_events WHERE event_id = 1"
+            )
+            original_digest = (await digest.fetchone())[0]
+
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "DISABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.agent_reporter_state SET high_water = 1"
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "ENABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+            assert not repair._authority_rebind_foundation_exact()
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "DISABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.agent_reporter_state SET high_water = 0"
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.agent_reporter_state "
+                "ENABLE TRIGGER agent_reporter_state_monotonic_row"
+            )
+
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "DISABLE TRIGGER audit_events_append_only_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.audit_events SET payload_digest = repeat('0', 64) "
+                "WHERE event_id = 1"
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "ENABLE TRIGGER audit_events_append_only_row"
+            )
+            with pytest.raises(ValueError, match="not canonical"):
+                repair._certify_authority_rebind_audits(
+                    expected_fence=target_fence,
+                    expected_registration=target_registration,
+                    committed=False,
+                )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "DISABLE TRIGGER audit_events_append_only_row"
+            )
+            await connection.execute(
+                "UPDATE loom_capacity_guard.audit_events SET payload_digest = %s "
+                "WHERE event_id = 1",
+                (original_digest,),
+            )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.audit_events "
+                "ENABLE TRIGGER audit_events_append_only_row"
+            )
+
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.authority_state "
+                "DISABLE TRIGGER authority_state_monotonic_row"
+            )
+            assert not repair._authority_rebind_triggers_exact()
+            with pytest.raises(RuntimeError, match="triggers drifted"):
+                repair._rebind_legacy_authority(
+                    repair_plan,  # type: ignore[arg-type]
+                    target_seed,
+                )
+            await connection.execute(
+                "ALTER TABLE loom_capacity_guard.authority_state "
+                "ENABLE TRIGGER authority_state_monotonic_row"
+            )
+
+        direct_runner.fail_before_commit = True
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            repair._rebind_legacy_authority(
+                repair_plan,  # type: ignore[arg-type]
+                target_seed,
+            )
+        async with await psycopg.AsyncConnection.connect(loom_admin_url) as connection:
+            authority = await connection.execute(
+                "SELECT authority_incarnation FROM loom_capacity_guard.authority_state"
+            )
+            audits = await connection.execute(
+                "SELECT count(*) FROM loom_capacity_guard.audit_events"
+            )
+            assert await authority.fetchone() == (UUID("558afea6-2a37-55a1-9f7c-3399695da966"),)
+            assert await audits.fetchone() == (4,)
+
+        direct_runner.lose_committed_response = True
+        with pytest.raises(RuntimeError, match="committed response loss"):
+            repair._rebind_legacy_authority(
+                repair_plan,  # type: ignore[arg-type]
+                target_seed,
+            )
+        committed = repair._certify_authority_rebind_audits(
+            expected_fence=target_fence,
+            expected_registration=target_registration,
+            committed=True,
+        )
+        assert len(committed.rows) == 6
+        assert [row["event_id"] for row in committed.rows] == [1, 2, 3, 4, 7, 8]
+        repair._restore_runtime_credentials(
+            repair_plan,  # type: ignore[arg-type]
+            target_seed,
+        )
+
+        async with await psycopg.AsyncConnection.connect(loom_admin_url) as connection:
+            authority = await connection.execute(
+                "SELECT authority_incarnation, updated_at FROM loom_capacity_guard.authority_state"
+            )
+            assert await authority.fetchone() == (target_authority, original_updated_at)
+            registration = await connection.execute(
+                "SELECT authority_incarnation FROM loom_capacity_guard.agent_registrations"
+            )
+            assert await registration.fetchone() == (target_authority,)
+        assert installation.runtime_database_url == runtime_url.replace(
+            "postgresql://",
+            "postgresql+psycopg://",
+            1,
+        )
+    finally:
+        async with await psycopg.AsyncConnection.connect(
+            cluster_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute("DROP DATABASE IF EXISTS loom WITH (FORCE)")
+            for role in (*reversed(protected), "loom", "postgres"):
+                await connection.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+                )
+
+
+@pytest.mark.asyncio
+async def test_capacity_guard_migration_uses_password_free_url_and_private_passfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = f"migrator-{uuid4().hex}"
+    migrator_url = (
+        "postgresql://loom_cap_staging_migrator:"
+        f"{secret}@postgres.example.test:5432/loom?sslmode=require"
+    )
+    observed: dict[str, object] = {}
+
+    class Process:
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    async def create_subprocess_exec(*argv: object, **kwargs: object) -> Process:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        db_url = env["LOOM_CAPACITY_GUARD_DB_URL"]
+        if secret in json.dumps(env, sort_keys=True):
+            raise AssertionError("secret found in child environment")
+        parsed = make_url(db_url)
+        assert parsed.drivername == "postgresql+psycopg"
+        assert parsed.password is None
+        assert parsed.username == "loom_cap_staging_migrator"
+        passfile = parsed.query["passfile"]
+        assert isinstance(passfile, str)
+        assert passfile.startswith("/proc/self/fd/")
+        pass_fds = kwargs["pass_fds"]
+        assert isinstance(pass_fds, tuple)
+        assert int(os.path.basename(passfile)) in pass_fds
+        with open(passfile, "rb") as handle:
+            observed["passfile"] = handle.read().decode("utf-8")
+        observed["argv"] = argv
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    await PsycopgPersonalDevCapacityDatabase("postgresql://unused")._migrate(
+        migrator_url=migrator_url,
+        owner="loom_cap_staging_owner",
+        agent="loom_cap_staging_agent",
+        executor="loom_cap_staging_executor",
+        observer="loom_cap_staging_observer",
+        runtime="loom_cap_staging_runtime",
+    )
+
+    assert observed["passfile"] == (
+        f"postgres.example.test:5432:loom:loom_cap_staging_migrator:{secret}\n"
+    )
+    assert secret not in " ".join(str(item) for item in observed["argv"])
 
 
 @pytest.mark.asyncio
@@ -185,6 +1065,7 @@ async def test_executor_surface_convergence_preserves_exact_protected_runtime_fu
 
     expected = {
         "assert_staging_worker_session",
+        "cancel_protected_runtime_pending_trial",
         "claim_staging_assigned_trial",
         "current_protected_runtime_registration",
         "publish_protected_runtime_trial_readiness",
@@ -789,6 +1670,364 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
             (owner, database_name),
         )
         assert await create_privilege.fetchone() == (False,)
+
+
+@pytest.mark.asyncio
+async def test_capacity_migrator_seal_is_idempotent_before_roles_exist(
+    postgres_url: str,
+) -> None:
+    name = f"seal-absent-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    owner, migrator, *_rest = _role_names(identity)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+
+    await database._seal_migrator(identity, owner=owner, migrator=migrator)
+
+    async with await psycopg.AsyncConnection.connect(
+        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+    ) as connection:
+        roles = await connection.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+            ([owner, migrator],),
+        )
+        assert await roles.fetchall() == []
+
+
+@pytest.mark.asyncio
+async def test_transient_migrator_admin_converges_roles_without_altering_itself(
+    postgres_url: str,
+) -> None:
+    parsed = make_url(postgres_url)
+    suffix = uuid4().hex[:8]
+    database_name = f"transient_roles_{suffix}"
+    application_role = f"transient_app_{suffix}"
+    application_password = f"transient-app-{uuid4().hex}"
+    identity = replace(
+        derive_identity(f"transient-{uuid4().hex[:8]}"),
+        database=database_name,
+        db_role=application_role,
+    )
+    credentials = _new_credentials()
+    owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+    protected = (owner, migrator, agent, executor, observer, runtime)
+    cluster_url = (
+        parsed.set(database="template1")
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    connect_url = (
+        parsed.set(database=database_name)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    application_url = (
+        parsed.set(database=database_name, username=application_role, password=application_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    async with await psycopg.AsyncConnection.connect(
+        cluster_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute(
+            psycopg.sql.SQL(
+                "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
+            ).format(
+                psycopg.sql.Identifier(application_role),
+                psycopg.sql.Literal(application_password),
+            )
+        )
+        await connection.execute(
+            psycopg.sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                psycopg.sql.Identifier(database_name),
+                psycopg.sql.Identifier(application_role),
+            )
+        )
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
+        cfg.set_main_option("script_location", str(repo_root / "migrations"))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            application_url.replace("postgresql://", "postgresql+psycopg://", 1),
+        )
+        command.upgrade(cfg, "head")
+        async with await psycopg.AsyncConnection.connect(
+            connect_url,
+            autocommit=True,
+        ) as connection:
+            for role in (owner, executor):
+                await connection.execute(
+                    psycopg.sql.SQL(
+                        "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+                    ).format(psycopg.sql.Identifier(role))
+                )
+            await connection.execute(
+                psycopg.sql.SQL(
+                    "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                    "INHERIT NOREPLICATION NOBYPASSRLS PASSWORD {} VALID UNTIL '2099-01-01'"
+                ).format(
+                    psycopg.sql.Identifier(migrator),
+                    psycopg.sql.Literal(credentials.migrator_password),
+                )
+            )
+            for role, password in (
+                (agent, credentials.agent_password),
+                (observer, credentials.observer_password),
+                (runtime, credentials.runtime_password),
+            ):
+                await connection.execute(
+                    psycopg.sql.SQL(
+                        "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {} "
+                        "VALID UNTIL '2099-01-01'"
+                    ).format(psycopg.sql.Identifier(role), psycopg.sql.Literal(password))
+                )
+            await connection.execute(
+                psycopg.sql.SQL("GRANT {} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
+                    psycopg.sql.Identifier(application_role),
+                    psycopg.sql.Identifier(migrator),
+                )
+            )
+            await connection.execute(
+                psycopg.sql.SQL("GRANT {} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
+                    psycopg.sql.Identifier(owner),
+                    psycopg.sql.Identifier(migrator),
+                )
+            )
+
+        migrator_url = parsed.set(
+            database=database_name,
+            username=migrator,
+            password=credentials.migrator_password,
+        ).render_as_string(hide_password=False)
+        database = PsycopgPersonalDevCapacityDatabase(
+            migrator_url,
+            transient_role_admin=True,
+        )
+
+        observed = await database._converge_roles(identity, credentials)
+
+        assert observed[:6] == protected
+        async with await psycopg.AsyncConnection.connect(connect_url) as connection:
+            role = await connection.execute(
+                "SELECT rolcanlogin, rolcreaterole, rolpassword IS NULL "
+                "FROM pg_authid WHERE rolname = %s",
+                (migrator,),
+            )
+            assert await role.fetchone() == (True, False, False)
+            memberships = await connection.execute(
+                "SELECT member.rolname, granted.rolname, membership.admin_option, "
+                "membership.inherit_option, membership.set_option "
+                "FROM pg_auth_members membership "
+                "JOIN pg_roles member ON member.oid = membership.member "
+                "JOIN pg_roles granted ON granted.oid = membership.roleid "
+                "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
+                "ORDER BY member.rolname, granted.rolname",
+                (list(protected), list(protected)),
+            )
+            assert await memberships.fetchall() == sorted(
+                [
+                    (migrator, application_role, False, True, True),
+                    (migrator, owner, False, True, True),
+                ]
+            )
+    finally:
+        async with await psycopg.AsyncConnection.connect(
+            cluster_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute(
+                psycopg.sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    psycopg.sql.Identifier(database_name)
+                )
+            )
+            for role in (*reversed(protected), application_role):
+                await connection.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+                )
+
+
+@pytest.mark.asyncio
+async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
+    postgres_url: str,
+) -> None:
+    credentials = _new_credentials()
+
+    class PayloadRunner:
+        def __init__(self) -> None:
+            self.environment: dict[str, str] = {}
+            self.payloads: list[bytes] = []
+
+        def run_checked(
+            self,
+            _argv,
+            *,
+            env,
+            input_payload,
+            timeout_seconds,
+        ) -> None:
+            assert env == self.environment
+            assert input_payload is not None
+            assert timeout_seconds == 60.0
+            self.payloads.append(input_payload)
+
+    runner = PayloadRunner()
+    component = KubernetesProtectedStagingCapacityDatabaseComponent(
+        runner=runner,  # type: ignore[arg-type]
+        container_registry="registry.example.test/loom",
+        seed_reader=lambda: {},
+    )
+    component._arm_transient_migrator(_staging_seed(credentials))
+    component._seal_transient_migrator()
+    arm_payload, *seal_payloads = runner.payloads
+    assert len(seal_payloads) == 6
+    parsed = make_url(postgres_url)
+    identity = staging_capacity_identity()
+    owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+    protected = (owner, migrator, agent, executor, observer, runtime)
+    superuser_url = (
+        parsed.set(database="template1")
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+
+    async with await psycopg.AsyncConnection.connect(
+        superuser_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute("DROP DATABASE IF EXISTS loom")
+        for role in (*reversed(protected), "loom", "postgres"):
+            await connection.execute(
+                psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
+            )
+        await connection.execute("CREATE ROLE postgres SUPERUSER NOLOGIN")
+        await connection.execute(
+            "CREATE ROLE loom NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+            "NOINHERIT NOREPLICATION NOBYPASSRLS"
+        )
+        await connection.execute("CREATE DATABASE loom OWNER loom")
+
+    loom_superuser_url = (
+        parsed.set(database="loom")
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    async with await psycopg.AsyncConnection.connect(
+        loom_superuser_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute("SET SESSION AUTHORIZATION postgres")
+        await connection.execute(arm_payload.decode("utf-8"))
+
+    async with await psycopg.AsyncConnection.connect(loom_superuser_url) as connection:
+        armed_state = await connection.execute(
+            "SELECT rolname, rolcanlogin, rolinherit, rolcreaterole, "
+            "rolpassword IS NOT NULL, rolvaliduntil IS NOT NULL "
+            "FROM pg_authid WHERE rolname = ANY(%s) ORDER BY rolname",
+            (list(protected),),
+        )
+        assert await armed_state.fetchall() == sorted(
+            [
+                (owner, False, False, False, False, True),
+                (migrator, True, True, False, True, True),
+                (agent, True, False, False, True, True),
+                (executor, False, False, False, False, True),
+                (observer, True, False, False, True, True),
+                (runtime, True, False, False, True, True),
+            ]
+        )
+        armed_memberships = await connection.execute(
+            "SELECT member.rolname, granted.rolname, membership.admin_option, "
+            "membership.inherit_option, membership.set_option "
+            "FROM pg_auth_members membership "
+            "JOIN pg_roles member ON member.oid = membership.member "
+            "JOIN pg_roles granted ON granted.oid = membership.roleid "
+            "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
+            "ORDER BY member.rolname, granted.rolname",
+            (list(protected), list(protected)),
+        )
+        assert await armed_memberships.fetchall() == sorted(
+            [
+                (migrator, "loom", False, True, True),
+                (migrator, owner, False, True, True),
+            ]
+        )
+
+    disable_payload, terminate_payload, cleanup_payload, *finish_payloads = seal_payloads
+    async with await psycopg.AsyncConnection.connect(
+        loom_superuser_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute("SET SESSION AUTHORIZATION postgres")
+        await connection.execute(disable_payload.decode("utf-8"))
+        await connection.execute(terminate_payload.decode("utf-8"))
+        await connection.execute("CREATE ROLE loom_cap_staging_foreign NOLOGIN")
+        await connection.execute("CREATE ROLE loom_cap_staging_dependent NOLOGIN")
+        await connection.execute(
+            "GRANT loom_cap_staging_foreign TO loom_cap_staging_migrator WITH ADMIN OPTION"
+        )
+        await connection.execute("SET ROLE loom_cap_staging_migrator")
+        await connection.execute("GRANT loom_cap_staging_foreign TO loom_cap_staging_dependent")
+        await connection.execute("RESET ROLE")
+        with pytest.raises(psycopg.errors.DependentObjectsStillExist):
+            await connection.execute(cleanup_payload.decode("utf-8"))
+        await connection.execute("ROLLBACK")
+        disabled = await connection.execute(
+            "SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid "
+            "WHERE rolname = 'loom_cap_staging_migrator'"
+        )
+        assert await disabled.fetchone() == (False, True)
+        await connection.execute("DROP ROLE loom_cap_staging_dependent")
+        await connection.execute(cleanup_payload.decode("utf-8"))
+        for seal_payload in finish_payloads:
+            await connection.execute(seal_payload.decode("utf-8"))
+        await connection.execute("DROP ROLE loom_cap_staging_foreign")
+
+    async with await psycopg.AsyncConnection.connect(loom_superuser_url) as connection:
+        migrator_state = await connection.execute(
+            "SELECT rolname, rolcanlogin, rolinherit, rolcreaterole, "
+            "rolpassword IS NOT NULL, "
+            "COALESCE(rolvaliduntil = 'infinity'::timestamptz, false) "
+            "FROM pg_authid WHERE rolname = ANY(%s) ORDER BY rolname",
+            (list(protected),),
+        )
+        assert await migrator_state.fetchall() == sorted(
+            [
+                (owner, False, False, False, False, True),
+                (migrator, False, True, False, False, True),
+                (agent, True, False, False, True, True),
+                (executor, False, False, False, False, True),
+                (observer, True, False, False, True, True),
+                (runtime, True, False, False, True, True),
+            ]
+        )
+        memberships = await connection.execute(
+            "SELECT count(*) FROM pg_auth_members membership "
+            "JOIN pg_roles member ON member.oid = membership.member "
+            "JOIN pg_roles granted ON granted.oid = membership.roleid "
+            "WHERE member.rolname = %s OR granted.rolname = %s",
+            (migrator, migrator),
+        )
+        assert await memberships.fetchone() == (0,)
+        application_state = await connection.execute(
+            "SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = 'loom'"
+        )
+        assert await application_state.fetchone() == (False, False)
+
+    async with await psycopg.AsyncConnection.connect(
+        superuser_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute("DROP DATABASE loom")
+        for role in (*reversed(protected), "loom", "postgres"):
+            await connection.execute(
+                psycopg.sql.SQL("DROP ROLE {}").format(psycopg.sql.Identifier(role))
+            )
 
 
 @pytest.mark.asyncio

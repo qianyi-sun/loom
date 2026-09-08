@@ -16,6 +16,7 @@ from loom.db.schema_startup import assert_schema_at_head
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.storage_credentials import build_s3_client
+from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.artifact_commit_runtime import (
     CheckpointRouteService,
@@ -103,13 +104,13 @@ async def _cancel_and_drain_tasks(
         task.cancel()
     results = await asyncio.gather(*active_tasks, return_exceptions=True)
     for result in results:
-        if isinstance(result, BaseException) and not isinstance(
-            result, asyncio.CancelledError
-        ):
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
             raise result
 
 
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
+    source_config = ServiceExecutionSourceConfig.from_settings(settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(
@@ -168,6 +169,10 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             secret_key=settings.minio_secret_key.get_secret_value(),
             region=settings.minio_region,
         )
+        source_store = (
+            source_config.build_store(MinioObjectStore) if source_config else artifact_store
+        )
+        source_bucket = source_config.bucket if source_config else settings.artifacts_bucket
         artifact_repository = SqlArtifactCommitRepository(
             session_factory=session_factory,
             store=artifact_store,
@@ -315,17 +320,13 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 run_service_execution_materializer_loop(
                     materializer=ServiceExecutionMaterializer(
                         session_factory=session_factory,
-                        source_store=artifact_store,
-                        source_bucket=settings.artifacts_bucket,
+                        source_store=source_store,
+                        source_bucket=source_bucket,
                         canonical_store=artifact_store,
                         artifacts_bucket=settings.artifacts_bucket,
                         trajectories_bucket=settings.trajectories_bucket,
-                        claim_ttl_seconds=(
-                            settings.service_execution_materializer_claim_ttl_sec
-                        ),
-                        source_retention_seconds=(
-                            settings.service_execution_source_retention_sec
-                        ),
+                        claim_ttl_seconds=(settings.service_execution_materializer_claim_ttl_sec),
+                        source_retention_seconds=(settings.service_execution_source_retention_sec),
                     ),
                     interval_seconds=settings.service_execution_materializer_interval_sec,
                     concurrency=settings.service_execution_materializer_concurrency,

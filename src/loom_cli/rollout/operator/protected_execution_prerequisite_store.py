@@ -202,6 +202,8 @@ class ProtectedExecutionPrerequisiteStore:
             artifact = self._read_locked(publication)
             return {
                 **artifact.attestation_evidence(),
+                "mode": "activation",
+                "bootstrap-authority-sha256": "0" * 64,
                 "artifact-path": str(publication.path),
             }
 

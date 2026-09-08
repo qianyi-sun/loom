@@ -249,7 +249,7 @@ def _database_authority(*, public_revision: str = "0066") -> DatabaseAuthorityEv
     )
     return DatabaseAuthorityEvidence(
         public_schema_revision=public_revision,
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest=canonical_digest(snapshot),
         authority_incarnation=fleet.authority_incarnation,
@@ -262,74 +262,11 @@ def _database_authority(*, public_revision: str = "0066") -> DatabaseAuthorityEv
     )
 
 
-def _database_authority_observation(*, public_revision: str = "0066") -> dict[str, object]:
-    fleet = fleet_with_development_template()
-    subject = subject_configuration()
-    fleet_digest = canonical_digest(fleet)
-    subject_digest = canonical_digest(subject)
-    refs = (
-        ConfigurationGenerationRefV1(
-            scope="subject",
-            generation=subject.configuration_generation,
-            digest=subject_digest,
-            subject_id=subject.subject_id,
-            subject_incarnation=subject.subject_incarnation,
-        ),
-    )
-    snapshot = ConfigurationSnapshotV1(
-        configuration_epoch=9,
-        fleet=ConfigurationGenerationRefV1(
-            scope="fleet",
-            generation=fleet.fleet_generation,
-            digest=fleet_digest,
-        ),
-        subjects=refs,
-    )
+def _application_database_authority_observation(
+    *, public_revision: str = "0066"
+) -> dict[str, object]:
     return {
-        "authority": [
-            {
-                "authority_incarnation": str(fleet.authority_incarnation),
-                "executable_new_capacity_ceiling": 0,
-                "execution_epoch": 0,
-                "execution_manifest_sha256": None,
-                "execution_state": "shadow",
-                "increase_freeze": True,
-                "recovery_state": "shadow",
-                "schema_version": 1,
-                "singleton_id": 1,
-                "writer_epoch": 4,
-            }
-        ],
-        "configuration": [
-            {
-                "canonical_digest": canonical_digest(snapshot),
-                "configuration_epoch": 9,
-                "fleet_digest": fleet_digest,
-                "fleet_generation": fleet.fleet_generation,
-                "subject_generation_manifest": [item.model_dump(mode="json") for item in refs],
-            }
-        ],
-        "generations": [
-            {
-                "digest": fleet_digest,
-                "payload": fleet.model_dump(mode="json"),
-                "scope": "fleet",
-                "scope_generation": fleet.fleet_generation,
-                "state": "active",
-                "subject_id": None,
-                "subject_incarnation": None,
-            },
-            {
-                "digest": subject_digest,
-                "payload": subject.model_dump(mode="json"),
-                "scope": "subject",
-                "scope_generation": subject.configuration_generation,
-                "state": "active",
-                "subject_id": str(subject.subject_id),
-                "subject_incarnation": str(subject.subject_incarnation),
-            },
-        ],
-        "guard_revisions": ["guard_0027"],
+        "guard_revisions": ["guard_0028"],
         "guard_table_present": True,
         "public_revisions": [public_revision],
     }
@@ -729,6 +666,26 @@ def test_database_streams_exact_checkpoint_into_restricted_pod(
             tag = argv[-1]
             name = tag.split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if "psql" in argv:
+            assert "--username=loom_rehearsal" in argv
+            if "--file=-" in argv:
+                assert payload is not None
+                assert (
+                    "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                    in payload.decode()
+                )
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    json.dumps(_application_database_authority_observation()) + "\n",
+                    "",
+                )
+            command = next(item for item in argv if item.startswith("--command="))
+            if "to_regclass" in command:
+                record = {"database": plan.resources.database, "restored": restored}
+            else:
+                record = {"schema_revision": plan.schema_revision}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(record) + "\n", "")
         if payload is not None:
             pod = json.loads(payload)
             for container in pod["spec"]["containers"]:
@@ -776,21 +733,6 @@ def test_database_streams_exact_checkpoint_into_restricted_pod(
                 },
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps(observed), "")
-        if "psql" in argv:
-            assert "--username=loom_rehearsal" in argv
-            command = next(item for item in argv if item.startswith("--command="))
-            if "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in command:
-                return subprocess.CompletedProcess(
-                    argv,
-                    0,
-                    json.dumps(_database_authority_observation()) + "\n",
-                    "",
-                )
-            if "to_regclass" in command:
-                record = {"database": plan.resources.database, "restored": restored}
-            else:
-                record = {"schema_revision": plan.schema_revision}
-            return subprocess.CompletedProcess(argv, 0, json.dumps(record) + "\n", "")
         raise AssertionError(argv)
 
     def stream(argv, source, timeout):
@@ -824,20 +766,16 @@ def test_database_streams_exact_checkpoint_into_restricted_pod(
     assert "--jobs=4" in restore_call
     assert "--username=loom_rehearsal" in restore_call
     assert restore_call[-1] == "/var/lib/postgresql/data/loom-rehearsal.dump"
-    authority_call = next(
-        call[0]
-        for call in calls
-        if "psql" in call[0]
-        and any(
-            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in item
-            for item in call[0]
-        )
-    )
-    authority_sql = next(item for item in authority_call if item.startswith("--command="))
+    authority_call = next(call[0] for call in calls if "psql" in call[0] and "--file=-" in call[0])
+    authority_payload = next(call[1] for call in calls if call[0] == authority_call)
+    assert authority_payload is not None
+    authority_sql = authority_payload.decode()
+    assert "-i" in authority_call
+    assert not any(item.startswith("--command") for item in authority_call)
     assert "FROM public.alembic_version" in authority_sql
     assert "FROM loom_capacity_guard.capacity_guard_alembic_version" in authority_sql
-    assert "FROM public.capacity_configuration_epochs" in authority_sql
-    assert "FROM public.capacity_authority_state" in authority_sql
+    assert "capacity_configuration_epochs" not in authority_sql
+    assert "capacity_authority_state" not in authority_sql
     assert calls.index(next(call for call in calls if call[0] == restore_call)) < calls.index(
         next(call for call in calls if call[0] == authority_call)
     )
@@ -1269,18 +1207,20 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
     revision = plan.schema_revision
     calls: list[tuple[str, ...]] = []
 
-    def run(argv, _payload, _timeout):
+    def run(argv, payload, _timeout):
         nonlocal revision
         command = tuple(argv)
         calls.append(command)
         if "psql" in command:
-            sql = next(item for item in command if item.startswith("--command="))
-            if "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in sql:
-                record = _database_authority_observation(public_revision=revision)
-            elif "to_regclass" in sql:
-                record = {"database": plan.resources.database, "restored": True}
+            if "--file=-" in command:
+                assert payload is not None
+                record = _application_database_authority_observation(public_revision=revision)
             else:
-                record = {"schema_revision": revision}
+                sql = next(item for item in command if item.startswith("--command="))
+                if "to_regclass" in sql:
+                    record = {"database": plan.resources.database, "restored": True}
+                else:
+                    record = {"schema_revision": revision}
             return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
         if "alembic" in command:
             revision = plan.migration_target_revision
@@ -1308,21 +1248,10 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
     revision_queries = [
         next(item for item in command if item.startswith("--command="))
         for command in calls
-        if "psql" in command
-        and not any(
-            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in item
-            for item in command
-        )
+        if "psql" in command and "--file=-" not in command
     ]
     assert all("FROM public.alembic_version" in query for query in revision_queries[1::2])
-    authority_indexes = [
-        index
-        for index, command in enumerate(calls)
-        if any(
-            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in item
-            for item in command
-        )
-    ]
+    authority_indexes = [index for index, command in enumerate(calls) if "--file=-" in command]
     migration_index = calls.index(migration)
     assert len(authority_indexes) == 2
     assert authority_indexes[0] < migration_index < authority_indexes[1]
@@ -1331,7 +1260,7 @@ def test_migration_runs_exact_candidate_against_restored_database() -> None:
 @pytest.mark.parametrize(
     ("field", "drifted"),
     [
-        ("capacity_guard_schema_revision", "guard_0028"),
+        ("capacity_guard_schema_revision", "guard_0027"),
         ("configuration_epoch", 10),
         ("configuration_digest", "0" * 64),
         ("authority_incarnation", uuid.UUID("00000000-0000-4000-8000-0000000000bb")),
@@ -1410,18 +1339,20 @@ def test_migration_is_idempotent_and_rejects_unexpected_baseline() -> None:
     revision = plan.migration_target_revision
     calls: list[tuple[str, ...]] = []
 
-    def run(argv, _payload, _timeout):
+    def run(argv, payload, _timeout):
         command = tuple(argv)
         calls.append(command)
         if "psql" not in command:
             raise AssertionError(argv)
-        sql = next(item for item in command if item.startswith("--command="))
-        if "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in sql:
-            record = _database_authority_observation(public_revision=revision)
-        elif "to_regclass" in sql:
-            record = {"database": plan.resources.database, "restored": True}
+        if "--file=-" in command:
+            assert payload is not None
+            record = _application_database_authority_observation(public_revision=revision)
         else:
-            record = {"schema_revision": revision}
+            sql = next(item for item in command if item.startswith("--command="))
+            if "to_regclass" in sql:
+                record = {"database": plan.resources.database, "restored": True}
+            else:
+                record = {"schema_revision": revision}
         return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
 
     outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.migration", plan)
@@ -3409,6 +3340,24 @@ def test_stream_runner_reads_private_file_without_following_parent_symlinks(
     assert observed == [b"exact-dump"]
     with pytest.raises(OSError):
         _default_stream_run(("consumer",), linked / "loom.dump", 30)
+
+
+def test_stream_runner_disables_kubectl_remote_command_websockets(tmp_path: Path) -> None:
+    source = tmp_path / "loom.dump"
+    source.write_bytes(b"exact-dump")
+    source.chmod(0o600)
+    consumer = tmp_path / "consumer"
+    consumer.write_text(
+        "#!/bin/sh\n"
+        'test "$KUBECTL_REMOTE_COMMAND_WEBSOCKETS" = false || exit 97\n'
+        'test "$(cat)" = exact-dump\n',
+        encoding="utf-8",
+    )
+    consumer.chmod(0o700)
+
+    result = _default_stream_run((str(consumer),), source, 30)
+
+    assert result.returncode == 0
 
 
 def test_stream_runner_rejects_mode_and_read_time_drift(

@@ -67,7 +67,7 @@ NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
 def _lease() -> BackupLease:
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0066",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest="9" * 64,
         authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
@@ -754,7 +754,7 @@ def test_final_gate_plan_rejects_execution_prerequisite_authority_drift(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("capacity_guard_schema_revision", "guard_0027"),
+        ("capacity_guard_schema_revision", "guard_0028"),
         ("manager_execution_manifest_sha256", "f" * 64),
         ("execution_policy_sha256", "f" * 64),
     ],

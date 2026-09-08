@@ -524,11 +524,12 @@ async def _seed_ready_trial(
     session: AsyncSession,
     *,
     now: datetime,
+    task_id: str | None = None,
 ) -> tuple[UUID, ExecutionTargetV1]:
     suffix = uuid4().hex[:12]
     team_id = uuid4()
     trial_id = uuid4()
-    task_id = f"service-execution/{suffix}"
+    task_id = task_id or f"service-execution/{suffix}"
     target = _target(suffix)
     session.add_all(
         (
@@ -2884,8 +2885,10 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("source_task_id", [None, "nebius-acceptance/canonical-output"])
 async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     postgres_url: str,
+    source_task_id: str | None,
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -2913,13 +2916,23 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     canonical_store = FailOnceCanonicalStore()
     try:
         async with sessions() as session:
-            trial_id, target = await _seed_ready_trial(session, now=now)
+            catalog_task_id = (
+                f"ts/{uuid4()}/nebius-canonical-acceptance/tasks/nebius-acceptance_canonical-output"
+                if source_task_id is not None
+                else None
+            )
+            trial_id, target = await _seed_ready_trial(
+                session, now=now, task_id=catalog_task_id
+            )
             trial = await session.get(Trial, trial_id)
             task = None if trial is None else await session.get(Task, trial.task_id)
             assert trial is not None and task is not None
             task.config = {
                 "schema_version": "1",
-                "task": {"id": task.id, "name": "Canonical materialization"},
+                "task": {
+                    "id": source_task_id or task.id,
+                    "name": "Canonical materialization",
+                },
                 "environment": {
                     "os": "linux",
                     "cpu_arch": "x86_64",
@@ -3223,6 +3236,10 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert len(lifecycle_objects) == len(artifact.storage["files"]) + 5
             assert all(event.lifecycle_authority_id is not None for event in events)
             assert trial.trajectory_index["atif_schema_version"] == "1.7"
+            assert events[0].payload["task_id"] == trial.task_id
+            persisted_task = await session.get(Task, trial.task_id)
+            assert persisted_task is not None
+            assert persisted_task.config["task"]["id"] == (source_task_id or trial.task_id)
             assert [event.kind for event in events] == [
                 "trial_start",
                 "step_start",
@@ -3258,6 +3275,9 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert json.loads(canonical_store.objects[("trajectories", atif_key)])[
                 "schema_version"
             ] == "1.7"
+            assert json.loads(canonical_store.objects[("trajectories", atif_key)])[
+                "metadata"
+            ]["task_id"] == trial.task_id
             source_prefix = f"service-executions/{trial.team_id}/{lease.id}/1/output/"
             assert not any(
                 bucket == "artifacts" and key.startswith(source_prefix)

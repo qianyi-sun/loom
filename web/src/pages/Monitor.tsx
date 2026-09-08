@@ -47,6 +47,7 @@ type View = "batches" | "trials";
 const BATCH_STATE_OPTIONS = ["submitted", "running", "finished", "cancelled"];
 const TRIAL_STATE_OPTIONS = [
   "queued",
+  "protected-pending",
   "claimed",
   "running",
   "materializing",
@@ -62,6 +63,7 @@ const STATE_OPTION_LABELS: Record<string, string> = {
   claimed: "Claimed - worker reserved it",
   failed: "Failed - needs diagnosis",
   finished: "Finished - all trials terminal",
+  "protected-pending": "Protected pending - waiting for runtime admission",
   queued: "Queued - waiting for worker",
   running: "Running - in progress",
   materializing: "Materializing - securing complete output",
@@ -574,7 +576,11 @@ function MonitorHealthSummary({
           />
           <CountBox
             label="Queued"
-            value={stateCount(resources?.queued_tasks ?? data.queue.queued, "queued")}
+            value={stateCount(
+              resources?.queued_tasks ??
+                data.queue.queued + data.queue.protected_pending,
+              "queued",
+            )}
           />
           <CountBox
             label="Running"
@@ -611,6 +617,12 @@ function MonitorHealthSummary({
         <ResourcePoolBreakdown resources={data.resources} />
         <NebiusExecutionBreakdown serviceExecution={data.service_execution} />
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+          <span>
+            {stateCount(
+              data.state_counts.trials["protected-pending"],
+              "protected pending",
+            )}
+          </span>
           <span>
             Batches: {data.state_counts.batches.submitted} submitted,{" "}
             {data.state_counts.batches.running} running,{" "}

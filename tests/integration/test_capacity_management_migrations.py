@@ -56,6 +56,7 @@ EXPECTED_TABLES = {
     "capacity_executable_command_receipts",
     "capacity_executable_executor_states",
     "capacity_executable_intents",
+    "capacity_executable_terminal_inventory_evidence",
     "capacity_executable_launch_rate_buckets",
     "capacity_executable_protected_release_receipts",
     "capacity_executable_tranches",
@@ -2656,12 +2657,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0014")
+            ).scalar_one() == ("capacity_0015")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0014"
+            assert environment_revision != "capacity_0015"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -2683,7 +2684,89 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 14
+    assert await assert_capacity_schema_at_head(capacity_engine) == 15
+
+
+def test_capacity_0015_terminal_inventory_evidence_is_append_only_and_reversible(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "head")
+    engine = create_engine(isolated_capacity_migration_url)
+    table = "capacity_executable_terminal_inventory_evidence"
+    signature = "public.capacity_executable_terminal_inventory_insert_guard()"
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0015"
+            assert table in inspect(connection).get_table_names()
+            columns = {item["name"] for item in inspect(connection).get_columns(table)}
+            assert {
+                "intent_id",
+                "subject_id",
+                "subject_incarnation",
+                "execution_epoch",
+                "executor_incarnation",
+                "inventory_sequence",
+                "physical_identity",
+                "terminal_evidence_sha256",
+                "evidence_digest",
+                "evidence_payload",
+            } <= columns
+            triggers = set(
+                connection.execute(
+                    text(
+                        "SELECT tgname FROM pg_trigger "
+                        "WHERE tgrelid = to_regclass(:table) "
+                        "AND NOT tgisinternal"
+                    ),
+                    {"table": f"public.{table}"},
+                ).scalars()
+            )
+            assert triggers == {
+                "capacity_executable_terminal_inventory_insert_guard",
+                "capacity_executable_terminal_inventory_append_only_guard",
+                "capacity_executable_terminal_inventory_truncate_guard",
+            }
+            routine = (
+                connection.execute(
+                    text(
+                        "SELECT prosecdef, proconfig FROM pg_proc "
+                        "WHERE oid = to_regprocedure(:signature)"
+                    ),
+                    {"signature": signature},
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(routine) == {
+                "prosecdef": True,
+                "proconfig": ["search_path=pg_catalog"],
+            }
+            assert connection.execute(
+                text("SELECT has_function_privilege('public', :signature, 'EXECUTE')"),
+                {"signature": signature},
+            ).scalar_one() is False
+
+        command.downgrade(cfg, "capacity_0014")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0014"
+            assert connection.execute(
+                text("SELECT to_regclass(:table)"),
+                {"table": f"public.{table}"},
+            ).scalar_one() is None
+            assert connection.execute(
+                text("SELECT to_regprocedure(:signature)"),
+                {"signature": signature},
+            ).scalar_one() is None
+
+        command.upgrade(cfg, "head")
+    finally:
+        command.upgrade(cfg, "head")
+        engine.dispose()
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(

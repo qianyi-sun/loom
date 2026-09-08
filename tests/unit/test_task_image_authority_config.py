@@ -81,6 +81,15 @@ def test_settings_are_frozen_strict_and_use_only_the_authority_prefix(
     assert settings.request_rate_limit_per_second == 75
     assert settings.request_concurrency_limit == 12
     assert settings.host == "127.0.0.1"
+    assert settings.bundle_public_https_origin is None
+    assert settings.bundle_expected_bucket is None
+    assert settings.bundle_maximum_objects == 2_000
+    assert settings.bundle_maximum_bytes == 512 * 1024 * 1024
+    assert settings.bundle_url_expiry_seconds == 900
+    assert settings.registry_origin is None
+    assert settings.registry_service is None
+    assert settings.registry_issuer is None
+    assert settings.registry_signing_key_file is None
     with pytest.raises(ValidationError):
         settings.port = 8446  # type: ignore[misc]
     with pytest.raises(ValidationError):
@@ -88,11 +97,182 @@ def test_settings_are_frozen_strict_and_use_only_the_authority_prefix(
     with pytest.raises(ValidationError):
         TaskImageAuthoritySettings(**_settings_values(tmp_path), unknown=True)
     assert (
-        TaskImageAuthoritySettings(**_settings_values(tmp_path), host="0.0.0.0").host
-        == "0.0.0.0"
+        TaskImageAuthoritySettings(**_settings_values(tmp_path), host="0.0.0.0").host == "0.0.0.0"
     )
     with pytest.raises(ValidationError):
         TaskImageAuthoritySettings(**_settings_values(tmp_path), host="192.0.2.1")
+
+
+def test_bundle_capability_configuration_is_explicit_and_environment_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in _settings_values(tmp_path).items():
+        monkeypatch.setenv(f"LOOM_TASK_IMAGE_AUTHORITY_{name.upper()}", str(value))
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_BUNDLE_PUBLIC_HTTPS_ORIGIN",
+        "https://objects.example",
+    )
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_BUNDLE_EXPECTED_BUCKET",
+        "loom-bundles",
+    )
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_BUNDLE_MAXIMUM_OBJECTS", "123")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_BUNDLE_MAXIMUM_BYTES", "456789")
+    monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_BUNDLE_URL_EXPIRY_SECONDS", "321")
+
+    settings = TaskImageAuthoritySettings()
+
+    assert settings.bundle_public_https_origin == "https://objects.example"
+    assert settings.bundle_expected_bucket == "loom-bundles"
+    assert settings.bundle_maximum_objects == 123
+    assert settings.bundle_maximum_bytes == 456789
+    assert settings.bundle_url_expiry_seconds == 321
+
+
+@pytest.mark.parametrize(
+    ("changes"),
+    [
+        {"bundle_public_https_origin": "http://objects.example", "bundle_expected_bucket": "loom"},
+        {
+            "bundle_public_https_origin": "https://user@objects.example",
+            "bundle_expected_bucket": "loom",
+        },
+        {
+            "bundle_public_https_origin": "https://objects.example/path",
+            "bundle_expected_bucket": "loom",
+        },
+        {"bundle_public_https_origin": "https://objects.example", "bundle_expected_bucket": "LOOM"},
+        {"bundle_public_https_origin": "https://objects.example"},
+        {"bundle_expected_bucket": "loom-bundles"},
+        {"bundle_maximum_objects": 0},
+        {"bundle_maximum_objects": 2_001},
+        {"bundle_maximum_bytes": 0},
+        {"bundle_maximum_bytes": 512 * 1024 * 1024 + 1},
+        {"bundle_url_expiry_seconds": 0},
+        {"bundle_url_expiry_seconds": 901},
+    ],
+)
+def test_settings_reject_unsafe_or_partial_bundle_configuration(
+    tmp_path: Path,
+    changes: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskImageAuthoritySettings(**(_settings_values(tmp_path) | changes))
+
+
+def test_registry_configuration_is_optional_but_complete_and_environment_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in _settings_values(tmp_path).items():
+        monkeypatch.setenv(f"LOOM_TASK_IMAGE_AUTHORITY_{name.upper()}", str(value))
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_ORIGIN",
+        "https://registry.example:5443",
+    )
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_SERVICE",
+        "registry.example",
+    )
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_ISSUER",
+        "loom-task-image-authority",
+    )
+    monkeypatch.setenv(
+        "LOOM_TASK_IMAGE_AUTHORITY_REGISTRY_SIGNING_KEY_FILE",
+        str(tmp_path / "registry-signing.pem"),
+    )
+
+    settings = TaskImageAuthoritySettings()
+
+    assert settings.registry_origin == "https://registry.example:5443"
+    assert settings.registry_service == "registry.example"
+    assert settings.registry_issuer == "loom-task-image-authority"
+    assert settings.registry_signing_key_file == tmp_path / "registry-signing.pem"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"registry_origin": "https://registry.example"},
+        {"registry_service": "registry.example"},
+        {"registry_issuer": "loom-task-image-authority"},
+        {"registry_signing_key_file": Path("/run/loom/registry-signing.pem")},
+        {
+            "registry_origin": "http://registry.example",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://user@registry.example",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry.example/path",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry.example?scope=all",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry.example#fragment",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://REGISTRY.example",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry.example:",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry%2eexample",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry_example",
+            "registry_service": "registry.example",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry.example",
+            "registry_service": "REGISTRY.EXAMPLE",
+            "registry_issuer": "loom-task-image-authority",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+        {
+            "registry_origin": "https://registry.example",
+            "registry_service": "registry.example",
+            "registry_issuer": "issuer with spaces",
+            "registry_signing_key_file": Path("/run/loom/registry-signing.pem"),
+        },
+    ],
+)
+def test_settings_reject_unsafe_or_partial_registry_configuration(
+    tmp_path: Path,
+    changes: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        TaskImageAuthoritySettings(**(_settings_values(tmp_path) | changes))
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,7 @@ from scripts.ops import staging_rollout_host as host
 from loom_cli.rollout.install_attestation import RunnerInstallAttestation
 from loom_cli.rollout.lifecycle_protocol import LifecyclePhase
 from loom_cli.rollout.operator.backup_job import BackupJobState, PreflightBackupJobEnvelope
+from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.config import OperatorConfig
 
 TEAM_ID = "11111111-1111-4111-8111-111111111111"
@@ -6349,6 +6350,175 @@ def _write_orphaned_backup_fixture(
     rotation_path.chmod(0o600)
     evidence_root = tmp_path / "orphan-evidence"
     return state_root, evidence_root, service_uid, service_gid
+
+
+def _schema_two_backup_lease_record() -> dict[str, object]:
+    """A complete literal record emitted by the protected checkpoint path."""
+    return {
+        "capacity_guard_schema_revision": None,
+        "checkpoint_schema_version": 3,
+        "component_sha256": {
+            "database_authority": (
+                "060308731c084aff507ce0d291086d2106d6a0c924ba64793090a2cb97b0b29b"
+            ),
+            "k8s_secrets": ("4662333a36769392100a4d2b6b0ff3f29858ad076c576ad3cf660e6bba23fa19"),
+            "object_inventory": (
+                "49f4dae73e2fe25d9d26cd8c8a9b561263594a8d1792d378f9ddd6aa98e76069"
+            ),
+            "postgres": ("aa6390e101f415ed117c3de0b825e27d8bb245b5fd2450520e3c77c69fe46017"),
+        },
+        "created_at": "2026-09-05T15:47:03.549095+00:00",
+        "database_authority_digest": (
+            "060308731c084aff507ce0d291086d2106d6a0c924ba64793090a2cb97b0b29b"
+        ),
+        "db_snapshot_identity": (
+            "pgdump-sha256:aa6390e101f415ed117c3de0b825e27d8bb245b5fd2450520e3c77c69fe46017"
+        ),
+        "environment": "staging",
+        "expires_at": "2026-09-06T11:53:23.138868+00:00",
+        "lease_id": "lease-27b0ccefa05643c84fc35318",
+        "manager_authority_incarnation": "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+        "manager_configuration_digest": (
+            "4dcb9707c3ca55fcaa75d64ba4baabac496ef8f1cf28c02fb7b7aa626c2cb597"
+        ),
+        "manager_configuration_epoch": 1,
+        "manager_executable_new_capacity_ceiling": 0,
+        "manager_execution_epoch": 0,
+        "manager_execution_manifest_sha256": None,
+        "manager_execution_state": "shadow",
+        "manager_increase_freeze": True,
+        "manager_writer_epoch": 19,
+        "manifest_sha256": ("27b0ccefa05643c84fc353189ef6f769dbc6354de5a9c777f564a8da8e639a93"),
+        "mutation_epoch": 248,
+        "namespace": "loom-staging",
+        "object_inventory_root": (
+            "7cb87e6c54f72fbb3ee9960fa965d3dcc568b0c1923f2f93139f1a2cf8eb8efb"
+        ),
+        "public_schema_revision": "0129",
+        "restore_report_sha256": (
+            "7a26ea8a4cb7f4d42d9735dbc3b75acb9d13eedbe3ffee2ef3b6b684b888fa99"
+        ),
+        "restore_verified_at": "2026-09-05T15:53:23.133610+00:00",
+        "schema_revision": "0129",
+        "schema_version": 2,
+        "source_request_id": "req-b0343c3707ab4951",
+    }
+
+
+def _replace_active_backup_lease(state_root: Path, lease: dict[str, object]) -> None:
+    rotation_path = state_root / "backup-rotation.json"
+    rotation = json.loads(rotation_path.read_text(encoding="utf-8"))
+    active = rotation["active"]
+    assert isinstance(active, dict)
+    active["lease"] = lease
+    active["manifest_sha256"] = lease["manifest_sha256"]
+    active["request_id"] = lease["source_request_id"]
+    rotation_path.write_text(
+        json.dumps(rotation, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _resign_schema_two_database_authority(lease: dict[str, object]) -> None:
+    authority = {
+        "authority_incarnation": lease["manager_authority_incarnation"],
+        "capacity_guard_schema_revision": lease["capacity_guard_schema_revision"],
+        "configuration_digest": lease["manager_configuration_digest"],
+        "configuration_epoch": lease["manager_configuration_epoch"],
+        "executable_new_capacity_ceiling": lease["manager_executable_new_capacity_ceiling"],
+        "execution_epoch": lease["manager_execution_epoch"],
+        "execution_manifest_sha256": lease["manager_execution_manifest_sha256"],
+        "execution_state": lease["manager_execution_state"],
+        "increase_freeze": lease["manager_increase_freeze"],
+        "public_schema_revision": lease["public_schema_revision"],
+        "schema_version": 1,
+        "writer_epoch": lease["manager_writer_epoch"],
+    }
+    digest = hashlib.sha256(
+        (json.dumps(authority, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    lease["database_authority_digest"] = digest
+    components = lease["component_sha256"]
+    assert isinstance(components, dict)
+    components["database_authority"] = digest
+
+
+def test_backup_rotation_accepts_complete_schema_two_backup_lease(tmp_path: Path) -> None:
+    state_root, _, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        referenced=True,
+    )
+    lease = _schema_two_backup_lease_record()
+    assert BackupLease.from_dict(lease).to_dict() == lease
+    _replace_active_backup_lease(state_root, lease)
+
+    _, _, referenced = host._read_backup_rotation_references(
+        state_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+    )
+
+    assert referenced == {"payload-orphan001"}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value", "resign"),
+    [
+        ("missing-manager_writer_epoch", None, False),
+        ("extra-field", "unexpected", False),
+        ("checkpoint_schema_version", 2, False),
+        ("missing-object_inventory-component", None, False),
+        ("database_authority_digest", "0" * 64, False),
+        ("capacity_guard_schema_revision", "guard-invalid", True),
+        ("manager_configuration_epoch", 0, True),
+        ("manager_configuration_digest", "invalid", True),
+        ("manager_authority_incarnation", "not-a-uuid", False),
+        ("manager_writer_epoch", -1, True),
+        ("manager_execution_state", "active", True),
+        ("manager_execution_epoch", 1, True),
+        ("manager_execution_manifest_sha256", "0" * 64, True),
+        ("manager_executable_new_capacity_ceiling", 1, True),
+        ("manager_increase_freeze", False, True),
+        ("restore_report_sha256", "invalid", False),
+        ("public_schema_revision", "0130", True),
+        ("postgres-component-drift", "0" * 64, False),
+    ],
+)
+def test_backup_rotation_rejects_partial_or_unsafe_schema_two_authority(
+    tmp_path: Path,
+    mutation: str,
+    value: object,
+    resign: bool,
+) -> None:
+    state_root, _, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        referenced=True,
+    )
+    lease = _schema_two_backup_lease_record()
+    if mutation == "missing-manager_writer_epoch":
+        lease.pop("manager_writer_epoch")
+    elif mutation == "extra-field":
+        lease["unexpected"] = value
+    elif mutation == "missing-object_inventory-component":
+        components = lease["component_sha256"]
+        assert isinstance(components, dict)
+        components.pop("object_inventory")
+    elif mutation == "postgres-component-drift":
+        components = lease["component_sha256"]
+        assert isinstance(components, dict)
+        components["postgres"] = value
+    else:
+        lease[mutation] = value
+    if resign:
+        _resign_schema_two_database_authority(lease)
+    _replace_active_backup_lease(state_root, lease)
+
+    with pytest.raises(host.InstallError, match="backup rotation evidence is invalid"):
+        host._read_backup_rotation_references(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+        )
 
 
 def _rewrite_orphaned_backup_json(path: Path, **updates: object) -> None:

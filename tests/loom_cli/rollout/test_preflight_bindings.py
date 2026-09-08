@@ -201,7 +201,9 @@ def _executions(*, include_execution_prerequisites: bool = True) -> tuple[CheckE
         _execution(
             "execution.prerequisites",
             {
+                "mode": "activation",
                 "schema-version": 1,
+                "bootstrap-authority-sha256": "0" * 64,
                 "artifact-path": f"/var/lib/loom/execution-prerequisites/{'1' * 64}.json",
                 "artifact-sha256": "1" * 64,
                 "core-artifact-bundle-sha256": "2" * 64,
@@ -240,7 +242,7 @@ def _context(*, candidate_sha: str = "a" * 40) -> CheckContext:
 def _schema_three_lease() -> BackupLease:
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0067",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest="9" * 64,
         authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
@@ -502,6 +504,49 @@ def test_new_schema_three_checkpoint_attestation_requires_execution_prerequisite
             executions,
             backup_lease=_schema_three_lease(),
         )
+
+
+def test_zero_ceiling_bootstrap_evidence_produces_non_execution_attestation() -> None:
+    """Catch accidentally admitting executable components during foundation bootstrap."""
+    bootstrap = _execution(
+        "execution.prerequisites",
+        {
+            "mode": "zero-ceiling-bootstrap",
+            "schema-version": 0,
+            "bootstrap-authority-sha256": "a" * 64,
+            "artifact-path": "/",
+            "artifact-sha256": "0" * 64,
+            "core-artifact-bundle-sha256": "0" * 64,
+            "execution-policy-sha256": "0" * 64,
+            "executor-profile-seed-sha256": "0" * 64,
+            "manager-route-sha256": "0" * 64,
+            "access-metadata-sha256": "0" * 64,
+            "coexistence-witness-sha256": "0" * 64,
+            "legacy-writer-sha256": "0" * 64,
+            "rollback-evidence-sha256": "0" * 64,
+        },
+    )
+    executions = (
+        *_executions(include_execution_prerequisites=False),
+        bootstrap,
+    )
+
+    bindings = derive_attestation_bindings(
+        _context(),
+        executions,
+        backup_lease=_schema_three_lease(),
+    )
+    attestation = PreflightAttestation.issue(
+        bindings=bindings,
+        executions=executions,
+        issued_at=NOW + timedelta(minutes=1),
+        registry_digest="4" * 64,
+        coverage_digest="5" * 64,
+    )
+
+    assert bindings.execution_prerequisite_schema_version is None
+    assert bindings.execution_prerequisite_artifact_path is None
+    assert attestation.schema_version == 4
 
 
 def test_new_attestation_bindings_require_a_schema_three_lease() -> None:

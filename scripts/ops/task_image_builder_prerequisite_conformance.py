@@ -73,6 +73,10 @@ EXPECTED_CLUSTER_AUTHORITY = {
         "legacy_reservation_partition": "gb10",
     },
 }
+RUNTIME_ARCHITECTURE_MAP = {
+    "x86_64": "amd64",
+    "aarch64": "arm64",
+}
 BUILDER_FEATURE = "loom_rootless_buildkit"
 PHASE2_NAMES = (
     "loom-task-builder-allocation-supervisor",
@@ -257,6 +261,81 @@ def _policy_json(payload: bytes, error_message: str) -> Any:
     return value
 
 
+def _json_object(value: Any, error_message: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ConformanceError(error_message)
+    return dict(value)
+
+
+def _normalized_runtime_binaries(
+    value: Any,
+    *,
+    key: str,
+) -> dict[str, str]:
+    architecture = _json_object(value, "rootless runtime manifest is invalid")
+    binaries = _json_object(architecture.get(key), "rootless runtime manifest is invalid")
+    if not binaries:
+        raise ConformanceError("rootless runtime manifest is invalid")
+    normalized: dict[str, str] = {}
+    for name, digest in binaries.items():
+        if (
+            Path(name).name != name
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ConformanceError("rootless runtime manifest is invalid")
+        normalized[name] = digest
+    return normalized
+
+
+def load_runtime_manifest(path: Path) -> dict[str, Any]:
+    runtime_payload = _read_regular(path)
+    runtime_value = _json_object(
+        _policy_json(runtime_payload, "rootless runtime manifest is invalid"),
+        "rootless runtime manifest is invalid",
+    )
+    schema = runtime_value.get("schema")
+    release = runtime_value.get("release")
+    architectures = _json_object(
+        runtime_value.get("architectures"),
+        "rootless runtime manifest is invalid",
+    )
+    if schema == "loom.task-image-builder-rootless-runtime/v1":
+        if release != "rootless-runtime-v1":
+            raise ConformanceError("rootless runtime manifest is invalid")
+        return {
+            "schema": schema,
+            "release": release,
+            "architectures": {
+                architecture: {
+                    "binaries": _normalized_runtime_binaries(
+                        architectures.get(architecture),
+                        key="binaries",
+                    )
+                }
+                for architecture in ("x86_64", "aarch64")
+            },
+        }
+    if schema == "loom.task-image-builder-rootless-runtime/v2":
+        if release != "rootless-runtime-v2":
+            raise ConformanceError("rootless runtime manifest is invalid")
+        return {
+            "schema": schema,
+            "release": release,
+            "architectures": {
+                architecture: {
+                    "binaries": _normalized_runtime_binaries(
+                        architectures.get(debian_architecture),
+                        key="members",
+                    )
+                }
+                for architecture, debian_architecture in RUNTIME_ARCHITECTURE_MAP.items()
+            },
+        }
+    raise ConformanceError("rootless runtime manifest is invalid")
+
+
 def _canonical_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -346,11 +425,7 @@ def load_policy(path: Path) -> PrerequisitePolicy:
         raise ConformanceError("runtime manifest path is invalid")
     runtime_path = path.parent / manifest_name
     runtime_payload = _read_regular(runtime_path)
-    runtime_value = _policy_json(runtime_payload, "rootless runtime manifest is invalid")
-    if not isinstance(runtime_value, dict) or runtime_value.get("schema") != (
-        "loom.task-image-builder-rootless-runtime/v1"
-    ):
-        raise ConformanceError("rootless runtime manifest is invalid")
+    runtime_value = load_runtime_manifest(runtime_path)
     release_manifest = raw_value.get("host_release_manifest")
     if (
         not isinstance(release_manifest, str)

@@ -6,12 +6,14 @@ import json
 import re
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_agent.admission import (
+    ExecutableTerminalInventoryImportReceiptV2,
     ProtectedReleasePublicationCheckpointV2,
     PublishableExecutableProtectedReleaseV2,
 )
@@ -24,6 +26,7 @@ from loom_capacity_guard.contracts import canonical_bytes, canonical_digest
 from loom_capacity_guard.store import CapacityGuardStore
 from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
+    ExecutableTerminalInventoryEvidenceV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
@@ -544,6 +547,73 @@ async def read_next_executable_protected_release(
     return publication
 
 
+async def import_executable_terminal_inventory_evidence(
+    session: AsyncSession,
+    *,
+    registration: AgentRegistrationV1,
+    protected_attempt_id: UUID,
+    evidence: ExecutableTerminalInventoryEvidenceV2,
+) -> ExecutableTerminalInventoryImportReceiptV2:
+    """Import one exact manager-authenticated terminal witness through the guard."""
+
+    if not isinstance(registration, AgentRegistrationV1):
+        raise TypeError("terminal inventory import registration is invalid")
+    if not isinstance(protected_attempt_id, UUID):
+        raise TypeError("terminal inventory protected attempt id must be a UUID")
+    if not isinstance(evidence, ExecutableTerminalInventoryEvidenceV2):
+        raise TypeError("terminal inventory evidence is invalid")
+    binding = evidence.binding
+    if (
+        binding.subject_id != registration.subject_id
+        or binding.subject_incarnation != registration.subject_incarnation
+        or binding.deployment_generation != registration.deployment_generation
+        or binding.candidate.algorithm != registration.candidate_identity_algorithm
+        or binding.candidate.identity != registration.candidate_identity
+        or binding.candidate.publication_sha256 != registration.candidate_publication_sha256
+    ):
+        raise CapacityAgentStoreError("terminal inventory evidence binding is invalid")
+    canonical_payload = canonical_executable_bytes(evidence)
+    evidence_digest = canonical_executable_digest(evidence)
+    async with session.begin_nested():
+        returned = (
+            await session.execute(
+                text(
+                    f"SELECT {_SCHEMA}.import_executable_terminal_inventory_evidence("
+                    ":agent_incarnation, :protected_attempt_id, CAST(:payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :evidence_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "protected_attempt_id": protected_attempt_id,
+                    "payload": canonical_payload.decode("ascii"),
+                    "canonical_payload": canonical_payload,
+                    "evidence_digest": evidence_digest,
+                },
+            )
+        ).scalar_one()
+        if not isinstance(returned, Mapping):
+            raise CapacityAgentStoreError("terminal inventory import returned a non-object")
+        try:
+            receipt = ExecutableTerminalInventoryImportReceiptV2.model_validate_json(
+                _json_payload(returned).encode("ascii")
+            )
+        except (ValidationError, ValueError) as exc:
+            raise CapacityAgentStoreError(
+                "terminal inventory import returned an invalid contract"
+            ) from exc
+        if (
+            receipt.intent_id != binding.intent_id
+            or receipt.protected_attempt_id != protected_attempt_id
+            or receipt.physical_job_id != evidence.record.physical_identity
+            or receipt.inventory_sequence != evidence.inventory_sequence
+            or receipt.terminal_evidence_sha256 != evidence.record.terminal_evidence_sha256
+            or receipt.evidence_digest != evidence_digest
+        ):
+            raise CapacityAgentStoreError("terminal inventory import receipt changed")
+        canonical_executable_bytes(receipt)
+    return receipt
+
+
 async def acknowledge_executable_protected_release_publication(
     session: AsyncSession,
     *,
@@ -607,6 +677,7 @@ __all__ = [
     "acknowledge_executable_protected_release_publication",
     "capture_demand_observation",
     "capture_lifecycle_demand_observation",
+    "import_executable_terminal_inventory_evidence",
     "read_agent_lifecycle_demand_observation",
     "read_agent_reporter_high_water",
     "read_next_executable_protected_release",

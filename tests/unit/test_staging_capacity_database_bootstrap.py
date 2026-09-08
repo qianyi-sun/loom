@@ -105,8 +105,9 @@ async def test_bootstrap_uses_fixed_staging_identity_and_existing_database_insta
     observed: dict[str, Any] = {}
 
     class Database:
-        def __init__(self, admin_url: str) -> None:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
             observed["admin_url"] = admin_url
+            observed["transient_role_admin"] = transient_role_admin
 
         async def converge_protected(
             self,
@@ -142,6 +143,7 @@ async def test_bootstrap_uses_fixed_staging_identity_and_existing_database_insta
         "sslmode": "verify-full",
         "sslrootcert": str(tmp_path / "ca.crt"),
     }
+    assert observed["transient_role_admin"] is True
     identity = observed["identity"]
     assert identity.name == "staging"
     assert identity.runtime_environment == "staging"
@@ -175,6 +177,97 @@ async def test_bootstrap_rejects_seed_and_configuration_identity_mismatch(
             factory_called = True
 
     with pytest.raises(ValueError, match="staging capacity bootstrap identity mismatch"):
+        await bootstrap_staging_capacity_database(settings, database_factory=Database)
+
+    assert factory_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "00000000-0000-0000-0000-000000000000",
+        "841E79C2-8A76-4EEB-AF56-F6D03BCB1BD8",
+        "{841e79c2-8a76-4eeb-af56-f6d03bcb1bd8}",
+    ],
+)
+async def test_bootstrap_rejects_noncanonical_or_nil_authority(
+    tmp_path: Path,
+    authority: str,
+) -> None:
+    """Break caught: accepting an ambiguous or nil protected authority binding."""
+    settings, seed = _write_inputs(tmp_path)
+    seed["authority_incarnation"] = authority
+    configuration = _configuration(seed)
+    settings.credential_seed_path.write_text(json.dumps(seed), encoding="ascii")
+    settings.reporter_configuration_path.write_text(
+        configuration.model_dump_json(),
+        encoding="ascii",
+    )
+    factory_called = False
+
+    class Database:
+        def __init__(self, _admin_url: str, *, transient_role_admin: bool) -> None:
+            nonlocal factory_called
+            factory_called = True
+
+        async def converge_protected(self, **_kwargs: object) -> CapacityDatabaseInstallation:
+            return CapacityDatabaseInstallation(
+                protected_admission_sha256="4" * 64,
+                agent_database_url="redacted-agent-url",
+                runtime_database_url="redacted-runtime-url",
+            )
+
+    with pytest.raises(ValueError, match="staging capacity credential seed identity is invalid"):
+        await bootstrap_staging_capacity_database(settings, database_factory=Database)
+
+    assert factory_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("document", ["seed", "configuration"])
+async def test_bootstrap_rejects_duplicate_authority_key(
+    tmp_path: Path,
+    document: str,
+) -> None:
+    """Break caught: JSON last-value-wins silently replacing a protected authority."""
+    settings, seed = _write_inputs(tmp_path)
+    authority = str(seed["authority_incarnation"])
+    duplicate = f'"authority_incarnation":"{authority}","authority_incarnation":"{authority}"'
+    if document == "seed":
+        payload = settings.credential_seed_path.read_text(encoding="ascii")
+        original = f'"authority_incarnation": "{authority}"'
+        settings.credential_seed_path.write_text(
+            payload.replace(original, duplicate),
+            encoding="ascii",
+        )
+    else:
+        payload = settings.reporter_configuration_path.read_text(encoding="ascii")
+        original = f'"authority_incarnation":"{authority}"'
+        settings.reporter_configuration_path.write_text(
+            payload.replace(original, duplicate),
+            encoding="ascii",
+        )
+    factory_called = False
+
+    class Database:
+        def __init__(self, _admin_url: str, *, transient_role_admin: bool) -> None:
+            nonlocal factory_called
+            factory_called = True
+
+        async def converge_protected(self, **_kwargs: object) -> CapacityDatabaseInstallation:
+            return CapacityDatabaseInstallation(
+                protected_admission_sha256="4" * 64,
+                agent_database_url="redacted-agent-url",
+                runtime_database_url="redacted-runtime-url",
+            )
+
+    expected = (
+        "staging capacity credential seed is invalid"
+        if document == "seed"
+        else "staging capacity reporter configuration is invalid"
+    )
+    with pytest.raises(ValueError, match=expected):
         await bootstrap_staging_capacity_database(settings, database_factory=Database)
 
     assert factory_called is False

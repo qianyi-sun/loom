@@ -1264,8 +1264,14 @@ class HttpControlPlaneClient:
             attempt_count = (
                 int(raw_attempt) if isinstance(raw_attempt, int) else None
             )
+            # Operator cancel may stamp cancellation_requested_at before the
+            # row reaches state=cancelled; treat that as cancelled for revoke.
+            if body.get("cancellation_requested_at") is not None:
+                state = "cancelled"
+            else:
+                state = str(body["state"])
             return TrialOwnershipSnapshot(
-                state=str(body["state"]),
+                state=state,
                 worker_id=worker_id,
                 attempt_count=attempt_count,
             )
@@ -1277,7 +1283,8 @@ class HttpControlPlaneClient:
         """Fetch the current CP-side state for ``trial_id``.
 
         Prefer :meth:`get_trial_ownership` for new revoke logic; this helper
-        remains for callers that only need the state string.
+        remains for callers that only need the state string. A non-null
+        ``cancellation_requested_at`` is reported as ``cancelled``.
         """
         return (await self.get_trial_ownership(trial_id)).state
 

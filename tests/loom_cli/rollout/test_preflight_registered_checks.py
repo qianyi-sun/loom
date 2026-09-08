@@ -751,6 +751,66 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
     assert "database.schema.revision" in check.spec.input_keys
 
 
+def test_external_supervisor_predecessor_remains_fresh_through_rehearsal_cleanup() -> None:
+    """Catch a detached rehearsal outliving its late prerequisite dependency."""
+    current_time = [datetime(2026, 9, 5, 2, 30, tzinfo=UTC)]
+    predecessor = build_external_supervisor_predecessor_check(
+        lambda _context: _external_supervisor_snapshots(_external_supervisor_snapshot())
+    )
+
+    def finish_slow_rehearsal(_context: CheckContext) -> CheckProbe:
+        current_time[0] += timedelta(seconds=121)
+        return CheckProbe(passed=True, evidence={"ready": True})
+
+    cleanup = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="rehearsal.cleanup",
+            failure_code="rehearsal.cleanup.failed",
+            tier=3,
+            stage=StageCapability.ISOLATED_REHEARSAL,
+            dependencies=("external-supervisor.predecessor",),
+            mutation_class=MutationClass.ISOLATED,
+            input_keys=("candidate.sha",),
+            evidence_schema=(EvidenceField("ready", "boolean"),),
+            timeout_seconds=3600,
+            freshness_ttl_seconds=3600,
+            remediation="clean the exact isolated rehearsal",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="test-v1",
+        operations={CheckOperation.PROBE: finish_slow_rehearsal},
+    )
+    deferred = build_execution_prerequisite_check(
+        lambda _lease: {},
+        lease=None,
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            **dict(_external_supervisor_context().bindings),
+            "namespace": "loom-staging",
+            "staging.mutation-epoch": 8,
+        }
+    )
+
+    executions = PreflightDag(
+        (
+            _passing_dependency("candidate.identity"),
+            _passing_dependency("systemd.user-manager"),
+            predecessor,
+            cleanup,
+            deferred,
+        ),
+        max_concurrency=1,
+        attested_dependencies=frozenset({"artifacts.publish"}),
+    ).run(context, through_tier=3, now=lambda: current_time[0])
+
+    execution = next(item for item in executions if item.check_id == "execution.prerequisites")
+    assert not execution.passed
+
+
 def test_registered_external_supervisor_predecessor_binds_every_controller() -> None:
     gb10 = _external_supervisor_snapshot()
     snapshots = _external_supervisor_snapshots(gb10)
@@ -1876,8 +1936,8 @@ def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> N
     )
 
     assert result.passed
-    assert result.evidence["head"] == "0129"
-    assert result.evidence["revision-count"] == 130
+    assert result.evidence["head"] == "0132"
+    assert result.evidence["revision-count"] == 133
     assert result.evidence["linear"] is True
     assert result.evidence["policy-digest"] == policy_digest
 
@@ -2631,7 +2691,9 @@ def test_execution_prerequisite_check_defers_until_exact_lease() -> None:
     """Catch pre-lease publication or a contract change at late completion."""
     calls: list[object] = []
     evidence = {
+        "mode": "activation",
         "schema-version": 1,
+        "bootstrap-authority-sha256": "0" * 64,
         "artifact-path": f"/var/lib/loom/execution-prerequisites/{'1' * 64}.json",
         "artifact-sha256": "1" * 64,
         "core-artifact-bundle-sha256": "2" * 64,
@@ -2687,3 +2749,44 @@ def test_execution_prerequisite_check_defers_until_exact_lease() -> None:
         "external-supervisor.predecessor",
         "rehearsal.cleanup",
     )
+
+
+def test_execution_prerequisite_check_admits_only_explicit_zero_ceiling_bootstrap() -> None:
+    """Catch treating an ordinary missing execution authority as bootstrap-ready."""
+    bootstrap_authority = "a" * 64
+    evidence = {
+        "mode": "zero-ceiling-bootstrap",
+        "schema-version": 0,
+        "bootstrap-authority-sha256": bootstrap_authority,
+        "artifact-path": "/",
+        "artifact-sha256": "0" * 64,
+        "core-artifact-bundle-sha256": "0" * 64,
+        "execution-policy-sha256": "0" * 64,
+        "executor-profile-seed-sha256": "0" * 64,
+        "manager-route-sha256": "0" * 64,
+        "access-metadata-sha256": "0" * 64,
+        "coexistence-witness-sha256": "0" * 64,
+        "legacy-writer-sha256": "0" * 64,
+        "rollback-evidence-sha256": "0" * 64,
+    }
+    check = build_execution_prerequisite_check(
+        lambda _lease: evidence,
+        lease=object(),  # type: ignore[arg-type]
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": "a" * 40,
+            "candidate.tree": "b" * 40,
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "staging.mutation-epoch": 8,
+        }
+    )
+
+    probe = check.operations[CheckOperation.PROBE](context)
+
+    assert probe.passed
+    assert probe.evidence == evidence

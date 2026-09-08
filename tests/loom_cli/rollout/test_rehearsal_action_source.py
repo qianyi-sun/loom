@@ -52,7 +52,7 @@ def _candidate() -> CandidateBinding:
 def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0066",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=9,
         configuration_digest="9" * 64,
         authority_incarnation=UUID("00000000-0000-4000-8000-0000000000aa"),
@@ -349,7 +349,7 @@ def test_plan_schema_round_trips_schema_three_checkpoint_authority(tmp_path: Pat
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("capacity_guard_schema_revision", "guard_0027"),
+        ("capacity_guard_schema_revision", "guard_0028"),
         ("manager_execution_manifest_sha256", "f" * 64),
     ],
 )

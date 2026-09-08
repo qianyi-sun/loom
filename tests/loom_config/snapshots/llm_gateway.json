@@ -129,6 +129,41 @@
     "default": "300",
     "required": false
   },
+  "service_execution_source_access_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "service_execution_source_access_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "service_execution_source_bucket": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
+  "service_execution_source_endpoint": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
+  "service_execution_source_region": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
+  "service_execution_source_secret_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "service_execution_source_secret_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "step_jwt_signing_key": {
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",

@@ -1056,8 +1056,10 @@ async def test_reconcile_reports_partial_pending_slurm_cancellation(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("trial_state", ["queued", "protected-pending"])
 async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
     postgres_url: str,
+    trial_state: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1075,8 +1077,8 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
                         task_id="task-a",
                         config={},
                         requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
-                        state="queued",
-                        idempotency_key=f"queued-{idx}",
+                        state=trial_state,
+                        idempotency_key=f"{trial_state}-{idx}",
                     )
                 )
             await s.execute(

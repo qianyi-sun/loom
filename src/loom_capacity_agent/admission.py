@@ -649,6 +649,37 @@ class ProtectedReleasePublicationCheckpointV2(StrictV2Model):
     manager_acknowledgement_digest: Digest
 
 
+class ExecutableTerminalInventoryImportReceiptV2(StrictV2Model):
+    """Exact guard receipt for one imported physical-terminal witness."""
+
+    intent_id: UUID
+    protected_attempt_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    physical_job_id: Identifier
+    inventory_sequence: PositiveGeneration
+    terminal_evidence_sha256: Digest
+    evidence_digest: Digest
+    import_state: Literal["imported"] = "imported"
+    executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _distinct_identities(self) -> ExecutableTerminalInventoryImportReceiptV2:
+        if (
+            len(
+                {
+                    self.intent_id,
+                    self.protected_attempt_id,
+                    self.worker_id,
+                    self.worker_incarnation,
+                }
+            )
+            != 4
+        ):
+            raise ValueError("terminal inventory import identities must be distinct")
+        return self
+
+
 class ExecutableReleaseReceiptV2(StrictV2Model):
     """Append-only protected release proof consumed by the manager."""
 
@@ -743,6 +774,7 @@ __all__ = [
     "ExecutablePreparedBootstrapRevocationV2",
     "ExecutableReleaseReceiptV2",
     "ExecutableReleaseRequestV2",
+    "ExecutableTerminalInventoryImportReceiptV2",
     "ExecutableWorkerRegistrationV2",
     "ExecutableWorkerWithdrawalRequestV2",
     "PhysicalJobBindingV2",

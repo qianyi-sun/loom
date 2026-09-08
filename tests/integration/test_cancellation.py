@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial, User
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -68,12 +69,13 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, str, UUID, UUID, UUID]
         with session_factory() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
+            s.execute(delete(Batch).where(Batch.team_id == team_id))
             # The control plane lazily materializes a team_quotas row; clear it
             # before the team so teardown does not trip the FK.
             s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_id))
             s.execute(delete(User).where(User.id == user_id))
-            s.execute(delete(Team))
-            s.execute(delete(Task))
+            s.execute(delete(Team).where(Team.id == team_id))
+            s.execute(delete(Task).where(Task.id == "t"))
             s.commit()
         engine.dispose()
 
@@ -83,6 +85,21 @@ def app(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path,
     cancel_seed: tuple[str, str, UUID, UUID, UUID],
 ):
+    async def idle_background_loop(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    for name in (
+        "run_crash_detector_loop",
+        "run_live_preview_reconciler_loop",
+        "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop",
+        "run_service_execution_materializer_loop",
+        "run_worker_pool_autoscaler_loop",
+    ):
+        monkeypatch.setattr(
+            f"loom_control_plane.app.{name}",
+            idle_background_loop,
+        )
     secret_file = tmp_path / "admin-secrets.toml"
     _write_admin_secret(secret_file)
     for k, v in {
@@ -104,8 +121,14 @@ def test_cancel_queued(app, cancel_seed, postgres_url: str):  # type: ignore[no-
             f"/trials/{queued}/cancel",
             headers={"Authorization": f"Bearer {raw}"},
         )
+        replay = client.post(
+            f"/trials/{queued}/cancel",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
         assert r.status_code == 200
         assert r.json()["state"] == "cancelled"
+        assert replay.status_code == 200
+        assert replay.json() == r.json()
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     try:
@@ -127,14 +150,26 @@ def test_cancel_running(app, cancel_seed, postgres_url: str):  # type: ignore[no
             headers={"Authorization": f"Bearer {raw}"},
         )
         assert r.status_code == 200
+        assert r.json() == {
+            "trial_id": str(running),
+            "state": "cancellation-requested",
+        }
+        observed = client.get(
+            f"/trials/{running}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert observed.status_code == 200
+        assert observed.json()["state"] == "running"
+        assert observed.json()["cancellation_requested_at"] is not None
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     try:
         with session_factory() as s:
             trial = s.get(Trial, running)
             assert trial is not None
-            assert trial.state == "cancelled"
-            assert trial.finished_at is not None
+            assert trial.state == "running"
+            assert trial.cancellation_requested_at is not None
+            assert trial.finished_at is None
     finally:
         engine.dispose()
 
@@ -160,6 +195,64 @@ def test_cancel_as_platform_admin(app, cancel_seed):  # type: ignore[no-untyped-
         )
         assert r.status_code == 200
         assert r.json()["state"] == "cancelled"
+
+
+def test_batch_runner_can_cancel_only_batch_linked_trial(
+    app,  # type: ignore[no-untyped-def]
+    cancel_seed: tuple[str, str, UUID, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    _raw, _admin_raw, queued, running, _done = cancel_seed
+    batch_id = uuid4()
+    batch_runner_raw = f"loom_br_{uuid4().hex}"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    try:
+        with session_factory() as session:
+            queued_trial = session.get(Trial, queued)
+            assert queued_trial is not None
+            session.add(
+                Batch(
+                    id=batch_id,
+                    team_id=queued_trial.team_id,
+                    name="hard-budget cancellation",
+                    task_filter={},
+                    trial_config={},
+                    state="running",
+                    created_by_token_prefix="test",
+                    expected_trial_count=1,
+                )
+            )
+            queued_trial.batch_id = batch_id
+            session.execute(
+                insert(Token).values(
+                    token_hash=hashlib.sha256(batch_runner_raw.encode()).digest(),
+                    type="worker",
+                    scopes=["submit:batch"],
+                    team_id=None,
+                    issued_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            batch_linked = client.post(
+                f"/trials/{queued}/cancel",
+                headers={"Authorization": f"Bearer {batch_runner_raw}"},
+            )
+            unrelated = client.post(
+                f"/trials/{running}/cancel",
+                headers={"Authorization": f"Bearer {batch_runner_raw}"},
+            )
+
+        assert batch_linked.status_code == 200, batch_linked.text
+        assert batch_linked.json() == {
+            "trial_id": str(queued),
+            "state": "cancelled",
+        }
+        assert unrelated.status_code == 401
+    finally:
+        engine.dispose()
 
 
 def test_cancel_requires_a_token(app, cancel_seed):  # type: ignore[no-untyped-def]

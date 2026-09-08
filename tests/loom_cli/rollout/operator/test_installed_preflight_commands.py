@@ -289,7 +289,7 @@ def test_oldlab_controller_runs_only_the_fixed_host_namespace_channel(
         _environment(),
         run_subprocess=run,
     )
-    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    image = "localhost:5000/loom-capacity-executor@sha256:" + "a" * 64
     argv = (
         "/usr/bin/docker",
         "run",
@@ -310,8 +310,10 @@ def test_oldlab_controller_runs_only_the_fixed_host_namespace_channel(
         "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
         "--host-root",
         "/host",
+        "--runtime-image",
+        image,
         "--operation",
-        "discover-controller",
+        "observe-prerequisite",
     )
 
     result = commands.oldlab_controller(argv, '{"schema_version":1}\n')
@@ -329,6 +331,12 @@ def test_oldlab_controller_runs_only_the_fixed_host_namespace_channel(
     with pytest.raises(ValueError, match="OLDLAB controller command is outside authority"):
         commands.oldlab_controller(
             (*argv[:7], "--network=host", *argv[8:]),
+            '{"schema_version":1}\n',
+        )
+    cluster_image = "192.168.50.13:5000/loom-capacity-executor@sha256:" + "a" * 64
+    with pytest.raises(ValueError, match="OLDLAB controller command is outside authority"):
+        commands.oldlab_controller(
+            (*argv[:15], cluster_image, *argv[16:]),
             '{"schema_version":1}\n',
         )
 
@@ -358,7 +366,7 @@ def test_oldlab_controller_admits_each_fixed_prepared_installer_operation(
         _environment(),
         run_subprocess=run,
     )
-    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    image = "localhost:5000/loom-capacity-executor@sha256:" + "a" * 64
     argv = (
         "/usr/bin/docker",
         "run",
@@ -391,7 +399,7 @@ def test_oldlab_controller_admits_each_fixed_prepared_installer_operation(
 
 def test_oldlab_controller_bounds_payload_and_output(tmp_path: Path) -> None:
     """Catch unbounded controller input or captured output crossing the local boundary."""
-    image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "a" * 64
+    image = "localhost:5000/loom-capacity-executor@sha256:" + "a" * 64
     argv = (
         "/usr/bin/docker",
         "run",
@@ -412,6 +420,8 @@ def test_oldlab_controller_bounds_payload_and_output(tmp_path: Path) -> None:
         "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
         "--host-root",
         "/host",
+        "--runtime-image",
+        image,
         "--operation",
         "observe-prerequisite",
     )

@@ -252,15 +252,33 @@ async def camp_setup(
         region_name=settings.minio_region,
         config=Config(signature_version="s3v4"),
     )
-    # CRUD tests never reach the CP via http_client (only the runner does).
-    app.state.http_client = httpx.AsyncClient(base_url="http://cp")
-
     team_id = uuid4()
     username = f"BatchOwner-{team_id.hex[:8]}"
     user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
+
+    def control_plane(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/cancel"):
+            return httpx.Response(404)
+        trial_id = UUID(request.url.path.split("/")[-2])
+        with sl() as session:
+            trial = session.get(Trial, trial_id)
+            if trial is None:
+                return httpx.Response(404)
+            if trial.state in {"succeeded", "failed", "cancelled"}:
+                return httpx.Response(409)
+            trial.state = "cancelled"
+            trial.cancellation_requested_at = datetime.now(UTC)
+            trial.finished_at = datetime.now(UTC)
+            session.commit()
+        return httpx.Response(200, json={"state": "cancelled"})
+
+    app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(control_plane),
+        base_url="http://cp",
+    )
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(

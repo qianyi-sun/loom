@@ -106,9 +106,16 @@ def test_redaction_assertion_covers_authority_change_tls_values() -> None:
 class _Cluster:
     environment: ClassVar[dict[str, str]] = {"KUBECONFIG": "/fixed"}
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_status_image: str | None = None,
+        runtime_image_id: str | None = None,
+    ) -> None:
         self.objects: dict[tuple[str, str], dict[str, object]] = {}
         self.calls: list[tuple[tuple[str, ...], bytes | None]] = []
+        self.runtime_status_image = runtime_status_image
+        self.runtime_image_id = runtime_image_id
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
@@ -140,6 +147,13 @@ class _Cluster:
             if deployment is None:
                 return b'{"apiVersion":"v1","kind":"List","items":[]}'
             image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+            status = {
+                "name": "capacity-agent",
+                "image": self.runtime_status_image or image,
+                "ready": True,
+            }
+            if self.runtime_image_id is not None:
+                status["imageID"] = self.runtime_image_id
             return json.dumps(
                 {
                     "apiVersion": "v1",
@@ -153,9 +167,7 @@ class _Cluster:
                             "spec": {"containers": [{"name": "capacity-agent", "image": image}]},
                             "status": {
                                 "phase": "Running",
-                                "containerStatuses": [
-                                    {"name": "capacity-agent", "image": image, "ready": True}
-                                ],
+                                "containerStatuses": [status],
                             },
                         }
                     ],
@@ -361,6 +373,44 @@ def test_absent_agent_set_converges_to_exact_hardened_candidate_only_resources(
         assert str(credential) not in evidence
 
 
+def test_ready_pod_accepts_containerd_local_status_image_with_exact_image_id(
+    tmp_path: Path,
+) -> None:
+    """Break caught: containerd image normalization falsely fails exact pod readback."""
+    plan = _plan(tmp_path)
+    expected_image = (
+        f"registry.example.test/loom/loom-control-plane@{plan.image_digests['loom-control-plane']}"
+    )
+    cluster = _Cluster(
+        runtime_status_image="sha256:" + "1" * 64,
+        runtime_image_id=expected_image,
+    )
+    component = _component(cluster)
+
+    component.apply(plan)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+
+def test_agent_diff_uses_installed_kubectl_flags(tmp_path: Path) -> None:
+    """Break caught: adding apply-only validation flags makes kubectl diff exit 2."""
+    cluster = _Cluster()
+    component = _component(cluster)
+    plan = _plan(tmp_path)
+    component.apply(plan)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+    diff_calls = [argv for argv, payload in cluster.calls if payload is not None and "diff" in argv]
+    assert diff_calls
+    assert all("--validate=strict" not in argv for argv in diff_calls)
+    apply_calls = [
+        argv for argv, payload in cluster.calls if payload is not None and "apply" in argv
+    ]
+    assert apply_calls
+    assert all("--validate=strict" in argv for argv in apply_calls)
+
+
 def test_runtime_dispatches_agent_only_after_manager_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -384,7 +434,9 @@ def test_runtime_dispatches_agent_only_after_manager_configuration(
         container_registry="registry.example.test/loom",
     )
     monkeypatch.setattr(
-        KubernetesProtectedStagingCapacityRuntime, "_agent_component", lambda _self: _Agent()
+        KubernetesProtectedStagingCapacityRuntime,
+        "_agent_component",
+        lambda _self, _plan: _Agent(),
     )
     plan = _plan(tmp_path)
     epoch = ComponentObservation(
@@ -508,6 +560,78 @@ def test_controller_status_and_ready_pod_failures_do_not_relax_spec_ownership(
     unready = _UnreadyCluster()
     with pytest.raises(RuntimeError, match="did not converge"):
         _component(unready).apply(plan)
+
+    wrong_runtime_identity = _Cluster(
+        runtime_status_image="sha256:" + "2" * 64,
+        runtime_image_id="registry.example.test/loom/loom-control-plane@sha256:" + "3" * 64,
+    )
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(wrong_runtime_identity).apply(plan)
+
+    missing_runtime_image_id = _Cluster(runtime_status_image="sha256:" + "4" * 64)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(missing_runtime_image_id).apply(plan)
+
+    class _MalformedStatusCluster(_Cluster):
+        def capture_stdout(self, argv, *, env, timeout_seconds):
+            payload = super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
+            if "pods" in argv and payload:
+                value = json.loads(payload)
+                value["items"][0]["status"]["containerStatuses"][0] = []
+                return json.dumps(value).encode("ascii")
+            return payload
+
+    malformed = _MalformedStatusCluster()
+    with pytest.raises(RuntimeError, match="did not converge"):
+        _component(malformed).apply(plan)
+
+
+def test_k3s_status_ownership_is_limited_to_deployment_revision_metadata(
+    tmp_path: Path,
+) -> None:
+    """Break caught: live K3s revision ownership is rejected or foreign metadata is trusted."""
+
+    class _ExactDiffCluster(_Cluster):
+        def run_status(self, argv, *, env, input_payload, timeout_seconds):
+            return 0
+
+    cluster = _ExactDiffCluster()
+    component = _component(cluster)
+    plan = _plan(tmp_path)
+    component.apply(plan)
+    deployment = cluster.objects[("Deployment", "loom-capacity-agent")]
+    deployment["metadata"]["annotations"] = {"deployment.kubernetes.io/revision": "1"}
+    status_owner = {
+        "apiVersion": "apps/v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+            "f:metadata": {
+                "f:annotations": {
+                    ".": {},
+                    "f:deployment.kubernetes.io/revision": {},
+                }
+            },
+            "f:status": {"f:availableReplicas": {}},
+        },
+        "manager": "k3s",
+        "operation": "Update",
+        "subresource": "status",
+    }
+    deployment["metadata"]["managedFields"].append(status_owner)
+
+    assert component.classify(plan)[0] is ComponentState.EXACT
+
+    status_owner["fieldsV1"]["f:metadata"]["f:labels"] = {"f:foreign": {}}
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["fieldsV1"]["f:metadata"].pop("f:labels")
+    status_owner["fieldsV1"].pop("f:status")
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["fieldsV1"]["f:status"] = {}
+    status_owner["apiVersion"] = "v1"
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["apiVersion"] = "apps/v1"
+    status_owner["fieldsV1"]["f:metadata"] = None
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
 
 
 def test_rollout_and_readback_failures_are_closed_without_secret_disclosure(tmp_path: Path) -> None:
@@ -867,7 +991,7 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
     )
 
     assert configuration.protected_admission_sha256 == (
-        "69b3251eaf30269f7b690fc9878395d96feaf2cedaccee09e6eda254c887da46"
+        "51b50234edf19102baf749776995846d5bc73ce0a9e3b1b4fe0d93bcced98fc9"
     )
 
 

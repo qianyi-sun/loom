@@ -76,9 +76,10 @@ async def _amain() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _sigterm)
 
-    # Wire the skill_patcher_llm adapter with a dedicated family:evolve
-    # credential. The client exchanges it at the Control Plane for a JWT bound
-    # to the real completed trial, represented team, and evolver provider.
+    # Wire cancellation and skill_patcher_llm with the dedicated family service
+    # credential. The client keeps trial mutation at the Control Plane and
+    # exchanges the same credential for a JWT bound to the real completed
+    # trial, represented team, and evolver provider.
     gateway_token = os.environ.get(
         "LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN", "",
     )
@@ -94,12 +95,13 @@ async def _amain() -> None:
         logger.warning(
             "family_orchestrator_gateway_unconfigured — set "
             "LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN to enable "
-            "adapter LLM calls",
+            "family cancellation and adapter LLM calls",
         )
 
     ctx = OrchestratorContext(
         session_factory=session_factory,
         gateway=gateway_client,
+        cancellation_client=gateway_client,
         object_store=object_store,
         artifacts_bucket=artifacts_bucket,
         state_backend_factory=None,

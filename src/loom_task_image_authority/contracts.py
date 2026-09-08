@@ -20,6 +20,12 @@ from pydantic import (
     model_validator,
 )
 
+from loom_task_image_authority.config import (
+    _validate_https_origin,
+    _validate_registry_identity,
+)
+from loom_task_image_authority.registry_token import publication_repository
+
 MAX_SIGNED_BIGINT = (1 << 63) - 1
 MAX_CONTRACT_BYTES = 64 * 1024
 MAX_GRANT_LIFETIME = timedelta(hours=4)
@@ -28,12 +34,22 @@ MAX_ATTESTATION_LIFETIME = timedelta(seconds=60)
 MAX_SESSION_LIFETIME = timedelta(minutes=15)
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_MANIFEST_DIGEST_RE = re.compile(r"sha256:([0-9a-f]{64})")
 
 CpuArchitecture = Literal["x86_64", "arm64"]
 SlurmClusterId = Literal["oldlab", "gb10"]
 BuildPurpose = Literal["production", "shadow"]
 GuardScope = Literal["task-image:project", "task-image:attest"]
 PositiveSignedBigint = Annotated[int, Field(gt=0, le=MAX_SIGNED_BIGINT)]
+RegistryCredentialGeneration = Annotated[int, Field(gt=0, le=512)]
+TaskImageComponent = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=136,
+        pattern=r"^(?:task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$",
+    ),
+]
 Identifier = Annotated[
     str, Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 ]
@@ -55,6 +71,13 @@ def _nonzero_digest(value: str) -> str:
     return value
 
 
+def _nonzero_manifest_digest(value: str) -> str:
+    match = _MANIFEST_DIGEST_RE.fullmatch(value)
+    if match is None or match.group(1) == "0" * 64:
+        raise ValueError("authority manifest digest must be a nonzero lowercase SHA-256")
+    return value
+
+
 def _safe_cgroup_path(value: str) -> str:
     if (
         not value.startswith("/sys/fs/cgroup/")
@@ -69,6 +92,11 @@ def _safe_cgroup_path(value: str) -> str:
 
 NonzeroUUID = Annotated[UUID, AfterValidator(_nonzero_uuid)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$"), AfterValidator(_nonzero_digest)]
+ManifestDigest = Annotated[
+    str,
+    Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+    AfterValidator(_nonzero_manifest_digest),
+]
 CgroupPath = Annotated[
     str,
     Field(min_length=16, max_length=4096),
@@ -100,9 +128,7 @@ class StrictTaskImageAuthorityModel(BaseModel):
         for name, item in normalized.items():
             if isinstance(item, list):
                 normalized[name] = tuple(item)
-            elif isinstance(item, str) and (
-                name.endswith("_at") or name.endswith("_expires_at")
-            ):
+            elif isinstance(item, str) and (name.endswith("_at") or name.endswith("_expires_at")):
                 normalized[name] = _parse_timestamp(item)
         return normalized
 
@@ -160,6 +186,13 @@ class TaskImageBuildGrantAuthorityV1(StrictTaskImageAuthorityModel):
             label="grant",
         )
         return self
+
+
+class TaskImageBuildGrantAuthorityV2(TaskImageBuildGrantAuthorityV1):
+    """Composite provider-release identity with a distinct native ELF binding."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    supervisor_executable_sha256: Digest
 
 
 class TaskImageGuardPrincipalV1(StrictTaskImageAuthorityModel):
@@ -228,9 +261,7 @@ class TaskImageContainmentAttachmentV1(StrictTaskImageAuthorityModel):
     resource_limits_sha256: Digest
     probe_sha256: Digest
     link_ids: Annotated[tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)]
-    program_ids: Annotated[
-        tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)
-    ]
+    program_ids: Annotated[tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)]
     map_ids: Annotated[tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)]
 
     @field_validator("link_ids", "program_ids", "map_ids")
@@ -402,6 +433,13 @@ class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
         return payload
 
 
+class TaskImageBuildSessionV2(TaskImageBuildSessionV1):
+    """One immutable generation of a renewable build session."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    generation: PositiveSignedBigint
+
+
 class TaskImageContainmentAttestationV1(StrictTaskImageAuthorityModel):
     attestation_id: NonzeroUUID
     grant_id: NonzeroUUID
@@ -432,6 +470,202 @@ class TaskImageContainmentAttestationV1(StrictTaskImageAuthorityModel):
         return self
 
 
+class TaskImageSessionRenewalV1(_SecretBearingAuthorityModel):
+    """Current-session possession and the guard's complete next attestation."""
+
+    renewal_id: NonzeroUUID
+    grant_id: NonzeroUUID
+    session_id: NonzeroUUID
+    session_generation: PositiveSignedBigint
+    session_token: Annotated[str, Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$")]
+    attestation: TaskImageContainmentAttestationV1
+    observed_at: datetime
+
+    @model_validator(mode="after")
+    def _renewal_is_exact(self) -> TaskImageSessionRenewalV1:
+        if self.attestation.grant_id != self.grant_id:
+            raise ValueError("authority renewal grant changed")
+        if self.attestation.generation != self.session_generation + 1:
+            raise ValueError("authority renewal attestation is not the next generation")
+        if self.observed_at != self.attestation.issued_at:
+            raise ValueError("authority renewal observation differs from attestation issue time")
+        return self
+
+    def public_binding(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json", exclude={"session_token"})
+        payload["session_token_sha256"] = hashlib.sha256(
+            self.session_token.encode("utf-8")
+        ).hexdigest()
+        return payload
+
+
+class _TaskImageCurrentSessionRequestV1(_SecretBearingAuthorityModel):
+    """Short-lived session possession common to materialization requests."""
+
+    grant_id: NonzeroUUID
+    session_id: NonzeroUUID
+    session_generation: PositiveSignedBigint
+    session_token: Annotated[
+        str,
+        Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$", repr=False),
+    ]
+
+    def public_binding(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json", exclude={"session_token"})
+        payload["session_token_sha256"] = hashlib.sha256(
+            self.session_token.encode("utf-8")
+        ).hexdigest()
+        return payload
+
+
+class TaskImageMaterializationClaimRequestV1(_TaskImageCurrentSessionRequestV1):
+    claim_id: NonzeroUUID
+
+
+class TaskImageMaterializationOperationRequestV1(_TaskImageCurrentSessionRequestV1):
+    operation_id: NonzeroUUID
+    materialization_id: NonzeroUUID
+    attempt_id: NonzeroUUID
+    lease_epoch: PositiveSignedBigint
+
+
+class TaskImageMaterializationFailureRequestV1(TaskImageMaterializationOperationRequestV1):
+    failure_kind: Literal["deterministic", "containment"]
+
+
+class TaskImageRegistryCredentialRequestV1(_TaskImageCurrentSessionRequestV1):
+    """Current possession and one exact derived-component credential request."""
+
+    request_id: NonzeroUUID
+    materialization_id: NonzeroUUID
+    attempt_id: NonzeroUUID
+    lease_epoch: PositiveSignedBigint
+    component: TaskImageComponent
+    predecessor_credential_id: NonzeroUUID | None = None
+    predecessor_generation: RegistryCredentialGeneration | None = None
+
+    @model_validator(mode="after")
+    def _predecessor_pair_is_complete(self) -> TaskImageRegistryCredentialRequestV1:
+        if (self.predecessor_credential_id is None) != (
+            self.predecessor_generation is None
+        ):
+            raise ValueError("registry credential predecessor pair is incomplete")
+        return self
+
+
+class TaskImageRegistryCredentialV1(_SecretBearingAuthorityModel):
+    """One exact short-lived Distribution bearer capability."""
+
+    credential_id: NonzeroUUID
+    request_id: NonzeroUUID
+    grant_id: NonzeroUUID
+    session_id: NonzeroUUID
+    session_generation: PositiveSignedBigint
+    attestation_generation: PositiveSignedBigint
+    attestation_sha256: Digest
+    materialization_id: NonzeroUUID
+    attempt_id: NonzeroUUID
+    attempt_number: PositiveSignedBigint
+    lease_epoch: PositiveSignedBigint
+    builder_id: Annotated[str, Field(pattern=r"^rootless:[0-9a-f]{32}$")]
+    purpose: Literal["production"]
+    shadow_campaign_id: None = None
+    cpu_arch: CpuArchitecture
+    platform: Literal["linux/amd64", "linux/arm64"]
+    component: TaskImageComponent
+    generation: RegistryCredentialGeneration
+    predecessor_credential_id: NonzeroUUID | None = None
+    predecessor_generation: RegistryCredentialGeneration | None = None
+    lease_heartbeat_operation_id: NonzeroUUID | None = None
+    registry_origin: Annotated[str, Field(min_length=9, max_length=2048)]
+    registry_service: Annotated[
+        str,
+        Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9_.:-]{0,127}$"),
+    ]
+    registry_issuer: Annotated[
+        str,
+        Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9_.:-]{0,127}$"),
+    ]
+    repository: Annotated[str, Field(min_length=1, max_length=255)]
+    actions: tuple[Literal["pull"], Literal["push"]]
+    registry_key_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{43}$")]
+    bearer_token: Annotated[
+        str,
+        Field(
+            min_length=5,
+            max_length=16 * 1024,
+            pattern=r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$",
+            repr=False,
+        ),
+    ]
+    issued_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def _credential_is_exact(self) -> TaskImageRegistryCredentialV1:
+        expected_platform = "linux/amd64" if self.cpu_arch == "x86_64" else "linux/arm64"
+        if self.platform != expected_platform:
+            raise ValueError("registry credential architecture and platform disagree")
+        if self.repository != publication_repository(
+            purpose=self.purpose,
+            shadow_campaign_id=self.shadow_campaign_id,
+            cpu_arch=self.cpu_arch,
+            attempt_id=self.attempt_id,
+            component=self.component,
+        ):
+            raise ValueError("registry credential repository binding is invalid")
+        renewal_values = (
+            self.predecessor_credential_id,
+            self.predecessor_generation,
+            self.lease_heartbeat_operation_id,
+        )
+        if self.generation == 1:
+            if any(value is not None for value in renewal_values):
+                raise ValueError("first registry credential has renewal evidence")
+        elif (
+            any(value is None for value in renewal_values)
+            or self.predecessor_generation != self.generation - 1
+            or self.predecessor_credential_id == self.credential_id
+        ):
+            raise ValueError("registry credential renewal chain is invalid")
+        _validate_https_origin(self.registry_origin, label="registry origin")
+        _validate_registry_identity(self.registry_service, label="registry service")
+        _validate_registry_identity(self.registry_issuer, label="registry issuer")
+        if self.issued_at.microsecond != 0 or self.expires_at.microsecond != 0:
+            raise ValueError("registry credential times must be whole seconds")
+        _validate_interval(
+            self.issued_at,
+            self.expires_at,
+            maximum=timedelta(seconds=45),
+            label="registry credential",
+        )
+        return self
+
+    def public_binding(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json", exclude={"bearer_token"})
+        payload["bearer_token_sha256"] = hashlib.sha256(
+            self.bearer_token.encode("utf-8")
+        ).hexdigest()
+        return payload
+
+
+class TaskImagePublicationCandidateRequestV1(_TaskImageCurrentSessionRequestV1):
+    """Immutable local OCI evidence with no caller-selected registry authority."""
+
+    operation_id: NonzeroUUID
+    materialization_id: NonzeroUUID
+    attempt_id: NonzeroUUID
+    lease_epoch: PositiveSignedBigint
+    credential_id: NonzeroUUID
+    credential_generation: RegistryCredentialGeneration
+    component: TaskImageComponent
+    manifest_digest: ManifestDigest
+    manifest_size: PositiveSignedBigint
+    oci_file_sha256: Digest
+    oci_file_size: PositiveSignedBigint
+    platform: Literal["linux/amd64", "linux/arm64"]
+
+
 def canonical_authority_bytes(model: StrictTaskImageAuthorityModel) -> bytes:
     """Encode one nonsecret authority model as bounded RFC 8785 JSON."""
 
@@ -452,7 +686,12 @@ def canonical_authority_sha256(model: StrictTaskImageAuthorityModel) -> str:
 def canonical_public_binding_sha256(
     model: TaskImageProjectionReceiptV1
     | TaskImageBootstrapExchangeV1
-    | TaskImageBuildSessionV1,
+    | TaskImageBuildSessionV1
+    | TaskImageBuildSessionV2
+    | TaskImageSessionRenewalV1
+    | TaskImageRegistryCredentialRequestV1
+    | TaskImageRegistryCredentialV1
+    | TaskImagePublicationCandidateRequestV1,
 ) -> str:
     """Hash the canonical nonsecret binding of a secret-bearing contract."""
 
@@ -483,23 +722,35 @@ __all__ = [
     "Digest",
     "GuardScope",
     "Identifier",
+    "ManifestDigest",
     "NodeName",
     "NonzeroUUID",
     "PositiveSignedBigint",
+    "RegistryCredentialGeneration",
     "SlurmClusterId",
     "SlurmJobId",
     "StrictTaskImageAuthorityModel",
     "TaskImageAttachmentProofV1",
     "TaskImageBootstrapExchangeV1",
     "TaskImageBuildGrantAuthorityV1",
+    "TaskImageBuildGrantAuthorityV2",
     "TaskImageBuildSessionV1",
+    "TaskImageBuildSessionV2",
+    "TaskImageComponent",
     "TaskImageContainmentAttachmentV1",
     "TaskImageContainmentAttestationV1",
     "TaskImageGuardPrincipalV1",
+    "TaskImageMaterializationClaimRequestV1",
+    "TaskImageMaterializationFailureRequestV1",
+    "TaskImageMaterializationOperationRequestV1",
     "TaskImageProjectionChallengeV1",
     "TaskImageProjectionReceiptV1",
     "TaskImageProjectionRequestV1",
     "TaskImageProjectionRevocationV1",
+    "TaskImagePublicationCandidateRequestV1",
+    "TaskImageRegistryCredentialRequestV1",
+    "TaskImageRegistryCredentialV1",
+    "TaskImageSessionRenewalV1",
     "canonical_authority_bytes",
     "canonical_authority_sha256",
     "canonical_public_binding_sha256",

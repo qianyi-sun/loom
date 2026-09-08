@@ -1,7 +1,7 @@
 {
   "schema": "loom.task-image-builder-host-release/v2",
   "release": "host-release-v2",
-  "runtime_manifest": "rootless-runtime-v1.json",
+  "runtime_manifest": "rootless-runtime-v2.json",
   "ubuntu": {
     "os_id": "ubuntu",
     "version_id": "24.04",

@@ -25,6 +25,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckOutcome,
     CheckProbe,
     CheckSpec,
+    DependencyExpiredError,
     EvidenceClass,
     EvidenceField,
     MutationClass,
@@ -841,13 +842,19 @@ def test_dag_rechecks_dependency_freshness_at_consumer_worker_start() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="dependency execution expired before dependent execution"):
+    with pytest.raises(
+        DependencyExpiredError,
+        match="dependency execution expired before dependent execution",
+    ) as caught:
         PreflightDag((dependency, consumer)).run(
             _context(),
             now=lambda: next(times, NOW + timedelta(seconds=1)),
             prior_executions={prior.check_id: prior},
         )
 
+    assert caught.value.check_id == "final.smoke"
+    assert caught.value.dependency_ids == ("final.capacity",)
+    assert caught.value.stage is StageCapability.STATIC
     assert consumer_calls == []
 
 
@@ -1087,7 +1094,7 @@ def _bindings(**overrides: object) -> AttestationBindings:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("capacity_guard_schema_revision", "guard_0027"),
+        ("capacity_guard_schema_revision", "guard_0028"),
         ("manager_execution_manifest_sha256", "f" * 64),
     ],
 )

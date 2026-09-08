@@ -328,9 +328,10 @@ def _load_context(candidate_root: Path, policy_path: Path, release_path: Path) -
         "deploy/task-image-builder/" + str(release["runtime_manifest"]),
     )
     runtime_payload = _same_input(runtime_path, candidate_runtime, "runtime manifest")
-    runtime = _json_object(runtime_payload, "runtime manifest")
-    if runtime.get("schema") != "loom.task-image-builder-rootless-runtime/v1":
-        raise EvidenceError("runtime manifest contract is invalid")
+    try:
+        runtime = conformance.load_runtime_manifest(runtime_path)
+    except conformance.ConformanceError as exc:
+        raise EvidenceError("runtime manifest contract is invalid") from exc
     try:
         authority_binding = authority.load_authority_binding(candidate_root)
     except authority.AuthorityError as exc:

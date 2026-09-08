@@ -74,6 +74,10 @@ describe("StatusPill", () => {
 });
 
 describe("trialStateVariant", () => {
+  it("renders protected pending trials as queued work", () => {
+    expect(trialStateVariant("protected-pending")).toBe("queued");
+  });
+
   it("maps known states to their visual variants", () => {
     expect(trialStateVariant("succeeded")).toBe("success");
     expect(trialStateVariant("running")).toBe("running");

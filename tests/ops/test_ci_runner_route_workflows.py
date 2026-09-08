@@ -68,6 +68,15 @@ def test_every_normal_job_consumes_its_ci_route_dependency() -> None:
         assert "LOOM_CI_" not in job["runs-on"]
 
 
+def test_go_checks_workflow_pins_exact_supervisor_toolchain_patch() -> None:
+    job = _workflow("ci")["jobs"]["go-checks"]
+    setup_go = next(
+        step for step in job["steps"] if step.get("uses", "").startswith("actions/setup-go@")
+    )
+
+    assert setup_go["with"]["go-version"] == "1.23.4"
+
+
 def test_image_and_smoke_jobs_consume_only_their_route_maps() -> None:
     images = _workflow("images")["jobs"]
     build = images["build"]
@@ -75,7 +84,6 @@ def test_image_and_smoke_jobs_consume_only_their_route_maps() -> None:
         "plan",
         "image-route",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     }
     assert "ubuntu-24.04-arm" in build["runs-on"]
     assert "needs.image-route.outputs.routes" in build["runs-on"]

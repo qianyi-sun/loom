@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# Install the inert, allocation-scoped rootless builder node prerequisites.
+# Install the inert, allocation-scoped provider release prerequisites.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 LOOM_DEFAULT_POLICY_PATH="$REPO_ROOT/deploy/task-image-builder/prerequisites-v1.toml"
-LOOM_DEFAULT_RUNTIME_MANIFEST="$REPO_ROOT/deploy/task-image-builder/rootless-runtime-v1.json"
+LOOM_DEFAULT_HOST_RELEASE_MANIFEST="$REPO_ROOT/deploy/task-image-builder/host-release-v2.json"
+LOOM_DEFAULT_PROVIDER_INSTALLER="$REPO_ROOT/scripts/ops/install_task_image_builder_provider_release.py"
 LOOM_POLICY_PATH="${LOOM_POLICY_PATH:-$LOOM_DEFAULT_POLICY_PATH}"
-LOOM_RUNTIME_MANIFEST="${LOOM_RUNTIME_MANIFEST:-$LOOM_DEFAULT_RUNTIME_MANIFEST}"
-LOOM_INSTALL_BASE="${LOOM_INSTALL_BASE:-/opt/loom-task-builder}"
+LOOM_HOST_RELEASE_MANIFEST="${LOOM_HOST_RELEASE_MANIFEST:-$LOOM_DEFAULT_HOST_RELEASE_MANIFEST}"
+LOOM_PROVIDER_INSTALLER="${LOOM_PROVIDER_INSTALLER:-$LOOM_DEFAULT_PROVIDER_INSTALLER}"
+LOOM_STAGE_ROOT="${LOOM_STAGE_ROOT:-/}"
 LOOM_PASSWD_FILE="${LOOM_PASSWD_FILE:-/etc/passwd}"
 LOOM_GROUP_FILE="${LOOM_GROUP_FILE:-/etc/group}"
 LOOM_SUBUID_FILE="${LOOM_SUBUID_FILE:-/etc/subuid}"
 LOOM_SUBGID_FILE="${LOOM_SUBGID_FILE:-/etc/subgid}"
-LOOM_INSTALL_OWNER="${LOOM_INSTALL_OWNER:-root}"
-LOOM_INSTALL_GROUP="${LOOM_INSTALL_GROUP:-root}"
 LOOM_HOST_ARCH="${LOOM_HOST_ARCH:-$(uname -m)}"
 LOOM_SKIP_HOST_CHECKS="${LOOM_SKIP_HOST_CHECKS:-0}"
-LOOM_RELEASE_NAME="rootless-runtime-v1"
 
 loom_node_error() {
   echo "error: $*" >&2
@@ -35,39 +34,45 @@ loom_node_load_policy() {
     loom_node_error "prerequisite policy is unavailable"
     return
   fi
-  if [[ ! -f "$LOOM_RUNTIME_MANIFEST" || -L "$LOOM_RUNTIME_MANIFEST" ]]; then
-    loom_node_error "runtime manifest is unavailable"
+  if [[ ! -f "$LOOM_HOST_RELEASE_MANIFEST" || -L "$LOOM_HOST_RELEASE_MANIFEST" ]]; then
+    loom_node_error "host release manifest is unavailable"
+    return
+  fi
+  if [[ ! -f "$LOOM_PROVIDER_INSTALLER" || -L "$LOOM_PROVIDER_INSTALLER" ]]; then
+    loom_node_error "provider installer is unavailable"
     return
   fi
   mapfile -t values < <(
-    python3 - "$LOOM_POLICY_PATH" "$LOOM_RUNTIME_MANIFEST" "$cluster_id" <<'PY'
+    python3 - "$LOOM_POLICY_PATH" "$LOOM_HOST_RELEASE_MANIFEST" "$cluster_id" <<'PY'
 import json
 import pathlib
 import sys
 import tomllib
 
 policy_path = pathlib.Path(sys.argv[1])
-manifest_path = pathlib.Path(sys.argv[2])
+host_release_path = pathlib.Path(sys.argv[2])
 cluster_id = sys.argv[3]
 policy = tomllib.loads(policy_path.read_text(encoding="utf-8"))
 if policy.get("schema") != "loom.task-image-builder-prerequisites/v1":
     raise SystemExit("invalid policy schema")
 if policy.get("production_certification_allowed") is not False:
-    raise SystemExit("Phase 1 policy is not inert")
+    raise SystemExit("Phase 2C policy is not inert")
 if policy.get("certified_nodes") != []:
-    raise SystemExit("Phase 1 policy certifies nodes")
+    raise SystemExit("Phase 2C policy certifies nodes")
+if policy.get("unconditional_blockers") != ["phase2_guard_provider_release_missing"]:
+    raise SystemExit("Phase 2C blocker set is invalid")
+host_release = json.loads(host_release_path.read_text(encoding="utf-8"))
+if host_release.get("schema") != "loom.task-image-builder-host-release/v2":
+    raise SystemExit("invalid host release schema")
+if host_release.get("release") != "host-release-v2":
+    raise SystemExit("invalid host release identity")
+if policy.get("host_release_manifest") != host_release_path.name:
+    raise SystemExit("policy does not bind the host release manifest")
 identity = policy["identity"]
 clusters = [item for item in policy["clusters"] if item["id"] == cluster_id]
 if len(clusters) != 1:
     raise SystemExit("cluster policy is not unique")
 cluster = clusters[0]
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-if manifest.get("schema") != "loom.task-image-builder-rootless-runtime/v1":
-    raise SystemExit("invalid runtime manifest schema")
-if manifest.get("release") != "rootless-runtime-v1":
-    raise SystemExit("invalid runtime release")
-if policy.get("runtime", {}).get("manifest") != manifest_path.name:
-    raise SystemExit("policy does not bind the runtime manifest")
 values = (
     cluster["architecture"],
     ",".join(cluster["builder_nodes"]),
@@ -206,236 +211,91 @@ PY
   fi
 }
 
-loom_node_runtime() {
-  local mode="$1"
-  local artifact_dir="$2"
-  python3 - "$mode" "$LOOM_RUNTIME_MANIFEST" "$LOOM_HOST_ARCH" \
-    "$artifact_dir" "$LOOM_INSTALL_BASE" "$LOOM_INSTALL_OWNER" \
-    "$LOOM_INSTALL_GROUP" <<'PY'
-import grp
-import hashlib
-import json
+loom_node_validate_provider_release() {
+  local bundle_dir="$1"
+  local release_sha
+  if [[ ! -d "$bundle_dir" || -L "$bundle_dir" ]]; then
+    loom_node_error "provider release directory is unavailable"
+    return
+  fi
+  if ! release_sha="$(python3 - "$bundle_dir" "$LOOM_EXPECTED_ARCH" "$LOOM_PROVIDER_INSTALLER" "$LOOM_HOST_RELEASE_MANIFEST" <<'PY'
 import os
 import pathlib
-import pwd
-import shutil
-import stat
 import sys
-import tarfile
-import tempfile
 
-mode, manifest_name, architecture, artifact_name, install_name, owner_name, group_name = (
-    sys.argv[1:]
+bundle = pathlib.Path(sys.argv[1]).resolve(strict=True)
+architecture = sys.argv[2]
+installer = pathlib.Path(sys.argv[3]).resolve(strict=True)
+host_release = pathlib.Path(sys.argv[4]).resolve(strict=True)
+repository = installer.parents[2]
+source_root = host_release.parents[2]
+sys.path[:0] = [str(repository), str(repository / "src")]
+
+from scripts.ops.task_image_builder_provider_release import verify_release_directory_against_spec
+
+verify_release_directory_against_spec(
+    bundle,
+    source_root=source_root,
+    expected_architecture=architecture,
+    expected_uid=os.geteuid(),
+    expected_gid=os.getegid(),
+    expected_release_sha256=bundle.name,
 )
-manifest_path = pathlib.Path(manifest_name)
-artifact_dir = pathlib.Path(artifact_name)
-install_base = pathlib.Path(install_name)
-
-def fail(message: str) -> None:
-    print(f"error: {message}", file=sys.stderr)
-    raise SystemExit(1)
-
-def digest(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    release = manifest["architectures"][architecture]
-except (OSError, KeyError, json.JSONDecodeError):
-    fail("runtime manifest does not contain the host architecture")
-
-expected_artifacts = {item["name"]: item["sha256"] for item in release["artifacts"]}
-try:
-    actual_entries = list(artifact_dir.iterdir())
-except OSError:
-    fail("artifact directory is unavailable")
-if {item.name for item in actual_entries} != set(expected_artifacts):
-    fail("artifact set does not match the runtime manifest")
-for item in actual_entries:
-    if item.is_symlink():
-        fail("artifact symlink is forbidden")
-    if not item.is_file():
-        fail("artifact must be a regular file")
-    if item.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        fail("artifact has an unsafe mode")
-    if digest(item.read_bytes()) != expected_artifacts[item.name]:
-        fail("artifact digest does not match the runtime manifest")
-
-buildkit_names = [name for name in expected_artifacts if name.startswith("buildkit-")]
-rootlesskit_names = [name for name in expected_artifacts if name.startswith("rootlesskit-")]
-slirp_names = [name for name in expected_artifacts if name.startswith("slirp4netns-")]
-fuse_names = [name for name in expected_artifacts if name.startswith("fuse-overlayfs-")]
-if any(len(items) != 1 for items in (buildkit_names, rootlesskit_names, slirp_names, fuse_names)):
-    fail("runtime artifact roles are ambiguous")
-
-selected: dict[str, bytes] = {}
-archive_specs = (
-    (
-        artifact_dir / buildkit_names[0],
-        {
-            "bin/buildctl": "buildctl",
-            "bin/buildkit-runc": "buildkit-runc",
-            "bin/buildkitd": "buildkitd",
-        },
-    ),
-    (
-        artifact_dir / rootlesskit_names[0],
-        {"rootlessctl": "rootlessctl", "rootlesskit": "rootlesskit"},
-    ),
-)
-for archive_path, members in archive_specs:
-    try:
-        with tarfile.open(archive_path, "r:gz") as archive:
-            by_name = {member.name: member for member in archive.getmembers()}
-            for member_name, binary_name in members.items():
-                member = by_name.get(member_name)
-                if member is None or not member.isfile():
-                    fail("runtime archive is missing a regular selected binary")
-                stream = archive.extractfile(member)
-                if stream is None:
-                    fail("runtime archive selected binary cannot be read")
-                selected[binary_name] = stream.read()
-    except (OSError, tarfile.TarError):
-        fail("runtime archive is invalid")
-selected["slirp4netns"] = (artifact_dir / slirp_names[0]).read_bytes()
-selected["fuse-overlayfs"] = (artifact_dir / fuse_names[0]).read_bytes()
-expected_binaries = release["binaries"]
-if set(selected) != set(expected_binaries):
-    fail("selected runtime binary set does not match the manifest")
-if any(digest(payload) != expected_binaries[name] for name, payload in selected.items()):
-    fail("selected runtime binary digest does not match the manifest")
-
-receipt = {
-    "schema": "loom.task-image-builder-installed-runtime/v1",
-    "release": manifest["release"],
-    "architecture": architecture,
-    "manifest_sha256": digest(manifest_path.read_bytes()),
-    "binary_sha256": expected_binaries,
-}
-receipt_payload = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-release_dir = install_base / "releases" / manifest["release"]
-current = install_base / "current"
-
-try:
-    owner = pwd.getpwnam(owner_name).pw_uid
-    group = grp.getgrnam(group_name).gr_gid
-except KeyError:
-    fail("installation owner or group is unavailable")
-
-def verify_installed() -> bool:
-    if not release_dir.exists():
-        if release_dir.is_symlink() or current.exists() or current.is_symlink():
-            fail("installed release drift has an incomplete release marker")
-        return False
-    if release_dir.is_symlink() or not release_dir.is_dir():
-        fail("installed release drift is unsafe")
-    release_metadata = release_dir.stat()
-    if (
-        stat.S_IMODE(release_metadata.st_mode) != 0o755
-        or release_metadata.st_uid != owner
-        or release_metadata.st_gid != group
-    ):
-        fail("installed release drift changed release metadata")
-    binary_dir = release_dir / "bin"
-    if binary_dir.is_symlink() or not binary_dir.is_dir():
-        fail("installed release drift changed the binary directory type")
-    try:
-        entries = list(binary_dir.iterdir())
-    except OSError:
-        fail("installed release drift is incomplete")
-    binary_dir_metadata = binary_dir.stat()
-    if (
-        stat.S_IMODE(binary_dir_metadata.st_mode) != 0o755
-        or binary_dir_metadata.st_uid != owner
-        or binary_dir_metadata.st_gid != group
-    ):
-        fail("installed release drift changed binary directory metadata")
-    if {item.name for item in entries} != set(expected_binaries):
-        fail("installed release drift changed the binary set")
-    for item in entries:
-        if item.is_symlink() or not item.is_file():
-            fail("installed release drift changed a binary type")
-        metadata = item.stat()
-        if (
-            stat.S_IMODE(metadata.st_mode) != 0o755
-            or metadata.st_uid != owner
-            or metadata.st_gid != group
-        ):
-            fail("installed release drift changed binary metadata")
-        if digest(item.read_bytes()) != expected_binaries[item.name]:
-            fail("installed release drift changed a binary digest")
-    receipt_path = release_dir / "receipt.json"
-    if receipt_path.is_symlink() or not receipt_path.is_file():
-        fail("installed release drift removed its receipt")
-    receipt_metadata = receipt_path.stat()
-    if (
-        stat.S_IMODE(receipt_metadata.st_mode) != 0o644
-        or receipt_metadata.st_uid != owner
-        or receipt_metadata.st_gid != group
-    ):
-        fail("installed release drift changed receipt metadata")
-    if receipt_path.read_bytes() != receipt_payload:
-        fail("installed release drift changed its receipt")
-    if current.is_symlink():
-        current_metadata = current.lstat()
-        if current_metadata.st_uid != owner or current_metadata.st_gid != group:
-            fail("installed release drift changed the current link metadata")
-        if os.readlink(current) != str(pathlib.Path("releases") / manifest["release"]):
-            fail("installed release drift changed the current link")
-    elif current.exists():
-        fail("installed release drift changed the current link type")
-    else:
-        fail("installed release drift removed the current link")
-    return True
-
-if release_dir.exists() or release_dir.is_symlink() or current.exists() or current.is_symlink():
-    verify_installed()
-    print(json.dumps({"release": manifest["release"], "state": "present"}, sort_keys=True))
-    raise SystemExit(0)
-if mode in {"check", "validate"}:
-    if mode == "check":
-        fail("installed rootless runtime is missing")
-    print(json.dumps({"release": manifest["release"], "state": "validated"}, sort_keys=True))
-    raise SystemExit(0)
-if mode != "install":
-    fail("runtime operation is invalid")
-
-releases = install_base / "releases"
-releases.mkdir(parents=True, mode=0o755, exist_ok=True)
-stage = pathlib.Path(tempfile.mkdtemp(prefix=f".{manifest['release']}.", dir=releases))
-try:
-    binary_dir = stage / "bin"
-    binary_dir.mkdir(mode=0o755)
-    for name, payload in selected.items():
-        target = binary_dir / name
-        with target.open("xb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        target.chmod(0o755)
-        os.chown(target, owner, group)
-    receipt_path = stage / "receipt.json"
-    with receipt_path.open("xb") as handle:
-        handle.write(receipt_payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    receipt_path.chmod(0o644)
-    os.chown(receipt_path, owner, group)
-    os.chown(binary_dir, owner, group)
-    stage.chmod(0o755)
-    os.chown(stage, owner, group)
-    stage.rename(release_dir)
-except BaseException:
-    shutil.rmtree(stage, ignore_errors=True)
-    raise
-if current.exists() or current.is_symlink():
-    fail("installed release drift occupied the current link")
-temporary_link = install_base / f".current.{os.getpid()}"
-temporary_link.symlink_to(pathlib.Path("releases") / manifest["release"])
-temporary_link.replace(current)
-verify_installed()
-print(json.dumps({"release": manifest["release"], "state": "installed"}, sort_keys=True))
+print(bundle.name)
 PY
+  )"; then
+    loom_node_error "provider release verification failed"
+    return
+  fi
+  if [[ "$release_sha" != "${bundle_dir##*/}" ]]; then
+    loom_node_error "provider release identity is inconsistent"
+    return
+  fi
+  LOOM_PROVIDER_RELEASE_SHA256="$release_sha"
+}
+
+loom_node_reviewed_source_root() {
+  python3 - "$LOOM_HOST_RELEASE_MANIFEST" <<'PY'
+import pathlib
+import sys
+
+print(pathlib.Path(sys.argv[1]).resolve(strict=True).parents[2])
+PY
+}
+
+loom_node_provider_stage_args() {
+  local source_root
+  source_root="$(loom_node_reviewed_source_root)"
+  local args=(
+    "$LOOM_PROVIDER_INSTALLER"
+    "--bundle" "$1"
+    "--release-sha256" "$LOOM_PROVIDER_RELEASE_SHA256"
+    "--architecture" "$LOOM_EXPECTED_ARCH"
+    "--root" "$LOOM_STAGE_ROOT"
+    "--source-root" "$source_root"
+  )
+  if [[ "$LOOM_STAGE_ROOT" == "/" ]]; then
+    args+=("--live")
+  fi
+  printf '%s\n' "${args[@]}"
+}
+
+loom_node_verify_staged_provider_release() {
+  local bundle_dir="$1"
+  mapfile -t stage_args < <(loom_node_provider_stage_args "$bundle_dir")
+  if ! python3 "${stage_args[@]}" --verify-staged >/dev/null; then
+    loom_node_error "staged provider release is missing"
+    return
+  fi
+}
+
+loom_node_stage_provider_release() {
+  local bundle_dir="$1"
+  mapfile -t stage_args < <(loom_node_provider_stage_args "$bundle_dir")
+  if ! python3 "${stage_args[@]}" >/dev/null; then
+    loom_node_error "provider release staging failed"
+    return
+  fi
 }
 
 loom_node_validate_subid_file() {
@@ -602,16 +462,16 @@ loom_node_host_checks() {
 loom_node_check() {
   local cluster_id="$1"
   local slurm_node="$2"
-  local artifact_dir="$3"
+  local bundle_dir="$3"
   loom_node_load_policy "$cluster_id" "$slurm_node"
   loom_node_verify_slurm_identity "$slurm_node"
-  loom_node_runtime validate "$artifact_dir" >/dev/null
+  loom_node_validate_provider_release "$bundle_dir"
   loom_node_identity_preflight
   if ! loom_node_identity_complete; then
     loom_node_error "builder identity prerequisites are incomplete"
     return
   fi
-  loom_node_runtime check "$artifact_dir" >/dev/null
+  loom_node_verify_staged_provider_release "$bundle_dir"
   loom_node_host_checks
   printf '{"certified_nodes":[],"cluster_id":"%s","production_certification_allowed":false,"state":"prepared"}\n' \
     "$cluster_id"
@@ -620,38 +480,37 @@ loom_node_check() {
 loom_node_apply() {
   local cluster_id="$1"
   local slurm_node="$2"
-  local artifact_dir="$3"
+  local bundle_dir="$3"
   loom_node_load_policy "$cluster_id" "$slurm_node"
   loom_node_verify_slurm_identity "$slurm_node"
-  loom_node_runtime validate "$artifact_dir" >/dev/null
+  loom_node_validate_provider_release "$bundle_dir"
   loom_node_identity_preflight
   loom_node_host_checks
   loom_node_apply_identity
-  loom_node_runtime install "$artifact_dir" >/dev/null
-  loom_node_check "$cluster_id" "$slurm_node" "$artifact_dir"
+  loom_node_stage_provider_release "$bundle_dir"
+  loom_node_check "$cluster_id" "$slurm_node" "$bundle_dir"
 }
 
 loom_node_main() {
   if [[ "$#" -ne 4 || ( "$1" != "check" && "$1" != "apply" ) ]]; then
-    echo "usage: sudo $0 {check|apply} <cluster-id> <slurm-node-name> <offline-artifact-directory>" >&2
+    echo "usage: sudo $0 {check|apply} <cluster-id> <slurm-node-name> <offline-provider-release-directory>" >&2
     return 2
   fi
   if [[ "$LOOM_POLICY_PATH" != "$LOOM_DEFAULT_POLICY_PATH" \
-    || "$LOOM_RUNTIME_MANIFEST" != "$LOOM_DEFAULT_RUNTIME_MANIFEST" \
-    || "$LOOM_INSTALL_BASE" != "/opt/loom-task-builder" \
+    || "$LOOM_HOST_RELEASE_MANIFEST" != "$LOOM_DEFAULT_HOST_RELEASE_MANIFEST" \
+    || "$LOOM_PROVIDER_INSTALLER" != "$LOOM_DEFAULT_PROVIDER_INSTALLER" \
+    || "$LOOM_STAGE_ROOT" != "/" \
     || "$LOOM_PASSWD_FILE" != "/etc/passwd" \
     || "$LOOM_GROUP_FILE" != "/etc/group" \
     || "$LOOM_SUBUID_FILE" != "/etc/subuid" \
     || "$LOOM_SUBGID_FILE" != "/etc/subgid" \
-    || "$LOOM_INSTALL_OWNER" != "root" \
-    || "$LOOM_INSTALL_GROUP" != "root" \
     || "$LOOM_HOST_ARCH" != "$(uname -m)" \
     || "$LOOM_SKIP_HOST_CHECKS" != "0" ]]; then
     loom_node_error "test overrides are forbidden in the direct installer CLI"
     return
   fi
-  if [[ "$1" == "apply" && "$(id -u)" -ne 0 ]]; then
-    loom_node_error "node prerequisite installation requires root"
+  if [[ "$(id -u)" -ne 0 ]]; then
+    loom_node_error "node prerequisite staging requires root"
     return
   fi
   "loom_node_$1" "$2" "$3" "$4"

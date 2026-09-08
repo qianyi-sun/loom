@@ -74,6 +74,15 @@ class OrchestratorGatewayClient:
             self._control_plane_client = None
             self._owned_control_plane = False
 
+    async def cancel_trial(self, trial_id: str) -> None:
+        """Cancel one family trial through the Control Plane authority."""
+
+        response = await self._control_plane().post(
+            f"/trials/{trial_id}/cancel",
+            headers={"Authorization": f"Bearer {self.worker_token}"},
+        )
+        response.raise_for_status()
+
     async def chat_completion(
         self,
         *,

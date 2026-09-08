@@ -16,7 +16,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 
-from loom.auth import AuthContext, mint_step_jwt, verify_bearer_token
+from loom.auth import (
+    FAMILY_ORCHESTRATOR_SCOPES,
+    AuthContext,
+    mint_step_jwt,
+    verify_bearer_token,
+)
 from loom.db.schema import (
     AdminAuditEvent,
     PipelineRun,
@@ -217,7 +222,7 @@ async def issue_step_token(
             ctx.type != "family_orchestrator"
             or ctx.team_id is not None
             or ctx.user_id is not None
-            or ctx.scopes != ["family:evolve"]
+            or tuple(ctx.scopes) != FAMILY_ORCHESTRATOR_SCOPES
             or not explicit_provider
             or payload.execution_attempt_id is not None
         ):

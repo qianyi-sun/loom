@@ -101,6 +101,18 @@ spec:
                   optional: true
             - name: LOOM_GW_RATE_CARD_CACHE_TTL_SEC
               value: "300"
+            - name: LOOM_GW_SERVICE_EXECUTION_SOURCE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: service-execution-source-access-key
+                  optional: true
+            - name: LOOM_GW_SERVICE_EXECUTION_SOURCE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: service-execution-source-secret-key
+                  optional: true
             - name: LOOM_GW_STEP_JWT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

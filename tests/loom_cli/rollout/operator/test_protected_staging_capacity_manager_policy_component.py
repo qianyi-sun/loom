@@ -119,6 +119,11 @@ def _projection(document):  # type: ignore[no-untyped-def]
         "uid",
     ):
         metadata.pop(field, None)
+    annotations = metadata.get("annotations")
+    if isinstance(annotations, dict):
+        annotations.pop("deployment.kubernetes.io/revision", None)
+        if not annotations:
+            metadata.pop("annotations")
     spec = value.get("spec")
     if isinstance(spec, dict):
         template = spec.get("template")
@@ -270,12 +275,21 @@ class _PolicyCluster:
                 {
                     "apiVersion": "apps/v1",
                     "fieldsType": "FieldsV1",
-                    "fieldsV1": {"f:status": {}},
+                    "fieldsV1": {
+                        "f:metadata": {
+                            "f:annotations": {
+                                ".": {},
+                                "f:deployment.kubernetes.io/revision": {},
+                            }
+                        },
+                        "f:status": {},
+                    },
                     "manager": "k3s",
                     "operation": "Update",
                     "subresource": "status",
                 }
             )
+            metadata.setdefault("annotations", {})["deployment.kubernetes.io/revision"] = "1"
             value["status"] = {
                 "availableReplicas": replicas,
                 "observedGeneration": metadata["generation"],
@@ -427,6 +441,7 @@ class _PolicyCluster:
 
 def test_policy_resource_builder_selects_only_bound_router_and_manager_resources(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert importlib.util.find_spec(MODULE) is not None, "manager policy component is missing"
     module = importlib.import_module(MODULE)
@@ -434,6 +449,10 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
     assert builder is not None, "manager policy resource builder is missing"
     plan, prerequisite = _plan_and_prerequisite(tmp_path)
     registry = b'{"principals":[],"schema_version":1}\n'
+    monkeypatch.setattr(
+        "loom_cli.capacity_control_plane._capacity_head",
+        lambda: (_ for _ in ()).throw(AssertionError("local migration head lookup is forbidden")),
+    )
 
     resources = builder(
         plan,
@@ -459,6 +478,43 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
         ("NetworkPolicy", "loom-capacity-router", "capacity-manager-router-ingress"),
         ("NetworkPolicy", "loom-capacity-router", "capacity-manager-router-egress"),
     }
+
+    manager = resources[("Deployment", "loom-dev", "loom-capacity-manager")]
+    pod_spec = manager["spec"]["template"]["spec"]
+    init_containers = pod_spec["initContainers"]
+    assert [container["name"] for container in init_containers] == [
+        "prepare-credentials",
+        "migrate-capacity-schema",
+        "execution-policy-init",
+    ]
+    migration = init_containers[1]
+    assert migration["image"] == (
+        "registry.example.test/loom/loom-capacity-manager@sha256:" + "9" * 64
+    )
+    assert migration["command"] == ["python", "-m", "loom_capacity_manager.migrate"]
+    assert migration["args"] == [
+        "--db-url-file",
+        "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+        "--expected-authority-incarnation",
+        "841e79c2-8a76-4eeb-af56-f6d03bcb1bd8",
+    ]
+    assert migration["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "1Gi"},
+    }
+    assert migration["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+    assert migration["volumeMounts"] == [
+        {
+            "name": "runtime",
+            "mountPath": "/var/run/loom-capacity-manager/runtime/credentials/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        }
+    ]
     assert all(
         resource["metadata"]["labels"][_COMPONENT_LABEL] == _COMPONENT_VALUE
         for resource in resources.values()
@@ -594,6 +650,12 @@ def test_policy_component_converges_foundations_before_private_router(
         and ("create" in command or "replace" in command)
         and "--dry-run=server" in command
     )
+
+    diff_calls = [
+        command for command, payload in cluster.calls if payload is not None and "diff" in command
+    ]
+    assert diff_calls
+    assert all("--validate=strict" not in command for command in diff_calls)
 
 
 def test_policy_component_keeps_exact_artifact_bound_prepared_runtime_exact(
@@ -954,6 +1016,41 @@ def test_policy_component_rejects_foreign_ownership_on_expected_resource(
         and "--dry-run=server" not in command
         for command, payload in cluster.calls
     )
+
+
+def test_policy_component_limits_k3s_status_owner_to_deployment_revision(
+    tmp_path: Path,
+) -> None:
+    """Break caught: the manager's K3s status owner is trusted for foreign metadata."""
+    module = importlib.import_module(MODULE)
+    candidate = _candidate(tmp_path)
+    plan, prerequisite = _plan_and_prerequisite(tmp_path)
+    cluster = _PolicyCluster(candidate)
+    manager = cluster.resources[("Deployment", "loom-dev", "loom-capacity-manager")]
+    managed = manager["metadata"]["managedFields"]
+    status_owner = next(entry for entry in managed if entry.get("manager") == "k3s")
+    status_owner["fieldsV1"]["f:metadata"]["f:labels"] = {"f:foreign": {}}
+    authority = module.ManagerPolicyRuntimeAuthority(
+        authority_incarnation=UUID(str(_seed()["authority_incarnation"])),
+        principal_registry=b'{"principals":[],"schema_version":1}\n',
+        server_certificate=_server_certificate(),
+    )
+    component = module.KubernetesProtectedStagingCapacityManagerPolicyComponent(
+        runner=cluster,
+        candidate_root=candidate,
+        container_registry="registry.example.test/loom",
+        prerequisite_reader=lambda _plan: prerequisite,
+        runtime_authority_reader=lambda: authority,
+        manager_status_reader=lambda: dict(cluster.status),
+    )
+
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["fieldsV1"]["f:metadata"].pop("f:labels")
+    status_owner["apiVersion"] = "v1"
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    status_owner["apiVersion"] = "apps/v1"
+    status_owner["fieldsV1"]["f:metadata"] = None
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
 
 
 def test_policy_component_rejects_unexpected_server_diff_status(tmp_path: Path) -> None:

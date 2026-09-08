@@ -170,7 +170,7 @@ def _lease(*, plan, desired) -> BackupLease:
     configuration_digest = canonical_digest(desired.original.snapshot)
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0066",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         configuration_epoch=desired.original.snapshot.configuration_epoch,
         configuration_digest=configuration_digest,
         authority_incarnation=desired.fleet.authority_incarnation,
@@ -204,7 +204,7 @@ def _lease(*, plan, desired) -> BackupLease:
         checkpoint_schema_version=3,
         database_authority_digest=authority.digest,
         public_schema_revision="0066",
-        capacity_guard_schema_revision="guard_0027",
+        capacity_guard_schema_revision="guard_0028",
         manager_configuration_epoch=desired.original.snapshot.configuration_epoch,
         manager_configuration_digest=configuration_digest,
         manager_authority_incarnation=desired.fleet.authority_incarnation,

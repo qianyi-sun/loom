@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_gate_plan import FinalGatePlan
@@ -35,16 +35,24 @@ from .protected_external_supervisor_transport import (
     ExternalSupervisorCompensationError,
 )
 
-_COMPONENT_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+_COMPONENT_PATTERN = r"[a-z][a-z0-9-]{2,63}"
+_COMPONENT_RE = re.compile(rf"^{_COMPONENT_PATTERN}$")
+_COMPONENT_DIRECTORY_RE = re.compile(
+    rf"^(?P<ordinal>\d{{2}})-(?P<component_id>{_COMPONENT_PATTERN})$"
+)
 _GB10_HOST_RE = re.compile(r"^trt-gb10-(?:[1-9]|1[0-5])$")
 _RECONCILIATION_COMPONENT_DIRECTORY_RE = re.compile(r"^\d{2}-external-supervisor-reconciliation$")
 _RECONCILIATION_OUTCOME_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
+_FAILURE_DIAGNOSTIC_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _RENAME_NOREPLACE = 1
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_FAILURE_DIAGNOSTIC_CHARS = 512
+_MAX_FAILURE_DIAGNOSTICS = 1024
+_MAX_FAILURE_DIAGNOSTIC_BYTES = 4096
 _MAX_RECONCILIATION_OUTCOMES = 1024
 _MAX_RECONCILIATION_OUTCOME_BYTES = 4096
 _LEGACY_FAILURE_DIAGNOSTIC_CODES = frozenset(
@@ -70,6 +78,11 @@ _TYPED_APPLY_DIAGNOSTIC = "classified external-supervisor apply failure"
 _TYPED_COMPENSATION_DIAGNOSTIC = (
     "classified external-supervisor compensation reconciliation failure"
 )
+_CLASSIFICATION_DRIFT_DIAGNOSTICS = {
+    "pre-classify-failed": "component classified drifted before apply",
+    "post-classify-failed": "component classified drifted after apply",
+    "terminal-classify-failed": "terminal component classified drifted",
+}
 
 
 class ProtectedApplyJournalError(RuntimeError):
@@ -103,6 +116,55 @@ class ComponentObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class ComponentTerminalRecoveryAuthority:
+    schema_version: int
+    component_id: str
+    source_authority_incarnation: str
+    target_authority_incarnation: str
+    authority_digest: str
+
+    def __post_init__(self) -> None:
+        payload = {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "source_authority_incarnation": self.source_authority_incarnation,
+            "target_authority_incarnation": self.target_authority_incarnation,
+        }
+        if (
+            self.schema_version != 1
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or not _canonical_nonzero_uuid(self.source_authority_incarnation)
+            or not _canonical_nonzero_uuid(self.target_authority_incarnation)
+            or self.source_authority_incarnation == self.target_authority_incarnation
+            or _SHA256_RE.fullmatch(self.authority_digest) is None
+            or _hash_json(payload) != self.authority_digest
+        ):
+            raise ValueError("protected component terminal recovery authority is invalid")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        component_id: str,
+        source_authority_incarnation: str,
+        target_authority_incarnation: str,
+    ) -> ComponentTerminalRecoveryAuthority:
+        payload = {
+            "schema_version": 1,
+            "component_id": component_id,
+            "source_authority_incarnation": source_authority_incarnation,
+            "target_authority_incarnation": target_authority_incarnation,
+        }
+        return cls(
+            schema_version=1,
+            component_id=component_id,
+            source_authority_incarnation=source_authority_incarnation,
+            target_authority_incarnation=target_authority_incarnation,
+            authority_digest=_hash_json(payload),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProtectedApplyComponent:
     component_id: str
     implementation_digest: str
@@ -111,6 +173,13 @@ class ProtectedApplyComponent:
     apply: Callable[[FinalGatePlan], None]
     preapply_group: str | None = None
     reconcile_before_apply: bool = False
+    terminal_recovery_authority: (
+        Callable[
+            [FinalGatePlan, ComponentTerminal, ComponentObservation],
+            ComponentTerminalRecoveryAuthority | None,
+        ]
+        | None
+    ) = None
 
     def __post_init__(self) -> None:
         if (
@@ -120,6 +189,10 @@ class ProtectedApplyComponent:
             or (
                 self.preapply_group is not None
                 and _COMPONENT_RE.fullmatch(self.preapply_group) is None
+            )
+            or (
+                self.terminal_recovery_authority is not None
+                and not callable(self.terminal_recovery_authority)
             )
             or self.reconcile_before_apply
             != (self.component_id == "external-supervisor-reconciliation")
@@ -347,6 +420,64 @@ class ComponentFailureDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
+class _ComponentFailureDiagnosticEntry:
+    schema_version: int
+    component_id: str
+    ordinal: int
+    sequence: int
+    failure_code: str
+    diagnostic: str
+    primary_failure_code: str | None
+    compensation_failure_code: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or type(self.sequence) is not int
+            or not 0 <= self.sequence < _MAX_FAILURE_DIAGNOSTICS
+        ):
+            raise ValueError("protected component failure diagnostic entry is invalid")
+        self.as_diagnostic()
+
+    def as_diagnostic(self) -> ComponentFailureDiagnostic:
+        return ComponentFailureDiagnostic(
+            schema_version=(
+                2
+                if self.primary_failure_code is not None
+                or self.compensation_failure_code is not None
+                else 1
+            ),
+            component_id=self.component_id,
+            ordinal=self.ordinal,
+            failure_code=self.failure_code,
+            diagnostic=self.diagnostic,
+            primary_failure_code=self.primary_failure_code,
+            compensation_failure_code=self.compensation_failure_code,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> _ComponentFailureDiagnosticEntry:
+        if set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("protected component failure diagnostic entry fields are invalid")
+        return cls(
+            schema_version=_integer(value, "schema_version"),
+            component_id=_string(value, "component_id"),
+            ordinal=_integer(value, "ordinal"),
+            sequence=_integer(value, "sequence"),
+            failure_code=_string(value, "failure_code"),
+            diagnostic=_string(value, "diagnostic"),
+            primary_failure_code=_optional_string(value, "primary_failure_code"),
+            compensation_failure_code=_optional_string(
+                value,
+                "compensation_failure_code",
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationOutcome:
     schema_version: int
     component_id: str
@@ -493,6 +624,225 @@ class ComponentTerminal:
         }
         if _hash_json(payload) != terminal.terminal_digest:
             raise ValueError("protected component terminal content drifted")
+        return terminal
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentTerminalRecoveryIntent:
+    schema_version: int
+    request_id: str
+    attempt_number: int
+    plan_digest: str
+    candidate_sha: str
+    candidate_tree: str
+    component_id: str
+    ordinal: int
+    component_intent_digest: str
+    prior_terminal_digest: str
+    prior_evidence_digest: str
+    source_authority_incarnation: str
+    target_authority_incarnation: str
+    observed_epoch: int
+    authority_digest: str
+    recovery_intent_digest: str
+
+    def __post_init__(self) -> None:
+        validate_safe_identifier(self.request_id, "request_id")
+        if (
+            self.schema_version != 1
+            or type(self.attempt_number) is not int
+            or self.attempt_number < 1
+            or _SHA256_RE.fullmatch(self.plan_digest) is None
+            or _GIT_SHA_RE.fullmatch(self.candidate_sha) is None
+            or _GIT_SHA_RE.fullmatch(self.candidate_tree) is None
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or type(self.ordinal) is not int
+            or not 0 <= self.ordinal < 32
+            or any(
+                _SHA256_RE.fullmatch(value) is None
+                for value in (
+                    self.component_intent_digest,
+                    self.prior_terminal_digest,
+                    self.prior_evidence_digest,
+                    self.authority_digest,
+                    self.recovery_intent_digest,
+                )
+            )
+            or not _canonical_nonzero_uuid(self.source_authority_incarnation)
+            or not _canonical_nonzero_uuid(self.target_authority_incarnation)
+            or self.source_authority_incarnation == self.target_authority_incarnation
+            or type(self.observed_epoch) is not int
+            or self.observed_epoch < 0
+        ):
+            raise ValueError("protected component terminal recovery intent is invalid")
+        try:
+            authority = ComponentTerminalRecoveryAuthority.build(
+                component_id=self.component_id,
+                source_authority_incarnation=self.source_authority_incarnation,
+                target_authority_incarnation=self.target_authority_incarnation,
+            )
+        except ValueError as exc:
+            raise ValueError("protected component terminal recovery intent is invalid") from exc
+        if authority.authority_digest != self.authority_digest:
+            raise ValueError("protected component terminal recovery intent is invalid")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        plan: FinalGatePlan,
+        intent: ComponentIntent,
+        terminal: ComponentTerminal,
+        authority: ComponentTerminalRecoveryAuthority,
+    ) -> ComponentTerminalRecoveryIntent:
+        if (
+            intent.request_id != plan.request_id
+            or intent.attempt_number != plan.attempt_number
+            or intent.plan_digest != plan.plan_digest
+            or terminal.intent_digest != intent.intent_digest
+            or terminal.component_id != intent.component_id
+            or terminal.observed_epoch != plan.starting_mutation_epoch + 1
+            or authority.component_id != intent.component_id
+            or authority.target_authority_incarnation != plan.manager_authority_incarnation
+        ):
+            raise ValueError("protected component terminal recovery identity is invalid")
+        payload = {
+            "schema_version": 1,
+            "request_id": plan.request_id,
+            "attempt_number": plan.attempt_number,
+            "plan_digest": plan.plan_digest,
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "component_id": intent.component_id,
+            "ordinal": intent.ordinal,
+            "component_intent_digest": intent.intent_digest,
+            "prior_terminal_digest": terminal.terminal_digest,
+            "prior_evidence_digest": terminal.evidence_digest,
+            "source_authority_incarnation": authority.source_authority_incarnation,
+            "target_authority_incarnation": authority.target_authority_incarnation,
+            "observed_epoch": terminal.observed_epoch,
+            "authority_digest": authority.authority_digest,
+        }
+        return cls.from_dict({**payload, "recovery_intent_digest": _hash_json(payload)})
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ComponentTerminalRecoveryIntent:
+        if set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("protected component terminal recovery intent fields are invalid")
+        recovery_intent = cls(
+            schema_version=_integer(value, "schema_version"),
+            request_id=_string(value, "request_id"),
+            attempt_number=_integer(value, "attempt_number"),
+            plan_digest=_string(value, "plan_digest"),
+            candidate_sha=_string(value, "candidate_sha"),
+            candidate_tree=_string(value, "candidate_tree"),
+            component_id=_string(value, "component_id"),
+            ordinal=_integer(value, "ordinal"),
+            component_intent_digest=_string(value, "component_intent_digest"),
+            prior_terminal_digest=_string(value, "prior_terminal_digest"),
+            prior_evidence_digest=_string(value, "prior_evidence_digest"),
+            source_authority_incarnation=_string(value, "source_authority_incarnation"),
+            target_authority_incarnation=_string(value, "target_authority_incarnation"),
+            observed_epoch=_integer(value, "observed_epoch"),
+            authority_digest=_string(value, "authority_digest"),
+            recovery_intent_digest=_string(value, "recovery_intent_digest"),
+        )
+        payload = {
+            key: item
+            for key, item in recovery_intent.to_dict().items()
+            if key != "recovery_intent_digest"
+        }
+        if _hash_json(payload) != recovery_intent.recovery_intent_digest:
+            raise ValueError("protected component terminal recovery intent content drifted")
+        return recovery_intent
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentTerminalRecovery:
+    schema_version: int
+    recovery_intent_digest: str
+    component_id: str
+    evidence_digest: str
+    observed_epoch: int
+    applied: bool
+    effective_terminal_digest: str
+    recovery_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or any(
+                _SHA256_RE.fullmatch(value) is None
+                for value in (
+                    self.recovery_intent_digest,
+                    self.evidence_digest,
+                    self.effective_terminal_digest,
+                    self.recovery_digest,
+                )
+            )
+            or type(self.observed_epoch) is not int
+            or self.observed_epoch < 0
+            or type(self.applied) is not bool
+        ):
+            raise ValueError("protected component terminal recovery is invalid")
+
+    @classmethod
+    def build(
+        cls,
+        recovery_intent: ComponentTerminalRecoveryIntent,
+        terminal: ComponentTerminal,
+    ) -> ComponentTerminalRecovery:
+        payload = {
+            "schema_version": 1,
+            "recovery_intent_digest": recovery_intent.recovery_intent_digest,
+            "component_id": recovery_intent.component_id,
+            "evidence_digest": terminal.evidence_digest,
+            "observed_epoch": terminal.observed_epoch,
+            "applied": terminal.applied,
+            "effective_terminal_digest": terminal.terminal_digest,
+        }
+        return cls.from_dict({**payload, "recovery_digest": _hash_json(payload)})
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ComponentTerminalRecovery:
+        if set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("protected component terminal recovery fields are invalid")
+        recovery = cls(
+            schema_version=_integer(value, "schema_version"),
+            recovery_intent_digest=_string(value, "recovery_intent_digest"),
+            component_id=_string(value, "component_id"),
+            evidence_digest=_string(value, "evidence_digest"),
+            observed_epoch=_integer(value, "observed_epoch"),
+            applied=_boolean(value, "applied"),
+            effective_terminal_digest=_string(value, "effective_terminal_digest"),
+            recovery_digest=_string(value, "recovery_digest"),
+        )
+        payload = {
+            key: item for key, item in recovery.to_dict().items() if key != "recovery_digest"
+        }
+        if _hash_json(payload) != recovery.recovery_digest:
+            raise ValueError("protected component terminal recovery content drifted")
+        return recovery
+
+    def effective_terminal(self, intent: ComponentIntent) -> ComponentTerminal:
+        terminal = ComponentTerminal.build(
+            intent,
+            ComponentObservation(
+                state=ComponentState.EXACT,
+                evidence_digest=self.evidence_digest,
+                observed_epoch=self.observed_epoch,
+            ),
+            applied=self.applied,
+        )
+        if terminal.terminal_digest != self.effective_terminal_digest:
+            raise ValueError("protected component effective terminal content drifted")
         return terminal
 
 
@@ -731,8 +1081,14 @@ class ProtectedApplyJournal:
                 or observed.evidence_digest != terminal.evidence_digest
                 or observed.observed_epoch != terminal.observed_epoch
             ):
-                raise ProtectedApplyJournalError(
-                    f"protected component {component.component_id} terminal state drifted"
+                return self._recover_terminal_authority_forward(
+                    component_root=component_root,
+                    component=component,
+                    ordinal=ordinal,
+                    plan=plan,
+                    intent=intent,
+                    prior_terminal=terminal,
+                    observed=observed,
                 )
             if component.reconcile_before_apply:
                 self._append_reconciliation_outcome(
@@ -802,6 +1158,134 @@ class ProtectedApplyJournal:
             )
         else:
             self._publish_or_match(terminal_path, terminal.to_dict())
+        return terminal
+
+    def _recover_terminal_authority_forward(
+        self,
+        *,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        ordinal: int,
+        plan: FinalGatePlan,
+        intent: ComponentIntent,
+        prior_terminal: ComponentTerminal,
+        observed: ComponentObservation,
+    ) -> ComponentTerminal:
+        authority_resolver = component.terminal_recovery_authority
+        recovery_intent_path = component_root / "terminal-recovery-intent.json"
+        recovery_path = component_root / "terminal-recovery.json"
+        authority = (
+            None
+            if authority_resolver is None
+            else authority_resolver(plan, prior_terminal, observed)
+        )
+        if (
+            authority is None
+            or not isinstance(authority, ComponentTerminalRecoveryAuthority)
+            or authority.component_id != component.component_id
+            or prior_terminal.observed_epoch != plan.starting_mutation_epoch + 1
+        ):
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal state drifted"
+            )
+        recovery_intent = ComponentTerminalRecoveryIntent.build(
+            plan=plan,
+            intent=intent,
+            terminal=prior_terminal,
+            authority=authority,
+        )
+        try:
+            self._read(recovery_intent_path)
+        except FileNotFoundError:
+            recovery_intent_preexisted = False
+        else:
+            recovery_intent_preexisted = True
+
+        if not recovery_intent_preexisted:
+            try:
+                self._read(recovery_path)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ProtectedApplyJournalError(
+                    "protected component terminal recovery intent is missing"
+                )
+        if not recovery_intent_preexisted and observed.state is not ComponentState.READY:
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal state drifted"
+            )
+        self._publish_or_match(recovery_intent_path, recovery_intent.to_dict())
+
+        try:
+            recovery = ComponentTerminalRecovery.from_dict(self._read(recovery_path))
+        except FileNotFoundError:
+            recovery = None
+        except ValueError as exc:
+            raise ProtectedApplyJournalError(
+                "protected component terminal recovery is invalid"
+            ) from exc
+        if recovery is not None:
+            if (
+                not recovery_intent_preexisted
+                or recovery.recovery_intent_digest != recovery_intent.recovery_intent_digest
+                or recovery.component_id != component.component_id
+            ):
+                raise ProtectedApplyJournalError(
+                    "protected component terminal recovery identity drifted"
+                )
+            try:
+                terminal = recovery.effective_terminal(intent)
+            except ValueError as exc:
+                raise ProtectedApplyJournalError(
+                    "protected component terminal recovery is invalid"
+                ) from exc
+            if (
+                observed.state is not ComponentState.EXACT
+                or observed.evidence_digest != terminal.evidence_digest
+                or observed.observed_epoch != terminal.observed_epoch
+            ):
+                raise ProtectedApplyJournalError(
+                    f"protected component {component.component_id} recovered terminal state drifted"
+                )
+            return terminal
+
+        applied = False
+        if observed.state is ComponentState.READY:
+            self._apply_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+            )
+            applied = True
+            after = self._classify_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+                failure_code="post-classify-failed",
+            )
+        elif recovery_intent_preexisted and observed.state is ComponentState.EXACT:
+            after = observed
+        else:
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal recovery state drifted"
+            )
+        if after.state is not ComponentState.EXACT:
+            diagnostic = f"component classified {after.state.value} after terminal recovery"
+            self._publish_failure_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                failure_code="did-not-converge",
+                diagnostic=diagnostic,
+            )
+            raise ProtectedApplyJournalError(
+                f"protected component {component.component_id} terminal recovery did not converge"
+            )
+        terminal = ComponentTerminal.build(intent, after, applied=applied)
+        recovery = ComponentTerminalRecovery.build(recovery_intent, terminal)
+        self._publish_or_match(recovery_path, recovery.to_dict())
         return terminal
 
     def _apply_with_diagnostic(
@@ -1018,7 +1502,7 @@ class ProtectedApplyJournal:
         failure_code: str,
     ) -> ComponentObservation:
         try:
-            return component.classify(plan)
+            observation = component.classify(plan)
         except BaseException as exc:
             diagnostic = unclassified_failure_diagnostic(
                 exc,
@@ -1040,6 +1524,24 @@ class ProtectedApplyJournal:
                 compensation_failure_code=None,
             )
             raise
+        if observation.state is ComponentState.DRIFTED:
+            diagnostic = _CLASSIFICATION_DRIFT_DIAGNOSTICS[failure_code]
+            self._publish_failure_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                failure_code=failure_code,
+                diagnostic=diagnostic,
+            )
+            self._publish_reconciliation_outcome_best_effort(
+                component_root,
+                component,
+                status=ReconciliationOutcomeStatus.FAILED,
+                failure_code=failure_code,
+                diagnostic=diagnostic,
+                compensation_failure_code=None,
+            )
+        return observation
 
     def _publish_failure_diagnostic(
         self,
@@ -1058,13 +1560,15 @@ class ProtectedApplyJournal:
         written only after exact convergence), so its cause was previously
         unrecoverable — a masked dead-end (#1081, #1085 phase 1). This writes a
         coded reason plus a secret-safe diagnostic (exception type + raise-site
-        only; never the message — the #1077 lesson) beside the intent.
+        only; never the message — the #1077 lesson) beside the intent. The
+        legacy write-once record remains intact while a bounded append-only
+        stream makes later retry failures observable.
 
         Strictly best-effort: it must never mask the real failure. Any error
-        writing it — including a write-once mismatch on a differing retry — is
-        swallowed so the original exception still propagates unchanged.
+        writing either form is swallowed so the original exception still
+        propagates unchanged.
         """
-        record = ComponentFailureDiagnostic(
+        diagnostic_record = ComponentFailureDiagnostic(
             schema_version=(
                 2
                 if primary_failure_code is not None or compensation_failure_code is not None
@@ -1076,11 +1580,120 @@ class ProtectedApplyJournal:
             diagnostic=diagnostic,
             primary_failure_code=primary_failure_code,
             compensation_failure_code=compensation_failure_code,
-        ).to_dict()
+        )
         try:
-            self._publish_or_match(component_root / "failure-diagnostic.json", record)
+            self._publish_or_match(
+                component_root / "failure-diagnostic.json",
+                diagnostic_record.to_dict(),
+            )
         except Exception:
             pass
+        try:
+            self._append_failure_diagnostic(component_root, diagnostic_record)
+        except Exception:
+            pass
+
+    def _append_failure_diagnostic(
+        self,
+        component_root: Path,
+        diagnostic: ComponentFailureDiagnostic,
+    ) -> None:
+        diagnostics_root = component_root / "failure-diagnostics"
+        try:
+            diagnostics_root.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not create protected failure diagnostic journal"
+            ) from exc
+        _require_directory(diagnostics_root, uid=self.service_uid)
+        existing = _read_failure_diagnostics(
+            component_root,
+            service_uid=self.service_uid,
+        )
+        if len(existing) >= _MAX_FAILURE_DIAGNOSTICS:
+            raise ProtectedApplyJournalError("protected failure diagnostic journal is too large")
+        sequence = len(existing)
+        entry = _ComponentFailureDiagnosticEntry(
+            schema_version=1,
+            component_id=diagnostic.component_id,
+            ordinal=diagnostic.ordinal,
+            sequence=sequence,
+            failure_code=diagnostic.failure_code,
+            diagnostic=diagnostic.diagnostic,
+            primary_failure_code=diagnostic.primary_failure_code,
+            compensation_failure_code=diagnostic.compensation_failure_code,
+        )
+        self._publish_failure_diagnostic_entry(
+            diagnostics_root / f"{sequence:08d}.json",
+            entry.to_dict(),
+        )
+
+    def _publish_failure_diagnostic_entry(
+        self,
+        path: Path,
+        value: Mapping[str, object],
+    ) -> None:
+        payload = _json_bytes(value)
+        if (
+            len(payload) > _MAX_FAILURE_DIAGNOSTIC_BYTES
+            or path.parent.name != "failure-diagnostics"
+            or _COMPONENT_DIRECTORY_RE.fullmatch(path.parent.parent.name) is None
+        ):
+            raise ProtectedApplyJournalError("protected failure diagnostic publication is invalid")
+        source_directory_fd = _open_directory(path.parent.parent)
+        try:
+            destination_directory_fd = _open_directory(path.parent)
+        except BaseException:
+            os.close(source_directory_fd)
+            raise
+        temporary = f".{path.name}.{uuid4().hex}.tmp"
+        created = False
+        try:
+            fd = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                _PRIVATE_FILE_MODE,
+                dir_fd=source_directory_fd,
+            )
+            created = True
+            try:
+                os.fchmod(fd, _PRIVATE_FILE_MODE)
+                _write_all(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _rename_noreplace(
+                source_directory_fd,
+                temporary,
+                destination_directory_fd,
+                path.name,
+            )
+            created = False
+            os.fsync(destination_directory_fd)
+            os.fsync(source_directory_fd)
+        except FileExistsError:
+            if self._read(path) != dict(value):
+                raise ProtectedApplyJournalError(
+                    "protected failure diagnostic cannot be replaced"
+                ) from None
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not publish protected failure diagnostic"
+            ) from exc
+        finally:
+            if created:
+                try:
+                    os.unlink(temporary, dir_fd=source_directory_fd)
+                except OSError:
+                    pass
+            os.close(destination_directory_fd)
+            os.close(source_directory_fd)
 
     def _ensure(self) -> None:
         _require_directory(self.attempt_root, uid=self.service_uid)
@@ -1282,6 +1895,14 @@ def _boolean(value: Mapping[str, object], key: str) -> bool:
     return item
 
 
+def _canonical_nonzero_uuid(value: str) -> bool:
+    try:
+        parsed = UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return parsed.int != 0 and str(parsed) == value
+
+
 def _write_all(fd: int, payload: bytes) -> None:
     offset = 0
     while offset < len(payload):
@@ -1375,6 +1996,95 @@ def read_component_failure_diagnostic(
         ) from exc
 
 
+def _read_failure_diagnostics(
+    component_root: Path,
+    *,
+    service_uid: int,
+) -> tuple[_ComponentFailureDiagnosticEntry, ...]:
+    match = _COMPONENT_DIRECTORY_RE.fullmatch(component_root.name)
+    if (
+        not component_root.is_absolute()
+        or ".." in component_root.parts
+        or match is None
+        or service_uid < 0
+    ):
+        raise ProtectedApplyJournalError("protected failure diagnostic path is invalid")
+    _require_directory(component_root, uid=service_uid)
+    diagnostics_root = component_root / "failure-diagnostics"
+    try:
+        _require_directory(diagnostics_root, uid=service_uid)
+    except FileNotFoundError:
+        return ()
+    try:
+        entries = tuple(os.scandir(diagnostics_root))
+    except OSError as exc:
+        raise ProtectedApplyJournalError(
+            "protected failure diagnostic journal is unavailable"
+        ) from exc
+    if len(entries) > _MAX_FAILURE_DIAGNOSTICS:
+        raise ProtectedApplyJournalError("protected failure diagnostic journal is too large")
+    paths: list[tuple[int, Path]] = []
+    for entry in entries:
+        entry_match = _FAILURE_DIAGNOSTIC_FILE_RE.fullmatch(entry.name)
+        if entry_match is None or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            raise ProtectedApplyJournalError("protected failure diagnostic journal is unsafe")
+        paths.append((int(entry_match.group("sequence")), Path(entry.path)))
+    paths.sort()
+    if [sequence for sequence, _path in paths] != list(range(len(paths))):
+        raise ProtectedApplyJournalError("protected failure diagnostic sequence is invalid")
+    expected_component_id = match.group("component_id")
+    expected_ordinal = int(match.group("ordinal"))
+    diagnostics: list[_ComponentFailureDiagnosticEntry] = []
+    for sequence, path in paths:
+        try:
+            diagnostic = _ComponentFailureDiagnosticEntry.from_dict(
+                _read_service_component_record(
+                    path,
+                    service_uid=service_uid,
+                    filename=path.name,
+                    max_bytes=_MAX_FAILURE_DIAGNOSTIC_BYTES,
+                )
+            )
+        except ValueError as exc:
+            raise ProtectedApplyJournalError(
+                "protected failure diagnostic record is invalid"
+            ) from exc
+        if (
+            diagnostic.component_id != expected_component_id
+            or diagnostic.ordinal != expected_ordinal
+            or diagnostic.sequence != sequence
+        ):
+            raise ProtectedApplyJournalError("protected failure diagnostic identity drifted")
+        diagnostics.append(diagnostic)
+    return tuple(diagnostics)
+
+
+def read_latest_component_failure_diagnostic(
+    component_root: Path,
+    *,
+    service_uid: int,
+) -> ComponentFailureDiagnostic | None:
+    """Read the newest certified diagnostic, falling back to legacy evidence."""
+    diagnostics = _read_failure_diagnostics(component_root, service_uid=service_uid)
+    if diagnostics:
+        return diagnostics[-1].as_diagnostic()
+    match = _COMPONENT_DIRECTORY_RE.fullmatch(component_root.name)
+    if match is None:  # guarded by _read_failure_diagnostics
+        raise ProtectedApplyJournalError("protected failure diagnostic path is invalid")
+    try:
+        diagnostic = read_component_failure_diagnostic(
+            component_root / "failure-diagnostic.json",
+            service_uid=service_uid,
+        )
+    except FileNotFoundError:
+        return None
+    if diagnostic.component_id != match.group("component_id") or diagnostic.ordinal != int(
+        match.group("ordinal")
+    ):
+        raise ProtectedApplyJournalError("protected failure diagnostic identity drifted")
+    return diagnostic
+
+
 def _read_reconciliation_outcomes(
     component_root: Path,
     *,
@@ -1448,6 +2158,9 @@ __all__ = [
     "ComponentObservation",
     "ComponentState",
     "ComponentTerminal",
+    "ComponentTerminalRecovery",
+    "ComponentTerminalRecoveryAuthority",
+    "ComponentTerminalRecoveryIntent",
     "ProtectedApplyComponent",
     "ProtectedApplyJournal",
     "ProtectedApplyJournalError",
@@ -1455,5 +2168,6 @@ __all__ = [
     "ReconciliationOutcomeStatus",
     "read_component_failure",
     "read_component_failure_diagnostic",
+    "read_latest_component_failure_diagnostic",
     "read_latest_reconciliation_outcome",
 ]

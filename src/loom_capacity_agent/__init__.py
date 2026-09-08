@@ -2,6 +2,7 @@
 
 from loom_capacity_agent.admission import (
     AbandonedAdmissionPlanV1,
+    ExecutableTerminalInventoryImportReceiptV2,
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
     PreparedPlacementAllowanceV1,
@@ -85,6 +86,7 @@ from loom_capacity_agent.store import (
     acknowledge_executable_protected_release_publication,
     capture_demand_observation,
     capture_lifecycle_demand_observation,
+    import_executable_terminal_inventory_evidence,
     read_agent_lifecycle_demand_observation,
     read_agent_reporter_high_water,
     read_next_executable_protected_release,
@@ -118,6 +120,7 @@ __all__ = [
     "ExecutableAdmissionPlanClosureAcknowledgementReceiptV2",
     "ExecutableProtectedReleasePublishReceiptV2",
     "ExecutableProtectedReleaseReporterRuntime",
+    "ExecutableTerminalInventoryImportReceiptV2",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
     "GuardLifecycleDemandAttemptV2",
@@ -151,6 +154,7 @@ __all__ = [
     "build_lifecycle_demand_snapshot",
     "capture_demand_observation",
     "capture_lifecycle_demand_observation",
+    "import_executable_terminal_inventory_evidence",
     "read_agent_lifecycle_demand_observation",
     "read_agent_reporter_high_water",
     "read_next_executable_protected_release",

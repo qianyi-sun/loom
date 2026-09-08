@@ -211,6 +211,7 @@ def render_nebius_runtime(
     physical_binding_path: Path,
     capacity_policy_path: Path,
     output_dir: Path,
+    staging_attachment_path: Path | None = None,
 ) -> dict[str, Any]:
     if environment not in _ENVIRONMENTS:
         raise NebiusRuntimeRenderError(f"unsupported environment {environment!r}")
@@ -234,10 +235,30 @@ def render_nebius_runtime(
     if policy.get("target_id") != target["target_id"]:
         raise NebiusRuntimeRenderError("capacity policy target does not match selected environment")
 
+    attachment = None
+    attachment_raw = b""
+    if staging_attachment_path is not None:
+        if yaml is None:
+            raise NebiusRuntimeRenderError("staging attachment rendering requires PyYAML")
+        from loom.nebius_staging_attachment import (
+            StagingAttachmentError,
+            validate_staging_attachment,
+        )
+
+        attachment, attachment_raw = _read_object(
+            staging_attachment_path, label="staging attachment"
+        )
+        try:
+            validate_staging_attachment(attachment, environment=environment, target=target)
+        except StagingAttachmentError as exc:
+            raise NebiusRuntimeRenderError(str(exc)) from exc
+
     template_dir = repo_root / "deploy" / "k8s"
-    output_dir.mkdir(parents=True, exist_ok=True)
     rendered: dict[str, bytes] = {}
-    for name in (_ACTUATOR_TEMPLATE, _COLLECTOR_TEMPLATE, *_PATCH_TEMPLATES):
+    templates: tuple[str, ...] = (_ACTUATOR_TEMPLATE, _COLLECTOR_TEMPLATE)
+    if attachment is None:
+        templates += _PATCH_TEMPLATES
+    for name in templates:
         output_name = name.replace("-development-patch", f"-{environment}-patch")
         rendered[output_name] = _render_yaml(
             template_dir / name,
@@ -247,7 +268,16 @@ def render_nebius_runtime(
             image=image,
             replace_physical=name == _COLLECTOR_TEMPLATE,
         )
+    if attachment is not None:
+        from loom.nebius_staging_attachment import render_staging_attachment
+
+        rendered = render_staging_attachment(
+            attachment,
+            actuator=rendered[_ACTUATOR_TEMPLATE],
+            collector=rendered[_COLLECTOR_TEMPLATE],
+        )
     rendered[f"nebius-{environment}-capacity-policy.json"] = policy_raw
+    output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in rendered.items():
         (output_dir / name).write_bytes(payload)
 
@@ -269,6 +299,11 @@ def render_nebius_runtime(
             for name, payload in sorted(rendered.items())
         ],
     }
+    if attachment is not None:
+        manifest["source_sha256"]["staging_attachment"] = _sha256(attachment_raw)
+        manifest["canonical_environment"] = "staging"
+        manifest["canonical_database"] = attachment["canonical_database"]
+        manifest["gateway_image"] = attachment["gateway_image"]
     manifest_bytes = (
         json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
     ).encode()

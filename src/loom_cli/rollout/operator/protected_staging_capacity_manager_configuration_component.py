@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -15,6 +15,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import ValidationError
 
 from loom_capacity_manager.contracts import (
+    AccountPolicyV1,
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
     ConfigurationRollbackV1,
@@ -46,6 +47,9 @@ from .protected_capacity_manager_configuration_compensation import (
     CapacityManagerConfigurationCompensationRecord,
     CapacityManagerConfigurationCompensationStore,
 )
+from .protected_staging_capacity_database_component import (
+    derive_staging_reporter_incarnation,
+)
 
 _GB10_SOURCE_NODES = frozenset(f"trt-gb10-{index}" for index in range(1, 16))
 _GB10_TARGET_NODES = _GB10_SOURCE_NODES - {"trt-gb10-2"}
@@ -63,6 +67,18 @@ _PROPOSAL_FIELDS = frozenset(
     }
 )
 _ACTIVATION_RESPONSE_FIELDS = frozenset({"configuration_epoch", "digest", "snapshot"})
+_SHARED_DEVELOPMENT_ACCOUNT = AccountPolicyV1(
+    account_id="shared-development",
+    kind="service",
+    owner_id=None,
+    min_reservation_slots=0,
+    max_slots=16,
+    max_surge_slots=2,
+    max_pending_slots=16,
+    max_pending_jobs=16,
+    submission_rate_per_minute=8,
+    max_live_subjects=16,
+)
 
 
 class ManagerConfigurationClient(Protocol):
@@ -549,9 +565,17 @@ def derive_protected_staging_capacity_configuration(
 ) -> _DesiredConfiguration:
     """Derive the one target shared by protected preflight and apply."""
 
+    seed = _parse_configuration_seed(dict(seed_values))
+    seed = replace(
+        seed,
+        reporter_incarnation=derive_staging_reporter_incarnation(
+            seed_values.get("reporter_incarnation"),
+            target_generation=target_generation,
+        ),
+    )
     return _derive_desired_configuration(
         _parse_active_configuration(active_document),
-        seed=_parse_configuration_seed(dict(seed_values)),
+        seed=seed,
         target_generation=target_generation,
     )
 
@@ -592,6 +616,8 @@ def _derive_desired_configuration(
         (subject for subject in active.subjects if subject.subject_id == seed.subject_id),
         None,
     )
+    if existing_staging is None:
+        base_fleet = _with_authenticated_staging_account(base_fleet)
     if existing_staging is not None and (
         existing_staging.subject_incarnation != seed.subject_incarnation
     ):
@@ -792,6 +818,34 @@ def _fleet_with_digest(
     fleet = FleetManifestV1.model_validate(payload)
     validate_fleet_manifest_digests(fleet)
     return fleet
+
+
+def _with_authenticated_staging_account(fleet: FleetManifestV1) -> FleetManifestV1:
+    services = tuple(account for account in fleet.account_policies if account.kind == "service")
+    if len(services) == 1:
+        return fleet
+    if services or any(
+        account.account_id == _SHARED_DEVELOPMENT_ACCOUNT.account_id
+        for account in fleet.account_policies
+    ):
+        raise ValueError("authenticated staging service account is ambiguous")
+    payload = fleet.model_dump(mode="python")
+    payload.update(
+        {
+            "account_policies": tuple(
+                sorted(
+                    (*fleet.account_policies, _SHARED_DEVELOPMENT_ACCOUNT),
+                    key=lambda account: account.account_id,
+                )
+            ),
+            "fleet_digest": "0" * 64,
+        }
+    )
+    provisional = FleetManifestV1.model_validate(payload)
+    payload["fleet_digest"] = canonical_digest_excluding(provisional, "fleet_digest")
+    authenticated = FleetManifestV1.model_validate(payload)
+    validate_fleet_manifest_digests(authenticated)
+    return authenticated
 
 
 def _staging_subject(

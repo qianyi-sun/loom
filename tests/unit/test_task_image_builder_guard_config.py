@@ -96,6 +96,13 @@ def _document() -> dict[str, object]:
             "bpf_program_sha256": SHA_A,
             "bpf_map_schema_sha256": SHA_B,
         },
+        "storage": {
+            "root": "/var/lib/loom-task-builder",
+            "mount_device": "259:1",
+            "project_id": 300993,
+            "byte_limit": 107374182400,
+            "inode_limit": 1000000,
+        },
         "service": {
             "attestation_interval_seconds": 15,
             "attestation_lifetime_seconds": 60,
@@ -132,6 +139,8 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
         "/etc/loom/task-image-builder-guard/network-policy-v1.json"
     )
     assert config.containment.device_program_tags == ("0123456789abcdef",)
+    assert config.storage.root == Path("/var/lib/loom-task-builder")
+    assert config.storage.project_id == 300993
     assert config.service.attestation_interval_seconds == 15
 
 

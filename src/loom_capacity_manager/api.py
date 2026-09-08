@@ -64,6 +64,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
+    ExecutableTerminalInventoryEvidenceV2,
     ExecutionActivationV2,
     ExecutionContextV2,
     ExecutionDrainV2,
@@ -72,6 +73,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionRetirementV2,
     PreparedExecutorBindingV2,
     canonical_executable_admission_work_bytes,
+    canonical_executable_bytes,
     canonical_executable_digest,
 )
 from loom_capacity_manager.execution_policy import load_execution_preparation_policy
@@ -1532,6 +1534,37 @@ def create_app(
                     idempotency_key=idempotency_key,
                 )
             return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get(
+        "/v2/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence",
+        response_model=ExecutableTerminalInventoryEvidenceV2 | None,
+    )
+    async def get_subject_terminal_inventory_evidence(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+    ) -> Response:
+        if (
+            actor.subject_id != subject_id
+            or actor.subject_incarnation is None
+            or actor.demand_reporter_incarnation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.subject_terminal_inventory_evidence(
+                    session,
+                    subject_id=subject_id,
+                    subject_incarnation=actor.subject_incarnation,
+                    reporter_incarnation=actor.demand_reporter_incarnation,
+                    intent_id=intent_id,
+                )
+            payload = b"null" if result is None else canonical_executable_bytes(result)
+            return Response(content=payload, media_type="application/json")
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

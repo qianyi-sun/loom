@@ -226,10 +226,12 @@ def test_fixed_controller_transport_uses_only_typed_pool_operations(tmp_path: Pa
 def test_oldlab_controller_transport_binds_fixed_image_and_host_pid_channel(
     tmp_path: Path,
 ) -> None:
+    """Catch using the cluster-only logical image for later credential calls."""
     module = importlib.import_module(MODULE)
     payload = _payload(tmp_path, "oldlab")
     digest = "a" * 64
     image = f"192.168.50.13:5000/loom-capacity-executor@sha256:{digest}"
+    runtime_image = f"localhost:5000/loom-capacity-executor@sha256:{digest}"
     calls: list[tuple[tuple[str, ...], str]] = []
 
     def run(argv, input_payload):  # type: ignore[no-untyped-def]
@@ -256,7 +258,7 @@ def test_oldlab_controller_transport_binds_fixed_image_and_host_pid_channel(
         "type=bind,src=/,dst=/host,bind-propagation=rslave",
         "--entrypoint",
         "/usr/local/bin/python",
-        image,
+        runtime_image,
         "/opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py",
         "--host-root",
         "/host",

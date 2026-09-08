@@ -249,6 +249,9 @@ native_authority_request() {
   local operation="$1"
   local request_id="$2"
   local output="$3"
+  local part
+  local component request_status=0
+  local -a pipeline_status=()
   shift 3
   [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
     || return 1
@@ -256,42 +259,62 @@ native_authority_request() {
     status) ;;
     *) return 1 ;;
   esac
-  if ! "${native_authority_client[@]}" "$operation" \
-    --authority-source-sha "$authority_source_sha" \
-    --authority-source-tree "$authority_source_tree" \
-    --request-id "$request_id" \
-    --runtime-profile-sha256 "$runtime_profile_sha256" \
-    --schema-version 1 \
-    "$@" | sudo -n -- /usr/bin/ssh -F /dev/null \
-    -o HostName=207.35.188.227 \
-    -o Port=2221 \
-    -o User=qianyi \
-    -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
-    -o IdentitiesOnly=yes \
-    -o PubkeyAuthentication=yes \
-    -o PreferredAuthentications=publickey \
-    -o GSSAPIAuthentication=no \
-    -o HostbasedAuthentication=no \
-    -o PasswordAuthentication=no \
-    -o KbdInteractiveAuthentication=no \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes \
-    -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
-    -o GlobalKnownHostsFile=/dev/null \
-    -o UpdateHostKeys=no \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
-    -o ConnectTimeout=10 \
-    trt-gb10-1 \
-    'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
-    | jq -cS -j -s '
-      if length == 1 and (.[0] | type) == "object" then .[0]
-      else error("authority receipt cardinality") end
-    ' | validate_native_authority_receipt "$operation" "$request_id" > "$output"; then
-    rm -f -- "$output"
-    return 1
-  fi
-  chmod 0600 "$output"
+  test ! -e "$output" && test ! -L "$output" || return 1
+  (
+    part="$(/usr/bin/mktemp -- "$output.part.XXXXXXXXXX")" || exit 1
+    trap '/usr/bin/rm -f -- "$part"' EXIT
+    trap 'exit 1' HUP INT TERM
+    if
+      "${native_authority_client[@]}" "$operation" \
+        --authority-source-sha "$authority_source_sha" \
+        --authority-source-tree "$authority_source_tree" \
+        --request-id "$request_id" \
+        --runtime-profile-sha256 "$runtime_profile_sha256" \
+        --schema-version 1 \
+        "$@" | sudo -n -- /usr/bin/ssh -F /dev/null \
+        -o HostName=207.35.188.227 \
+        -o Port=2221 \
+        -o User=qianyi \
+        -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+        -o IdentitiesOnly=yes \
+        -o PubkeyAuthentication=yes \
+        -o PreferredAuthentications=publickey \
+        -o GSSAPIAuthentication=no \
+        -o HostbasedAuthentication=no \
+        -o PasswordAuthentication=no \
+        -o KbdInteractiveAuthentication=no \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=yes \
+        -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+        -o GlobalKnownHostsFile=/dev/null \
+        -o UpdateHostKeys=no \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ConnectTimeout=10 \
+        trt-gb10-1 \
+        'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
+        | jq -cS -j -s '
+          if length == 1 and (.[0] | type) == "object" then .[0]
+          else error("authority receipt cardinality") end
+        ' > "$part"
+    then
+      pipeline_status=("${PIPESTATUS[@]}")
+    else
+      pipeline_status=("${PIPESTATUS[@]}")
+    fi
+    for component in "${pipeline_status[@]}"; do
+      if test "$request_status" -eq 0 && test "$component" -ne 0; then
+        request_status="$component"
+      fi
+    done
+    if test "$request_status" -ne 0 ||
+      ! /usr/bin/chmod 0600 "$part" 2>/dev/null ||
+      ! validate_native_authority_receipt "$operation" "$request_id" \
+        < "$part" >/dev/null ||
+      ! /usr/bin/ln -T -- "$part" "$output"; then
+      exit 1
+    fi
+  )
 }
 new_native_authority_request_id() {
   python3 - <<'PY'

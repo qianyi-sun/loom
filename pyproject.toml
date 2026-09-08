@@ -138,7 +138,7 @@ s3_artifacts = "loom.family_run.state_backends:S3ArtifactsStateBackend"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["loom*", "loom_drivers*", "capacity_migrations*"]
+include = ["loom*", "loom_drivers*", "capacity_guard_migrations*", "capacity_migrations*"]
 
 [tool.setuptools.package-data]
 "loom_cli.data" = ["*.toml", "*.json", "grafana/*.json", "envoy/*.yaml"]
@@ -155,6 +155,8 @@ include = ["loom*", "loom_drivers*", "capacity_migrations*"]
 ]
 "capacity_migrations" = ["alembic.ini", "env.py", "script.py.mako"]
 "capacity_migrations.versions" = ["*.py"]
+"capacity_guard_migrations" = ["alembic.ini", "env.py", "script.py.mako"]
+"capacity_guard_migrations.versions" = ["*.py"]
 
 [tool.ruff]
 line-length = 100

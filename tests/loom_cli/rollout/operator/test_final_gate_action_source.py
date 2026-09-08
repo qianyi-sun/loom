@@ -590,11 +590,15 @@ def test_repeated_resume_convergence_uses_the_original_apply_plan(tmp_path: Path
     )
 
 
-def test_final_gate_action_source_runs_post_apply_drift_in_process(
+def test_final_gate_action_source_forwards_attested_dependencies_to_post_apply_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source, attestation, calls = _authority(tmp_path)
+    source = replace(
+        source,
+        post_apply_attested_dependencies=frozenset({"runner.install"}),
+    )
     preflight_plan = SimpleNamespace(candidate="exact-plan")
     admission = replace(
         _admission(attestation),
@@ -618,7 +622,20 @@ def test_final_gate_action_source_runs_post_apply_drift_in_process(
     assert captured["plan"] is not preflight_plan
     assert captured["plan"].candidate == ("exact-plan", 8)  # type: ignore[union-attr]
     assert captured["current_mutation_epoch"] == 8
+    assert captured["attested_dependencies"] == frozenset({"runner.install"})
     assert calls == []
+
+
+def test_final_gate_action_source_rejects_unknown_post_apply_attested_dependency(
+    tmp_path: Path,
+) -> None:
+    source, _attestation, _calls = _authority(tmp_path)
+
+    with pytest.raises(ValueError, match="authority is invalid"):
+        replace(
+            source,
+            post_apply_attested_dependencies=frozenset({"staging.health"}),
+        )
 
 
 def test_final_gate_action_source_retries_transient_post_apply_drift(

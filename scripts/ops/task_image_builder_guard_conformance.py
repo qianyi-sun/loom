@@ -71,8 +71,8 @@ _SPEC = Path("deploy/task-image-builder/guard-release-v1.json")
 _PREREQUISITES = Path("deploy/task-image-builder/prerequisites-v1.toml")
 _PROVIDERS = Path("deploy/task-image-builder/rootless-provider-v1.toml")
 _AUTHORITY = Path("deploy/task-image-builder/authority-service-v1.yaml")
-_PREREQUISITES_SHA256 = "c661d1ee54b392f05f1d4eb2381ee10bc6579381ebdd817cdd440d9bb2ae5046"
-_PROVIDERS_SHA256 = "a5286f925d1e78aa08673c36c922425f8f417d6b674fe99dfbef042542d25186"
+_PREREQUISITES_SHA256 = "cfac216b3e614740be38eb0cacf55be506260de6decc967ff224a690cb822add"
+_PROVIDERS_SHA256 = "fb9a91999490873bafcef24e839b268215407a52e4af81d3e0ca66d622df0f76"
 _AUTHORITY_SHA256 = "b72c82f110c3b8b013fb14782f1dd7cb6faedccb4ae644fcdb783a236dc173fe"
 _SELF_CHECK = (
     b'{"schema":"loom.task-image-builder-node-guard-self-check/v1",'

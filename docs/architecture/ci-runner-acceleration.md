@@ -101,6 +101,25 @@ or emergency policy stop; restoring that policy is still an operator decision.
 Queue and runner metrics use bounded work-class labels. Dynamic PR, branch,
 actor, and repository-provided strings are not metric labels.
 
+The CI workflow requests selected integration shards first, then the two root
+shards, before the shorter lint, package, and Go checks. The broker allocates
+all keys in request order in one transaction. With five free normal slots,
+this gives the four critical test jobs priority instead of freezing both
+integration shards onto hosted runners after shorter jobs consume the pool.
+If integration is not selected, root shards receive first priority. The
+selected job set, preflight jobs, eligibility checks, and capacity ceilings
+are unchanged; excess jobs still use hosted runners. A short job releasing
+its lease does not rewrite another job's already-frozen assignment.
+
+Validate priority changes with the actual workflow key-selection step and the
+broker at empty, partially occupied, and full capacity. After protected merge,
+wait for the trusted workflow generation to advance, then inspect a fresh
+eligible run's exact route, actual runner, terminal checks, and lease release.
+The workflow-changing PR itself remains hosted because of workflow blob drift,
+so its green checks alone do not prove that the new placement is in use. Compare
+test duration and final-gate completion at similar load before claiming a
+speedup; root timings on different runner types are not an integration benchmark.
+
 ## Trusted workflow generations
 
 The installed route runtime and the workflow eligibility baseline are separate

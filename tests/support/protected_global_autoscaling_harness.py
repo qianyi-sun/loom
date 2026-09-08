@@ -169,11 +169,14 @@ _UNITS = (
     "loom-capacity-pool-executor-active.service",
     "loom-capacity-pool-executor-active.timer",
 )
-_CONFIGURATION_SCOPES = {
-    "configuration-read": "capacity:read",
-    "configuration-fleet": "capacity:configure:fleet",
-    "configuration-subject": "capacity:configure:subject",
-    "configuration-activate": "capacity:configure:activate",
+_CONFIGURATION_PRINCIPALS = {
+    "configuration-read": ("capacity-read", "capacity:read"),
+    "configuration-fleet": ("capacity-config-fleet", "capacity:configure:fleet"),
+    "configuration-subject": ("capacity-config-subject", "capacity:configure:subject"),
+    "configuration-activate": (
+        "capacity-config-activate",
+        "capacity:configure:activate",
+    ),
 }
 _COMPONENT_LABEL = "loom.carin.dev/protected-component"
 _COMPONENT_VALUE = "staging-capacity-manager-policy"
@@ -235,11 +238,11 @@ def _base_registry(credentials_root: Path) -> bytes:
             "scopes": ["capacity:read", "capacity:reconcile"],
         }
     ]
-    for principal_id, scope in _CONFIGURATION_SCOPES.items():
+    for directory_name, (principal_id, scope) in _CONFIGURATION_PRINCIPALS.items():
         principals.append(
             _principal(
                 principal_id,
-                (credentials_root / principal_id / "bearer-token").read_bytes(),
+                (credentials_root / directory_name / "bearer-token").read_bytes(),
                 scope,
             )
         )
@@ -1313,6 +1316,7 @@ class FrozenProtectedAutoscalingHarness:
     ) -> FrozenProtectedAutoscalingHarness:
         candidate = _candidate(tmp_path)
         state_root = tmp_path / "state"
+        base_plan = _plan(tmp_path)
 
         class _BootstrapRunner:
             environment = _FrozenKubernetes.environment
@@ -1326,7 +1330,7 @@ class FrozenProtectedAutoscalingHarness:
             container_registry=_CONTAINER_REGISTRY,
         )
         _write_bootstrap(bootstrap_runtime)
-        bootstrap_runtime._create_credential_seed()
+        bootstrap_runtime._create_credential_seed(UUID(base_plan.manager_authority_incarnation))
         seed = bootstrap_runtime.read_credential_seed()
         bundle = bootstrap_runtime.read_execution_credential_bundle()
         authority_incarnation = UUID(str(seed["authority_incarnation"]))
@@ -1413,7 +1417,6 @@ class FrozenProtectedAutoscalingHarness:
             coexistence_witness_sha256={"gb10": "5" * 64, "oldlab": "6" * 64},
             legacy_writer_fences=(fence,),
         )
-        base_plan = _plan(tmp_path)
         lease = _lease(plan=base_plan, desired=desired)
         prerequisite_store = ProtectedExecutionPrerequisiteStore(
             state_root,

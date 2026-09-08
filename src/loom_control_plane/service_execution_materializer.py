@@ -599,8 +599,10 @@ class ServiceExecutionMaterializer:
             trial_config = TrialConfig.model_validate(trial_config_raw)
         except ValidationError as exc:
             raise MaterializationIntegrityError("source_metadata_invalid", str(exc)) from exc
-        if task_config.task.id != trial_task_id:
-            raise MaterializationIntegrityError("task_identity_drift")
+        # The Task row was loaded through Trial.task_id above. Uploaded TaskSets
+        # namespace that catalog identity without rewriting the source config's
+        # task.id. Canonical events and ATIF must use the catalog identity, while
+        # the original config remains intact for task semantics and provenance.
         manifest_body = canonical_document(manifest)
         if (
             manifest.session_id != upload_data["id"]
@@ -769,7 +771,7 @@ class ServiceExecutionMaterializer:
             )
         events = build_canonical_events(
             trial_id=cast(UUID, lease_data["trial_id"]),
-            task_id=task_config.task.id,
+            task_id=trial_task_id,
             task_config=task_config,
             trial_config=trial_config,
             runtime_result=runtime_result,
@@ -779,7 +781,7 @@ class ServiceExecutionMaterializer:
         events_body = _canonical_jsonl(events)
         atif = project_to_atif(
             events,
-            task_id=task_config.task.id,
+            task_id=trial_task_id,
             agent_name=trial_config.agent_name,
             agent_version=task_config.agent.version or "service-execution-v1",
         )

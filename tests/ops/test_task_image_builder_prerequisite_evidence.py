@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/ops/task_image_builder_prerequisite_evidence.py"
 POLICY = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
 RELEASE = ROOT / "deploy/task-image-builder/host-release-v2.json"
-RUNTIME = ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
+RUNTIME = ROOT / "deploy/task-image-builder/rootless-runtime-v2.json"
 SCHEMA = ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v2.schema.json"
 PHASE2_NAMES = (
     "loom-task-builder-allocation-supervisor",
@@ -93,7 +93,7 @@ def _release() -> dict[str, Any]:
 
 
 def _runtime() -> dict[str, Any]:
-    return json.loads(RUNTIME.read_text(encoding="utf-8"))
+    return EVIDENCE.conformance.load_runtime_manifest(RUNTIME)
 
 
 def _cluster(cluster_id: str) -> dict[str, Any]:
@@ -1429,7 +1429,7 @@ def test_node_collector_builds_production_observation_from_system_boundaries(
 
     runtime = _runtime()
     binaries = runtime["architectures"]["x86_64"]["binaries"]
-    release_root = Path("/opt/loom-task-builder/releases/rootless-runtime-v1")
+    release_root = Path("/opt/loom-task-builder/releases") / str(runtime["release"])
     binary_payloads = {
         release_root / "bin" / name: f"static-elf:{name}".encode() for name in binaries
     }
@@ -1438,7 +1438,7 @@ def test_node_collector_builds_production_observation_from_system_boundaries(
         _canonical(
             {
                 "schema": "loom.task-image-builder-installed-runtime/v1",
-                "release": "rootless-runtime-v1",
+                "release": runtime["release"],
                 "architecture": "x86_64",
                 "manifest_sha256": _sha_path(RUNTIME),
                 "binary_sha256": binaries,

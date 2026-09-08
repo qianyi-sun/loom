@@ -220,7 +220,7 @@ async def test_family_orchestrator_is_default_deny_and_explicit_allow(
         db_session,
         raw=raw,
         type_="family_orchestrator",
-        scopes=["family:evolve"],
+        scopes=["family:cancel", "family:evolve"],
         team_id=None,
     )
 
@@ -233,7 +233,7 @@ async def test_family_orchestrator_is_default_deny_and_explicit_allow(
 
     assert ctx is not None
     assert ctx.type == "family_orchestrator"
-    assert ctx.scopes == ["family:evolve"]
+    assert ctx.scopes == ["family:cancel", "family:evolve"]
     assert ctx.team_id is None
     assert ctx.user_id is None
 
@@ -242,6 +242,7 @@ async def test_family_orchestrator_is_default_deny_and_explicit_allow(
     ("scopes", "bind_team", "bind_user"),
     (
         (["family:evolve", "submit"], False, False),
+        (["family:evolve"], False, False),
         (["family:evolve"], True, False),
         (["family:evolve"], False, True),
     ),

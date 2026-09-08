@@ -133,9 +133,7 @@ def _manifest(*, layer_digest: str, layer_media_type: str) -> dict[str, Any]:
         "artifactType": "application/vnd.aquasec.trivy.config.v1+json",
         "config": {
             "data": "e30=",
-            "digest": (
-                "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
-            ),
+            "digest": ("sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"),
             "mediaType": "application/vnd.oci.empty.v1+json",
             "size": 2,
         },
@@ -244,12 +242,10 @@ def test_materializer_publishes_exact_verified_inventory(
     assert files.database_sha256 == hashlib.sha256(_DATABASE_BYTES).hexdigest()
     assert files.database_metadata_sha256 == hashlib.sha256(_DATABASE_METADATA).hexdigest()
     assert files.java_database_sha256 == hashlib.sha256(_JAVA_DATABASE_BYTES).hexdigest()
-    assert files.java_database_metadata_sha256 == hashlib.sha256(
-        _JAVA_DATABASE_METADATA
-    ).hexdigest()
-    assert {
-        path.relative_to(case.output).as_posix() for path in case.output.rglob("*")
-    } == {
+    assert (
+        files.java_database_metadata_sha256 == hashlib.sha256(_JAVA_DATABASE_METADATA).hexdigest()
+    )
+    assert {path.relative_to(case.output).as_posix() for path in case.output.rglob("*")} == {
         "db",
         "db/metadata.json",
         "db/trivy.db",
@@ -292,8 +288,14 @@ def test_materializer_publishes_exact_verified_inventory(
         case.java_database_ref,
     ]
     evidence = json.loads((case.output / "scanner-cache-evidence.json").read_bytes())
+    expected_platform = {
+        "x86_64": "linux/amd64",
+        "amd64": "linux/amd64",
+        "aarch64": "linux/arm64",
+        "arm64": "linux/arm64",
+    }[os.uname().machine.lower()]
     assert evidence == {
-        "binary_platform": "linux/amd64",
+        "binary_platform": expected_platform,
         "binary_sha256": hashlib.sha256(_TRIVY).hexdigest(),
         "database": {
             "image": case.database_ref,
@@ -523,8 +525,7 @@ def test_materializer_rejects_oci_manifest_drift(
     else:
         manifest["layers"].append(dict(manifest["layers"][0]))
     new_reference = (
-        "ghcr.io/aquasecurity/trivy-db@sha256:"
-        + hashlib.sha256(_canonical(manifest)).hexdigest()
+        "ghcr.io/aquasecurity/trivy-db@sha256:" + hashlib.sha256(_canonical(manifest)).hexdigest()
     )
     manifests[new_reference] = manifests.pop(case.database_ref)
     manifests_path.write_bytes(_canonical(manifests))
@@ -566,6 +567,4 @@ def test_manifest_inspection_cleanup_does_not_mask_command_failure(
     monkeypatch.setattr(scanner_cache_assets.os, "killpg", denied_process_group_kill)
 
     with pytest.raises(PersonalDevScannerCacheError, match="preparation failed"):
-        scanner_cache_assets._bounded_command_output(
-            [sys.executable, "-c", "raise SystemExit(23)"]
-        )
+        scanner_cache_assets._bounded_command_output([sys.executable, "-c", "raise SystemExit(23)"])

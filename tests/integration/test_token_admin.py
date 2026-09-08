@@ -226,7 +226,7 @@ def test_issue_family_orchestrator_token(
     engine.dispose()
     assert row.type == "family_orchestrator"
     assert row.team_id is None
-    assert row.scopes == ["family:evolve"]
+    assert row.scopes == ["family:cancel", "family:evolve"]
 
 
 def test_issue_worker_token_accepts_singleton_admin_secret(

@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import insert, select, text, update
 
-from loom.auth import AuthContext, verify_bearer_token
+from loom.auth import FAMILY_ORCHESTRATOR_SCOPES, AuthContext, verify_bearer_token
 from loom.db.schema import (
     AdminAuditEvent,
     ExecutionCapacityPolicy,
@@ -667,11 +667,12 @@ async def issue_family_orchestrator_token(
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
-    """Issue the teamless credential that may request family-evolver JWTs.
+    """Issue the teamless credential for family cancellation and evolution.
 
-    The credential cannot call the Gateway directly.  It can only ask the
-    Control Plane to mint a JWT for an existing trial and a provider owned by
-    or shared with that trial's team.
+    The credential cannot call the Gateway directly. It may cancel only
+    family-linked trials through the Control Plane or ask the Control Plane to
+    mint a JWT for an existing trial and a provider owned by or shared with
+    that trial's team.
     """
     await _require_admin_scope(request, authorization, "admin:tokens")
 
@@ -687,7 +688,7 @@ async def issue_family_orchestrator_token(
             insert(Token).values(
                 token_hash=token_hash,
                 type="family_orchestrator",
-                scopes=["family:evolve"],
+                scopes=list(FAMILY_ORCHESTRATOR_SCOPES),
                 team_id=None,
                 issued_at=datetime.now(UTC),
                 expires_at=expires_at,

@@ -54,6 +54,7 @@ from loom_cli.rollout.operator.protected_pool_credential_transport import (
 
 _DIGEST = "a" * 64
 _IMAGE = f"ghcr.io/qianyi-sun/loom-capacity-executor@sha256:{_DIGEST}"
+_RUNTIME_IMAGE = f"localhost:5000/loom-capacity-executor@sha256:{_DIGEST}"
 _SOURCE_SHA = "1" * 40
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _UNITS = (
@@ -149,6 +150,7 @@ class FakeHostRunner:
         self,
         root: Path,
         *,
+        image: str = _IMAGE,
         image_architecture: str = "amd64",
         image_revision: str = _SOURCE_SHA,
         repo_digests: tuple[str, ...] = (_IMAGE,),
@@ -177,6 +179,7 @@ class FakeHostRunner:
         slurm_association: str = "trt-gb10|loom-staging|loom_capacity_executor|loom-staging|loom-staging|loom-staging|",
     ) -> None:
         self.root = root
+        self.image = image
         self.image_architecture = image_architecture
         self.image_revision = image_revision
         self.repo_digests = repo_digests
@@ -294,10 +297,10 @@ class FakeHostRunner:
             self.units_verified = True
             result = CommandResult(0)
         elif command == "docker" and call[1:3] == ("pull", "--quiet"):
-            assert call[3] == _IMAGE
-            result = CommandResult(0, f"{_IMAGE}\n")
+            assert call[3] == self.image
+            result = CommandResult(0, f"{self.image}\n")
         elif command == "docker" and call[1:3] == ("image", "inspect"):
-            assert call[3] == _IMAGE
+            assert call[3] == self.image
             result = CommandResult(
                 0,
                 json.dumps(
@@ -472,7 +475,7 @@ def _fake_release_extractor(
     context: InstallContext,
 ) -> None:
     del runner, context
-    assert image == _IMAGE
+    assert image in {_IMAGE, _RUNTIME_IMAGE}
     payload = destination / "payload"
     wheelhouse = payload / "wheelhouse"
     units = payload / "units"
@@ -1923,7 +1926,11 @@ def test_controller_prerequisite_wire_operation_is_canonical_and_bounded(
     tmp_path: Path,
 ) -> None:
     request = _controller_request(tmp_path)
-    runner = FakeHostRunner(tmp_path)
+    runner = FakeHostRunner(
+        tmp_path,
+        image=_RUNTIME_IMAGE,
+        repo_digests=(_RUNTIME_IMAGE,),
+    )
     runner.group_present = True
     runner.user_present = True
     installer = ControllerInstaller(
@@ -1940,20 +1947,61 @@ def test_controller_prerequisite_wire_operation_is_canonical_and_bounded(
         == b"null\n"
     )
     encoded = _controller_prerequisite_operation(
-        installer, "converge-prerequisite", request.to_bytes()
+        installer,
+        "converge-prerequisite",
+        request.to_bytes(),
+        runtime_image=_RUNTIME_IMAGE,
     )
 
     from loom_cli.rollout.operator.protected_controller_prerequisite_component import (
         ControllerPrerequisiteEvidence,
     )
 
-    assert ControllerPrerequisiteEvidence.from_bytes(encoded).pool_id == "oldlab"
+    evidence = ControllerPrerequisiteEvidence.from_bytes(encoded)
+    assert evidence.pool_id == "oldlab"
+    assert evidence.image == request.image
+    assert ("/usr/bin/docker", "pull", "--quiet", _RUNTIME_IMAGE) in runner.calls
+    assert not any(
+        call[:3] == ("/usr/bin/docker", "pull", "--quiet") and call[-1] == request.image
+        for call in runner.calls
+    )
     with pytest.raises(CapacityExecutorInstallError, match="request"):
         _controller_prerequisite_operation(
             installer,
             "observe-prerequisite",
             request.to_bytes() + b" ",
         )
+
+
+def test_controller_prerequisite_rejects_runtime_image_digest_drift_before_pull(
+    tmp_path: Path,
+) -> None:
+    """Catch installing bytes that differ from the signed logical image."""
+    request = _controller_request(tmp_path)
+    runner = FakeHostRunner(tmp_path)
+    runner.group_present = True
+    runner.user_present = True
+    installer = ControllerInstaller(
+        context=_context(tmp_path),
+        runner=runner,
+        extractor=_fake_release_extractor,
+        machine="x86_64",
+        hostname="TRT-EAI-OLDLAB-1",
+        effective_uid=0,
+    )
+    drifted_runtime_image = (
+        "localhost:5000/loom-capacity-executor@sha256:" + "b" * 64
+    )
+
+    with pytest.raises(CapacityExecutorInstallError, match="runtime image"):
+        _controller_prerequisite_operation(
+            installer,
+            "converge-prerequisite",
+            request.to_bytes(),
+            runtime_image=drifted_runtime_image,
+        )
+
+    assert not any(call[:2] == ("/usr/bin/docker", "pull") for call in runner.calls)
 
 
 def test_controller_credential_operation_recovers_partial_private_publication(
