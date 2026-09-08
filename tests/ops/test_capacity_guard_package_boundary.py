@@ -129,6 +129,14 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
             "loom_capacity_agent.secret_init",
             "loom_capacity_agent.store",
         },
+        Path("src/loom/personal_dev_membership_client.py"): {
+            "loom_capacity_agent.client",
+        },
+        Path("src/loom/personal_dev_membership_runtime.py"): {
+            "loom_capacity_agent.client",
+            "loom_capacity_agent.contracts",
+            "loom_capacity_agent.store",
+        },
         Path("src/loom/staging_capacity_database_bootstrap.py"): {
             "loom_capacity_agent.contracts",
         },
