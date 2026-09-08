@@ -1616,6 +1616,11 @@ loom run
   is stored on `model_switch_plans.seed` (not on `trial_config` as
   `seed`). This is who acts, not DAgger teacher labels.
 
+  Path C (`--multi-model-step-start` / `--multi-model-step-end`): each
+  chat-completion turn (`call_ordinal`) uses rising β between the window
+  edges, then forces teacher with one-way latch. Window is stored as plan
+  `k1`/`k2`. Optional `--multi-model-seed` applies here too.
+
   `raw-harbor-tb2-v2` packs applied cuts in
   `agent_runs/.../trajectory.json` → `model_switches`, and per-step
   `role` on agent steps. Gateway `llm_calls.role` / `requested_model`

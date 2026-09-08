@@ -10,7 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.agent.terminus2.model_switch import role_for_beta_episode, role_for_episode
+from loom.agent.terminus2.model_switch import (
+    role_for_beta_episode,
+    role_for_episode,
+    role_for_turn_schedule,
+)
 from loom.db.schema import LlmCallIntent, ModelSwitchPlan
 
 LOOM_PAYLOAD_PREFIX = "loom_"
@@ -178,6 +182,19 @@ async def persist_correlated_intent(
         expected_role = role_for_beta_episode(
             episode,
             beta=float(plan.beta),
+            seed=str(plan.seed),
+            trial_id=str(trial_id),
+        )
+    elif mix_mode == "student_to_teacher_turns":
+        if plan.k1 is None or plan.k2 is None or not plan.seed:
+            raise HTTPException(
+                status_code=400,
+                detail="turn schedule plan is missing step_start/step_end/seed",
+            )
+        expected_role = role_for_turn_schedule(
+            call_ordinal,
+            step_start=int(plan.k1),
+            step_end=int(plan.k2),
             seed=str(plan.seed),
             trial_id=str(trial_id),
         )
