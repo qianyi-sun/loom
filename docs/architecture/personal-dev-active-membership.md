@@ -94,8 +94,37 @@ Destroy appends a disabled generation and closes new admission immediately.
 It does not erase the subject/account or any physical commitment. Existing
 unknown, pending, running and terminal-but-unreleased intents stay charged until
 authenticated cleanup. Old protected plans cannot submit or publish after
-supersession. A fresh generation can redeploy without reviving old credentials.
+supersession. Recreating a deleted environment retains its subject ID, owner and
+name but creates a fresh subject incarnation and reporter; deployment/candidate
+generation restarts at 1 and configuration/operation generation keeps increasing.
+This preserves the existing lifecycle ABA fence, not an in-place reactivation.
 Other subjects retain their fences and continue serving work.
+
+Recreation is a distinct manager-verified transition. The immediate predecessor
+must be a disabled zero-capacity membership entry. Under the common authority
+lock and SERIALIZABLE transaction, every intent for that predecessor identity
+across epochs must be released through the existing authenticated release path;
+every legacy reservation must also be released. Pending, proposed, unknown,
+quarantined and terminal-but-unreleased work blocks recreation. The membership
+writer never changes an intent to released itself. An empty release set is valid;
+zero capacity alone is not release evidence. Current-generation checks fence
+concurrent stale allocation commits and new admission after disable.
+
+The immutable recreation event records its origin subject reference, exact
+disabled predecessor reference/revision/head, successor incarnation and a digest
+of the canonically ordered released-intent/reservation identities and durable
+release witnesses. The store generates this evidence, never accepts a caller's
+claimed release certificate. Membership materialization carries the evidence
+through later updates of the successor. The pure resolver checks the evidence's
+namespace/manifest/origin/predecessor/successor bindings; the store validates the
+actual event chain and release witnesses when producing allocation input. A
+typed digest by itself is not authentication. Repeated recreations preserve the
+first origin and extend the immutable predecessor chain. Historical exact
+identities remain available for status and cleanup; they cannot reopen admission.
+
+Implementation is staged: durable ordinary membership first rejects every
+incarnation change; the separately reviewed recreation task adds only this
+explicit transition before the executable membership interface is delivered.
 
 Protected acknowledgement lookup must use the exact admission generation:
 current generation for increases, stored generation for authenticated cleanup.
