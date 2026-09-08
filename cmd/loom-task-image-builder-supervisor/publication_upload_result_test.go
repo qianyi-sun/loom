@@ -10,34 +10,47 @@ import (
 
 type publicationUploadFunc func(context.Context, OCIOutput, RegistryUploadCredentialSource) (UploadedManifest, error)
 
+type repeatedCandidateCallback struct{ RegistryUploadCredentialSource }
+
+func (s repeatedCandidateCallback) UploadSucceeded(ctx context.Context, manifest UploadedManifest, credential *RegistryCredential) error {
+	if err := s.RegistryUploadCredentialSource.UploadSucceeded(ctx, manifest, credential); err != nil {
+		return err
+	}
+	return s.RegistryUploadCredentialSource.UploadSucceeded(ctx, manifest, credential)
+}
+
 func (f publicationUploadFunc) Upload(ctx context.Context, output OCIOutput, source RegistryUploadCredentialSource) (UploadedManifest, error) {
 	return f(ctx, output, source)
 }
 
 type retainingCandidateGuard struct {
 	*handoffCredentialGuard
-	last *PublicationCandidateV2Acknowledgement
+	last        *PublicationCandidateV2Acknowledgement
 	duplicateID bool
 }
 
 func (g *retainingCandidateGuard) PublicationCandidateV2(ctx context.Context, request PublicationCandidateV2Request, current *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
 	ack, err := g.handoffCredentialGuard.PublicationCandidateV2(ctx, request, current)
-	if ack != nil && g.duplicateID { ack.CandidateID = "99999999-9999-4999-8999-999999999999" }
+	if ack != nil && g.duplicateID {
+		ack.CandidateID = "99999999-9999-4999-8999-999999999999"
+	}
 	g.last = ack
 	return ack, err
 }
 
 func TestPublicationUploadRetainsCompleteOwnedV2Acknowledgements(t *testing.T) {
 	for _, sidecarsOnly := range []bool{false, true} {
-		t.Run(map[bool]string{false:"task-and-sidecar", true:"sidecar-only"}[sidecarsOnly], func(t *testing.T) {
+		t.Run(map[bool]string{false: "task-and-sidecar", true: "sidecar-only"}[sidecarsOnly], func(t *testing.T) {
 			set := handoffBuiltSet()
-			if sidecarsOnly { set.Components[0].Name = "sidecar:cache" }
+			if sidecarsOnly {
+				set.Components[0].Name = "sidecar:cache"
+			}
 			var events []string
-			guard := &retainingCandidateGuard{handoffCredentialGuard:newHandoffCredentialGuard(t, &events)}
+			guard := &retainingCandidateGuard{handoffCredentialGuard: newHandoffCredentialGuard(t, &events)}
 			manager := NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard)
 			defer manager.Close()
 			source := NewPublicationCredentialSource(manager, guard, validPublicationAttemptBinding())
-			base := &handoffUploader{events:&events, renewComponents:map[string]bool{set.Components[0].Name:true}}
+			base := &handoffUploader{events: &events, renewComponents: map[string]bool{set.Components[0].Name: true}}
 			uploader := publicationUploadFunc(func(ctx context.Context, output OCIOutput, credentials RegistryUploadCredentialSource) (UploadedManifest, error) {
 				manifest, err := base.Upload(ctx, output, credentials)
 				if guard.last != nil {
@@ -49,14 +62,16 @@ func TestPublicationUploadRetainsCompleteOwnedV2Acknowledgements(t *testing.T) {
 				return manifest, err
 			})
 			acks, err := newTestRegistryPublicationHandoff(uploader).UploadWithCredentials(context.Background(), set, source)
-			if err != nil || len(acks) != len(set.Components) { t.Fatalf("count=%d err=%v", len(acks), err) }
+			if err != nil || len(acks) != len(set.Components) {
+				t.Fatalf("count=%d err=%v", len(acks), err)
+			}
 			for index, ack := range acks {
 				request := guard.candidateRequests[index]
 				if ack.CandidateID != uuidWithTail(0x9000+index+1) || ack.Component != set.Components[index].Name ||
 					ack.OperationID != request.OperationID || ack.CredentialID != request.CredentialID ||
 					ack.SessionGeneration != request.SessionGeneration || ack.SessionGeneration != 2 ||
 					ack.ManifestDigest != set.Components[index].Output.TopLevelDigest ||
-					ack.BaseResolution != set.Components[index].BaseResolution || ack.AuthorityResponseSHA256 != strings.Repeat("c",64) {
+					ack.BaseResolution != set.Components[index].BaseResolution || ack.AuthorityResponseSHA256 != strings.Repeat("c", 64) {
 					t.Fatal("complete validated acknowledgement lost or aliased")
 				}
 			}
@@ -66,27 +81,46 @@ func TestPublicationUploadRetainsCompleteOwnedV2Acknowledgements(t *testing.T) {
 }
 
 func TestPublicationUploadCannotReturnCompleteSetWithoutEveryDistinctCandidate(t *testing.T) {
-	for _, condition := range []string{"missing-callback", "duplicate-id", "second-upload-fails", "cancelled"} {
+	for _, condition := range []string{"missing-callback", "duplicate-id", "second-upload-fails", "cancelled", "changed-return", "duplicate-callback"} {
 		t.Run(condition, func(t *testing.T) {
 			set := handoffBuiltSet()
 			var events []string
-			guard := &retainingCandidateGuard{handoffCredentialGuard:newHandoffCredentialGuard(t, &events), duplicateID:condition=="duplicate-id"}
+			guard := &retainingCandidateGuard{handoffCredentialGuard: newHandoffCredentialGuard(t, &events), duplicateID: condition == "duplicate-id"}
 			manager := NewSessionManager(testGrantID, testSession(1, time.Now().Add(time.Minute)), guard)
 			defer manager.Close()
 			source := NewPublicationCredentialSource(manager, guard, validPublicationAttemptBinding())
-			base := &handoffUploader{events:&events}
+			base := &handoffUploader{events: &events}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if condition == "second-upload-fails" { base.failBeforeManifest = "sidecar:db" }
-			if condition == "cancelled" { base.cancelAfterManifest = cancel }
+			if condition == "second-upload-fails" {
+				base.failBeforeManifest = "sidecar:db"
+			}
+			if condition == "cancelled" {
+				base.cancelAfterManifest = cancel
+			}
 			uploader := publicationUploadFunc(func(ctx context.Context, output OCIOutput, credentials RegistryUploadCredentialSource) (UploadedManifest, error) {
-				if condition == "missing-callback" { return UploadedManifest{Digest:output.TopLevelDigest, MediaType:output.ManifestMediaType, Size:output.ManifestSize}, nil }
-				return base.Upload(ctx, output, credentials)
+				if condition == "missing-callback" {
+					return UploadedManifest{Digest: output.TopLevelDigest, MediaType: output.ManifestMediaType, Size: output.ManifestSize}, nil
+				}
+				if condition == "duplicate-callback" {
+					credentials = repeatedCandidateCallback{credentials}
+				}
+				manifest, err := base.Upload(ctx, output, credentials)
+				if condition == "changed-return" {
+					manifest.Digest = "sha256:" + strings.Repeat("f", 64)
+				}
+				return manifest, err
 			})
 			acks, err := newTestRegistryPublicationHandoff(uploader).UploadWithCredentials(ctx, set, source)
-			if err == nil || acks != nil { t.Fatalf("partial/unacknowledged set returned: count=%d err=%v", len(acks), err) }
-			if condition == "cancelled" && !errors.Is(err, context.Canceled) { t.Fatal("cancellation lost") }
-			if condition != "missing-callback" { guard.wantAllSecretsClosed(t) }
+			if err == nil || acks != nil {
+				t.Fatalf("partial/unacknowledged set returned: count=%d err=%v", len(acks), err)
+			}
+			if condition == "cancelled" && !errors.Is(err, context.Canceled) {
+				t.Fatal("cancellation lost")
+			}
+			if condition != "missing-callback" {
+				guard.wantAllSecretsClosed(t)
+			}
 		})
 	}
 }
