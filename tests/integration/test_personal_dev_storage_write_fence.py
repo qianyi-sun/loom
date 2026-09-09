@@ -8,8 +8,8 @@ from uuid import uuid4
 import pytest
 
 from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient, KubectlSecretVault
-from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
 from loom.personal_dev_capacity_runtime import KubectlPersonalDevCapacityInstaller
+from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
 from tests.integration.test_personal_dev_storage_namespace import (
     disposable_storage_kubectl,  # noqa: F401
 )
@@ -107,11 +107,79 @@ async def test_secret_two_phase_write_fences_namespace_replacement(
         resume.set()
         with pytest.raises(DevInstanceRuntimeError):
             await asyncio.wait_for(task, timeout=15)
-        after = await kubectl.read_secret_optional(current.namespace, "storage-write-probe")
-        assert after == ({} if pause_at == "before_create" else before)
+        if pause_at == "before_create":
+            raw = await kubectl.runner.run(kubectl._argv(
+                "get", "secret", "storage-write-probe", "--namespace", current.namespace, "-o", "json",
+            ))
+            # Kubernetes omits the data field for an empty Secret.
+            assert not json.loads(raw.stdout).get("data")
+        else:
+            after = await kubectl.read_secret_optional(current.namespace, "storage-write-probe")
+            assert after == before
         assert len(transmitted) == 1
     finally:
         resume.set()
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_two_phase_secret_retry_recovers_empty_placeholder_and_preserves_uid(
+    disposable_storage_kubectl,  # noqa: F811
+):
+    from loom.personal_dev_storage_secret_write import write_storage_secret
+
+    kubectl = disposable_storage_kubectl
+    identity = _bound_claim().operation.storage_binding.identity
+    await kubectl.apply(json.dumps({"apiVersion": "v1", "kind": "Namespace", "metadata": {
+        "name": identity.namespace, "annotations": personal_dev_storage_annotations(identity),
+    }}))
+
+    class LostReply:
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            result = await kubectl.runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+            if "create" in argv:
+                raise DevInstanceRuntimeError("lost empty-create reply")
+            return result
+
+    document = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                "metadata": {"name": "storage-write-probe", "namespace": identity.namespace},
+                "stringData": {"password": "first"}}
+    with pytest.raises(DevInstanceRuntimeError, match="lost"):
+        await write_storage_secret(KubectlClient("kubectl", runner=LostReply()), identity, document)
+    raw = await kubectl.runner.run(kubectl._argv(
+        "get", "secret", "storage-write-probe", "--namespace", identity.namespace, "-o", "json",
+    ))
+    placeholder = json.loads(raw.stdout)
+    assert not placeholder.get("data")
+    uid = placeholder["metadata"]["uid"]
+    await write_storage_secret(kubectl, identity, document)
+    await write_storage_secret(kubectl, identity, {**document, "stringData": {"password": "second"}})
+    assert await kubectl.read_secret(identity.namespace, "storage-write-probe") == {"password": b"second"}
+    with pytest.raises(DevInstanceRuntimeError, match="initialized"):
+        await write_storage_secret(kubectl, identity, document, create_only=True)
+    raw = await kubectl.runner.run(kubectl._argv(
+        "get", "secret", "storage-write-probe", "--namespace", identity.namespace, "-o", "json",
+    ))
+    assert json.loads(raw.stdout)["metadata"]["uid"] == uid
+    assert await kubectl.read_secret(identity.namespace, "storage-write-probe") == {"password": b"second"}
+
+
+async def test_secret_writer_rejects_older_operation_epoch(
+    disposable_storage_kubectl,  # noqa: F811
+):
+    from loom.personal_dev_storage_secret_write import write_storage_secret
+
+    kubectl = disposable_storage_kubectl
+    identity = _bound_claim().operation.storage_binding.identity
+    await kubectl.apply(json.dumps({"apiVersion": "v1", "kind": "Namespace", "metadata": {
+        "name": identity.namespace, "annotations": personal_dev_storage_annotations(identity),
+    }}))
+    document = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                "metadata": {"name": "storage-write-probe", "namespace": identity.namespace},
+                "stringData": {"password": "newer"}}
+    await write_storage_secret(kubectl, identity, document, operation_epoch=2)
+    with pytest.raises(DevInstanceRuntimeError, match="epoch"):
+        await write_storage_secret(kubectl, identity,
+                                   {**document, "stringData": {"password": "older"}}, operation_epoch=1)
+    assert await kubectl.read_secret(identity.namespace, "storage-write-probe") == {"password": b"newer"}
