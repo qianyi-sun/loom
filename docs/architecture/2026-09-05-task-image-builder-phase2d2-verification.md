@@ -450,6 +450,16 @@ fault injection is not prevented by triggers that such an owner can disable.
 Retirement transactions still must load the complete inventory under their
 shared fence and separately prove references and registry quiescence.
 
+The same unpublished migration prevents a terminal Trial from becoming
+nonterminal through UPDATE, including changes made by BEFORE triggers. Its
+row-local AFTER trigger raises a named constraint violation and rolls back the
+whole statement. It permits nonterminal retries (including protected-pending),
+metadata changes and terminal-to-terminal corrections. Installation and inactive
+downgrade include `trials` in their upfront NOWAIT lock sets; runtime retention
+does not gain a trials-table barrier. This closes later UPDATE reopening, not
+new link insertion or deletion/reinsertion of Trial identities. Those races
+remain part of the pending retirement reference proof.
+
 Reference ensure freshly reloads existing materializations under consistently
 ordered row locks, so a cached ready object cannot survive committed retirement.
 It rejects pending materialization edits before refreshing rather than discarding

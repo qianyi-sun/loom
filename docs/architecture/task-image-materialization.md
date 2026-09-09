@@ -188,10 +188,12 @@ the components, and records fresh immutable digest evidence before scheduling.
 
 Service-execution reservation, retry, and finalized-event projection reject
 terminal-to-nonterminal reopening using fresh locked Trial state; exact event
-replay does not reproject state. Terminal reruns require a new Trial and its
-image prerequisites. Rootless irreversible retirement still requires its own
-transactional reference proof across all writers; these service guards alone
-do not authorize deletion.
+replay does not reproject state. The unpublished `0135` migration also rejects
+terminal-to-nonterminal updates at the database row boundary, without cross-row
+lookups or locking. Terminal reruns require a new Trial and its image prerequisites.
+Rootless irreversible retirement still requires its own transactional reference
+proof, including new reference insertion and identity recreation; terminal-update
+monotonicity alone does not authorize deletion.
 
 ## Rollout safety
 
