@@ -943,11 +943,11 @@ test "$shadow_render_sha256" = \
 jq -e --arg plan "$operational_plan_sha256" --arg yaml "$operational_render_sha256" '
   .schema == "loom-personal-dev-control-plane-render-v1" and
   .mode == "operational" and .operational_plan_sha256 == $plan and
-  .yaml_sha256 == $yaml and .resource_count == 38
+  .yaml_sha256 == $yaml and .resource_count == 39
 ' "$operational_render_evidence" >/dev/null
 jq -e --arg yaml "$shadow_render_sha256" '
   .schema == "loom-personal-dev-control-plane-render-v1" and
-  .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 38
+  .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 39
 ' "$shadow_render_evidence" >/dev/null
 
 capture_file_binding "$operational_render" 16777216
@@ -965,7 +965,7 @@ assert_operational_render_binding() {
     --arg yaml "$operational_render_sha256" '
       .schema == "loom-personal-dev-control-plane-render-v1" and
       .mode == "operational" and .operational_plan_sha256 == $plan and
-      .yaml_sha256 == $yaml and .resource_count == 38
+      .yaml_sha256 == $yaml and .resource_count == 39
     ' "$operational_render_evidence" >/dev/null
 }
 
@@ -977,7 +977,7 @@ assert_shadow_render_binding() {
     "$(jq -r .release.shadow_manifest_sha256 "$operational_plan")"
   jq -e --arg yaml "$shadow_render_sha256" '
     .schema == "loom-personal-dev-control-plane-render-v1" and
-    .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 38
+    .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 39
   ' "$shadow_render_evidence" >/dev/null
 }
 ```

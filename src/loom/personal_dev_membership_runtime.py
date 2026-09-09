@@ -14,7 +14,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID
 
-import yaml  # type: ignore[import-untyped]
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -24,7 +23,10 @@ from loom.dev_instance_runtime import fixture_database_url
 from loom.personal_dev_capacity import PersonalDevCapacityInstallation
 from loom.personal_dev_capacity_identity import capacity_role_names
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
-from loom.personal_dev_incarnation_storage import resolve_personal_dev_storage_identity
+from loom.personal_dev_incarnation_storage import (
+    personal_dev_secret_name,
+    resolve_personal_dev_storage_identity,
+)
 from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipEnvelopeV1,
     PersonalDevMembershipObservationV1,
@@ -431,11 +433,11 @@ class PersonalDevMembershipObserver:
         )
         identity = resolve_personal_dev_storage_identity(claim)
         seed = await runtime._kubectl.read_secret_optional(
-            identity.namespace, _CREDENTIALS_SECRET_NAME
+            identity.namespace, personal_dev_secret_name(identity, _CREDENTIALS_SECRET_NAME)
         )
-        secret = await runtime._kubectl.read_secret_optional(identity.namespace, _SECRET_NAME)
+        secret = await runtime._kubectl.read_secret_optional(identity.namespace, personal_dev_secret_name(identity, _SECRET_NAME))
         worker = await runtime._kubectl.read_secret_optional(
-            identity.namespace, PROTECTED_WORKER_RUNTIME_SECRET_NAME
+            identity.namespace, personal_dev_secret_name(identity, PROTECTED_WORKER_RUNTIME_SECRET_NAME)
         )
         if seed is None or secret is None or worker is None:
             raise ValueError("protected membership installation is unavailable")
@@ -605,9 +607,7 @@ class PersonalDevMembershipObserver:
             else None,
         )
         if retirement:
-            await self.installer._kubectl.apply(
-                yaml.safe_dump_all(documents, sort_keys=False, explicit_start=True)
-            )
+            await self.installer._apply_manifests(claim, identity, documents)
         await self._installed(claim, installation, retirement=retirement, require_current=True)
         operation = claim.operation
         assert operation.local_activation_sha256 is not None
@@ -665,8 +665,9 @@ class PersonalDevMembershipObserver:
         validate_membership_observation_context(
             claim, checkpoint, self.installer._membership_execution, observed_at
         )
+        identity = resolve_personal_dev_storage_identity(claim)
         secret = await self.installer._kubectl.read_secret_optional(
-            resolve_personal_dev_storage_identity(claim).namespace, _SECRET_NAME
+            identity.namespace, personal_dev_secret_name(identity, _SECRET_NAME)
         )
         if secret is None:
             raise ValueError("retained membership agent is unavailable")
@@ -699,7 +700,7 @@ class PersonalDevMembershipObserver:
             raise ValueError("membership verification differs from persisted operation")
         identity = resolve_personal_dev_storage_identity(claim)
         secret = await self.installer._kubectl.read_secret_optional(
-            identity.namespace, _SECRET_NAME
+            identity.namespace, personal_dev_secret_name(identity, _SECRET_NAME)
         )
         if secret is None:
             raise ValueError("membership agent is unavailable")

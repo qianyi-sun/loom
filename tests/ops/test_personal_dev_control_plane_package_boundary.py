@@ -1849,8 +1849,8 @@ public_store_endpoint_cidrs = ["207.35.188.227/32"]
         encoding="utf-8",
     )
     for profile, expected_count in (
-        (checked_profile, "38\n"),
-        (prepared_profile, "40\n"),
+        (checked_profile, "39\n"),
+        (prepared_profile, "41\n"),
     ):
         count = subprocess.run(
             [sys.executable, "-", str(profile)],
@@ -3208,7 +3208,7 @@ def test_multi_owner_runbooks_bind_web_release_render_and_rollout() -> None:
     ):
         runbook = _read(relative)
         assert 'test "$(jq -r .schema_version "$trusted_release")" = 3' in runbook
-        assert ".resource_count == 38" in runbook
+        assert ".resource_count == 39" in runbook
         assert runbook.count("deployment/loom-personal-dev-web --timeout=300s") >= 2
         assert runbook.count("assert_web_api_route_contract") >= 3
 
@@ -3221,7 +3221,7 @@ def test_shadow_runbook_binds_resource_count_to_the_validated_profile() -> None:
     assert "profile.native_builder is not None and profile.native_builder.prepared" in runbook
     assert '--argjson resource_count "$expected_shadow_resource_count"' in runbook
     assert ".resource_count == $resource_count" in runbook
-    assert ".resource_count == 38" not in runbook
+    assert ".resource_count == 39" not in runbook
     assert '"namespaced-resources","observed":36' in runbook
 
 

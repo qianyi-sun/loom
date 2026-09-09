@@ -15,6 +15,7 @@ from loom.dev_instance_runtime import (
     KubectlClient,
     KubectlSecretVault,
 )
+from loom.personal_dev_incarnation_storage import personal_dev_secret_name
 from tests.unit.test_dev_instance_runtime import _personal_manifest_config
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
@@ -70,7 +71,7 @@ async def test_storage_cleanup_real_uid_precondition_and_secret_recovery(disposa
     old_uid = old["metadata"]["uid"]
     # A lost write reply is handled by a fresh reader. Removing only the generated
     # admin fixture also exercises the missing-Secret kubectl response/recovery.
-    await kubectl.runner.run(["kubectl", "delete", "secret", "loom-admin-secret", "-n", identity.namespace])
+    await kubectl.runner.run(["kubectl", "delete", "secret", personal_dev_secret_name(identity, "loom-admin-secret"), "-n", identity.namespace])
     assert await vault.database_password(identity) == "b" * 32
     await vault.store(identity, "b" * 32)
     assert await vault.admin_token(identity)

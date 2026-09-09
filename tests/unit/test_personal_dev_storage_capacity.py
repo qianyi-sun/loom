@@ -12,6 +12,7 @@ from loom.personal_dev_capacity_runtime import (
     KubectlPersonalDevCapacityInstaller,
     PersonalDevCapacityInstallationError,
 )
+from loom.personal_dev_incarnation_storage import personal_dev_secret_name
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_personal_dev_reconciler import _installation
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
@@ -60,11 +61,11 @@ async def test_capacity_credentials_and_seed_pin_full_storage_binding(secret_nam
     )
     credentials = await installer._credentials(claim, identity)
     await installer._persist_credentials(claim, identity, credentials)
-    seed = cluster.secrets["loom-capacity-agent-credentials"]
+    seed = cluster.secrets[personal_dev_secret_name(identity, "loom-capacity-agent-credentials")]
     assert seed["storage-binding.json"] == canonical_bytes(identity.storage_binding)
     assert seed["storage-binding.sha256"] == canonical_digest(identity.storage_binding).encode()
     assert (await installer._credentials(claim, identity)).reporter_token == credentials.reporter_token
-    cluster.secrets[secret_name]["storage-binding.sha256"] = b"0" * 64
+    cluster.secrets[personal_dev_secret_name(identity, secret_name)]["storage-binding.sha256"] = b"0" * 64
     before = list(cluster.writes)
     with pytest.raises(PersonalDevCapacityInstallationError):
         await installer._credentials(claim, identity)
@@ -92,7 +93,7 @@ async def test_status_uses_bound_observer_role_and_fences_mixed_coordinates(monk
     elif tamper in ("subject_id", "subject_incarnation"):
         arguments[tamper] = uuid4()
     elif tamper == "secret":
-        cluster.secrets["loom-capacity-agent-credentials"]["storage-binding.sha256"] = b"0" * 64
+        cluster.secrets[personal_dev_secret_name(identity, "loom-capacity-agent-credentials")]["storage-binding.sha256"] = b"0" * 64
 
     class Projector:
         async def subject_status(self, **kwargs):

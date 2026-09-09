@@ -254,6 +254,15 @@ def _builder_namespace_cel(value: str) -> str:
     return f"({value}.startsWith('loom-build-') && {value}.matches('{_BUILDER_NAMESPACE_PATTERN}'))"
 
 
+def _personal_secret_names_cel(*purposes: str) -> str:
+    legacy = "[" + ",".join(f"'{purpose}'" for purpose in purposes) + "]"
+    return (
+        "(variables.personalStorageBound ? "
+        "(variables.personalStorageSuffix == '' ? [] : "
+        f"{legacy}.map(purpose, purpose + variables.personalStorageSuffix)) : {legacy})"
+    )
+
+
 def _builder_attempt_matches_namespace(*, labels: str, namespace: str) -> str:
     attempt = f"{labels}['loom.dev/attempt']"
     return (
@@ -359,10 +368,22 @@ def _management_mutation_role(context: _RenderContext) -> dict[str, Any]:
             },
             {
                 "apiGroups": ["rbac.authorization.k8s.io"],
+                "resources": ["roles"],
+                "verbs": ["create", "delete", "patch", "update"],
+            },
+            {
+                "apiGroups": ["rbac.authorization.k8s.io"],
+                "resources": ["roles"],
+                "resourceNames": ["loom-personal-dev-credential-reader"],
+                "verbs": ["bind", "escalate"],
+            },
+            {
+                "apiGroups": ["rbac.authorization.k8s.io"],
                 "resources": ["clusterroles"],
                 "resourceNames": [
                     "loom-personal-dev-activation-agent",
                     "loom-personal-dev-managed-namespace",
+                    "loom-personal-dev-managed-namespace-bound",
                 ],
                 "verbs": ["bind"],
             },
@@ -440,6 +461,13 @@ def _managed_namespace_role(context: _RenderContext) -> dict[str, Any]:
             },
         ],
     }
+
+
+def _bound_managed_namespace_role(context: _RenderContext) -> dict[str, Any]:
+    role = _managed_namespace_role(context)
+    role["metadata"] = _metadata(context, "loom-personal-dev-managed-namespace-bound")
+    role["rules"] = [rule for rule in role["rules"] if "secrets" not in rule.get("resources", [])]
+    return role
 
 
 def _activation_role(context: _RenderContext) -> dict[str, Any]:
@@ -601,6 +629,19 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                         f"({_builder_namespace_metadata_contract(target)})"
                     ),
                     "message": "builder namespace metadata differs from its exact contract",
+                },
+                {
+                    "expression": (
+                        "request.operation != 'UPDATE' || "
+                        f"!{personal_namespace} || "
+                        "['loom.dev/storage-binding','loom.dev/storage-binding-sha256',"
+                        "'loom.dev/storage-incarnation'].all(key, "
+                        "(has(oldObject.metadata.annotations) && key in oldObject.metadata.annotations) "
+                        "? (has(object.metadata.annotations) && key in object.metadata.annotations && "
+                        "object.metadata.annotations[key] == oldObject.metadata.annotations[key]) "
+                        ": (!has(object.metadata.annotations) || !(key in object.metadata.annotations)))"
+                    ),
+                    "message": "personal namespace storage identity is immutable for its UID",
                 },
             ],
         },
@@ -1462,22 +1503,22 @@ def _management_resource_admission(
         "request.resource.resource == 'pods' && request.subResource == 'exec' && "
         "request.name == 'loom-dev-minio-0')"
     )
-    app_resources = "['secrets','services','deployments','jobs','networkpolicies','rolebindings']"
+    app_resources = "['secrets','services','deployments','jobs','networkpolicies','rolebindings','roles']"
     build_resources = (
         "['configmaps','limitranges','resourcequotas','secrets','jobs',"
         "'networkpolicies','rolebindings']"
     )
-    personal_application_secret_names = "['loom-secrets','loom-admin-secret']"
-    personal_control_plane_secret_names = (
-        "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime']"
+    personal_application_secret_names = _personal_secret_names_cel("loom-secrets", "loom-admin-secret")
+    personal_control_plane_secret_names = _personal_secret_names_cel(
+        "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime"
     )
-    personal_capacity_secret_names = "['loom-capacity-agent']"
-    personal_capacity_resource_secret_names = (
-        "['loom-capacity-agent','loom-capacity-agent-credentials']"
+    personal_capacity_secret_names = _personal_secret_names_cel("loom-capacity-agent")
+    personal_capacity_resource_secret_names = _personal_secret_names_cel(
+        "loom-capacity-agent", "loom-capacity-agent-credentials"
     )
-    personal_secret_names = (
-        "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime',"
-        "'loom-capacity-agent','loom-capacity-agent-credentials']"
+    personal_secret_names = _personal_secret_names_cel(
+        "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime",
+        "loom-capacity-agent", "loom-capacity-agent-credentials",
     )
     capacity_owned_resource = (
         "((request.resource.resource == 'secrets' && "
@@ -1502,7 +1543,9 @@ def _management_resource_admission(
         "(request.resource.resource == 'networkpolicies' && "
         f"{target}.metadata.name in "
         "['default-deny','runtime-egress','runtime-ingress','capacity-agent-egress']) || "
-        "request.resource.resource == 'rolebindings')"
+        "request.resource.resource == 'rolebindings' || "
+        "(request.resource.resource == 'roles' && "
+        f"{target}.metadata.name == 'loom-personal-dev-credential-reader'))"
     )
     builder_resource_names = (
         "((request.resource.resource == 'configmaps' && "
@@ -1620,6 +1663,29 @@ def _management_resource_admission(
                     ),
                 },
             ],
+            "variables": [
+                {
+                    "name": "personalStorageBound",
+                    "expression": (
+                        "namespaceObject != null && has(namespaceObject.metadata.annotations) && "
+                        "['loom.dev/storage-binding','loom.dev/storage-binding-sha256',"
+                        "'loom.dev/storage-incarnation'].exists(key, key in namespaceObject.metadata.annotations)"
+                    ),
+                },
+                {
+                    "name": "personalStorageSuffix",
+                    "expression": (
+                        "namespaceObject != null && has(namespaceObject.metadata.annotations) && "
+                        "['loom.dev/storage-binding','loom.dev/storage-binding-sha256',"
+                        "'loom.dev/storage-incarnation'].all(key, key in namespaceObject.metadata.annotations) && "
+                        "namespaceObject.metadata.annotations['loom.dev/storage-binding'] != '' && "
+                        "namespaceObject.metadata.annotations['loom.dev/storage-binding-sha256'].matches('^[0-9a-f]{64}$') && "
+                        "namespaceObject.metadata.annotations['loom.dev/storage-incarnation'].matches('^[0-9a-f]{32}$') && "
+                        "namespaceObject.metadata.annotations['loom.dev/storage-incarnation'] != '00000000000000000000000000000000' "
+                        "? '-' + namespaceObject.metadata.annotations['loom.dev/storage-incarnation'] : ''"
+                    ),
+                },
+            ],
             "validations": [
                 {
                     "expression": (f"request.namespace != 'loom-dev' || {shared_minio_exec}"),
@@ -1709,7 +1775,16 @@ def _management_resource_admission(
                         "request.resource.resource != 'rolebindings' || "
                         f"({target}.metadata.name == 'loom-personal-dev-management' && "
                         f"{target}.roleRef.kind == 'ClusterRole' && "
-                        f"{target}.roleRef.name == 'loom-personal-dev-managed-namespace' && "
+                        f"{target}.roleRef.name == (variables.personalStorageBound ? "
+                        "'loom-personal-dev-managed-namespace-bound' : 'loom-personal-dev-managed-namespace') && "
+                        f"{target}.subjects.size() == 1 && "
+                        f"{target}.subjects[0].kind == 'ServiceAccount' && "
+                        f"{target}.subjects[0].name == 'loom-personal-dev-management' && "
+                        f"{target}.subjects[0].namespace == 'loom-dev') || "
+                        f"({personal_namespace} && variables.personalStorageBound && "
+                        f"{target}.metadata.name == 'loom-personal-dev-credential-reader' && "
+                        f"{target}.roleRef.kind == 'Role' && "
+                        f"{target}.roleRef.name == 'loom-personal-dev-credential-reader' && "
                         f"{target}.subjects.size() == 1 && "
                         f"{target}.subjects[0].kind == 'ServiceAccount' && "
                         f"{target}.subjects[0].name == 'loom-personal-dev-management' && "
@@ -1724,6 +1799,21 @@ def _management_resource_admission(
                         f"{target}.subjects[0].namespace == 'loom-dev')"
                     ),
                     "message": "management RoleBinding is outside its exact delegated roles",
+                },
+                {
+                    "expression": (
+                        "request.operation == 'DELETE' || request.resource.resource != 'roles' || "
+                        f"({personal_namespace} && variables.personalStorageBound && "
+                        "variables.personalStorageSuffix != '' && "
+                        f"{target}.metadata.name == 'loom-personal-dev-credential-reader' && "
+                        f"{target}.rules.size() == 1 && "
+                        f"{target}.rules[0].apiGroups == [''] && "
+                        f"{target}.rules[0].resources == ['secrets'] && "
+                        f"{target}.rules[0].verbs == ['get'] && "
+                        f"{target}.rules[0].resourceNames == {personal_secret_names} && "
+                        f"!has({target}.rules[0].nonResourceURLs))"
+                    ),
+                    "message": "credential reader Role may grant only exact incarnation Secret GETs",
                 },
                 {
                     "expression": builder_role_binding_metadata,
@@ -3522,6 +3612,7 @@ def _render_documents(
         _management_mutation_role(context),
         _management_mutation_binding(context),
         _managed_namespace_role(context),
+        _bound_managed_namespace_role(context),
         _activation_role(context),
         *_management_namespace_admission(context),
         *_management_resource_admission(

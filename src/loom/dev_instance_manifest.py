@@ -15,6 +15,7 @@ from loom.dev_instance import DevInstanceIdentity
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
 from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
 from loom.personal_dev_incarnation_storage import (
+    personal_dev_secret_name,
     personal_dev_storage_annotations,
     validate_personal_dev_storage_identity,
 )
@@ -105,10 +106,10 @@ class DevInstanceManifestConfig:
         return f"{self.container_registry}/loom-{component}:{self.image_tag}"
 
 
-def _secret_env(name: str, key: str) -> dict[str, Any]:
+def _secret_env(identity: DevInstanceIdentity, name: str, key: str) -> dict[str, Any]:
     return {
         "name": name,
-        "valueFrom": {"secretKeyRef": {"name": "loom-secrets", "key": key}},
+        "valueFrom": {"secretKeyRef": {"name": personal_dev_secret_name(identity, "loom-secrets"), "key": key}},
     }
 
 
@@ -167,7 +168,7 @@ def _management_role_binding(
         "roleRef": {
             "apiGroup": "rbac.authorization.k8s.io",
             "kind": "ClusterRole",
-            "name": "loom-personal-dev-managed-namespace",
+            "name": "loom-personal-dev-managed-namespace-bound" if identity.storage_binding is not None else "loom-personal-dev-managed-namespace",
         },
         "subjects": [
             {
@@ -197,13 +198,39 @@ def _metadata(
     }
 
 
-def _admin_volume(mount_path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _credential_reader_authority(
+    identity: DevInstanceIdentity, config: DevInstanceManifestConfig,
+) -> tuple[dict[str, Any], ...]:
+    if identity.storage_binding is None:
+        return ()
+    name = "loom-personal-dev-credential-reader"
+    role = {
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+        "metadata": _metadata(name, identity, config),
+        "rules": [{
+            "apiGroups": [""], "resources": ["secrets"], "verbs": ["get"],
+            "resourceNames": [personal_dev_secret_name(identity, purpose) for purpose in (
+                "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime",
+                "loom-capacity-agent", "loom-capacity-agent-credentials",
+            )],
+        }],
+    }
+    binding = {
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+        "metadata": _metadata(name, identity, config),
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+        "subjects": [{"kind": "ServiceAccount", "name": "loom-personal-dev-management", "namespace": "loom-dev"}],
+    }
+    return role, binding
+
+
+def _admin_volume(identity: DevInstanceIdentity, mount_path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return (
         [{"name": "loom-admin-secret", "mountPath": mount_path, "readOnly": True}],
         [
             {
                 "name": "loom-admin-secret",
-                "secret": {"secretName": "loom-admin-secret", "defaultMode": 0o440},
+                "secret": {"secretName": personal_dev_secret_name(identity, "loom-admin-secret"), "defaultMode": 0o440},
             }
         ],
     )
@@ -224,7 +251,7 @@ def _deployment(
     extra_mounts: list[dict[str, Any]] | None = None,
     extra_volumes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    mounts, volumes = _admin_volume(admin_mount_path)
+    mounts, volumes = _admin_volume(identity, admin_mount_path)
     mounts.extend(extra_mounts or ())
     volumes.extend(extra_volumes or ())
     labels = {
@@ -577,10 +604,10 @@ def dev_instance_manifest_documents(
         _literal_env("LOOM_NAMESPACE", identity.namespace),
     ]
     cp_env = [
-        _secret_env("LOOM_CP_DB_URL", "cp-db-url"),
-        _secret_env("LOOM_CP_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
-        _secret_env("LOOM_CP_MINIO_ACCESS_KEY", "minio-access-key"),
-        _secret_env("LOOM_CP_MINIO_SECRET_KEY", "minio-secret-key"),
+        _secret_env(identity, "LOOM_CP_DB_URL", "cp-db-url"),
+        _secret_env(identity, "LOOM_CP_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
+        _secret_env(identity, "LOOM_CP_MINIO_ACCESS_KEY", "minio-access-key"),
+        _secret_env(identity, "LOOM_CP_MINIO_SECRET_KEY", "minio-secret-key"),
         _literal_env("LOOM_CP_MINIO_ENDPOINT", config.minio_endpoint),
         _literal_env("LOOM_CP_MINIO_REGION", config.minio_region),
         _literal_env("LOOM_CP_ARTIFACTS_BUCKET", identity.artifacts_bucket),
@@ -652,7 +679,7 @@ def dev_instance_manifest_documents(
             {
                 "name": "protected-worker-runtime-projected",
                 "secret": {
-                    "secretName": PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+                    "secretName": personal_dev_secret_name(identity, PROTECTED_WORKER_RUNTIME_SECRET_NAME),
                     "defaultMode": 0o440,
                     "items": [{"key": "database-url", "path": "database-url"}],
                 },
@@ -663,17 +690,17 @@ def dev_instance_manifest_documents(
             },
         ]
     gw_env = [
-        _secret_env("LOOM_GW_DB_URL", "gw-db-url"),
-        _secret_env("LOOM_GW_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
-        _secret_env("LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
+        _secret_env(identity, "LOOM_GW_DB_URL", "gw-db-url"),
+        _secret_env(identity, "LOOM_GW_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
+        _secret_env(identity, "LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
         _literal_env("LOOM_GW_ADMIN_SECRET_FILE", "/var/run/loom/admin/secrets.toml"),
         *common,
     ]
     svc_env = [
-        _secret_env("LOOM_SVC_DB_URL", "svc-db-url"),
-        _secret_env("LOOM_SVC_MINIO_ACCESS_KEY", "minio-access-key"),
-        _secret_env("LOOM_SVC_MINIO_SECRET_KEY", "minio-secret-key"),
-        _secret_env("LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
+        _secret_env(identity, "LOOM_SVC_DB_URL", "svc-db-url"),
+        _secret_env(identity, "LOOM_SVC_MINIO_ACCESS_KEY", "minio-access-key"),
+        _secret_env(identity, "LOOM_SVC_MINIO_SECRET_KEY", "minio-secret-key"),
+        _secret_env(identity, "LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
         _literal_env("LOOM_SVC_MINIO_ENDPOINT", config.minio_endpoint),
         _literal_env("LOOM_SVC_MINIO_REGION", config.minio_region),
         _literal_env("LOOM_SVC_ARTIFACTS_BUCKET", identity.artifacts_bucket),
@@ -741,7 +768,7 @@ def dev_instance_manifest_documents(
                                 "upgrade",
                                 "head",
                             ],
-                            "env": [_secret_env("LOOM_DB_URL", "cp-db-url")],
+                            "env": [_secret_env(identity, "LOOM_DB_URL", "cp-db-url")],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
                                 "capabilities": {"drop": ["ALL"]},
@@ -882,6 +909,7 @@ def dev_instance_manifest_documents(
         *(
             (
                 _management_role_binding(identity, config),
+                *_credential_reader_authority(identity, config),
                 _activation_agent_role_binding(identity, config),
             )
             if personal_candidate

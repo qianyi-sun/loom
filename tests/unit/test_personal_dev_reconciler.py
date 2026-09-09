@@ -978,9 +978,12 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
     bound_storage,
 ) -> None:
     from loom.dev_instance import derive_identity
+    from loom.dev_instance_runtime import KubectlClient
     from loom.personal_dev_capacity_identity import capacity_runtime_database_url
+    from loom.personal_dev_incarnation_storage import personal_dev_secret_name
     from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
     from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+    from tests.unit.test_personal_dev_storage_vault import _Cluster
 
     create = _bound_claim() if bound_storage else _claim()
     identity = create.operation.storage_binding.identity if bound_storage else derive_identity("alice")
@@ -992,15 +995,23 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
 
     class _Kubectl:
         def __init__(self) -> None:
-            self.secrets: dict[str, dict[str, bytes]] = {
-                "loom-protected-worker-runtime": {
+            self.runner = _Cluster()
+            self.secrets = self.runner.secrets
+            self.secrets.update({
+                personal_dev_secret_name(identity, "loom-protected-worker-runtime"): {
                     **storage_data,
                     "database-url": runtime_url.encode("ascii")
                 }
-            }
+            })
             self.documents: list[dict[str, object]] = []
             self.applied: list[list[dict[str, object]]] = []
             self.waited: list[tuple[str, str]] = []
+
+        @staticmethod
+        def _argv(*parts):
+            return ["kubectl", *parts]
+
+        _namespace_uid = staticmethod(KubectlClient._namespace_uid)
 
         async def read_storage_namespace(self, supplied_identity):
             assert supplied_identity == identity
@@ -1008,11 +1019,11 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
 
         async def read_secret_optional(self, namespace, name):
             assert namespace == "loom-dev-alice"
-            assert name in {
+            assert name in {personal_dev_secret_name(identity, purpose) for purpose in (
                 "loom-capacity-agent",
                 "loom-capacity-agent-credentials",
                 "loom-protected-worker-runtime",
-            }
+            )}
             return self.secrets.get(name)
 
         async def apply(self, manifest):
@@ -1092,8 +1103,8 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
     replay = await installer.converge(create)
     assert replay == first
     assert database.configurations[-1].reporter_incarnation == first.reporter_incarnation
-    seed = kubectl.secrets["loom-capacity-agent-credentials"]
-    runtime_secret = kubectl.secrets["loom-capacity-agent"]
+    seed = kubectl.secrets[personal_dev_secret_name(identity, "loom-capacity-agent-credentials")]
+    runtime_secret = kubectl.secrets[personal_dev_secret_name(identity, "loom-capacity-agent")]
     for key, value in storage_data.items():
         assert seed[key] == runtime_secret[key] == value
     assert seed["reporter-token"] == runtime_secret["reporter-token"]
@@ -1159,11 +1170,11 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
     assert database.configurations[-1].candidate_digest == "b" * 64
     assert database.configurations[-1].deployment_generation == 2
 
-    deployment = kubectl.documents[1]
+    deployment = next(document for document in kubectl.documents if document["kind"] == "Deployment")
     assert deployment["kind"] == "Deployment"
     assert "registry.example/loom-service@sha256:" in str(deployment)
     assert "registry.example/loom-service@sha256:" + "1" * 64 in str(deployment)
-    network_policy = kubectl.documents[2]
+    network_policy = next(document for document in kubectl.documents if document["kind"] == "NetworkPolicy")
     assert network_policy["kind"] == "NetworkPolicy"
     egress = network_policy["spec"]["egress"]  # type: ignore[index]
     assert egress == [

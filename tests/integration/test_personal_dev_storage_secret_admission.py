@@ -8,8 +8,15 @@ from uuid import uuid4
 
 import pytest
 
+from loom.dev_instance import derive_identity
 from loom.dev_instance_manifest import dev_instance_manifest_documents
-from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlCandidateGenerationProvisioner, KubectlClient, KubectlSecretVault
+from loom.dev_instance_runtime import (
+    DevInstanceRuntimeError,
+    KubectlCandidateGenerationProvisioner,
+    KubectlClient,
+    KubectlSecretVault,
+)
+from loom.personal_dev_capacity_runtime import KubectlPersonalDevCapacityInstaller
 from loom.personal_dev_control_plane_render import (
     _management_namespace_admission,
     _management_resource_admission,
@@ -19,6 +26,7 @@ from loom.personal_dev_incarnation_storage import (
     personal_dev_secret_name,
     personal_dev_storage_annotations,
 )
+from loom.personal_dev_storage_secret_write import write_storage_secret
 from tests.integration.test_personal_dev_storage_namespace import (
     disposable_storage_kubectl,  # noqa: F401
 )
@@ -27,11 +35,15 @@ from tests.unit.test_personal_dev_control_plane_render import _render
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 
+@pytest.mark.parametrize("bound_storage", (False, True))
 async def test_management_admission_accepts_only_current_incarnation_secret_names(
     disposable_storage_kubectl,  # noqa: F811
+    bound_storage,
 ):
     kubectl = disposable_storage_kubectl
     identity = _bound_claim().operation.storage_binding.identity
+    if not bound_storage:
+        identity = derive_identity(identity.name)
     principal = "system:serviceaccount:loom-dev:loom-personal-dev-management"
     for document in (
         {
@@ -93,16 +105,18 @@ async def test_management_admission_accepts_only_current_incarnation_secret_name
     ):
         capacity = purpose.startswith("loom-capacity-")
         await probe(personal_dev_secret_name(identity, purpose), capacity=capacity)
-        with pytest.raises(DevInstanceRuntimeError):
-            await probe(purpose, capacity=capacity)
+        if bound_storage:
+            with pytest.raises(DevInstanceRuntimeError):
+                await probe(purpose, capacity=capacity)
         with pytest.raises(DevInstanceRuntimeError):
             await probe(f"{purpose}-{uuid4().hex}", capacity=capacity)
 
     config = _immutable_config()
-    config = replace(config, lifecycle_binding=replace(
-        config.lifecycle_binding, subject_id=identity.storage_binding.subject_id,
-        subject_incarnation=identity.storage_incarnation,
-    ))
+    if bound_storage:
+        config = replace(config, lifecycle_binding=replace(
+            config.lifecycle_binding, subject_id=identity.storage_binding.subject_id,
+            subject_incarnation=identity.storage_incarnation,
+        ))
     for workload in dev_instance_manifest_documents(identity, config):
         if workload["kind"] != "Deployment" or "loom-web" in workload["metadata"]["name"]:
             continue
@@ -176,7 +190,8 @@ async def test_namespace_admission_rejects_storage_binding_reassignment(
 
 
 async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secret_reads(
-    disposable_storage_kubectl, tmp_path,  # noqa: F811
+    disposable_storage_kubectl,  # noqa: F811
+    tmp_path,
 ):
     kubectl = disposable_storage_kubectl
     identity = _bound_claim().operation.storage_binding.identity
@@ -215,7 +230,20 @@ async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secre
                 await asyncio.sleep(0.1)
     await KubectlCandidateGenerationProvisioner(managed).bootstrap(identity, config)
     await KubectlSecretVault(managed, "postgresql://admin:fixture@database.example/postgres", protected_worker_runtime=True).store(identity, "b" * 32)
-    for purpose in ("loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime"):
+    claim = _bound_claim()
+    installer = KubectlPersonalDevCapacityInstaller(kubectl=managed, database=None, config=None)
+    credentials = await installer._credentials(claim, identity)
+    await installer._persist_credentials(claim, identity, credentials)
+    await write_storage_secret(managed, identity, {
+        "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+        "metadata": {
+            "name": personal_dev_secret_name(identity, "loom-capacity-agent"),
+            "namespace": identity.namespace,
+            "labels": {"app.kubernetes.io/managed-by": "loom-personal-dev-lifecycle"},
+        },
+        "stringData": {"probe": "not-a-credential"},
+    }, operation_epoch=claim.operation.operation_epoch)
+    for purpose in ("loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime", "loom-capacity-agent", "loom-capacity-agent-credentials"):
         assert await managed.read_secret(identity.namespace, personal_dev_secret_name(identity, purpose))
         with pytest.raises(DevInstanceRuntimeError):
             await managed.read_secret_optional(identity.namespace, purpose)
@@ -231,6 +259,11 @@ async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secre
         changed = {**role, "rules": [widened]}
         with pytest.raises(DevInstanceRuntimeError):
             await managed.apply(json.dumps(changed))
+    binding = next(document for document in dev_instance_manifest_documents(identity, config) if document["kind"] == "RoleBinding" and document["roleRef"]["kind"] == "Role")
+    with pytest.raises(DevInstanceRuntimeError):
+        await managed.apply(json.dumps({**binding, "subjects": [{"kind": "ServiceAccount", "name": "default", "namespace": identity.namespace}]}))
+    with pytest.raises(DevInstanceRuntimeError):
+        await managed.apply(json.dumps({**role, "metadata": {**role["metadata"], "name": "unrelated-role"}}))
     other_namespace = "loom-dev-another-owner"
     await kubectl.apply(json.dumps({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": other_namespace}}))
     with pytest.raises(DevInstanceRuntimeError):

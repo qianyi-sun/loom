@@ -369,10 +369,28 @@ preconditions. Populated, malformed, foreign-owned or concurrently changed
 objects are never discarded as empty. Disposable Kubernetes tests exercise
 those interleavings at the actual API boundary.
 
-This helper currently protects only the management-only credential seed, which
-Pods do not mount. Vault and agent/runtime Secrets and executable workload writes
-still require incarnation-specific credential names and corresponding consumer
-propagation, followed by UID-fenced staged workload activation. Namespace CEL
+Bound main, admin, protected-runtime, capacity-agent and credential-seed Secrets
+use their existing purpose name plus the full incarnation UUID hex. Logical
+namespace and volume names remain stable. Vault reads/writes, persisted vault
+references, application/migration manifests, capacity installation/status and
+membership observation/retirement resolve those same names, without fixed-name
+fallback. Legacy callers also reject a bound namespace before accessing old
+names. Vault Secrets use the two-phase helper with immutable final bytes;
+identical final retries are accepted, while conflicting credentials are rejected.
+Agent convergence and retirement stage Secret writes before applying workloads.
+
+Bound bootstrap installs a namespace Role granting management GET on only the
+five resolved Secret names. Its general read ClusterRole omits legacy fixed-name
+Secret access. The management principal's narrowly named Role bind/escalate
+permission is constrained by fail-closed admission to that exact one-rule grant
+and its exact service-account binding. It cannot add list/watch, unrelated names
+or another principal. Admission resolves the corresponding per-purpose workload
+allowlists and forbids changing/removing storage annotations on a namespace UID.
+Bound preparation persists immutable vault credentials before mutating database
+roles, so a losing credential writer cannot change the winner's SQL password.
+
+This remains disabled pending real mounted-workload acceptance and UID-fenced
+staged workload activation. Workload CREATE/apply is not yet fenced. Namespace CEL
 checks alone cannot replace those fences: namespace objects used by admission
 policies come from an informer cache, and a namespace read is not atomic with a
 child write. PostgreSQL external-effect fencing is also a separate boundary.

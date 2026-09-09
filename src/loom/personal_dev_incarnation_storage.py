@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 _MAX_BINDING_BYTES = 16 * 1024
 STORAGE_BINDING_ANNOTATION = "loom.dev/storage-binding"
 STORAGE_BINDING_SHA_ANNOTATION = "loom.dev/storage-binding-sha256"
+STORAGE_INCARNATION_ANNOTATION = "loom.dev/storage-incarnation"
 _SECRET_PURPOSES = frozenset({
     "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime",
     "loom-capacity-agent", "loom-capacity-agent-credentials",
@@ -116,6 +117,7 @@ def personal_dev_storage_annotations(identity: DevInstanceIdentity) -> dict[str,
     return {
         STORAGE_BINDING_ANNOTATION: canonical_bytes(identity.storage_binding).decode(),
         STORAGE_BINDING_SHA_ANNOTATION: canonical_digest(identity.storage_binding),
+        STORAGE_INCARNATION_ANNOTATION: identity.storage_binding.subject_incarnation.hex,
     }
 
 

@@ -9,7 +9,10 @@ import pytest
 
 from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient, KubectlSecretVault
 from loom.personal_dev_capacity_runtime import KubectlPersonalDevCapacityInstaller
-from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
+from loom.personal_dev_incarnation_storage import (
+    personal_dev_secret_name,
+    personal_dev_storage_annotations,
+)
 from tests.integration.test_personal_dev_storage_namespace import (
     disposable_storage_kubectl,  # noqa: F401
 )
@@ -50,7 +53,7 @@ async def test_delayed_capacity_seed_cannot_overwrite_recreated_namespace(
     credentials = await installer._credentials(current, storage.identity)
     await installer._persist_credentials(current, storage.identity, credentials)
     before = await kubectl.read_secret_optional(
-        identity.namespace, "loom-capacity-agent-credentials"
+        identity.namespace, personal_dev_secret_name(storage.identity, "loom-capacity-agent-credentials")
     )
 
     # Resume the old invocation after its namespace/credential preflight has
@@ -60,7 +63,7 @@ async def test_delayed_capacity_seed_cannot_overwrite_recreated_namespace(
     assert (
         await kubectl.read_secret_optional(
             identity.namespace,
-            "loom-capacity-agent-credentials",
+            personal_dev_secret_name(storage.identity, "loom-capacity-agent-credentials"),
         )
         == before
     )
@@ -230,7 +233,7 @@ async def test_two_phase_secret_retry_recovers_empty_placeholder_and_preserves_u
         "password": b"second"
     }
     with pytest.raises(DevInstanceRuntimeError, match="initialized"):
-        await write_storage_secret(kubectl, identity, document, create_only=True)
+        await write_storage_secret(kubectl, identity, {**document, "immutable": True}, create_only=True)
     raw = await kubectl.runner.run(
         kubectl._argv(
             "get",
@@ -464,7 +467,7 @@ async def test_new_incarnation_recovers_only_empty_stale_seed_placeholder(
         "kind": "Secret",
         "type": "Opaque",
         "metadata": {
-            "name": "loom-capacity-agent-credentials",
+            "name": personal_dev_secret_name(storage.identity, "loom-capacity-agent-credentials"),
             "namespace": storage.identity.namespace,
             "annotations": {
                 **personal_dev_storage_annotations(old.operation.storage_binding.identity),

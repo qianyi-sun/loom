@@ -105,11 +105,11 @@ profile = load_personal_dev_control_plane_profile(Path(sys.argv[1]))
 prepared_native_builder = (
     profile.native_builder is not None and profile.native_builder.prepared
 )
-print(40 if prepared_native_builder else 38)
+print(41 if prepared_native_builder else 39)
 PY
 )"
-test "$expected_shadow_resource_count" = 38 || \
-  test "$expected_shadow_resource_count" = 40
+test "$expected_shadow_resource_count" = 39 || \
+  test "$expected_shadow_resource_count" = 41
 
 assert_reviewed_kubeconfig() {
   test -f "$kubeconfig" && test ! -L "$kubeconfig"

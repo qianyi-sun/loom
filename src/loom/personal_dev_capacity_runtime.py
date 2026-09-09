@@ -47,6 +47,7 @@ from loom.personal_dev_capacity_identity import (
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 from loom.personal_dev_incarnation_storage import (
     PersonalDevStorageBindingV1,
+    personal_dev_secret_name,
     personal_dev_storage_secret_data,
     resolve_personal_dev_storage_identity,
     validate_personal_dev_storage_identity,
@@ -1584,7 +1585,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 raise PersonalDevCapacityInstallationError("protected storage namespace is unavailable")
         runtime_secret = await self._kubectl.read_secret_optional(
             identity.namespace,
-            PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+            personal_dev_secret_name(identity, PROTECTED_WORKER_RUNTIME_SECRET_NAME),
         )
         if runtime_secret is None:
             raise PersonalDevCapacityInstallationError(
@@ -1602,7 +1603,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             ) from None
         if identity.storage_binding is not None:
             existing = await read_storage_secret_data(
-                self._kubectl, identity, _CREDENTIALS_SECRET_NAME,
+                self._kubectl, identity, personal_dev_secret_name(identity, _CREDENTIALS_SECRET_NAME),
                 operation_epoch=claim.operation.operation_epoch,
             )
         else:
@@ -1613,7 +1614,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         if existing is None:
             existing = await self._kubectl.read_secret_optional(
                 identity.namespace,
-                _SECRET_NAME,
+                personal_dev_secret_name(identity, _SECRET_NAME),
             )
         if existing is None:
             return _new_credentials(runtime_password=runtime_password)
@@ -1703,7 +1704,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": {
-                "name": _CREDENTIALS_SECRET_NAME,
+                "name": personal_dev_secret_name(identity, _CREDENTIALS_SECRET_NAME),
                 "namespace": identity.namespace,
                 "labels": labels,
             },
@@ -1730,7 +1731,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             )
         observed = await self._kubectl.read_secret_optional(
             identity.namespace,
-            _CREDENTIALS_SECRET_NAME,
+            personal_dev_secret_name(identity, _CREDENTIALS_SECRET_NAME),
         )
         expected = {
             **personal_dev_storage_secret_data(identity),
@@ -1758,12 +1759,12 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 raise PersonalDevCapacityInstallationError("protected storage namespace is unavailable")
         seed = await self._kubectl.read_secret_optional(
             identity.namespace,
-            _CREDENTIALS_SECRET_NAME,
+            personal_dev_secret_name(identity, _CREDENTIALS_SECRET_NAME),
         )
-        runtime = await self._kubectl.read_secret_optional(identity.namespace, _SECRET_NAME)
+        runtime = await self._kubectl.read_secret_optional(identity.namespace, personal_dev_secret_name(identity, _SECRET_NAME))
         protected_runtime = await self._kubectl.read_secret_optional(
             identity.namespace,
-            PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+            personal_dev_secret_name(identity, PROTECTED_WORKER_RUNTIME_SECRET_NAME),
         )
         if seed is None or runtime is None or protected_runtime is None:
             raise PersonalDevCapacityInstallationError(
@@ -1893,7 +1894,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": {
-                "name": _SECRET_NAME,
+                "name": personal_dev_secret_name(identity, _SECRET_NAME),
                 "namespace": identity.namespace,
                 "labels": labels,
             },
@@ -2029,7 +2030,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                         "volumes": [
                             {
                                 "name": "projected",
-                                "secret": {"secretName": _SECRET_NAME, "defaultMode": 288},
+                                "secret": {"secretName": personal_dev_secret_name(identity, _SECRET_NAME), "defaultMode": 288},
                             },
                             {"name": "runtime", "emptyDir": {"medium": "Memory"}},
                         ],
@@ -2190,7 +2191,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         )
         protected_runtime = await self._kubectl.read_secret_optional(
             identity.namespace,
-            PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+            personal_dev_secret_name(identity, PROTECTED_WORKER_RUNTIME_SECRET_NAME),
         )
         if protected_runtime is None:
             raise PersonalDevCapacityInstallationError(
@@ -2226,9 +2227,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             database=database,
             tls=tls,
         )
-        await self._kubectl.apply(
-            yaml.safe_dump_all(documents, sort_keys=False, explicit_start=True)
-        )
+        await self._apply_manifests(claim, identity, documents)
         return PersonalDevCapacityInstallation(
             reporter_incarnation=credentials.reporter_incarnation,
             reporter_token=credentials.reporter_token,
@@ -2242,6 +2241,24 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                     {capability.cpu_architecture for capability in configuration.pool_capabilities}
                 )
             ),
+        )
+
+    async def _apply_manifests(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        identity: DevInstanceIdentity,
+        documents: tuple[dict[str, object], ...],
+    ) -> None:
+        if identity.storage_binding is not None:
+            for document in documents:
+                if document.get("kind") == "Secret":
+                    await write_storage_secret(
+                        self._kubectl, identity, document,
+                        operation_epoch=claim.operation.operation_epoch,
+                    )
+            documents = tuple(document for document in documents if document.get("kind") != "Secret")
+        await self._kubectl.apply(
+            yaml.safe_dump_all(documents, sort_keys=False, explicit_start=True)
         )
 
     async def verify_publishing(
@@ -2333,7 +2350,10 @@ class PersonalDevCapacityStatusReader:
         if not manager.active_bindings:
             return PersonalDevCapacityAvailability("waiting", True, False)
         try:
-            seed = await self._kubectl.read_secret_optional(namespace, _CREDENTIALS_SECRET_NAME)
+            seed = await self._kubectl.read_secret_optional(
+                namespace, personal_dev_secret_name(identity, _CREDENTIALS_SECRET_NAME)
+                if identity is not None else _CREDENTIALS_SECRET_NAME,
+            )
             if seed is None:
                 raise ValueError("observer credential seed is missing")
             if identity is not None:

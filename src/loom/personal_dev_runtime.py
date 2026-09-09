@@ -501,6 +501,11 @@ class PersonalDevPreparationRuntime:
             if operation.kind == "update":
                 raise RuntimeError("personal-dev update has no existing fixture credential")
             password = self.password_factory()
+        if identity.storage_binding is not None:
+            # Choose durable, immutable credentials before any role/password
+            # mutation. A concurrent vault loser must never reach SQL with its
+            # separately prepared password; retries recover the winner first.
+            await self.vault.store(identity, password)
         plan = provisioning_plan_for_identity(identity, password)
         await self.sql.apply_role_and_database(
             identity,
@@ -508,7 +513,8 @@ class PersonalDevPreparationRuntime:
             create_database_sql=str(plan["create_database_sql"]),
         )
         await self.buckets.ensure_buckets(identity, dev_buckets(identity))
-        await self.vault.store(identity, password)
+        if identity.storage_binding is None:
+            await self.vault.store(identity, password)
         await self.object_store_tenant.converge(identity)
         return await self.cluster.prepare(identity, manifest_config)
 

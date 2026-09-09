@@ -17,6 +17,7 @@ from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient
 from loom.personal_dev_incarnation_storage import (
     STORAGE_BINDING_ANNOTATION,
     STORAGE_BINDING_SHA_ANNOTATION,
+    STORAGE_INCARNATION_ANNOTATION,
     parse_personal_dev_storage_binding,
     personal_dev_storage_annotations,
     validate_personal_dev_storage_identity,
@@ -67,6 +68,7 @@ def _stale_placeholder(
             != {
                 STORAGE_BINDING_ANNOTATION,
                 STORAGE_BINDING_SHA_ANNOTATION,
+                STORAGE_INCARNATION_ANNOTATION,
                 _NAMESPACE_UID,
                 _PHASE,
                 *(() if operation_epoch is None else (_EPOCH,)),
@@ -82,6 +84,7 @@ def _stale_placeholder(
         return (
             current is not None
             and binding.layout == "incarnation-v1"
+            and annotations[STORAGE_INCARNATION_ANNOTATION] == binding.subject_incarnation.hex
             and binding.environment_name == current.environment_name
             and binding.subject_id == current.subject_id
             and binding.owner_user_id == current.owner_user_id
@@ -181,7 +184,7 @@ async def read_storage_secret_data(
     identity: DevInstanceIdentity,
     name: str,
     *,
-    operation_epoch: int,
+    operation_epoch: int | None = None,
 ) -> dict[str, bytes] | None:
     """Treat only an authenticated empty placeholder as missing credentials."""
     validate_personal_dev_storage_identity(identity)
@@ -248,6 +251,8 @@ async def write_storage_secret(
     ):
         raise DevInstanceRuntimeError("storage Secret operation epoch is invalid")
     final = copy.deepcopy(document)
+    if create_only and final.get("immutable") is not True:
+        raise DevInstanceRuntimeError("create-only storage Secret must be immutable")
     metadata = final.get("metadata")
     if (
         final.get("apiVersion") != "v1"
@@ -332,7 +337,9 @@ async def write_storage_secret(
         raise DevInstanceRuntimeError("storage Secret creation readback is invalid")
     uid, version = _object_identity(observed)
     phase = _validate_existing(observed, identity, namespace_uid, name, operation_epoch)
-    if phase == "ready" and create_only:
+    if phase == "ready" and create_only and (
+        observed.get("immutable") is not True or _secret_data(observed) != desired_data
+    ):
         raise DevInstanceRuntimeError(
             "storage Secret is already initialized or has unknown provenance"
         )

@@ -132,7 +132,7 @@ async def test_kubectl_vault_sends_secrets_only_over_stdin() -> None:
     ref = await vault.store(derive_identity("alice"), "b" * 20)
 
     assert ref == "k8s-secret://loom-dev-alice/loom-secrets"
-    assert len(runner.calls) == 4
+    assert len(runner.calls) == 5
     flattened_argv = " ".join(part for argv, _stdin in runner.calls for part in argv)
     assert "fixture-secret" not in flattened_argv
     assert "minio-secret" not in flattened_argv
@@ -216,6 +216,9 @@ class _ExistingSecretRunner(_Runner):
 
 
 class _MemorySecretKubectl:
+    async def read_namespace_optional(self, namespace):
+        return {"metadata": {"name": namespace}}
+
     def __init__(self, secrets: dict[str, dict[str, bytes]]) -> None:
         self.secrets = secrets
         self.applied: list[dict[str, Any]] = []
@@ -336,7 +339,7 @@ async def test_kubectl_vault_treats_absent_namespace_as_absent_secret() -> None:
     )
 
     assert await vault.database_password(derive_identity("alice")) is None
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 2
     assert "namespace" in runner.calls[0][0]
     assert "secret" not in runner.calls[0][0]
 
