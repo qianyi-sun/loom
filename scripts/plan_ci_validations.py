@@ -77,11 +77,17 @@ NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
 NEBIUS_PLATFORM_EXACT = {
     ".github/workflows/nebius-candidate.yml",
     "scripts/ops/deploy_nebius_platform.py",
-    "scripts/ops/nebius_candidate.py",
     "scripts/ops/nebius_registry_auth.py",
     "scripts/ops/render_nebius_platform.py",
 }
 NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
+
+# Publication tools have root-test coverage, not application integration consumers.
+# The shared report validator additionally exercises every image scan below.
+PUBLICATION_TOOL_EXACT = {
+    "scripts/ops/nebius_candidate.py",
+    "scripts/validate_trivy_release_report.py",
+}
 
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     ".github/workflows/deploy-environment.yml",
@@ -318,6 +324,7 @@ def plan_validations(
         "tests/integration/",
     )
     image_exact = {
+        "scripts/validate_trivy_release_report.py",
         ".dockerignore",
         ".github/workflows/images.yml",
         "pyproject.toml",
@@ -415,6 +422,7 @@ def plan_validations(
         matched_owner = (
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
+            or path in PUBLICATION_TOOL_EXACT
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
             or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
             or _is_protected_staging_rollout_path(path)
@@ -444,7 +452,7 @@ def plan_validations(
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True
-        elif not test_owner_lanes:
+        elif not test_owner_lanes and path not in PUBLICATION_TOOL_EXACT:
             select("integration", f"non-doc-path:{path}")
         if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
             select("integration_docker", f"path:{path}")

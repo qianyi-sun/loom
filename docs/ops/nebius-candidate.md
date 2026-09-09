@@ -6,6 +6,13 @@ Registry and records the commit and six immutable image references. It also
 produces the existing service-execution runtime profile required by Control Plane.
 It does not deploy, change `dev`/`main` authority, or prove live acceptance.
 
+PR changes to the candidate publisher use the existing root tests. Changes to
+the shared Trivy report validator also retain all release-image build/scan
+compatibility checks. These two tools alone do not select application integration,
+Docker integration, Kubernetes or system smoke. Runtime changes and explicit CI
+labels still add their required checks; unknown code paths retain full coverage.
+The ordinary non-documentation CI baseline remains unchanged.
+
 ## Bootstrap
 
 Publication runs on GitHub-hosted Ubuntu 24.04 AMD64. CI and publication require
