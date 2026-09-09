@@ -342,3 +342,62 @@ def test_rendered_application_settings_and_startup_factories_accept_signed_profi
                 assert (
                     settings.local_providers["yibu"].base_url == config["model_provider_base_url"]
                 )
+
+
+def test_public_tls_renewal_uses_same_candidate_and_persistent_state(
+    platform_inputs: tuple,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["public_tls_bootstrap"] = True
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    services = files["40-services.yaml"]
+    web = next(doc for doc in services if doc["metadata"]["name"] == "loom-web")
+    pod = web["spec"]["template"]["spec"]
+    nginx, tls = pod["containers"]
+    assert nginx["image"] == tls["image"] == candidate["images"]["web"]["image_ref"]
+    assert "command" not in nginx
+    assert tls["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
+    assert tls["readinessProbe"]["httpGet"]["httpHeaders"] == [
+        {"name": "Host", "value": config["public_host"]}
+    ]
+    claims = [
+        doc for batch in files.values() for doc in batch if doc["kind"] == "PersistentVolumeClaim"
+    ]
+    assert len(claims) == 1 and claims[0] in services
+    assert claims[0]["spec"] == {
+        "accessModes": ["ReadWriteOnce"],
+        "storageClassName": config["storage_class"],
+        "resources": {"requests": {"storage": "4Gi"}},
+    }
+    cm = files["10-config-network.yaml"][0]
+    caddy = json.loads(cm["data"]["public-tls.json"])
+    server = caddy["apps"]["http"]["servers"]["public"]
+    assert server["listen"] == [":8443"]
+    assert server["automatic_https"]["ignore_loaded_certificates"] is True
+    assert server["tls_connection_policies"] == [{"default_sni": config["public_host"]}]
+    assert all("tags" not in item for item in caddy["apps"]["tls"]["certificates"]["load_files"])
+    assert "certificate_selection" not in json.dumps(caddy)
+    issuer = caddy["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]
+    assert issuer["challenges"]["http"]["disabled"] is True
+    assert issuer["challenges"]["tls-alpn"]["alternate_port"] == 8443
+    assert files["70-public.yaml"][0]["spec"]["ports"][0]["port"] == 443
+
+
+@pytest.mark.parametrize("bootstrap", [False, None])
+def test_steady_public_tls_does_not_load_bootstrap(platform_inputs: tuple, bootstrap) -> None:
+    config, candidate, profile = platform_inputs
+    config.pop("public_tls_bootstrap", None)
+    if bootstrap is not None:
+        config["public_tls_bootstrap"] = bootstrap
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    caddy = json.loads(files["10-config-network.yaml"][0]["data"]["public-tls.json"])
+    assert "certificates" not in caddy["apps"]["tls"]
+    web = next(doc for doc in files["40-services.yaml"] if doc["metadata"]["name"] == "loom-web")
+    assert not any(v["name"] == "public-tls" for v in web["spec"]["template"]["spec"]["volumes"])
+
+
+def test_public_tls_bootstrap_requires_boolean(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config["public_tls_bootstrap"] = "false"
+    with pytest.raises(NebiusPlatformError, match="public_tls_bootstrap must be a boolean"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

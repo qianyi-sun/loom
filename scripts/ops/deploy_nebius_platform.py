@@ -190,13 +190,12 @@ def wait_for_job(kube: Kubectl, name: str, namespace: str, seconds: int) -> None
         time.sleep(min(5, remaining))
 
 
-def preflight(
+def verify_cluster_identity(
     kube: Kubectl,
-    manifest: dict[str, Any],
     config: dict[str, Any],
-    files: dict[str, list[dict[str, Any]]],
     expected_cluster_id: str,
-) -> dict[str, Any]:
+) -> None:
+    """Check the existing independent target before deployment or maintenance."""
     if config["cluster_id"] != expected_cluster_id:
         raise DeploymentError("expected cluster id does not match environment")
     view = json.loads(kube.run("config", "view", "--minify", "-o", "json"))
@@ -229,6 +228,16 @@ def preflight(
             "metadata"
         ]["name"] != provider_id.removeprefix("nebius://"):
             raise DeploymentError("integration node provider identity is not Nebius")
+
+
+def preflight(
+    kube: Kubectl,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    files: dict[str, list[dict[str, Any]]],
+    expected_cluster_id: str,
+) -> dict[str, Any]:
+    verify_cluster_identity(kube, config, expected_cluster_id)
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(

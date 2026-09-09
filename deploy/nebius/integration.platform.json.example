@@ -11,6 +11,7 @@
   "project_id": "REPLACE_FROM_TERRAFORM",
   "quota_parent_id": "REPLACE_WITH_TENANT_ID",
   "execution_node_group_id": "REPLACE_FROM_TERRAFORM",
+  "public_tls_bootstrap": false,
   "tls_secret_name": "loom-platform-public-tls",
   "db_tls_secret_name": "loom-platform-db-tls",
   "storage_class": "compute-csi-default-sc",

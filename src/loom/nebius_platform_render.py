@@ -70,8 +70,10 @@ def validate_environment(config: dict[str, Any]) -> None:
         "capacity_policy",
         "execution_price",
     }
-    if set(config) != expected:
+    if set(config) - {"public_tls_bootstrap"} != expected:
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
+    if type(config.get("public_tls_bootstrap", False)) is not bool:
+        raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
     for key in (
         "namespace",
         "execution_namespace",
@@ -452,6 +454,115 @@ def _replace_tree(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Native Caddy TLS automation with a valid manual certificate for migration."""
+    host, ns = config["public_host"], config["namespace"]
+    api_proxy = {
+        "handler": "reverse_proxy",
+        "upstreams": [{"dial": f"loom-service.{ns}.svc:8090"}],
+        "transport": {"protocol": "http", "read_timeout": "300s"},
+        "flush_interval": -1,
+        "headers": {
+            "request": {
+                "set": {
+                    "Host": ["{http.request.host}"],
+                    "X-Forwarded-Proto": ["https"],
+                    "X-Forwarded-For": ["{http.request.remote.host}"],
+                }
+            }
+        },
+    }
+    result: dict[str, Any] = {
+        "admin": {"disabled": True},
+        "storage": {"module": "file_system", "root": "/data"},
+        "apps": {
+            "tls": {
+                # Caddyfile `tls cert key` pins certificate selection to the manual
+                # certificate's tag, even after expiry. Untagged JSON loading lets
+                # CertMagic select an unexpired managed certificate automatically.
+                "certificates": {
+                    "load_files": [
+                        {
+                            "certificate": "/var/run/loom-public-tls/tls.crt",
+                            "key": "/var/run/loom-public-tls/tls.key",
+                        }
+                    ]
+                },
+                "automation": {
+                    "policies": [
+                        {
+                            "subjects": [host],
+                            "issuers": [
+                                {
+                                    "module": "acme",
+                                    "ca": "https://acme-v02.api.letsencrypt.org/directory",
+                                    "challenges": {
+                                        "http": {"disabled": True},
+                                        "tls-alpn": {"alternate_port": 8443},
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+            "http": {
+                "https_port": 8443,
+                "servers": {
+                    "public": {
+                        "listen": [":8443"],
+                        "protocols": ["h1", "h2"],
+                        "automatic_https": {
+                            "disable_redirects": True,
+                            "ignore_loaded_certificates": True,
+                        },
+                        # Kubelet probes a Pod IP without DNS SNI; the Host header
+                        # still selects the public HTTP route after the handshake.
+                        "tls_connection_policies": [{"default_sni": host}],
+                        "routes": [
+                            {
+                                "match": [{"host": [host]}],
+                                "handle": [
+                                    {
+                                        "handler": "headers",
+                                        "response": {
+                                            "set": {
+                                                "Strict-Transport-Security": ["max-age=31536000"]
+                                            }
+                                        },
+                                    },
+                                    {"handler": "request_body", "max_size": 100 * 1024 * 1024},
+                                    {
+                                        "handler": "subroute",
+                                        "routes": [
+                                            {
+                                                "match": [{"path": ["/api/v1/*"]}],
+                                                "handle": [api_proxy],
+                                                "terminal": True,
+                                            },
+                                            {
+                                                "handle": [
+                                                    {
+                                                        "handler": "reverse_proxy",
+                                                        "upstreams": [{"dial": "127.0.0.1:8080"}],
+                                                    }
+                                                ]
+                                            },
+                                        ],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                },
+            },
+        },
+    }
+    if not config.get("public_tls_bootstrap", False):
+        result["apps"]["tls"].pop("certificates")
+    return result
+
+
 def build_platform(
     config: dict[str, Any],
     candidate: dict[str, Any],
@@ -485,29 +596,6 @@ def build_platform(
     files: dict[str, list[dict[str, Any]]] = {}
     files["00-namespaces.yaml"] = [_namespace(ns), _namespace(ex)]
     db_host = f"loom-postgres.{ns}.svc"
-    # Keep upstream SPA handling unchanged; a second listener terminates TLS
-    # and proxies only the public API and the existing local static listener.
-    tls_proxy = f"""server {{
-    listen 8443 ssl;
-    server_name {config["public_host"]};
-    ssl_certificate /var/run/loom-public-tls/tls.crt;
-    ssl_certificate_key /var/run/loom-public-tls/tls.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    server_tokens off;
-    client_max_body_size 100m;
-    add_header Strict-Transport-Security "max-age=31536000" always;
-    location /api/v1/ {{
-        proxy_pass http://loom-service.{ns}.svc:8090;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-    }}
-    location / {{ proxy_pass http://127.0.0.1:8080; }}
-}}
-"""
     cm = _obj("ConfigMap", "loom-platform-config", ns)
     target = {
         "schema_version": "loom.execution-target.v1",
@@ -541,7 +629,7 @@ def build_platform(
         "keyring.json": canonical(keyring).decode(),
         "environment.json": canonical(config).decode(),
         "catalog.json": canonical(catalog).decode(),
-        "public.conf": tls_proxy,
+        "public-tls.json": canonical(public_tls_config(config)).decode(),
     }
     private_ingress = [
         {"from": [_peer(ns), _peer(ex)], "ports": [{"protocol": "TCP", "port": port}]}
@@ -839,23 +927,62 @@ def build_platform(
     wpod = web["spec"]["template"]["spec"]
     wpod["securityContext"].update(runAsUser=101, runAsGroup=101, fsGroup=101)
     wpod["volumes"] = [
+        {"name": "public-config", "configMap": {"name": "loom-platform-config"}},
+        {"name": "tls-data", "persistentVolumeClaim": {"claimName": "loom-web-tls"}},
+    ]
+    wpod["containers"].append(
         {
-            "name": "public-config",
-            "configMap": {
-                "name": "loom-platform-config",
-                "items": [{"key": "public.conf", "path": "public.conf"}],
+            "name": "public-tls",
+            "image": images["web"],
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["/usr/bin/caddy"],
+            "args": ["run", "--config", "/etc/loom-public/public-tls.json"],
+            "env": _env({"XDG_CONFIG_HOME": "/data/config", "XDG_DATA_HOME": "/data"}),
+            "ports": [{"name": "https", "containerPort": 8443}],
+            "volumeMounts": [
+                {"name": "public-config", "mountPath": "/etc/loom-public", "readOnly": True},
+                {"name": "tls-data", "mountPath": "/data"},
+            ],
+            "readinessProbe": {
+                "httpGet": {
+                    "scheme": "HTTPS",
+                    "path": "/",
+                    "port": "https",
+                    "httpHeaders": [{"name": "Host", "value": config["public_host"]}],
+                },
+                "periodSeconds": 5,
+            },
+            "resources": {
+                "requests": {"cpu": "25m", "memory": "64Mi"},
+                "limits": {"cpu": "500m", "memory": "256Mi"},
+            },
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
             },
         }
-    ]
-    wpod["containers"][0]["volumeMounts"] = [
-        {
-            "name": "public-config",
-            "mountPath": "/etc/nginx/conf.d/public.conf",
-            "subPath": "public.conf",
-            "readOnly": True,
-        }
-    ]
-    _mount_secret(wpod, "public-tls", config["tls_secret_name"], "/var/run/loom-public-tls")
+    )
+    if config.get("public_tls_bootstrap", False):
+        wpod["volumes"].append(
+            {"name": "public-tls", "secret": {"secretName": config["tls_secret_name"]}}
+        )
+        wpod["containers"][-1]["volumeMounts"].append(
+            {"name": "public-tls", "mountPath": "/var/run/loom-public-tls", "readOnly": True}
+        )
+    # Services are applied after the deployment's mandatory pre-mutation backup.
+    # RWO permits the rolling Pods on the single integration system node.
+    app_docs.append(
+        _obj(
+            "PersistentVolumeClaim",
+            "loom-web-tls",
+            ns,
+            {
+                "accessModes": ["ReadWriteOnce"],
+                "storageClassName": config["storage_class"],
+                "resources": {"requests": {"storage": "4Gi"}},
+            },
+        )
+    )
     app_docs.append(web)
     files["40-services.yaml"] = app_docs
     files["50-configure.yaml"] = [job(f"loom-platform-configure-{short}", "configure")]
