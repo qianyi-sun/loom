@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import sys
+import tarfile
+import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from sqlalchemy.engine import make_url
 from testcontainers.postgres import PostgresContainer
 
@@ -20,13 +28,71 @@ from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
 
 
 @pytest.fixture(scope="module")
-def platform_database() -> Iterator[str]:
+def platform_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    # Exercise the same verify-full TLS URL as the live bootstrap. A plaintext
+    # fixture hides ConfigParser failures on the percent-encoded CA path.
     with PostgresContainer("postgres:16", dbname="loom") as postgres:
-        yield (
-            make_url(postgres.get_connection_url())
-            .set(drivername="postgresql")
-            .render_as_string(hide_password=False)
+        url = make_url(postgres.get_connection_url()).set(drivername="postgresql")
+        host = url.host or "localhost"
+        try:
+            san: x509.GeneralName = x509.IPAddress(ipaddress.ip_address(host))
+        except ValueError:
+            san = x509.DNSName(host)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(UTC) - timedelta(minutes=1))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
         )
+        certificate = cert.public_bytes(serialization.Encoding.PEM)
+        ca_path = tmp_path_factory.mktemp("platform-tls") / "ca.crt"
+        ca_path.write_bytes(certificate)
+        private_key = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            for filename, contents in (
+                ("platform.crt", certificate),
+                ("platform.key", private_key),
+            ):
+                entry = tarfile.TarInfo(filename)
+                entry.size = len(contents)
+                entry.uid = entry.gid = 999
+                entry.mode = 0o600
+                tar.addfile(entry, io.BytesIO(contents))
+        postgres.get_wrapped_container().put_archive("/tmp", archive.getvalue())
+        with psycopg.connect(url.render_as_string(hide_password=False), autocommit=True) as db:
+            db.execute("ALTER SYSTEM SET ssl_cert_file = '/tmp/platform.crt'")
+            db.execute("ALTER SYSTEM SET ssl_key_file = '/tmp/platform.key'")
+            db.execute("ALTER SYSTEM SET ssl = 'on'")
+            db.execute("SELECT pg_reload_conf()")
+        tls_url = url.update_query_dict(
+            {"sslmode": "verify-full", "sslrootcert": str(ca_path)}
+        ).render_as_string(hide_password=False)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                with psycopg.connect(tls_url, connect_timeout=2) as db:
+                    assert db.execute(
+                        "SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()"
+                    ).fetchone() == (True,)
+                break
+            except psycopg.OperationalError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        yield tls_url
 
 
 def test_fresh_bootstrap_repeat_and_database_privileges(

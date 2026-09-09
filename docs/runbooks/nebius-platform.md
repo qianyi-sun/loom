@@ -156,6 +156,14 @@ counts, and verifying sampled artifact references against canonical storage.
 Retain the backup manifest, candidate and restoration evidence until the owner
 accepts cleanup. No automatic down-migration or production promotion occurs.
 
+The operator stops on a Job's `Failed` condition instead of waiting for the
+completion deadline; pending Jobs retain their bounded timeout. PostgreSQL TLS
+URLs may contain percent-encoded CA paths or credentials. The Alembic INI
+adapter escapes percent signs only when writing its config, preserving the
+original URL passed to the database driver. An early `MigrationError` with
+`ValueError` and revision `unknown` can identify this configuration boundary;
+never log the raw exception, which can contain the complete connection string.
+
 Do not manually erase a failed Job or change live state to make deployment
 appear green. Candidate-specific Job names allow retry to be a deliberate
 operator action. Bootstrap error output includes phase, exception class,

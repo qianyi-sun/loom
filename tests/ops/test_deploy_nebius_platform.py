@@ -154,14 +154,16 @@ class FakeKubectl(deploy.Kubectl):
         if args[0] == "apply":
             for obj in yaml.safe_load_all(Path(args[2]).read_text()):
                 self.objects[obj["kind"].lower(), obj["metadata"]["name"]] = obj
+                if obj["kind"] == "Job":
+                    obj["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
         if args[:2] == ("create", "job"):
-            self.objects["job", args[2]] = {"metadata": {"name": args[2]}}
-        if args[0] == "wait" and args[2].startswith("job/"):
-            name = args[2].removeprefix("job/")
-            if self.fail_backup and name.startswith("loom-predeploy-"):
-                raise deploy.DeploymentError("backup execution failed")
-            self.objects["job", name]["status"] = {
-                "conditions": [{"type": "Complete", "status": "True"}]
+            name = args[2]
+            condition = (
+                "Failed" if self.fail_backup and name.startswith("loom-predeploy-") else "Complete"
+            )
+            self.objects["job", name] = {
+                "metadata": {"name": name},
+                "status": {"conditions": [{"type": condition, "status": "True"}]},
             }
         if args[:2] == ("delete", "job"):
             self.objects.pop(("job", args[2]))
@@ -231,7 +233,7 @@ def test_failed_upgrade_backup_prevents_all_apply(
     args.apply = True
     kube = FakeKubectl(config, files, database=True)
     kube.fail_backup = True
-    with pytest.raises(deploy.DeploymentError, match="backup execution"):
+    with pytest.raises(deploy.DeploymentError, match=r"loom-predeploy-.*Failed"):
         deploy.deploy(args, kube=kube)
     assert not any(command[0] in {"apply", "delete"} for command in kube.commands)
     result = json.loads(next(iter(args.evidence_dir.glob("*.json"))).read_text())
@@ -302,3 +304,35 @@ def test_kubectl_error_retains_api_reason_without_secret_message(
     with pytest.raises(deploy.DeploymentError, match="Forbidden") as error:
         deploy.Kubectl(tmp_path / "config").run("apply", "-f", "test.yaml")
     assert "secret" not in str(error.value) and "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("condition", ["Complete", "Failed", "Pending"])
+def test_job_wait_returns_on_failure_or_completion_and_preserves_timeout(
+    monkeypatch: pytest.MonkeyPatch, condition: str
+) -> None:
+    reads = 0
+    now = 0.0
+
+    def get(*args: str) -> dict:
+        nonlocal reads
+        reads += 1
+        # First read is still pending, then the controller records its terminal
+        # condition. Failed jobs must not wait out the full completion timeout.
+        observed = "Pending" if reads == 1 else condition
+        return {"status": {"conditions": [{"type": observed, "status": "True"}]}}
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: now)
+    monkeypatch.setattr(deploy.time, "sleep", sleep)
+    kube = SimpleNamespace(get=get)
+    if condition == "Complete":
+        deploy.wait_for_job(kube, "test-migration", "test-namespace", 20)
+    else:
+        reason = "Failed condition" if condition == "Failed" else "timed out"
+        with pytest.raises(deploy.DeploymentError, match=reason):
+            deploy.wait_for_job(kube, "test-migration", "test-namespace", 20)
+    assert now == (20 if condition == "Pending" else 5)
+    assert reads == (5 if condition == "Pending" else 2)
