@@ -24,9 +24,11 @@ from loom_capacity_manager.contracts import (
     SubjectConfigurationV1,
     canonical_digest,
 )
+from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.models import CapacityPersonalMembershipEvent
 from loom_capacity_manager.typed_membership_commands import (
+    PersonalApplicationCommandV2,
     PersonalBuildCommandV2,
     PersonalMembershipMutationV2,
     PersonalMembershipResultV2,
@@ -149,16 +151,67 @@ def _build_transition(
         raise ValueError("non-deployment build membership must retain service evidence")
 
 
+def _application_transition(
+    request: PersonalMembershipMutationV2, member: PersonalApplicationMemberV1,
+    prior: tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent] | None,
+    used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
+) -> None:
+    """Authenticate fresh application lifecycle; base adoption needs its origin."""
+    assert isinstance(request.command, PersonalApplicationCommandV2)
+    projection, subject = request.command.projection, member.configuration
+    fresh_reporter = subject.demand_reporter_incarnation not in reporters and projection.demand_reporter_token_sha256 not in tokens
+    if member.reincarnation is not None:
+        raise ValueError("typed application recreation requires authenticated release")
+    if prior is None:
+        if (
+            projection.operation_kind != "create" or subject.subject_incarnation in used_incarnations
+            or subject.candidate_generation != 1 or subject.deployment_generation != 1 or not fresh_reporter
+        ):
+            raise ValueError("initial application membership requires a fresh service identity")
+        return
+    old_request, old_result, _old_row = prior
+    old_member, old = old_result.member, old_result.member.configuration
+    if (
+        not isinstance(old_member, PersonalApplicationMemberV1)
+        or not isinstance(old_request.command, PersonalApplicationCommandV2)
+        or member.owner_id != old_member.owner_id or subject.display_name != old.display_name
+        or subject.subject_incarnation != old.subject_incarnation
+        or subject.configuration_generation <= old.configuration_generation
+        or old.lifecycle_state == "disabled" or projection.operation_kind == "create"
+    ):
+        raise ValueError("application membership historical identity or lifecycle changed")
+    if projection.operation_kind == "update":
+        if (
+            subject.deployment_generation <= old.deployment_generation
+            or subject.candidate_generation <= old.candidate_generation or not fresh_reporter
+        ):
+            raise ValueError("application deployment must advance and rotate its reporter")
+        return
+    # Capacity and teardown may only change lifecycle coordinates and limits.
+    # In particular, retain all source, installation, protocol and token facts.
+    mutable = {"operation_kind", "operation_id", "operation_epoch", "configuration_generation", "min_slots", "max_slots"}
+    if (
+        _payload(projection.model_dump(mode="json", exclude=mutable))
+        != _payload(old_request.command.projection.model_dump(mode="json", exclude=mutable))
+        or member.acknowledgement != old_member.acknowledgement.model_copy(update={
+            "configuration_generation": subject.configuration_generation,
+            "acknowledgement_sha256": member.acknowledgement.acknowledgement_sha256,
+        })
+    ):
+        raise ValueError("non-deployment application membership must retain service evidence")
+
+
 def validate_typed_membership_event_prefix(
     rows: Sequence[CapacityPersonalMembershipEvent], preparation: ExecutionPreparationV4, fleet: FleetManifestV1,
     *, execution_epoch: int,
 ) -> tuple[PersonalMembershipResultV2, ...]:
-    """Validate a mixed prefix and build lifecycle structure, not release facts.
+    """Validate mixed fresh-member lifecycle, not durable origins or release facts.
 
 Operation and idempotency IDs share one domain across purposes. The durable
 unique indexes also enforce their uniqueness across other execution epochs.
-    Application lifecycle/base adoption and actual release-set verification remain
-    store responsibilities. This cannot establish that a prefix is the latest.
+    Managed-base application adoption requires a separate authenticated origin
+    reader and remains rejected here. Actual release-set verification remains a
+    store responsibility. This cannot establish that a prefix is the latest.
 """
     if type(execution_epoch) is not int or execution_epoch <= 0:
         raise ValueError("typed membership execution epoch must be positive")
@@ -166,6 +219,7 @@ unique indexes also enforce their uniqueness across other execution epochs.
     operations: set[UUID] = set()
     keys: set[UUID] = set()
     prior_members: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent]] = {}
+    names: dict[str, UUID] = {}
     origins: dict[UUID, SubjectConfigurationV1] = {}
     used_incarnations = {item.subject_incarnation for item in preparation.subject_acknowledgements}
     base_ids = set(preparation.personal_membership.managed_base_subject_ids) | {item.subject_id for item in preparation.subject_acknowledgements}
@@ -181,6 +235,8 @@ unique indexes also enforce their uniqueness across other execution epochs.
         ):
             raise ValueError("typed membership prefix or replay identity changed")
         member, subject = result.member, result.member.configuration
+        if names.setdefault(subject.display_name, subject.subject_id) != subject.subject_id:
+            raise ValueError("typed membership name was already retained by another subject")
         prior = prior_members.get(subject.subject_id)
         if prior is not None and member.purpose != prior[1].member.purpose:
             raise ValueError("typed membership subject purpose changed")
@@ -189,6 +245,10 @@ unique indexes also enforce their uniqueness across other execution epochs.
             if subject.subject_id in base_ids:
                 raise ValueError("build membership cannot replace an immutable base subject")
             _build_transition(request, member, prior, origin, used_incarnations, reporters, tokens)
+        else:
+            if subject.subject_id in base_ids:
+                raise ValueError("application base adoption requires authenticated original provenance")
+            _application_transition(request, member, prior, used_incarnations, reporters, tokens)
         prior_members[subject.subject_id] = (request, result, row)
         used_incarnations.add(subject.subject_incarnation)
         reporters.add(subject.demand_reporter_incarnation)

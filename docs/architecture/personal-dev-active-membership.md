@@ -684,6 +684,16 @@ currentness or SQL insertion authority. The old
 application event preimage is retained byte-for-byte, including its original
 request format; old history is not translated into typed commands.
 
+Fresh application history now also checks lifecycle monotonicity, globally fresh
+reporters, complete source/installation/protocol retention during capacity and
+teardown, and retained name uniqueness even after disablement. Its retained
+generation reader authenticates installation attestation against the original
+create/update operation independently of the reporter's latest configuration.
+It verifies refreshed candidate/deployment/profile records canonically and can
+validate a historically fenced reporter. Managed-base adoption still requires
+its original immutable configuration and durable application provenance; neither
+an acknowledgement nor current materialization can substitute for that origin.
+
 Build-generation persistence now stages the exact native runtime candidate,
 two worker-profile records and the service reporter in the membership transaction.
 Candidate digests hash the complete runtime binding rather than padding a Git
