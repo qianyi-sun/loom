@@ -1,4 +1,4 @@
-"""CPU-only S3 GET signing; no ambient credentials, URL rewriting or network I/O."""
+"""CPU-only S3 object/list signing; no ambient credentials or network I/O."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from loom_task_image_authority.bundle_capability import (
     _bucket,
     _relative_path,
 )
+from loom_task_image_authority.bundle_s3_listing import _token
 from loom_task_image_authority.config import _validate_https_origin
 
 
@@ -106,6 +107,51 @@ def presign_bundle_get(
             raise ValueError("invalid target")
     except (TypeError, ValueError, AttributeError):
         raise TaskImageBundleCapabilityError("S3 signing target is invalid") from None
+    return _presign(
+        AWSRequest(method="GET", url=f"{public_origin}/{bucket}/{quote(key, safe='/~')}"),
+        credentials=credentials, region=region, expires_at=expires_at, clock=clock,
+    )
+
+
+def presign_bundle_list(
+    *, public_origin: str, bucket: str, prefix: str, maximum_keys: int,
+    region: str, credentials: S3SigningCredentials, expires_at: datetime,
+    continuation_token: str | None = None, clock: Callable[[], datetime] | None = None,
+) -> str:
+    """Sign one exact path-style ListObjectsV2 request for authority-only I/O.
+
+    This bearer URL must never be included in a builder's bundle capability.
+    It carries the same immutable deadline as the eventual object GETs; the
+    async owner must enforce one total budget and pagination progress separately.
+    """
+    try:
+        _validate_https_origin(public_origin, label="S3 public origin")
+        _bucket(bucket)
+        if (
+            type(prefix) is not str or not prefix.endswith("/")
+            or len(prefix.encode("utf-8")) > 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in prefix)
+            or type(maximum_keys) is not int or not 1 <= maximum_keys <= 1000
+            or type(region) is not str or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", region) is None
+        ):
+            raise ValueError("invalid target")
+        _relative_path(prefix[:-1])
+        _token(continuation_token)
+    except (TypeError, ValueError, AttributeError):
+        raise TaskImageBundleCapabilityError("S3 listing target is invalid") from None
+    params = {"list-type": "2", "prefix": prefix, "max-keys": str(maximum_keys), "encoding-type": "url"}
+    if continuation_token is not None:
+        params["continuation-token"] = continuation_token
+    return _presign(
+        AWSRequest(method="GET", url=f"{public_origin}/{bucket}", params=params),
+        credentials=credentials, region=region, expires_at=expires_at, clock=clock,
+    )
+
+
+def _presign(
+    request: Any, *, credentials: S3SigningCredentials, region: str,
+    expires_at: datetime, clock: Callable[[], datetime] | None,
+) -> str:
     if (
         not isinstance(expires_at, datetime) or expires_at.utcoffset() is None
         or expires_at.microsecond != 0
@@ -116,7 +162,6 @@ def presign_bundle_get(
     credentials.__post_init__()
     if credentials.expires_at is not None and credentials.expires_at < expires_at:
         raise TaskImageBundleCapabilityError("S3 signing credentials expire before the deadline")
-    request = AWSRequest(method="GET", url=f"{public_origin}/{bucket}/{quote(key, safe='/~')}")
     try:
         _DeadlineQueryAuth(
             credentials=credentials, region=region, expires_at=expires_at.astimezone(UTC),

@@ -5,6 +5,7 @@ import os
 import ssl
 import time
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import boto3
 import docker
@@ -16,7 +17,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from loom_task_image_authority.bundle_s3_signing import S3SigningCredentials, presign_bundle_get
+from loom_task_image_authority.bundle_s3_signing import (
+    S3SigningCredentials,
+    presign_bundle_get,
+    presign_bundle_list,
+)
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 IMAGE = "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
@@ -134,7 +139,8 @@ def test_actual_minio_rejects_modified_or_expired_capability(minio_tls, mutation
 
 
 @pytest.mark.parametrize("prefix,expected_keys", [("revision/", KEYS), ("revision space+/", (FORM_PREFIX_KEY,))])
-def test_actual_minio_listing_pages_preserve_key_bytes_and_continuation(minio_tls, prefix, expected_keys):
+@pytest.mark.parametrize("signer", ["sdk", "production"])
+def test_actual_minio_listing_pages_preserve_key_bytes_and_continuation(minio_tls, prefix, expected_keys, signer):
     from loom_task_image_authority.bundle_s3_listing import parse_list_objects_v2
 
     token = None
@@ -143,9 +149,16 @@ def test_actual_minio_listing_pages_preserve_key_bytes_and_continuation(minio_tl
         params = {"Bucket": "loom-bundles", "Prefix": prefix, "MaxKeys": 2, "EncodingType": "url"}
         if token is not None:
             params["ContinuationToken"] = token
-        # The SDK supplies the independent signed request in this parser test.
-        # This is not yet the asynchronous production listing transport.
-        url = minio_tls[3].generate_presigned_url("list_objects_v2", Params=params, ExpiresIn=60)
+        # Retain an independent SDK request path alongside the production signer.
+        # Neither path establishes the asynchronous production transport yet.
+        if signer == "sdk":
+            url = minio_tls[3].generate_presigned_url("list_objects_v2", Params=params, ExpiresIn=60)
+        else:
+            url = presign_bundle_list(
+                public_origin=minio_tls[0], bucket="loom-bundles", prefix=prefix,
+                maximum_keys=2, continuation_token=token, region="us-east-1", credentials=minio_tls[1],
+                expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60),
+            )
         response = minio_tls[2].get(url)
         assert response.status_code == 200
         page = parse_list_objects_v2(
@@ -164,3 +177,20 @@ def test_actual_minio_listing_pages_preserve_key_bytes_and_continuation(minio_tl
         response = minio_tls[2].get(_signed(minio_tls, obj.key))
         assert response.status_code == 200
         assert response.content == PAYLOAD
+
+
+@pytest.mark.parametrize("parameter,value", [
+    ("prefix", "revision space+/"), ("max-keys", "1"), ("encoding-type", ""),
+    ("continuation-token", "changed-token"), ("list-type", "1"),
+])
+def test_actual_minio_rejects_changed_signed_listing_parameters(minio_tls, parameter, value):
+    url = presign_bundle_list(
+        public_origin=minio_tls[0], bucket="loom-bundles", prefix="revision/",
+        maximum_keys=2, region="us-east-1", credentials=minio_tls[1],
+        expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60),
+    )
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query))
+    query[parameter] = value
+    changed = urlunsplit(parsed._replace(query=urlencode(query)))
+    assert minio_tls[2].get(changed).status_code == 403
