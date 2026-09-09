@@ -7,7 +7,7 @@ from loom.personal_dev_storage_workload_write import write_storage_workload
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 
-@pytest.mark.parametrize("payload", ('[]', 'null', 'false', '0', '"bad"', '{', '{"metadata":{}}'))
+@pytest.mark.parametrize("payload", ('{}', '[]', 'null', 'false', '0', '"bad"', '{', '{"metadata":{}}'))
 async def test_malformed_workload_readback_rejects_before_mutation(payload):
     identity = _bound_claim().operation.storage_binding.identity
 
