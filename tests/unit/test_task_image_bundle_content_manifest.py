@@ -173,3 +173,69 @@ def test_legacy_order_and_mode_sidecar_encoding_have_independent_unicode_vectors
     assert manifest.bundle_file_metadata_sha256 == bundle_file_metadata_sha256(tmp_path).removeprefix("sha256:")
     assert b"\\ud83d\\ude00" in manifest.mode_metadata_bytes
     assert "😀".encode() in manifest.canonical_bytes
+
+
+def test_manifest_and_legacy_sidecar_have_separate_byte_budgets(tmp_path, monkeypatch):
+    from loom import task_image_bundle_manifest as module
+
+    (tmp_path / "a").write_bytes(b"one")
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "MAX_MODE_METADATA_BYTES", 1)
+        with pytest.raises(ValueError):
+            module.capture_task_image_bundle_manifest(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "MAX_CONTENT_MANIFEST_BYTES", 1)
+        with pytest.raises(ValueError):
+            module.capture_task_image_bundle_manifest(tmp_path)
+
+
+def test_content_manifest_counts_pending_directory_entries_globally(tmp_path, monkeypatch):
+    import os
+
+    from loom import task_image_bundle_manifest as module
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "z").write_bytes(b"later sibling")
+    (tmp_path / "a" / "child").write_bytes(b"nested")
+    monkeypatch.setattr(module, "_MAX_TREE_ENTRIES", 2)
+
+    def unexpected_read(*args):
+        pytest.fail("entry enumeration exceeded quota before opening file content")
+
+    monkeypatch.setattr(os, "read", unexpected_read)
+    with pytest.raises(ValueError):
+        module.capture_task_image_bundle_manifest(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["parent_symlink", "file_symlink", "hardlink", "fifo", "mode", "same_size_bytes"])
+def test_verified_upload_reader_refuses_replaced_descriptors(tmp_path, kind):
+    import os
+
+    from loom.task_image_bundle_manifest import (
+        capture_task_image_bundle_manifest,
+        read_verified_task_image_bundle_file,
+    )
+
+    root = tmp_path / "tree"
+    (root / "dir").mkdir(parents=True)
+    source = root / "dir" / "data"
+    source.write_bytes(b"one")
+    manifest = capture_task_image_bundle_manifest(root)
+    if kind == "parent_symlink":
+        (root / "dir").rename(root / "old")
+        (root / "dir").symlink_to(root / "old", target_is_directory=True)
+    elif kind in {"file_symlink", "hardlink", "fifo"}:
+        original = root / "original"
+        source.rename(original)
+        if kind == "file_symlink":
+            source.symlink_to(original)
+        elif kind == "hardlink":
+            os.link(original, source)
+        else:
+            os.mkfifo(source)
+    elif kind == "mode":
+        source.chmod(0o755)
+    else:
+        source.write_bytes(b"two")
+    with pytest.raises(ValueError):
+        read_verified_task_image_bundle_file(root, manifest.files[0])
