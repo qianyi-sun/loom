@@ -92,3 +92,53 @@ async def test_sql_update_requires_exact_fenced_retired_reporter(capacity_sessio
         async with capacity_session.begin_nested():
             capacity_session.add(row)
             await capacity_session.flush()
+
+
+@pytest.mark.parametrize("target", ("candidate", "deployment", "profile", "subject", "account"))
+async def test_sql_lifecycle_rejects_retained_json_numeric_aliases(capacity_session, target):
+    from copy import deepcopy
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from loom_capacity_manager.models import (
+        CapacityAccountPolicy,
+        CapacityCandidate,
+        CapacityDeploymentGeneration,
+        CapacitySubject,
+        CapacityWorkerProfile,
+    )
+
+    row, _request, _result = await _staged_transition(capacity_session, "update")
+    if target == "account":
+        retained = (await capacity_session.scalars(select(CapacityAccountPolicy).where(
+            CapacityAccountPolicy.account_id == row.result_payload["member"]["configuration"]["account_id"],
+        ))).one()
+        field = "payload"
+    else:
+        model, field = {
+            "candidate": (CapacityCandidate, "artifact_payload"),
+            "deployment": (CapacityDeploymentGeneration, "required_profiles"),
+            "profile": (CapacityWorkerProfile, "shape_catalog"),
+            "subject": (CapacitySubject, "payload"),
+        }[target]
+        query = select(model).where(model.subject_id == row.subject_id)
+        if target in {"deployment", "profile"}:
+            query = query.where(model.deployment_generation == 2)
+        retained = (await capacity_session.scalars(query)).first()
+    payload = deepcopy(getattr(retained, field))
+    if target == "candidate":
+        payload["runtime_candidate"]["schema_version"] = 2.0
+    elif target == "deployment":
+        payload[0]["worker_shapes"][0]["concurrency_slots"] = 1.0
+    elif target == "profile":
+        payload[0]["concurrency_slots"] = 1.0
+    else:
+        payload["max_slots"] = float(payload["max_slots"])
+    setattr(retained, field, payload)
+    flag_modified(retained, field)
+    await capacity_session.flush()
+    with pytest.raises(DBAPIError) as error:
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()
+    assert error.value.orig.sqlstate == "23514"
