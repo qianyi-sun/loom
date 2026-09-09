@@ -244,6 +244,34 @@ precise authority-issued receipt timestamp, including fractional seconds, when
 forming its deterministic UTC observation; truncation would backdate the request
 before receipt issuance and correctly fail authority admission.
 
+### Bundle signing deadline
+
+Bundle issuance keeps one absolute deadline: the earlier of frozen plan
+authorization expiry and request-start plus configured URL lifetime, rounded
+down to a UTC second for SigV4. Listing or signing delays never move it forward.
+The backend receives that deadline, not a duration calculated before I/O. It
+must calculate the signature's duration from the actual signing timestamp and
+use credentials valid through the requested deadline.
+
+The provider checks a live clock before/after listing, before/after each signing
+call, and after constructing/serializing the complete capability. Clock
+regression or exhausted authorization fails closed. A returned URL's signing
+timestamp cannot be later than the post-signing observation, and its encoded
+expiry must equal the common deadline. Requiring the same expiry for every
+object avoids advertising a capability lifetime beyond an earlier-expiring URL.
+This permits valid signing after request start without extending authorization.
+
+Deterministic tests cover elapsed listing/signing time, expiry during I/O and
+response construction, backward/future clocks, exact deadline matching, and
+subsecond rounding. The composed fixture retains an actual advancing signing
+clock. These are provider-contract checks: the branch still has no production
+object-store backend or entrypoint wiring for bundle capabilities. A production
+adapter must implement the timestamp/deadline contract and bounded network I/O;
+test backends and post-call clock checks are not that evidence. The provider
+continues to fail closed when none is configured. Encrypted replay bypasses the
+provider, and secret persistence/transaction commit follow its final clock check;
+this patch does not establish response-time freshness across those boundaries.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
