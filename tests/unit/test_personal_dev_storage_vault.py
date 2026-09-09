@@ -56,9 +56,11 @@ class _Cluster:
             else:
                 if "create" in argv and document["metadata"]["name"] in self.secrets:
                     raise DevInstanceRuntimeError("secret already exists")
-                self.secrets[document["metadata"]["name"]] = {
-                    key: value.encode() for key, value in document["stringData"].items()
-                }
+                self.secrets[document["metadata"]["name"]] = (
+                    {key: value.encode() for key, value in document["stringData"].items()}
+                    if "stringData" in document else
+                    {key: base64.b64decode(value) for key, value in document["data"].items()}
+                )
         return CommandResult("{}", "")
 
 
