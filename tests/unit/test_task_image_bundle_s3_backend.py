@@ -189,3 +189,46 @@ async def test_forward_clock_during_signing_shortens_network_deadline(monkeypatc
     backend, _ = _backend(monkeypatch, reader=reader, clock=clock)
     await _list(backend)
     assert 0 < remaining[0] <= 1.0
+
+
+async def test_zero_byte_objects_are_valid_but_empty_inventory_is_not(monkeypatch):
+    reader = _Reader()
+    reader.pages = [lambda q: _page(q, size=0), lambda q: _page(q, keys=())]
+    backend, _ = _backend(monkeypatch, reader=reader)
+    assert len(await _list(backend, maximum_bytes=0)) == 1
+    with pytest.raises(RuntimeError):
+        await _list(backend)
+
+
+async def test_backend_close_disables_listing_and_signing(monkeypatch):
+    backend, reader = _backend(monkeypatch)
+    await backend.aclose()
+    with pytest.raises(RuntimeError):
+        await _list(backend)
+    with pytest.raises(RuntimeError):
+        backend.presign_get(bucket="loom-bundles", key="revision/a", expires_at=NOW + timedelta(seconds=60))
+    assert reader.closed and not reader.requests
+
+
+async def test_backend_redacts_unexpected_storage_failure(monkeypatch):
+    reader = _Reader()
+
+    def fail():
+        raise RuntimeError("private-storage-response")
+
+    reader.on_fetch = fail
+    backend, _ = _backend(monkeypatch, reader=reader)
+    with pytest.raises(RuntimeError) as error:
+        await _list(backend)
+    assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("limits", [
+    {"maximum_pages": True}, {"maximum_pages": 0}, {"maximum_pages": 65},
+    {"page_size": 0}, {"page_size": 1001}, {"maximum_listing_bytes": 33554433},
+    {"total_timeout_seconds": float("nan")}, {"total_timeout_seconds": float("inf")},
+    {"total_timeout_seconds": 121.0},
+])
+def test_inventory_configuration_is_finite_typed_and_bounded(limits):
+    with pytest.raises(RuntimeError):
+        _module().S3InventoryLimits(**limits)

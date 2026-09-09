@@ -228,3 +228,45 @@ async def test_actual_minio_async_transport_lists_exact_signed_pages(minio_tls, 
     assert len(objects) == len(expected_keys)
     assert {obj.key for obj in objects} == set(expected_keys)
     assert {obj.size_bytes for obj in objects} == {len(PAYLOAD)}
+
+
+@pytest.mark.parametrize("prefix,expected_keys", [("revision/", KEYS), ("revision space+/", (FORM_PREFIX_KEY,))])
+async def test_actual_minio_backend_owns_inventory_and_exact_get_signing(minio_tls, prefix, expected_keys):
+    from loom_task_image_authority.bundle_s3_backend import (
+        MinioTaskImageBundleBackend,
+        S3InventoryLimits,
+    )
+
+    deadline = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)
+    async with MinioTaskImageBundleBackend(
+        origin=minio_tls[0], bucket="loom-bundles", region="us-east-1",
+        credentials=minio_tls[1], ca_file=minio_tls[4], limits=S3InventoryLimits(page_size=2),
+    ) as backend:
+        objects = await backend.list_objects(
+            bucket="loom-bundles", prefix=prefix, maximum_objects=len(expected_keys),
+            maximum_bytes=len(expected_keys) * len(PAYLOAD), expires_at=deadline,
+        )
+        assert {obj.key for obj in objects} == set(expected_keys)
+        assert len(objects) == len(expected_keys)
+        for obj in objects:
+            url = backend.presign_get(bucket="loom-bundles", key=obj.key, expires_at=deadline)
+            response = minio_tls[2].get(url)
+            assert response.status_code == 200
+            assert response.content == PAYLOAD
+
+
+async def test_actual_minio_backend_rejects_incomplete_or_excessive_inventory(minio_tls):
+    from loom_task_image_authority.bundle_s3_backend import (
+        MinioTaskImageBundleBackend,
+        S3InventoryLimits,
+    )
+
+    async with MinioTaskImageBundleBackend(
+        origin=minio_tls[0], bucket="loom-bundles", region="us-east-1",
+        credentials=minio_tls[1], ca_file=minio_tls[4], limits=S3InventoryLimits(page_size=2),
+    ) as backend:
+        for changes in ({"maximum_objects": 3}, {"maximum_bytes": len(PAYLOAD)}, {"prefix": "missing/"}):
+            options = dict(bucket="loom-bundles", prefix="revision/", maximum_objects=4, maximum_bytes=4 * len(PAYLOAD), expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60))
+            options.update(changes)
+            with pytest.raises(RuntimeError):
+                await backend.list_objects(**options)
