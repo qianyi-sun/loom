@@ -257,6 +257,29 @@ async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secre
     await KubectlCandidateGenerationProvisioner(managed)._apply_generation_workloads(identity, config, workloads)
     await KubectlCandidateGenerationProvisioner(managed)._apply_generation_workloads(identity, config, workloads)
 
+    retry = replace(config, lifecycle_binding=replace(config.lifecycle_binding, attempt_id=uuid4(), attempt_sequence=1))
+    retry_jobs = tuple(document for document in dev_instance_manifest_documents(identity, retry) if document["kind"] == "Job")
+    await KubectlCandidateGenerationProvisioner(managed)._apply_generation_workloads(identity, retry, retry_jobs)
+    reservation_name = "loom-workload-fence-" + retry_jobs[0]["metadata"]["name"]
+    reservation = await managed.read_resource_json(namespace=identity.namespace, kind="configmap", name=reservation_name)
+    assert reservation["data"]["sequence"] == "1"
+    for field, value in (("sequence", "0"), ("attempt", str(uuid4())), ("intent", "{}"), ("extra", "not-allowed")):
+        changed = deepcopy(reservation)
+        changed["data"][field] = value
+        with pytest.raises(DevInstanceRuntimeError):
+            await managed.runner.run(managed._argv("replace", "--dry-run=server", "-f", "-"), stdin=json.dumps(changed))
+    changed = deepcopy(reservation)
+    changed["metadata"]["ownerReferences"][0]["controller"] = True
+    with pytest.raises(DevInstanceRuntimeError):
+        await managed.runner.run(managed._argv("replace", "--dry-run=server", "-f", "-"), stdin=json.dumps(changed))
+    delete = kubectl._argv("delete", "configmap", reservation_name, "-n", identity.namespace, "--dry-run=server")
+    # Establish that the test's exact DELETE request is valid, then demonstrate
+    # denial for the management principal with its real DELETE RBAC permission.
+    await kubectl.runner.run(delete)
+    with pytest.raises(DevInstanceRuntimeError):
+        await managed.runner.run(delete)
+    assert (await managed.read_resource_json(namespace=identity.namespace, kind="configmap", name=reservation_name))["metadata"]["uid"] == reservation["metadata"]["uid"]
+
     role = next(document for document in dev_instance_manifest_documents(identity, config) if document["kind"] == "Role")
     for widened in (
         {**role["rules"][0], "resourceNames": ["unrelated-secret"]},
