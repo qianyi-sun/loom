@@ -920,32 +920,47 @@ def _regional_documents(
             kind == "ServiceAccount" and name != "loom-execution-attempt"
         ):
             role = "actuator" if "actuator" in name else "collector"
-            # Give each primary process its own selector, configuration and SA.
-            doc = _replace_tree(
-                doc,
-                {
-                    "loom-execution-actuator": tid + "-actuator",
-                    "loom-execution-capacity-collector": tid + "-collector",
-                },
-            )
+            # Rename Kubernetes identities, never arbitrary strings such as
+            # published image repositories, commands or configuration values.
+            regional_name = tid + "-" + role
+            doc["metadata"]["name"] = regional_name
             doc["metadata"]["namespace"] = ns
+            if "app.kubernetes.io/name" in doc["metadata"].get("labels", {}):
+                doc["metadata"]["labels"]["app.kubernetes.io/name"] = regional_name
             pod = None
             if kind == "Deployment":
-                pod = doc["spec"]["template"]["spec"]
-                # The central actuator retains the existing database identity.
-                doc = _replace_tree(doc, {tid + "-actuator-db": "loom-execution-actuator-db"})
-                pod = doc["spec"]["template"]["spec"]
+                template = doc["spec"]["template"]
+                pod = template["spec"]
+                doc["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"] = regional_name
+                anti_affinity = pod.get("affinity", {}).get("podAntiAffinity", {})
+                for preference in anti_affinity.get(
+                    "preferredDuringSchedulingIgnoredDuringExecution", []
+                ):
+                    labels = (
+                        preference["podAffinityTerm"]
+                        .get("labelSelector", {})
+                        .get("matchLabels", {})
+                    )
+                    if labels.get("app.kubernetes.io/name") == name:
+                        labels["app.kubernetes.io/name"] = regional_name
             elif kind == "CronJob":
-                pod = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
-                # Reuse the existing CP observe token, with target-specific cloud viewer credentials.
+                template = doc["spec"]["jobTemplate"]["spec"]["template"]
+                pod = template["spec"]
+                # Reuse the existing CP token and give only the native cloud
+                # credential reference the regional Secret name.
                 for volume in pod["volumes"]:
                     for source in volume.get("projected", {}).get("sources", []):
                         secret = source.get("secret", {})
-                        if secret.get("name") == tid + "-collector-control-plane":
-                            secret["name"] = "loom-execution-capacity-collector-control-plane"
-                        elif secret.get("name") == tid + "-collector-nebius":
+                        if secret.get("name") == "loom-execution-capacity-collector-nebius":
                             secret["name"] = tid + "-collector-kubernetes"
             if pod is not None:
+                template["metadata"]["labels"]["app.kubernetes.io/name"] = regional_name
+                pod["serviceAccountName"] = regional_name
+                for container in pod.get("initContainers", []) + pod["containers"]:
+                    for source in container.get("envFrom", []):
+                        ref = source.get("configMapRef", {})
+                        if ref.get("name") == "loom-execution-capacity-collector":
+                            ref["name"] = tid + "-collector"
                 _mount_secret(
                     pod,
                     "remote-kubernetes",

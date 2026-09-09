@@ -625,6 +625,63 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
     assert "pod_identity_audience" not in targets[0]
 
 
+@pytest.mark.parametrize(
+    "target_id", ["nebius-eu-west1-integration", "nebius-loom-execution-actuator-west"]
+)
+def test_regional_object_renaming_preserves_published_images_and_settings(
+    regional_inputs: tuple, target_id: str
+) -> None:
+    config, candidate, profile = regional_inputs
+    target = config["regional_execution_targets"][0]
+    target["target_id"] = target_id
+    image = "cr.eu-north1.nebius.cloud/test/loom-execution-actuator@sha256:" + "d" * 64
+    candidate["images"]["execution_actuator"]["image_ref"] = image
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    documents = files["60-execution.yaml"]
+    for kind, role in (("Deployment", "actuator"), ("CronJob", "collector")):
+        doc = next(
+            row
+            for row in documents
+            if row["kind"] == kind and row["metadata"]["name"] == target_id + "-" + role
+        )
+        spec = doc["spec"] if kind == "Deployment" else doc["spec"]["jobTemplate"]["spec"]
+        template = spec["template"]
+        pod = template["spec"]
+        assert pod["serviceAccountName"] == target_id + "-" + role
+        assert template["metadata"]["labels"]["app.kubernetes.io/name"] == target_id + "-" + role
+        if kind == "Deployment":
+            affinity = pod["affinity"]["podAntiAffinity"][
+                "preferredDuringSchedulingIgnoredDuringExecution"
+            ]
+            assert (
+                affinity[0]["podAffinityTerm"]["labelSelector"]["matchLabels"][
+                    "app.kubernetes.io/name"
+                ]
+                == target_id + "-actuator"
+            )
+            assert all(
+                template["metadata"]["labels"][key] == value
+                for key, value in doc["spec"]["selector"]["matchLabels"].items()
+            )
+        for container in pod.get("initContainers", []) + pod["containers"]:
+            assert container["image"] == image
+        if role == "actuator":
+            env = {row["name"]: row.get("value") for row in pod["containers"][0]["env"]}
+            assert env["LOOM_EXECUTION_ACTUATOR_TARGET_ID"] == target_id
+        else:
+            assert (
+                pod["containers"][0]["envFrom"][0]["configMapRef"]["name"]
+                == target_id + "-collector"
+            )
+            settings = next(
+                row
+                for row in documents
+                if row["kind"] == "ConfigMap"
+                and row["metadata"]["name"] == target_id + "-collector"
+            )
+            assert settings["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID"] == target_id
+
+
 def test_regional_public_routes_preserve_exact_model_and_broker_boundaries(
     regional_inputs: tuple,
 ) -> None:
