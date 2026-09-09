@@ -99,6 +99,45 @@ def upgrade() -> None:
           FOR EACH STATEMENT EXECUTE FUNCTION public.task_image_preserve_retirement();
     """)
     op.execute("""
+        CREATE FUNCTION public.task_image_registry_reject_retired_attempt() RETURNS trigger
+        LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+        SET search_path = pg_catalog SET row_security = off AS $$
+        BEGIN
+          -- A locking read cannot refresh a RR/SERIALIZABLE transaction snapshot
+          -- when retirement changes the marker rather than the immutable attempt.
+          IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+            RAISE EXCEPTION 'task-image credential INSERT requires READ COMMITTED'
+              USING ERRCODE = '23514',
+                CONSTRAINT = 'task_image_registry_credentials_read_committed';
+          END IF;
+          -- No earlier materialization/grant/session locks here. This is the same
+          -- lock as the existing attempt FK, conflicting with retirement's UPDATE.
+          PERFORM 1 FROM public.task_image_materialization_attempts
+            WHERE id = NEW.materialization_attempt_id FOR KEY SHARE;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'task-image credential attempt is unavailable'
+              USING ERRCODE = '23503',
+                CONSTRAINT = 'task_image_registry_credentials_attempt_fkey';
+          END IF;
+          -- Separate SPI statement is essential: VOLATILE + READ COMMITTED sees
+          -- a retirement committed while the preceding lock acquisition waited.
+          IF EXISTS (
+            SELECT 1 FROM public.task_image_attempt_retention
+            WHERE attempt_id = NEW.materialization_attempt_id AND retired_at IS NOT NULL
+          ) THEN
+            RAISE EXCEPTION 'task-image credential attempt is permanently retired'
+              USING ERRCODE = '23514',
+                CONSTRAINT = 'task_image_registry_credentials_not_retired';
+          END IF;
+          RETURN NEW;
+        END $$;
+        REVOKE ALL ON FUNCTION public.task_image_registry_reject_retired_attempt() FROM PUBLIC;
+        -- Immediate AFTER ROW checks final identities after BEFORE transformations.
+        CREATE TRIGGER task_image_registry_credentials_not_retired
+          AFTER INSERT ON public.task_image_registry_credentials FOR EACH ROW
+          EXECUTE FUNCTION public.task_image_registry_reject_retired_attempt();
+    """)
+    op.execute("""
         CREATE FUNCTION task_image_registry_preserve_audit() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
         BEGIN
@@ -414,6 +453,9 @@ def downgrade() -> None:
         END $$;
     """)
     op.execute("""
+        DROP TRIGGER task_image_registry_credentials_not_retired
+          ON public.task_image_registry_credentials;
+        DROP FUNCTION public.task_image_registry_reject_retired_attempt();
         DROP TABLE public.task_image_attempt_retention;
         DROP FUNCTION public.task_image_preserve_retirement();
         DROP TRIGGER trials_terminal_state_monotonic ON public.trials;

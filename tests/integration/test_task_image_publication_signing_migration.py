@@ -38,6 +38,10 @@ def test_0135_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
     engine = create_engine(isolated_migration_postgres_url)
     try:
         assert not set(TABLES) & set(inspect(engine).get_table_names())
+        with engine.connect() as connection:
+            assert connection.scalar(text(
+                "SELECT to_regprocedure('public.task_image_registry_reject_retired_attempt()')"
+            )) is None
         command.upgrade(config, "head")
         assert set(TABLES) <= set(inspect(engine).get_table_names()), (
             "publication records are missing"
@@ -84,7 +88,21 @@ def test_0135_upgrade_downgrade_and_orm_parity(isolated_migration_postgres_url):
         assert "ready_publication_operation_id" not in {
             item["name"] for item in inspect(engine).get_columns("task_image_materializations")
         }
+        with engine.connect() as connection:
+            assert connection.scalar(text(
+                "SELECT to_regprocedure('public.task_image_registry_reject_retired_attempt()')"
+            )) is None
         command.upgrade(config, "0135")
+        with engine.connect() as connection:
+            assert connection.execute(text("""
+                SELECT t.tgtype, t.tgenabled, t.tgdeferrable, p.provolatile,
+                       p.prosecdef, p.proconfig
+                FROM pg_catalog.pg_trigger AS t
+                JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+                WHERE t.tgrelid = 'public.task_image_registry_credentials'::regclass
+                  AND t.tgname = 'task_image_registry_credentials_not_retired'
+                  AND t.tgfoid = 'public.task_image_registry_reject_retired_attempt()'::regprocedure
+            """)).one() == (5, "O", False, "v", True, ["search_path=pg_catalog", "row_security=off"])
     finally:
         engine.dispose()
 

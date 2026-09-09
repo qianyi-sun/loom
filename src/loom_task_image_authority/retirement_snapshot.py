@@ -57,11 +57,11 @@ class PreparedAttemptRetirementInventory:
     canonical_plan: bytes
 
 
-async def _require_credential_immutability(session: AsyncSession) -> None:
+async def _require_credential_guards(session: AsyncSession) -> None:
     # Schema administration is trusted throughout both phases. Checking active
     # guards at each endpoint cannot detect an administrator bypassing them in
     # between; a migration-version string alone does not even establish this much.
-    enabled = await session.scalar(text("""
+    immutable, ingress = (await session.execute(text("""
         SELECT pg_catalog.current_setting('session_replication_role') = 'origin' AND EXISTS (
           SELECT 1 FROM pg_catalog.pg_trigger
           WHERE tgrelid = pg_catalog.to_regclass('public.task_image_registry_credentials')
@@ -69,10 +69,24 @@ async def _require_credential_immutability(session: AsyncSession) -> None:
             AND tgfoid = pg_catalog.to_regprocedure('public.task_image_registry_preserve_audit()')
             AND tgenabled IN ('O', 'A') AND tgtype = 58 AND NOT tgisinternal
             AND tgqual IS NULL AND tgattr = ''::pg_catalog.int2vector AND tgnargs = 0
+        ), EXISTS (
+          SELECT 1 FROM pg_catalog.pg_trigger AS t
+          JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+          WHERE t.tgrelid = pg_catalog.to_regclass('public.task_image_registry_credentials')
+            AND t.tgname = 'task_image_registry_credentials_not_retired'
+            AND t.tgfoid = pg_catalog.to_regprocedure('public.task_image_registry_reject_retired_attempt()')
+            AND t.tgenabled IN ('O', 'A') AND t.tgtype = 5 AND NOT t.tgisinternal
+            AND t.tgqual IS NULL AND t.tgattr = ''::pg_catalog.int2vector AND t.tgnargs = 0
+            AND NOT t.tgdeferrable AND NOT t.tginitdeferred
+            AND p.provolatile = 'v' AND p.prosecdef
+            AND p.proconfig @> ARRAY['search_path=pg_catalog', 'row_security=off']::pg_catalog.text[]
+            AND pg_catalog.cardinality(p.proconfig) = 2
         )
-    """))
-    if not enabled:
+    """))).one()
+    if not immutable:
         raise RetirementInventoryUnavailableError("credential immutability guard unavailable")
+    if not ingress:
+        raise RetirementInventoryUnavailableError("credential retirement guard unavailable")
 
 
 def _prepare_detached(
@@ -123,7 +137,7 @@ async def prepare_attempt_retirement_inventory(
             await session.execute(text("SET TRANSACTION READ ONLY"))
             await session.execute(text("SET LOCAL statement_timeout = '5s'"))
             await session.execute(text("SET LOCAL idle_in_transaction_session_timeout = '5s'"))
-            await _require_credential_immutability(session)
+            await _require_credential_guards(session)
             attempt = await session.scalar(
                 select(TaskImageMaterializationAttempt)
                 .options(load_only(
@@ -170,8 +184,9 @@ async def revalidate_retirement_inventory(
 
     Immutable prepared rows S cannot leave committed set F. After the attempt
     fence stops insertion, S subset F and equal cardinality imply equality.
-    Raw INSERT after retirement is a separate ingress-boundary requirement; FK
-    locking alone cannot permanently deny an insert waiting behind this fence.
+    An active INSERT trigger now permanently rejects raw credential insertion
+    after retirement. This does not deny registry requests using existing tokens
+    or establish writer quiescence; FK locking alone supplies neither guarantee.
     """
     if session.new or session.dirty or session.deleted:
         raise RetirementInventoryUnavailableError("retirement recheck contains unflushed changes")
@@ -181,7 +196,7 @@ async def revalidate_retirement_inventory(
         or len(prepared.canonical_plan) > MAX_TASK_IMAGE_BUILD_PLAN_BYTES
     ):
         raise RetirementInventoryUnavailableError("prepared retirement inventory exceeds bounds")
-    await _require_credential_immutability(session)
+    await _require_credential_guards(session)
     identity = (
         select(1).select_from(TaskImageMaterialization)
         .join(TaskImageMaterializationAttempt,
