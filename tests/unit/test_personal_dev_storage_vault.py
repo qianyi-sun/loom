@@ -49,9 +49,13 @@ class _Cluster:
         self.writes.append((argv, stdin))
         for document in yaml.safe_load_all(stdin or ""):
             if document["kind"] == "Namespace":
+                if "create" in argv and self.namespace is not None:
+                    raise DevInstanceRuntimeError("namespace already exists")
                 self.namespace = document
                 self.namespace["metadata"]["uid"] = "fixture-namespace-uid"
             else:
+                if "create" in argv and document["metadata"]["name"] in self.secrets:
+                    raise DevInstanceRuntimeError("secret already exists")
                 self.secrets[document["metadata"]["name"]] = {
                     key: value.encode() for key, value in document["stringData"].items()
                 }
@@ -192,3 +196,46 @@ async def test_namespace_creation_race_never_attaches_binding_to_concurrent_name
         await _vault(cluster).store(identity, _PASSWORD)
     assert cluster.secrets == {}
     assert "annotations" not in cluster.namespace["metadata"]
+
+
+@pytest.mark.parametrize("method", ("database_password", "admin_token", "object_credentials"))
+async def test_cached_legacy_identity_is_rejected_after_namespace_becomes_bound(method):
+    cluster = _Cluster()
+    legacy = derive_identity("alice")
+    old_vault = _vault(cluster)
+    await old_vault.store(legacy, _PASSWORD)
+    await getattr(old_vault, method)(legacy)
+    cluster.namespace = None
+    cluster.secrets.clear()
+    await _vault(cluster).store(_bound_claim().operation.storage_binding.identity, "c" * 32)
+    with pytest.raises(DevInstanceRuntimeError):
+        await getattr(old_vault, method)(legacy)
+
+
+@pytest.mark.parametrize("fail_after", ("loom-secrets", "loom-admin-secret", PROTECTED_WORKER_RUNTIME_SECRET_NAME))
+async def test_partial_bound_secret_write_recovers_without_rotating_persisted_material(fail_after):
+    class InterruptedCluster(_Cluster):
+        interrupted = False
+
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            if stdin and not self.interrupted:
+                documents = list(yaml.safe_load_all(stdin))
+                for index, document in enumerate(documents):
+                    if document["metadata"]["name"] == fail_after:
+                        self.interrupted = True
+                        await super().run(argv, stdin=yaml.safe_dump_all(documents[:index + 1]),
+                                          timeout_seconds=timeout_seconds)
+                        raise DevInstanceRuntimeError("transport lost after server persistence")
+            return await super().run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+    cluster = InterruptedCluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    with pytest.raises(DevInstanceRuntimeError):
+        await _vault(cluster).store(identity, _PASSWORD)
+    persisted = {name: dict(data) for name, data in cluster.secrets.items()}
+    retry = _vault(cluster)
+    assert await retry.database_password(identity) == _PASSWORD
+    await retry.store(identity, _PASSWORD)
+    assert all(cluster.secrets[name] == data for name, data in persisted.items())
+    assert await retry.admin_token(identity)
+    assert await retry.object_credentials(identity)
