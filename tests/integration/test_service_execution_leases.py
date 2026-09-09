@@ -1532,7 +1532,9 @@ async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    now = datetime.now(UTC)
+    # Billing intervals in this scenario must stay inside one UTC day, even
+    # when the suite itself happens to run immediately before midnight.
+    now = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
     pod_started = now + timedelta(seconds=10)
     pod_stopped = now + timedelta(seconds=110)
     try:
