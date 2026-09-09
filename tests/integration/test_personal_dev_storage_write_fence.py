@@ -183,3 +183,124 @@ async def test_secret_writer_rejects_older_operation_epoch(
         await write_storage_secret(kubectl, identity,
                                    {**document, "stringData": {"password": "older"}}, operation_epoch=1)
     assert await kubectl.read_secret(identity.namespace, "storage-write-probe") == {"password": b"newer"}
+
+
+async def test_capacity_seed_cas_loser_stops_before_database_mutation(
+    disposable_storage_kubectl,  # noqa: F811
+):
+    kubectl = disposable_storage_kubectl
+    claim = _bound_claim()
+    identity = claim.operation.storage_binding.identity
+    await KubectlSecretVault(
+        kubectl, "postgresql://admin:fixture@database.example/postgres", protected_worker_runtime=True,
+    ).store(identity, "b" * 32)
+    installer = KubectlPersonalDevCapacityInstaller(kubectl=kubectl, database=None, config=None)
+    first = await installer._credentials(claim, identity)
+    await installer._persist_credentials(claim, identity, first)
+    paused, resume = asyncio.Event(), asyncio.Event()
+    database_calls = []
+
+    class Database:
+        async def converge(self, **kwargs):
+            database_calls.append(kwargs)
+            raise AssertionError("losing credential writer reached SQL")
+
+    class PauseReplace:
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            if "replace" in argv:
+                paused.set()
+                await resume.wait()
+            return await kubectl.runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+    loser = KubectlPersonalDevCapacityInstaller(
+        kubectl=KubectlClient("kubectl", runner=PauseReplace()), database=Database(), config=None,
+    )
+    task = asyncio.create_task(loser.converge(claim))
+    try:
+        await asyncio.wait_for(paused.wait(), timeout=15)
+        winner = replace(first, reporter_token="w" * 48, reporter_incarnation=uuid4())
+        await installer._persist_credentials(claim, identity, winner)
+        resume.set()
+        with pytest.raises(DevInstanceRuntimeError):
+            await asyncio.wait_for(task, timeout=15)
+        assert database_calls == []
+        assert (await installer._credentials(claim, identity)).reporter_token == winner.reporter_token
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_capacity_seed_lost_final_reply_recovers_persisted_credentials(
+    disposable_storage_kubectl,  # noqa: F811
+):
+    kubectl = disposable_storage_kubectl
+    claim = _bound_claim()
+    identity = claim.operation.storage_binding.identity
+    await KubectlSecretVault(
+        kubectl, "postgresql://admin:fixture@database.example/postgres", protected_worker_runtime=True,
+    ).store(identity, "b" * 32)
+
+    class LostReply:
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            result = await kubectl.runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+            if "replace" in argv:
+                raise DevInstanceRuntimeError("lost credential write reply")
+            return result
+
+    writer = KubectlPersonalDevCapacityInstaller(
+        kubectl=KubectlClient("kubectl", runner=LostReply()), database=None, config=None,
+    )
+    credentials = await writer._credentials(claim, identity)
+    with pytest.raises(DevInstanceRuntimeError, match="lost"):
+        await writer._persist_credentials(claim, identity, credentials)
+    retry = KubectlPersonalDevCapacityInstaller(kubectl=kubectl, database=None, config=None)
+    retained = await retry._credentials(claim, identity)
+    assert retained.reporter_token == credentials.reporter_token
+    assert retained.agent_password == credentials.agent_password
+    assert retained.observer_password == credentials.observer_password
+    await retry._persist_credentials(claim, identity, retained)
+
+
+@pytest.mark.parametrize("populated", (False, True))
+async def test_new_incarnation_recovers_only_empty_stale_seed_placeholder(
+    disposable_storage_kubectl, populated,  # noqa: F811
+):
+    kubectl = disposable_storage_kubectl
+    old = _bound_claim()
+    storage = old.operation.storage_binding.model_copy(update={"subject_incarnation": uuid4()})
+    current = replace(
+        old,
+        environment=replace(old.environment, storage_binding=storage,
+                            subject_incarnation=storage.subject_incarnation),
+        operation=replace(old.operation, storage_binding=storage,
+                          subject_incarnation=storage.subject_incarnation),
+        attempt=replace(old.attempt, subject_incarnation=storage.subject_incarnation),
+    )
+    await KubectlSecretVault(
+        kubectl, "postgresql://admin:fixture@database.example/postgres", protected_worker_runtime=True,
+    ).store(storage.identity, "b" * 32)
+    stale = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+             "metadata": {"name": "loom-capacity-agent-credentials", "namespace": storage.identity.namespace,
+                          "annotations": {**personal_dev_storage_annotations(old.operation.storage_binding.identity),
+                                          "loom.dev/storage-namespace-uid": str(uuid4()),
+                                          "loom.dev/storage-write-phase": "empty",
+                                          "loom.dev/storage-operation-epoch": str(old.operation.operation_epoch)}}}
+    if populated:
+        stale["stringData"] = {"password": "must-preserve"}
+    created = await kubectl.runner.run(kubectl._argv("create", "-f", "-", "-o", "json"), stdin=json.dumps(stale))
+    old_uid = json.loads(created.stdout)["metadata"]["uid"]
+    installer = KubectlPersonalDevCapacityInstaller(kubectl=kubectl, database=None, config=None)
+    if populated:
+        with pytest.raises(DevInstanceRuntimeError):
+            await installer._credentials(current, storage.identity)
+        assert await kubectl.read_secret(storage.identity.namespace, stale["metadata"]["name"]) == {"password": b"must-preserve"}
+    else:
+        credentials = await installer._credentials(current, storage.identity)
+        await installer._persist_credentials(current, storage.identity, credentials)
+        assert (await installer._credentials(current, storage.identity)).reporter_token == credentials.reporter_token
+    raw = await kubectl.runner.run(kubectl._argv(
+        "get", "secret", stale["metadata"]["name"], "--namespace", storage.identity.namespace, "-o", "json",
+    ))
+    assert (json.loads(raw.stdout)["metadata"]["uid"] == old_uid) is populated
