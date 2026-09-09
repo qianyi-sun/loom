@@ -100,6 +100,8 @@ def validate_environment(config: dict[str, Any]) -> None:
     ):
         if not isinstance(config.get(key), str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", config[key]):
             raise NebiusPlatformError(f"{key} is required")
+    if not config["quota_parent_id"].startswith("tenant-"):
+        raise NebiusPlatformError("quota_parent_id must identify the tenant, not the project")
     api = urlsplit(str(config["kubernetes_api_server"]))
     if (
         api.scheme != "https"

@@ -13,6 +13,10 @@ are outside this integration lane and are explicitly rejected.
 
 Copy `deploy/nebius/integration.platform.json.example` to a protected operator
 directory and fill its non-secret values from the reviewed Terraform outputs.
+Set `quota_parent_id` from the Terraform input `tenant_id`, while `project_id`
+identifies the project containing the platform resources. This deployment reads
+the tenant's allocated quota limits. Using the project ID instead returns
+usage-only entries without active allowance limits and prevents collection.
 All application images come from one published Nebius candidate. PostgreSQL 16
 Bookworm and the matching `pg_dump` image must also be mirrored to Nebius and
 pinned by digest; the PostgreSQL pod uses the image's UID/GID 999. Native CSI

@@ -77,6 +77,7 @@ def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
         "public_allocation_id",
     ):
         config[name] = "example-id"
+    config["quota_parent_id"] = "tenant-test"
     config["cluster_id"] = "mk8scluster-test"
     config["kubernetes_api_server"] = "https://api.cluster.test"
     config["execution_price"]["vcpu_microusd_per_hour"] = 1000
