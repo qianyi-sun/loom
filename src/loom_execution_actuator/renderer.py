@@ -174,6 +174,7 @@ def render_execution_job(
         "loom.openai.com/target": target_label,
     }
     annotations = {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
         "loom.openai.com/schema-version": "loom.execution-job.v1",
         "loom.openai.com/target-id": target.target_id,
         "loom.openai.com/execution-unit-key": str(lease.execution_unit_key),

@@ -8,10 +8,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget
+from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
 from loom.execution_contract import ExecutionRoutingReason, workload_requirements_from_task
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
@@ -22,6 +22,7 @@ from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     compile_service_execution_plan,
 )
+from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import reserve_trial_execution
 
 _LOG = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ SELECT t.id,
          SELECT 1 FROM execution_leases lease
           WHERE lease.trial_id = t.id
             AND lease.execution_role = 'attempt'
-            AND lease.revoked_at IS NULL
+            AND (lease.revoked_at IS NULL OR lease.cleanup_state != 'complete')
        )
  ORDER BY (q.in_flight_count::double precision / q.fair_share_weight) ASC,
           t.submit_priority DESC,
@@ -135,13 +136,48 @@ async def reserve_next_service_execution(
     """Reserve one normally queued, explicitly converted service task."""
 
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
-    row = (
-        (await session.execute(_NEXT_SERVICE_TRIAL, {"now": current_time, "pool_id": pool_id}))
-        .mappings()
-        .one_or_none()
-    )
-    if row is None:
-        return None
+    # Inspect a bounded number in the existing fair-share order. A failed
+    # savepoint releases admission/budget writes but preserves the Trial row lock.
+    for _ in range(32):
+        row = (
+            (await session.execute(_NEXT_SERVICE_TRIAL, {"now": current_time, "pool_id": pool_id}))
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        try:
+            async with session.begin_nested():
+                return await _reserve_service_candidate(
+                    session,
+                    row=row,
+                    environment=environment,
+                    pool_id=pool_id,
+                    image_admission_keyring=image_admission_keyring,
+                    maximum_deadline_seconds=maximum_deadline_seconds,
+                    current_time=current_time,
+                )
+        except ExecutionProvisioningBlockedError as exc:
+            delay = max(1, min(300, exc.retry_after_seconds))
+            await session.execute(
+                update(Trial)
+                .where(Trial.id == row["id"], Trial.state == "queued")
+                .values(next_attempt_at=current_time + timedelta(seconds=delay))
+            )
+            _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
+    return None
+
+
+async def _reserve_service_candidate(
+    session: AsyncSession,
+    *,
+    row: Any,
+    environment: str,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> ServiceExecutionLease | None:
     task = TaskConfig.model_validate(row["task_config"])
     task_revision = _task_revision(row["task_checksum"])
     binding = task.service_execution

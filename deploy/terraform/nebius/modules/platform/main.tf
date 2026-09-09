@@ -5,16 +5,17 @@ variable "integration_platform" {
   type = object({
     bucket_prefix       = string
     system_preset       = optional(string, "4vcpu-16gb")
-    execution_max_nodes = optional(number, 2)
+    execution_max_nodes = optional(number, 100)
   })
   default = null
   validation {
     condition = var.integration_platform == null ? true : (
       can(regex("^[a-z0-9][a-z0-9-]{5,45}$", var.integration_platform.bucket_prefix)) &&
       contains(["4vcpu-16gb", "8vcpu-32gb"], var.integration_platform.system_preset) &&
-      var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 8
+      var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 100 &&
+      floor(var.integration_platform.execution_max_nodes) == var.integration_platform.execution_max_nodes
     )
-    error_message = "Integration needs a unique bucket prefix and bounded CPU-only node groups."
+    error_message = "Integration needs a unique bucket prefix and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
   }
 }
 

@@ -220,9 +220,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         # Call audit lazily creates trial/event authorities and
                         # verifies existing ones; retention and deletion remain
                         # owned by lifecycle management.
-                        cursor.execute(
-                            "GRANT INSERT ON data_lifecycle_authorities TO loom_gateway"
-                        )
+                        cursor.execute("GRANT INSERT ON data_lifecycle_authorities TO loom_gateway")
                         cursor.execute(
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
@@ -237,7 +235,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         # Trial terminal projection invokes the existing quota
                         # trigger; quota settings and identity are not writable.
                         cursor.execute(
-                            "GRANT SELECT (team_id, in_flight_count), UPDATE (in_flight_count) ON team_quotas TO loom_actuator"
+                            "GRANT SELECT (team_id, in_flight_count, max_attempts_ceiling), UPDATE (in_flight_count) ON team_quotas TO loom_actuator"
                         )
                     cursor.execute(
                         sql.SQL("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {}").format(
@@ -291,6 +289,27 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                     raise ValueError(f"{name} token is revoked or bound to another authority")
 
 
+# Only this exact, previously shipped bootstrap policy is automatically widened.
+# A matching reason alone cannot authorize removing an operator's edited limit.
+_HISTORICAL_CAPACITY_POLICY = {
+    "enabled": True,
+    "max_nodes": 2,
+    "max_vcpu_millis": 32000,
+    "max_memory_mib": 131072,
+    "max_storage_mib": 131072,
+    "node_cpu_millis": 16000,
+    "node_memory_mib": 65536,
+    "node_storage_mib": 65536,
+    "max_pending_jobs": 4,
+    "max_unschedulable_jobs": 4,
+    "max_image_pull_backoff_jobs": 0,
+    "max_create_per_minute": 4,
+    "observation_max_age_seconds": 300,
+    "reason": "Dedicated bounded Nebius integration pool; validate current quota before activation.",
+}
+_HISTORICAL_ADMISSION_REASON = "Nebius integration environment capacity"
+
+
 def configure_platform(
     config: dict[str, Any],
     *,
@@ -301,10 +320,10 @@ def configure_platform(
         token = tomllib.load(handle)["admin"]["token"]
     origin = f"http://loom-control-plane.{config['namespace']}.svc:8080"
 
-    def request(method: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def request(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         req = urllib.request.Request(
             origin + path,
-            data=json.dumps(body).encode(),
+            data=json.dumps(body).encode() if body is not None else None,
             headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
             method=method,
         )
@@ -340,22 +359,73 @@ def configure_platform(
         or binding.get("enabled") is not True
     ):
         raise ValueError("execution price target binding readback mismatch")
-    observed = request(
-        "PUT",
-        "/admin/execution-capacity-policies/" + config["target_id"],
-        config["capacity_policy"],
+    capacity_status = request("GET", "/admin/execution-capacity/status")
+    existing_policy = next(
+        (
+            row.get("policy")
+            for row in capacity_status["targets"]
+            if row["target_id"] == config["target_id"]
+        ),
+        None,
     )
-    if any(observed.get(key) != value for key, value in config["capacity_policy"].items()):
-        raise ValueError("capacity policy readback mismatch")
+    desired_policy = config["capacity_policy"]
+    retained_operator_policy = bool(
+        existing_policy
+        and any(existing_policy.get(key) != value for key, value in desired_policy.items())
+        and any(
+            existing_policy.get(key) != value for key, value in _HISTORICAL_CAPACITY_POLICY.items()
+        )
+    )
+    if not retained_operator_policy:
+        observed = request(
+            "PUT",
+            "/admin/execution-capacity-policies/" + config["target_id"],
+            desired_policy,
+        )
+        if any(observed.get(key) != value for key, value in desired_policy.items()):
+            raise ValueError("capacity policy readback mismatch")
+    admission_policies = request("GET", "/admin/execution-admission/status")["policies"]
     for kind, key in (("global", "*"), ("pool", "nebius-cpu")):
-        body = {
-            "max_concurrent": config["max_concurrent"],
-            "enabled": True,
-            "reason": "Nebius integration environment capacity",
-        }
+        concurrent = config["max_concurrent"]
+        if concurrent is None:
+            existing = next(
+                (
+                    row
+                    for row in admission_policies
+                    if row["scope_kind"] == kind and row["scope_key"] == key
+                ),
+                None,
+            )
+            if not (
+                existing
+                and existing["enabled"]
+                and existing["max_concurrent"] == 4
+                and existing["reason"] == _HISTORICAL_ADMISSION_REASON
+            ):
+                continue
+            body = {
+                "max_concurrent": 4,
+                "enabled": False,
+                "reason": _HISTORICAL_ADMISSION_REASON,
+            }
+        else:
+            body = {
+                "max_concurrent": concurrent,
+                "enabled": True,
+                "reason": _HISTORICAL_ADMISSION_REASON,
+            }
         observed = request("PUT", f"/admin/execution-admission-policies/{kind}/{key}", body)
         if any(observed.get(key) != value for key, value in body.items()):
             raise ValueError("admission policy readback mismatch")
+    print(
+        json.dumps(
+            {
+                "target_id": config["target_id"],
+                "retained_operator_capacity_policy": retained_operator_policy,
+            },
+            sort_keys=True,
+        )
+    )
     # Operator intent is distinct from actuator-observed readiness: no healthy
     # claim is synthesized by deployment. The actuator refreshes actual health.
     with psycopg.connect(

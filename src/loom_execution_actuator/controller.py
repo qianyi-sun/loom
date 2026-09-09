@@ -23,6 +23,7 @@ from loom_control_plane.service_execution import (
     mark_execution_output_unavailable,
     record_kubernetes_observation,
     refresh_execution_target_health,
+    retry_unscheduled_execution_after_deadline,
 )
 from loom_execution_actuator.contracts import (
     ActuatorContractError,
@@ -176,6 +177,10 @@ class ExecutionActuator:
                 payload=observation.event_payload(),
                 observed_at=now,
             )
+            if observation.normalized_state == NormalizedJobState.UNSCHEDULABLE:
+                await retry_unscheduled_execution_after_deadline(
+                    session, lease_id=lease.id, generation=lease.generation, observed_at=now
+                )
             if observation.normalized_state in _COMMITTED_RESULT_TERMINAL_STATES:
                 await finalize_committed_service_execution(
                     session,
@@ -218,13 +223,15 @@ class ExecutionActuator:
     async def _create(
         self, lease: ServiceExecutionLease, *, now: datetime
     ) -> KubernetesJobObservation:
-        async with self._sessions() as session:
-            await reserve_execution_provisioning(session, lease_id=lease.id, now=now)
-            await session.commit()
         existing = await self._get(lease)
         if existing is not None:
             self._validate_observation(lease, existing)
             return existing
+        async with self._sessions() as session:
+            await reserve_execution_provisioning(
+                session, lease_id=lease.id, now=now, revalidate_existing=True
+            )
+            await session.commit()
         manifest = render_execution_job(lease, target=self._target, now=now)
         try:
             with KUBERNETES_API_SECONDS.labels(operation="create").time():

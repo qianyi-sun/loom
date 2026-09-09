@@ -25,6 +25,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ImageAdmissionError, ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -215,6 +216,13 @@ async def create_execution_reservation(
             )
             await session.commit()
             await session.refresh(lease)
+        except ExecutionProvisioningBlockedError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=exc.reason,
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
         except ServiceExecutionConflict as exc:
             await session.rollback()
             raise _conflict(exc) from exc

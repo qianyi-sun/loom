@@ -56,9 +56,109 @@ The integration system nodes carry `loom.nebius/platform=integration` and
 Execution nodes carry the same platform label and `node-role=integration-execution`, with
 the execution taint. The distinct node-role keeps integration nodes outside the historical collector's
 `node-role=execution` inventory. A dedicated execution group avoids competing autoscalers
-and duplicate quota accounting against the older development pool. The example
-starts with four admitted tasks and at most two execution nodes; these are
-deployment bounds, not proof of available capacity or workload acceptance.
+and duplicate quota accounting against the older development pool.
+
+Terraform owns the execution group's static autoscaling limit: the default is
+[the native API ceiling of 100 nodes](https://github.com/nebius/api/blob/main/nebius/mk8s/v1/node_group.proto),
+with explicit lower `integration_platform.execution_max_nodes` values preserved.
+No runtime component edits cloud limits. The example CP policy uses the same
+technical envelope: 100 nodes, 1,600,000m CPU, 6,553,600Mi RAM and 8,192,000Mi raw
+80Gi boot-disk storage. `node_storage_mib=65536` remains the task shape; provider
+quota accounting uses the collector's separate raw node shape. These ceilings
+are not evidence of quota, usable Pod capacity or workload acceptance. Admission
+uses fresh quota observations and actual Pod placement, including DaemonSet
+requests and Pod slots. A quota increase does not require changing a second
+small integration concurrency limit. The independent create-rate limit remains
+explicit at four creates per minute. It is separate from the concurrency ceiling,
+but short-task throughput still depends on this ramp rate; deliberately adjust
+the existing operator policy when planning a larger bounded acceptance run.
+
+The example `max_concurrent: null` creates no global or pool concurrency policy.
+Upgrade bootstrap disables only the exact old enabled four-task rows bearing
+`Nebius integration environment capacity`; other operator rows remain intact.
+A positive explicit value still installs global and pool admission limits. The
+capacity migration widens only the exact historical two-node bootstrap policy,
+including all its old limits and reason. A differing existing operator capacity
+policy is retained and reported as `retained_operator_capacity_policy: true` by
+the configure Job. Use the existing capacity/admission admin APIs for deliberate
+updates to those retained policies, and record matching limits in environment
+configuration. Fresh installs apply their explicit environment policy.
+
+The execution namespace ResourceQuota follows the configured CPU/RAM/storage
+ceilings and 64 Pods per allowed node, plus the rendered actuator rollout and
+collector requests. The default hard limits are 6403 Pods, 1600300m CPU,
+6553984Mi RAM and 8192000Mi ephemeral storage. CP observations deduct actual
+DaemonSet usage when computing fit; no dated DaemonSet count is baked into this
+namespace envelope. An optional `execution_resource_quota` map preserves a
+deliberate Kubernetes restriction using `pods`, `requests.cpu`,
+`requests.memory` or `requests.ephemeral-storage` string quantities; supplied
+keys override the derived values, including an explicit zero. The renderer
+never reads live quota to infer policy. Existing manually configured Kubernetes
+limits must be copied into this map before rendering an upgrade.
+
+Scale-from-zero also requires a previously collected **placement-format node
+sample** matching the current native node template and DaemonSet inventory.
+Older aggregate-only capacity observations cannot supply the missing allocatable
+resources or Pod slots. If upgrading while the execution group is at zero with
+no compatible sample, admission reports
+`execution_capacity_node_allocatable_unknown`; deployment alone cannot unblock
+or automatically scale that first workload. Plan and obtain authorization for a
+bounded initial node warmup through the existing Terraform/operator path,
+collect a fresh placement observation from the Ready node, and read back its
+native shape, allocatable resources, Pod slots and resident DaemonSet requests.
+Only then verify ordinary task admission and native scale-to-zero. A template or
+DaemonSet change can invalidate that sample and requires the same explicit
+warmup planning. Do not replace this dependency with guessed capacity or a
+runtime cloud writer.
+
+## Single-region capacity admission and recovery
+
+The control plane reserves capacity in the same transaction as the budget and
+admission records, before claiming a Trial or emitting its create command. A
+capacity wait rolls back those records and keeps the execution attempt and
+deadline untouched. The scheduler inspects at most32 candidates in its existing
+fair-share order, records a bounded retry time (normally15seconds), and can run a
+smaller compatible task behind an oversized or quota-blocked head. The direct
+admin reservation API returns409 with the limiting reason and Retry-After.
+
+Placement uses each Node's independent CPU, RAM, ephemeral-storage and Pod-slot
+requests. Pending Pods and durable authorizations are absorbed by lease and
+**resource generation** identity; terminating nonterminal Pods still consume
+resources. Cold nodes use matching observed allocatable capacity minus resident
+DaemonSet requests. Raw preset and boot-disk quantities separately charge the
+provider allowance; the current80GiB boot disk must not be charged as64GiB.
+The existing immutable observation JSON stores this evidence; no extra state
+service, hash inventory or cloud writer is introduced.
+
+Admissions serialize on the existing database lock and include all pools sharing
+each native tenant/region/service/quota identity. Separate CPU quotas can still
+share SSD quota. Registered or creating native nodes count toward known usage;
+remaining authorized demand is packed separately per target. Zero and reduced
+quotas stop new demand without rewriting running leases. Fresh quota evidence is
+required even when a compatible old node-template sample supplies cold-start fit.
+Provider/account snapshots are not atomic with external account users, and a
+RUNNING group is not a reservation of future physical stock. Native rejection
+and observed supply shortage remain distinct from quota exhaustion and normal
+provisioning delay.
+
+For a Job that has **never been scheduled or started** and remains Unschedulable
+past its existing execution deadline, the actuator uses the existing fenced
+retry/cleanup transition. The old authorization remains until deletion completes;
+the scheduler cannot issue the next attempt before that cleanup and its15second
+backoff. Attempt history is retained. If the existing team attempt ceiling is
+exhausted, the Trial stays queued with `infra_recovery_exhausted` rather than being
+reported as an agent/verifier failure. Ordinary Pending cold starts and already
+started workloads do not enter this recovery path. The Pod's native
+`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation protects active
+work from voluntary autoscaler eviction; terminal cleanup still removes the Pod.
+It does not prevent forced deletion or hardware failure.
+
+This implementation is the single-region slice of #1884. Cross-region target
+selection, connectivity and provider-fault acceptance remain subsequent work.
+#1538 must use fresh quota and a separately bounded resource/Trial plan to verify
+actual overlap, recovery and native scale-to-zero; passing local tests or raising
+the technical maximum is not live capacity acceptance. CI and publication remain
+GitHub-hosted.
 
 ## Secret prerequisites
 
@@ -120,7 +220,7 @@ invoker-rights triggers used by its command/reconciliation path:
 | `execution_capacity_policies` | `UPDATE(updated_at)` | `reserve_execution_provisioning` takes a row lock; capacity limits and enablement remain read-only |
 | `execution_admission_policies` | `UPDATE(active_count, counter_updated_at)` | Terminal lease triggers release admission counters |
 | `execution_budget_policies` | `UPDATE(daily_reserved_microusd, monthly_reserved_microusd, updated_at)` | Terminal leases without a started Pod release their reserved budget |
-| `team_quotas` | `SELECT(team_id, in_flight_count)`, `UPDATE(in_flight_count)` | Trial terminal projection decrements its team's active count |
+| `team_quotas` | `SELECT(team_id, in_flight_count, max_attempts_ceiling)`, `UPDATE(in_flight_count)` | Trial terminal projection decrements its team's active count; deadline-bounded infrastructure retry reads the attempt ceiling |
 
 [PostgreSQL row locks require UPDATE on at least one column](https://www.postgresql.org/docs/16/ddl-priv.html).
 The capacity grant permits changing its bookkeeping timestamp, not policy
@@ -312,7 +412,8 @@ loom eval nebius-acceptance \
 The acceptance policy uses `loom.nebius-development-capacity.v1`,
 `target_id=nebius-eu-north1-integration`, `accepted_concurrency=4`,
 `target_concurrency=4`, and enabled global `*` and pool `nebius-cpu` admission
-limits of four, matching the deployed policies. The explicit target is checked
+limits of four explicitly installed for this bounded acceptance. These are
+acceptance-specific controls, independent of the default quota-following lane. The explicit target is checked
 against that policy and every authenticated monitor snapshot, including later
 read-only cleanup verification. The monitor exposes only the logical target
 identifier; private cluster, node group and API bindings remain filtered.

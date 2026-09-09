@@ -247,12 +247,23 @@ def test_kubernetes_scheduler_request_includes_restartable_init_sidecars() -> No
 
 def _node(name: str) -> Any:
     return SimpleNamespace(
-        metadata=SimpleNamespace(name=name, deletion_timestamp=None),
-        spec=SimpleNamespace(unschedulable=False),
+        metadata=SimpleNamespace(
+            name=name,
+            uid=name + "-uid",
+            labels={"kubernetes.io/os": "linux"},
+            deletion_timestamp=None,
+        ),
+        spec=SimpleNamespace(unschedulable=False, provider_id="nebius://" + name, taints=[]),
         status=SimpleNamespace(
+            node_info=SimpleNamespace(kubelet_version="v1.35.6"),
             conditions=[SimpleNamespace(type="Ready", status="True")],
             capacity={"cpu": "4", "memory": "8Gi", "ephemeral-storage": "100Gi"},
-            allocatable={"cpu": "3500m", "memory": "7Gi", "ephemeral-storage": "90Gi"},
+            allocatable={
+                "cpu": "3500m",
+                "memory": "7Gi",
+                "ephemeral-storage": "90Gi",
+                "pods": "64",
+            },
         ),
     )
 
@@ -273,9 +284,19 @@ def _pod(
     return SimpleNamespace(
         metadata=SimpleNamespace(
             name=name,
+            uid=name + "-uid",
+            owner_references=[],
             namespace=namespace,
             deletion_timestamp=None,
-            labels=({"app.kubernetes.io/managed-by": "loom-execution-actuator"} if target else {}),
+            labels=(
+                {
+                    "app.kubernetes.io/managed-by": "loom-execution-actuator",
+                    "loom.openai.com/lease-id": name + "-lease",
+                    "loom.openai.com/generation": "1",
+                }
+                if target
+                else {}
+            ),
             annotations=(
                 {"loom.openai.com/target-id": "nebius-eu-north1-staging"} if target else {}
             ),
@@ -323,7 +344,7 @@ async def test_kubernetes_capture_counts_selected_node_load_and_target_pending_d
             metadata=SimpleNamespace(resource_version="pods-9"),
         ),
     )
-    snapshot = await InClusterKubernetesCapacityReader(core_api=core).capture(
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
         namespace="loom-nebius-staging",
         target_id="nebius-eu-north1-staging",
         node_label_selector="target=staging",
@@ -347,13 +368,13 @@ async def test_kubernetes_capture_accepts_scale_to_zero_inventory() -> None:
         ),
     )
 
-    snapshot = await InClusterKubernetesCapacityReader(core_api=core).capture(
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
         namespace="loom-nebius-development",
         target_id="nebius-eu-north1-development",
         node_label_selector="loom.nebius/node-role=execution",
     )
 
-    assert snapshot.source_versions == {"nodes": "nodes-8", "pods": "pods-10"}
+    assert snapshot.source_versions == {"nodes": "nodes-8", "pods": "pods-10", "daemonsets": "ds-1"}
     assert snapshot.active_nodes == 0
     assert snapshot.ready_nodes == 0
     assert snapshot.provisioned == ResourceTotals(
@@ -364,6 +385,40 @@ async def test_kubernetes_capture_accepts_scale_to_zero_inventory() -> None:
     assert snapshot.allocatable == snapshot.provisioned
     assert snapshot.requested == snapshot.provisioned
     assert snapshot.pending_jobs == 0
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_capture_keeps_terminating_nonterminal_requests() -> None:
+    pod = _pod(name="terminating", namespace="kube-system", node_name="node-1", target=False)
+    pod.metadata.deletion_timestamp = datetime(2026, 9, 9, tzinfo=UTC)
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(
+            items=[_node("node-1")], metadata=SimpleNamespace(resource_version="nodes-7")
+        ),
+        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=[pod], metadata=SimpleNamespace(resource_version="pods-9")
+        ),
+    )
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
+        namespace="loom-nebius-staging",
+        target_id="nebius-eu-north1-staging",
+        node_label_selector="target=staging",
+    )
+    assert snapshot.requested.cpu_millis == 500
+
+
+def test_zero_quota_is_valid_observation_not_unknown_capacity() -> None:
+    from loom_execution_capacity_collector.contracts import CapacityObservationV1
+
+    data = _observation(datetime(2026, 9, 9, tzinfo=UTC)).model_dump()
+    for name in (
+        "provider_quota_nodes",
+        "provider_quota_vcpu_millis",
+        "provider_quota_memory_mib",
+        "provider_quota_storage_mib",
+    ):
+        data[name] = 0
+    assert CapacityObservationV1.model_validate(data).provider_quota_nodes == 0
 
 
 @pytest.mark.asyncio
@@ -385,7 +440,7 @@ async def test_kubernetes_capture_rejects_target_pod_outside_bound_node_group() 
         ),
     )
     with pytest.raises(KubernetesObservationError, match="outside the selected node group"):
-        await InClusterKubernetesCapacityReader(core_api=core).capture(
+        await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
             namespace="loom-nebius-staging",
             target_id="nebius-eu-north1-staging",
             node_label_selector="target=staging",
@@ -434,7 +489,7 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
                 metadata=SimpleNamespace(
                     id="nodegroup-test", parent_id="cluster-test", resource_version=9
                 ),
-                spec=SimpleNamespace(autoscaling=SimpleNamespace(max_node_count=10)),
+                spec=_node_group_spec(),
                 status=SimpleNamespace(
                     state=_enum("RUNNING"),
                     node_count=3,
@@ -449,6 +504,7 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
     reader = NebiusCapacityReader(
         _settings(tmp_path),
         sdk=object(),
+        platform_client=_platform_client(),
         quota_client=quota_client,
         node_group_client=node_group_client,
     )
@@ -499,6 +555,7 @@ async def test_nebius_reader_ignores_error_events_only_after_node_group_converge
     reader = NebiusCapacityReader(
         _settings(tmp_path),
         sdk=object(),
+        platform_client=_platform_client(),
         quota_client=SimpleNamespace(
             list=lambda *_args, **_kwargs: _awaitable(
                 SimpleNamespace(items=quotas, next_page_token="")
@@ -512,7 +569,7 @@ async def test_nebius_reader_ignores_error_events_only_after_node_group_converge
                         parent_id="cluster-test",
                         resource_version=10,
                     ),
-                    spec=SimpleNamespace(autoscaling=SimpleNamespace(max_node_count=10)),
+                    spec=_node_group_spec(),
                     status=SimpleNamespace(
                         state=_enum("RUNNING"),
                         node_count=node_count,
@@ -556,6 +613,7 @@ async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
     reader = NebiusCapacityReader(
         settings,
         sdk=object(),
+        platform_client=_platform_client(),
         quota_client=SimpleNamespace(list=list_quotas),
         node_group_client=SimpleNamespace(
             get=lambda *_args, **_kwargs: _awaitable(
@@ -565,7 +623,7 @@ async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
                         parent_id="cluster-test",
                         resource_version=9,
                     ),
-                    spec=SimpleNamespace(autoscaling=SimpleNamespace(max_node_count=10)),
+                    spec=_node_group_spec(),
                     status=SimpleNamespace(
                         state=_enum("RUNNING"),
                         node_count=3,
@@ -583,7 +641,7 @@ async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
     assert observed_parents == ["tenant-test"]
     assert snapshot.quota_memory_mib == policy.max_nodes * policy.node_memory_mib
     assert snapshot.used_memory_mib == 3 * policy.node_memory_mib
-    assert snapshot.source_versions["quota_memory"] == "derived:policy-3:node-group-9"
+    assert snapshot.source_versions["quota_memory"] == "derived:node-group-9"
 
 
 async def _return(value: Any) -> Any:
@@ -744,12 +802,8 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR": (
             "loom.nebius/node-role=execution"
         ),
-        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID": (
-            "project-e00ksehzpr00ftw5pe61gt"
-        ),
-        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_QUOTA_PARENT_ID": (
-            "tenant-e00zcze7mmwb61vk7e"
-        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID": ("project-e00ksehzpr00ftw5pe61gt"),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_QUOTA_PARENT_ID": ("tenant-e00zcze7mmwb61vk7e"),
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID": (
             "mk8snodegroup-e00n6mbxcz8jgp8bat"
         ),
@@ -758,12 +812,8 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
             "http://loom-control-plane.loom.svc.cluster.local:8080"
         ),
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_NODES_NAME": "compute.instance.count",
-        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_NAME": (
-            "compute.instance.non-gpu.vcpu"
-        ),
-        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME": (
-            "compute.disk.size.network-ssd"
-        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_NAME": ("compute.instance.non-gpu.vcpu"),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME": ("compute.disk.size.network-ssd"),
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_NODES_UNIT": "count",
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_UNIT": "count",
         "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_UNIT": "byte",
@@ -792,3 +842,343 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
         "exec",
         "impersonate",
     } & {verb for rule in role["rules"] for verb in rule["verbs"]}
+
+
+def _apps(*daemons: Any) -> Any:
+    return SimpleNamespace(
+        list_daemon_set_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=list(daemons), metadata=SimpleNamespace(resource_version="ds-1")
+        )
+    )
+
+
+def _node_group_spec() -> Any:
+    from nebius.api.nebius.mk8s.v1 import DiskSpec
+
+    return SimpleNamespace(
+        version="1.35",
+        autoscaling=SimpleNamespace(max_node_count=10),
+        template=SimpleNamespace(
+            resources=SimpleNamespace(platform="cpu-e2", preset="4vcpu-8gb"),
+            boot_disk=DiskSpec(size_gibibytes=80, type=DiskSpec.DiskType.NETWORK_SSD),
+            max_pods=64,
+        ),
+    )
+
+
+def _platform_client() -> Any:
+    return SimpleNamespace(
+        get_by_name=lambda *_args, **_kwargs: _awaitable(
+            SimpleNamespace(
+                metadata=SimpleNamespace(name="cpu-e2"),
+                spec=SimpleNamespace(
+                    presets=[
+                        SimpleNamespace(
+                            name="4vcpu-8gb",
+                            resources=SimpleNamespace(vcpu_count=4, memory_gibibytes=8),
+                        )
+                    ]
+                ),
+            )
+        )
+    )
+
+
+def _daemon(*, uid: str, cpu: str = "100m", generation: int = 2, gpu: bool = False) -> Any:
+    spec = SimpleNamespace(
+        containers=[_resource_container(cpu=cpu, memory="128Mi")],
+        init_containers=[],
+        overhead={},
+        node_selector={"nebius.com/gpu": "true"} if gpu else {"kubernetes.io/os": "linux"},
+        tolerations=[{"operator": "Exists"}],
+        env=[{"name": "NOT_EVIDENCE", "value": "private-value"}],
+    )
+    return SimpleNamespace(
+        metadata=SimpleNamespace(uid=uid, generation=generation),
+        spec=SimpleNamespace(template=SimpleNamespace(spec=spec)),
+        status=SimpleNamespace(
+            observed_generation=generation, updated_number_scheduled=1, desired_number_scheduled=1
+        ),
+    )
+
+
+async def _capture_nodes(
+    nodes: list[Any], pods: list[Any], *daemons: Any
+) -> KubernetesCapacitySnapshot:
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(
+            items=nodes, metadata=SimpleNamespace(resource_version="n1")
+        ),
+        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=pods, metadata=SimpleNamespace(resource_version="p1")
+        ),
+    )
+    return await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps(*daemons)).capture(
+        namespace="loom-nebius-staging",
+        target_id="nebius-eu-north1-staging",
+        node_label_selector="target=staging",
+    )
+
+
+@pytest.mark.asyncio
+async def test_placement_preserves_fragmentation_slots_and_pending_lease_identity() -> None:
+    first = _pod(name="first", namespace="loom-nebius-staging", node_name="node-1", target=True)
+    first.spec.containers = [_resource_container(cpu="3", memory="1Gi")]
+    second = _pod(name="second", namespace="other-namespace", node_name="node-2", target=False)
+    second.spec.containers = [_resource_container(cpu="1", memory="7Gi")]
+    pending = _pod(
+        name="pending", namespace="loom-nebius-staging", node_name=None, target=True, pending=True
+    )
+    pending.metadata.labels["loom.openai.com/generation"] = "2"
+    snapshot = await _capture_nodes([_node("node-1"), _node("node-2")], [first, second, pending])
+    assert [
+        (
+            n.allocatable.cpu_millis - n.requested.cpu_millis,
+            n.allocatable.memory_mib - n.requested.memory_mib,
+        )
+        for n in snapshot.nodes
+    ] == [(500, 6144), (2500, 0)]
+    assert [n.used_pod_slots for n in snapshot.nodes] == [1, 1]
+    assert snapshot.nodes[0].managed_pods[0].lease_id == "first-lease"
+    assert snapshot.nodes[1].managed_pods == []
+    assert snapshot.pending_pods[0].generation == 2
+    assert snapshot.pending_pods[0].uid == "pending-uid"
+    # Pending demand remains separate from per-node assigned resources.
+    assert sum(n.requested.cpu_millis for n in snapshot.nodes) == 4000
+    assert snapshot.requested.cpu_millis == 6000
+
+
+@pytest.mark.asyncio
+async def test_observed_cold_sample_uses_allocatable_and_matching_daemonset_generation() -> None:
+    node = _node("node-1")
+    node.status.capacity = {"cpu": "16", "memory": "65843244Ki", "ephemeral-storage": "80162804Ki"}
+    node.status.allocatable = {
+        "cpu": "15900m",
+        "memory": "65216556Ki",
+        "ephemeral-storage": "72804298221",
+        "pods": "64",
+    }
+    daemon = _daemon(uid="cpu-daemon")
+    pod = _pod(name="system", namespace="kube-system", node_name="node-1", target=False)
+    pod.metadata.owner_references = [SimpleNamespace(kind="DaemonSet", uid="cpu-daemon")]
+    pod.spec.containers = daemon.spec.template.spec.containers
+    snapshot = await _capture_nodes([node], [pod], daemon, _daemon(uid="gpu-daemon", gpu=True))
+    sample = snapshot.template_samples[0]
+    assert sample.allocatable.model_dump() == {
+        "cpu_millis": 15900,
+        "memory_mib": 63688,
+        "storage_mib": 69431,
+    }
+    assert sample.daemonsets == {"cpu-daemon": 2}
+    assert sample.daemonset_requests.cpu_millis == 100
+    assert sample.daemonset_slots == 1
+    assert sample.pod_slots == 64
+    assert sample.kubelet_version == "v1.35.6"
+    assert len(snapshot.daemonsets) == 2
+    assert "private-value" not in snapshot.model_dump_json()
+    assert "env" not in snapshot.daemonsets[0].scheduling
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed", ["missing_pod", "terminating", "rollout", "requests", "runtime_class"]
+)
+async def test_incomplete_or_changing_daemonset_never_becomes_a_cold_template(changed: str) -> None:
+    daemon = _daemon(uid="daemon")
+    pod = _pod(name="system", namespace="kube-system", node_name="node-1", target=False)
+    pod.metadata.owner_references = [SimpleNamespace(kind="DaemonSet", uid="daemon")]
+    pod.spec.containers = daemon.spec.template.spec.containers
+    pods = [pod]
+    if changed == "missing_pod":
+        pods = []
+    elif changed == "terminating":
+        pod.metadata.deletion_timestamp = datetime(2026, 9, 9, tzinfo=UTC)
+    elif changed == "rollout":
+        daemon.status.updated_number_scheduled = 0
+    elif changed == "requests":
+        pod.spec.containers = [_resource_container(cpu="50m", memory="128Mi")]
+    else:
+        daemon.spec.template.spec.runtime_class_name = "unknown-overhead"
+    snapshot = await _capture_nodes([_node("node-1")], pods, daemon)
+    assert snapshot.template_samples == []
+    if changed == "terminating":
+        assert snapshot.nodes[0].used_pod_slots == 1
+        assert snapshot.nodes[0].requested.cpu_millis == 100
+
+
+@pytest.mark.asyncio
+async def test_zero_nodes_retains_current_daemonsets_but_does_not_invent_template() -> None:
+    snapshot = await _capture_nodes([], [], _daemon(uid="daemon"))
+    assert snapshot.nodes == snapshot.template_samples == []
+    assert snapshot.daemonsets[0].generation == 2
+
+
+@pytest.mark.asyncio
+async def test_native_shape_and_zero_quota_override_old_policy_billing_shape(
+    tmp_path: Path,
+) -> None:
+    quotas = [
+        _quota("non-gpu-vms", "count", 0, 0, 1),
+        _quota("non-gpu-vcpu", "vcpu", 0, 0, 2),
+        _quota("ssd-storage", "byte", 0, 0, 3),
+    ]
+    native = SimpleNamespace(
+        metadata=SimpleNamespace(id="nodegroup-test", parent_id="cluster-test", resource_version=9),
+        spec=_node_group_spec(),
+        status=SimpleNamespace(
+            state=_enum("RUNNING"),
+            node_count=1,
+            target_node_count=1,
+            ready_node_count=1,
+            reconciling=False,
+            events=[],
+        ),
+    )
+    native.spec.template.resources.preset = "16vcpu-64gb"
+    seen = []
+
+    async def platform(request: Any, **_kwargs: Any) -> Any:
+        seen.append((request.parent_id, request.name))
+        return SimpleNamespace(
+            metadata=SimpleNamespace(name="cpu-e2"),
+            spec=SimpleNamespace(
+                presets=[
+                    SimpleNamespace(
+                        name="16vcpu-64gb",
+                        resources=SimpleNamespace(vcpu_count=16, memory_gibibytes=64),
+                    )
+                ]
+            ),
+        )
+
+    settings = _settings(tmp_path).model_copy(
+        update={"quota_memory_name": None, "quota_memory_unit": None}
+    )
+    reader = NebiusCapacityReader(
+        settings,
+        sdk=object(),
+        quota_client=SimpleNamespace(
+            list=lambda *_a, **_k: _awaitable(SimpleNamespace(items=quotas, next_page_token=""))
+        ),
+        node_group_client=SimpleNamespace(get=lambda *_a, **_k: _awaitable(native)),
+        platform_client=SimpleNamespace(get_by_name=platform),
+    )
+    policy = (await _ControlPlane().fetch_policy(target_id="x", pool_id="y")).model_copy(
+        update={"node_storage_mib": 65536}
+    )
+    snapshot = await reader.capture(policy)
+    assert seen == [("project-test", "cpu-e2")]
+    assert snapshot.node_group is not None
+    assert snapshot.node_group.raw_node.model_dump() == {
+        "cpu_millis": 16000,
+        "memory_mib": 65536,
+        "storage_mib": 81920,
+    }
+    assert snapshot.quota_nodes == snapshot.quota_storage_mib == 0
+    assert "memory" not in snapshot.quota_resources
+    assert snapshot.quota_resources["storage"].used == 81920
+    assert snapshot.quota_resources["storage"].parent_id == "tenant-test"
+    assert snapshot.quota_resources["storage"].name == "ssd-storage"
+    assert snapshot.quota_resources["vcpu"].used == 16000
+
+    class Kubernetes:
+        async def capture(self, **_kwargs: Any) -> KubernetesCapacitySnapshot:
+            return await _capture_nodes([_node("node-1")], [])
+
+    control_plane = _ControlPlane()
+    await collect_capacity_observation(
+        settings, control_plane=control_plane, provider=reader, kubernetes=Kubernetes()
+    )
+    published = control_plane.observations[0]
+    assert published.provisioned_storage_mib == 81920
+    assert published.provider_used_storage_mib == 81920
+    assert published.placement.node_group.raw_node.storage_mib == 81920
+    assert published.placement.quota_resources["storage"].used == 81920
+    assert published.placement.nodes[0].allocatable.cpu_millis == 3500
+    template = snapshot.node_group.template
+    native.metadata.resource_version += 1
+    native.spec.autoscaling.max_node_count = 0
+    native.spec.version = "v1.35.x"
+    next_snapshot = await reader.capture(policy)
+    assert next_snapshot.node_group is not None
+    assert next_snapshot.node_group.max_nodes == 0
+    assert next_snapshot.node_group.template == template
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mismatch",
+    [None, "rolling", "version", "platform", "group", "labels", "taints", "capacity", "os"],
+)
+async def test_collector_binds_cold_samples_to_actual_native_template(mismatch: str | None) -> None:
+    from loom_execution_capacity_collector.collector import _matching_samples
+    from loom_execution_capacity_collector.contracts import NodeGroupPlacement
+
+    node = _node("node-1")
+    node.status.capacity["ephemeral-storage"] = "75Gi"
+    node.status.allocatable["ephemeral-storage"] = "70Gi"
+    node.status.node_info.os_image = "Ubuntu 24.04.4 LTS"
+    node.metadata.labels.update(
+        {
+            "nebius.com/node-group-id": "nodegroup-test",
+            "node.kubernetes.io/instance-type": "cpu-e2",
+            "loom.nebius/platform": "integration",
+        }
+    )
+    kubernetes = await _capture_nodes([node], [])
+    group = NodeGroupPlacement(
+        id="nodegroup-test",
+        max_nodes=100,
+        node_count=1,
+        raw_node=ResourceTotals(cpu_millis=4000, memory_mib=8192, storage_mib=81920),
+        template={
+            "platform": "cpu-e2",
+            "preset": "4vcpu-8gb",
+            "kubernetes_version": "1.35",
+            "labels": {"loom.nebius/platform": "integration"},
+            "taints": [],
+            "max_pods": 64,
+            "os": "ubuntu24.04",
+        },
+    )
+    provider = (
+        await _Provider().capture(await _ControlPlane().fetch_policy(target_id="x", pool_id="y"))
+    ).model_copy(update={"node_group": group, "autoscaler_state": "ready"})
+    if mismatch == "rolling":
+        provider = provider.model_copy(update={"autoscaler_state": "scaling"})
+    elif mismatch == "version":
+        group.template["kubernetes_version"] = "1.36"
+    elif mismatch == "platform":
+        group.template["platform"] = "cpu-d3"
+    elif mismatch == "group":
+        provider = provider.model_copy(
+            update={"node_group": group.model_copy(update={"id": "other-group"})}
+        )
+    elif mismatch == "labels":
+        group.template["labels"]["loom.nebius/platform"] = "other"
+    elif mismatch == "taints":
+        group.template["taints"] = [{"key": "only-other", "value": "true", "effect": "NO_SCHEDULE"}]
+    elif mismatch == "capacity":
+        provider = provider.model_copy(
+            update={
+                "node_group": group.model_copy(
+                    update={
+                        "raw_node": ResourceTotals(
+                            cpu_millis=2000, memory_mib=8192, storage_mib=81920
+                        )
+                    }
+                )
+            }
+        )
+    elif mismatch == "os":
+        group.template["os"] = "ubuntu22.04"
+    samples = _matching_samples(provider, kubernetes)
+    assert len(samples) == (1 if mismatch is None else 0)
+
+
+def test_locked_sdk_native_disk_bytes_preserve_actual_quota_charge() -> None:
+    from nebius.api.nebius.mk8s.v1 import DiskSpec
+
+    from loom_execution_capacity_collector.nebius import _disk_mib
+
+    assert _disk_mib(DiskSpec(size_bytes=80 * 1024**3, type=DiskSpec.DiskType.NETWORK_SSD)) == 81920

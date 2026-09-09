@@ -21,6 +21,7 @@ from loom.db.schema import (
 )
 from loom_control_plane.execution_admission import upsert_execution_admission_policy
 from loom_control_plane.service_execution import enqueue_execution_transition
+from loom_execution_actuator.contracts import NormalizedJobState
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
@@ -31,9 +32,11 @@ from tests.integration.test_service_execution_leases import (
 )
 
 
+@pytest.mark.parametrize("infra_retry", [False, True])
 async def test_restricted_actuator_creates_reconciles_and_releases_without_policy_authority(
     platform_database: str,  # noqa: F811 -- imported shared pytest fixture
     monkeypatch: pytest.MonkeyPatch,
+    infra_retry: bool,
 ) -> None:
     monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: platform_database)
     monkeypatch.setenv("LOOM_DB_URL", platform_database)
@@ -47,6 +50,10 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
     actuator_engine = create_async_engine(
         url.set(username="loom_actuator", password="restricted-role-password-" + "a" * 32)
     )
+    control_plane_engine = create_async_engine(
+        url.set(username="loom_control_plane", password="restricted-role-password-" + "a" * 32)
+    )
+    control_plane = async_sessionmaker(control_plane_engine, expire_on_commit=False)
     admins = async_sessionmaker(admin_engine, expire_on_commit=False)
     restricted = async_sessionmaker(actuator_engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -68,6 +75,10 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
                 reason="restricted-role test",
                 now=now,
             )
+            await session.commit()
+        # Scheduling now reserves capacity before publishing the create command;
+        # exercise that transaction using the real Control Plane login as well.
+        async with control_plane() as session:
             lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
             await session.commit()
         async with restricted() as session:
@@ -99,16 +110,43 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
             assert authorization.state == "pending"
             policy = (await session.execute(select(ExecutionAdmissionPolicy))).scalar_one()
             assert policy.active_count == 1
-            budgets = (await session.execute(select(ExecutionBudgetPolicy))).scalars().all()
-            assert len(budgets) == 2 and all(row.daily_reserved_microusd > 0 for row in budgets)
-            await enqueue_execution_transition(
-                session,
-                lease_id=lease.id,
-                expected_generation=1,
-                desired_state="cancel",
-                now=now + timedelta(seconds=2),
+            budgets = (
+                (
+                    await session.execute(
+                        select(ExecutionBudgetPolicy).where(
+                            ExecutionBudgetPolicy.scope_key.in_(
+                                (target.logical_pool_id, target.target_id)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
             )
+            assert len(budgets) == 2 and all(row.daily_reserved_microusd > 0 for row in budgets)
+            if not infra_retry:
+                await enqueue_execution_transition(
+                    session,
+                    lease_id=lease.id,
+                    expected_generation=1,
+                    desired_state="cancel",
+                    now=now + timedelta(seconds=2),
+                )
             await session.commit()
+        if infra_retry:
+            kubernetes.jobs[lease.job_name] = kubernetes.jobs[lease.job_name].model_copy(
+                update={
+                    "normalized_state": NormalizedJobState.UNSCHEDULABLE,
+                    "resource_version": "2",
+                }
+            )
+            await actuator.reconcile_full_once(now=lease.deadline_at)
+            async with admins() as session:
+                retry_trial = await session.get(Trial, trial_id)
+                assert retry_trial is not None and retry_trial.state == "queued"
+                assert retry_trial.attempt_count == 1 and retry_trial.failure_reason is None
+                assert retry_trial.next_attempt_at == lease.deadline_at + timedelta(seconds=15)
+            now = lease.deadline_at + timedelta(minutes=5)
         assert await actuator.run_commands_once(now=now + timedelta(seconds=2)) == 1
         assert kubernetes.delete_count == 1
         assert await actuator.reconcile_full_once(now=now + timedelta(seconds=3)) == 1
@@ -121,12 +159,32 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
                 await session.execute(select(ExecutionAdmissionPolicy.active_count))
             ).scalar_one() == 0
             assert (
-                await session.execute(select(ExecutionAdmissionReservation.state))
+                await session.execute(
+                    select(ExecutionAdmissionReservation.state).where(
+                        ExecutionAdmissionReservation.trial_id == trial_id
+                    )
+                )
             ).scalar_one() == "released"
             assert (
-                await session.execute(select(ExecutionCostReservation.state))
+                await session.execute(
+                    select(ExecutionCostReservation.state).where(
+                        ExecutionCostReservation.lease_id == lease.id
+                    )
+                )
             ).scalar_one() == "released"
-            budgets = (await session.execute(select(ExecutionBudgetPolicy))).scalars().all()
+            budgets = (
+                (
+                    await session.execute(
+                        select(ExecutionBudgetPolicy).where(
+                            ExecutionBudgetPolicy.scope_key.in_(
+                                (target.logical_pool_id, target.target_id)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             assert all(
                 row.daily_reserved_microusd == row.monthly_reserved_microusd == 0 for row in budgets
             )
@@ -142,8 +200,9 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
             # finalize_committed_service_execution, including its quota trigger.
             assert connection.execute(
                 "SELECT in_flight_count FROM team_quotas WHERE team_id=%s", (trial.team_id,)
-            ).fetchone() == (1,)
-            connection.execute("UPDATE trials SET state='failed' WHERE id=%s", (trial_id,))
+            ).fetchone() == (0 if infra_retry else 1,)
+            if not infra_retry:
+                connection.execute("UPDATE trials SET state='failed' WHERE id=%s", (trial_id,))
             assert connection.execute(
                 "SELECT in_flight_count FROM team_quotas WHERE team_id=%s", (trial.team_id,)
             ).fetchone() == (0,)
@@ -170,4 +229,5 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
                 connection.rollback()
     finally:
         await actuator_engine.dispose()
+        await control_plane_engine.dispose()
         await admin_engine.dispose()

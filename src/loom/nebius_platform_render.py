@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from datetime import datetime
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -70,7 +71,7 @@ def validate_environment(config: dict[str, Any]) -> None:
         "capacity_policy",
         "execution_price",
     }
-    if set(config) - {"public_tls_bootstrap"} != expected:
+    if set(config) - {"public_tls_bootstrap", "execution_resource_quota"} != expected:
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
@@ -170,8 +171,38 @@ def validate_environment(config: dict[str, Any]) -> None:
     for key in ("max_unschedulable_jobs", "max_image_pull_backoff_jobs"):
         if type(policy[key]) is not int or policy[key] < 0:
             raise NebiusPlatformError("capacity failure allowances must be nonnegative integers")
-    if type(config.get("max_concurrent")) is not int or config["max_concurrent"] < 1:
-        raise NebiusPlatformError("max_concurrent must be positive")
+    if config.get("max_concurrent") is not None and (
+        type(config["max_concurrent"]) is not int or config["max_concurrent"] < 1
+    ):
+        raise NebiusPlatformError("max_concurrent must be positive or null for quota-following")
+    if policy["max_nodes"] > 100:
+        raise NebiusPlatformError(
+            "max_nodes exceeds the native node-group technical maximum of 100"
+        )
+    overrides = config.get("execution_resource_quota", {})
+    if not isinstance(overrides, dict) or set(overrides) - {
+        "pods",
+        "requests.cpu",
+        "requests.memory",
+        "requests.ephemeral-storage",
+    }:
+        raise NebiusPlatformError(
+            "execution_resource_quota supports only Pod and requested-resource limits"
+        )
+    for resource, value in overrides.items():
+        pattern = (
+            r"[0-9]+"
+            if resource == "pods"
+            else (
+                r"[0-9]+(?:\.[0-9]+)?m?"
+                if resource == "requests.cpu"
+                else r"[0-9]+(?:\.[0-9]+)?(?:Ki|Mi|Gi|Ti)?"
+            )
+        )
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise NebiusPlatformError(
+                "execution_resource_quota values must be nonnegative Kubernetes quantities"
+            )
     if policy.get("enabled") is not True:
         raise NebiusPlatformError("capacity policy must explicitly enable the bounded target")
     price = config.get("execution_price", {})
@@ -561,6 +592,74 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     if not config.get("public_tls_bootstrap", False):
         result["apps"]["tls"].pop("certificates")
     return result
+
+
+def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) -> dict[str, str]:
+    """Technical envelope plus the actual namespace controller/collector requests.
+
+    Physical Pod fit and DaemonSet deductions belong to CP observations. This
+    static namespace quota must not recreate the old independent twelve-Pod cap.
+    """
+    policy = config["capacity_policy"]
+    totals = {
+        "pods": policy["max_nodes"] * 64,
+        "cpu": policy["max_vcpu_millis"],
+        "memory": policy["max_memory_mib"],
+        "ephemeral-storage": policy["max_storage_mib"],
+    }
+
+    def quantity(value: str | int, resource: str) -> int:
+        text = str(value)
+        if resource == "cpu":
+            amount = Decimal(text[:-1]) if text.endswith("m") else Decimal(text) * 1000
+        else:
+            factor = Decimal(1) / (1024 * 1024)
+            for unit, scale in (("Ki", 1 / 1024), ("Mi", 1), ("Gi", 1024), ("Ti", 1024 * 1024)):
+                if text.endswith(unit):
+                    text, factor = text[: -len(unit)], Decimal(str(scale))
+                    break
+            amount = Decimal(text) * factor
+        return int(amount.to_integral_value(rounding=ROUND_CEILING))
+
+    for doc in documents:
+        if doc["kind"] == "Deployment":
+            pod = doc["spec"]["template"]["spec"]
+            replicas = doc["spec"].get("replicas", 1)
+            strategy = doc["spec"].get("strategy", {})
+            surge = strategy.get("rollingUpdate", {}).get("maxSurge", "25%")
+            count = replicas
+            if strategy.get("type", "RollingUpdate") == "RollingUpdate":
+                count += (
+                    (replicas * int(surge[:-1]) + 99) // 100
+                    if isinstance(surge, str) and surge.endswith("%")
+                    else int(surge)
+                )
+        elif doc["kind"] == "CronJob":
+            pod = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+            count = 1  # The existing collector uses concurrencyPolicy=Forbid.
+        else:
+            continue
+        totals["pods"] += count
+        for resource in ("cpu", "memory", "ephemeral-storage"):
+
+            def request(container: dict[str, Any], resource: str = resource) -> int:
+                return quantity(
+                    container.get("resources", {}).get("requests", {}).get(resource, 0), resource
+                )
+
+            regular = sum(request(container) for container in pod["containers"])
+            init_peak = max(
+                (request(container) for container in pod.get("initContainers", [])), default=0
+            )
+            totals[resource] += count * max(regular, init_peak)
+    hard = {
+        "pods": str(totals["pods"]),
+        "requests.cpu": f"{totals['cpu']}m",
+        "requests.memory": f"{totals['memory']}Mi",
+        "requests.ephemeral-storage": f"{totals['ephemeral-storage']}Mi",
+    }
+    hard.update(config.get("execution_resource_quota", {}))
+    return hard
 
 
 def build_platform(
@@ -999,17 +1098,14 @@ def build_platform(
             if not doc or doc["kind"] in {"Namespace", "PodDisruptionBudget"}:
                 continue
             doc = _replace_tree(doc, replacements)
+            if doc["kind"] == "ClusterRole":
+                doc["rules"].append(
+                    {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]}
+                )
             if doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
                 doc["metadata"]["name"] = ex + "-collector"
                 if doc["kind"] == "ClusterRoleBinding":
                     doc["roleRef"]["name"] = ex + "-collector"
-            if doc["kind"] == "ResourceQuota":
-                policy = config["capacity_policy"]
-                doc["spec"]["hard"] = {
-                    "pods": str(policy["max_pending_jobs"] + 8),
-                    "requests.cpu": f"{policy['max_vcpu_millis']}m",
-                    "requests.memory": f"{policy['max_memory_mib']}Mi",
-                }
             if doc["kind"] == "NetworkPolicy":
                 for rule in doc["spec"].get("egress", []):
                     for peer in rule.get("to", []):
@@ -1080,6 +1176,9 @@ def build_platform(
                     "loom.nebius/node-role=integration-execution,loom.nebius/platform=integration"
                 )
             execution_docs.append(doc)
+    for doc in execution_docs:
+        if doc["kind"] == "ResourceQuota":
+            doc["spec"]["hard"] = _execution_quota(config, execution_docs)
     files["60-execution.yaml"] = execution_docs
     public = _service("loom-web", ns, 443, 8443)
     public["spec"]["type"] = "LoadBalancer"

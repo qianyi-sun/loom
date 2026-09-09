@@ -32,8 +32,15 @@ versioned backend to recover local state; do not import resources from the
 execution state or force-unlock an active operation.
 
 One 4-vCPU/16-GiB system node remains running. The execution group starts at zero
-and scales to at most two nodes. CI and image publication stay on GitHub-hosted machines; no cloud runner node groups
-are provisioned. Platform services use the dedicated system node selector and
+with the native API technical maximum of 100 nodes configured in Terraform.
+Explicit lower `integration_platform.execution_max_nodes` values remain valid;
+review existing tfvars before removing an intentional limit. Keep that value
+aligned with `capacity_policy.max_nodes` in the platform environment when
+choosing a lower operator ceiling. CP admission follows fresh provider quota and
+actual Kubernetes fit; this technical maximum does not reserve or promise
+100 nodes. Terraform remains the sole cloud-limit owner: no runtime writer or
+`ignore_changes` is introduced. CI and image publication stay on GitHub-hosted
+machines; no cloud runner node groups are provisioned. Platform services use the dedicated system node selector and
 tolerations; only queued workloads scale execution nodes.
 All nodes are private. Registry pull identity has no publication credential.
 The existing shared cluster's costs are unchanged; review current compute,
