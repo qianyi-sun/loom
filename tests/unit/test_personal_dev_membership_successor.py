@@ -80,6 +80,8 @@ def successor_case(kind="create", outcome="committed"):
                 "operation_epoch": 2,
                 "configuration_generation": 2,
                 "operation_kind": kind,
+                "min_slots": 0,
+                "max_slots": 0 if kind == "destroy" else original.operation.max_slots,
                 "candidate_generation": generation,
                 "deployment_generation": generation,
                 "demand_reporter_incarnation": uuid4()
@@ -225,6 +227,8 @@ def successor_case(kind="create", outcome="committed"):
         original,
         accepted if kind != "create" else None,
         {
+            "reviewed_at": (_NOW - timedelta(minutes=1)).isoformat(),
+            "expires_at": (_NOW + timedelta(hours=1)).isoformat(),
             "authority": authority,
             "current_configuration": configuration.model_dump(mode="json"),
             "predecessor_operation_id": str(original.operation.id),
@@ -485,6 +489,50 @@ def test_successor_requires_independent_candidate_publication(field, value):
     claim = replace(claim, candidate=replace(claim.candidate, **{field: value}))
     binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
     with pytest.raises(ValueError):
+        module.validate_membership_successor(
+            binding, claim=claim, accepted_operation=accepted, now=_NOW
+        )
+
+
+@pytest.mark.parametrize("kind", ("update", "destroy"))
+@pytest.mark.parametrize("review_expired", (False, True))
+def test_recovery_window_is_independent_of_positive_admission(kind, review_expired):
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case(kind, "terminal-not-committed")
+    values["authority"]["started_at"] = (_NOW - timedelta(hours=2)).isoformat()
+    values["authority"]["expires_at"] = (_NOW - timedelta(hours=1)).isoformat()
+    if review_expired:
+        values["reviewed_at"] = (_NOW - timedelta(hours=2)).isoformat()
+        values["expires_at"] = _NOW.isoformat()
+    binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    if kind == "destroy" and not review_expired:
+        decision = module.validate_membership_successor(
+            binding, claim=claim, accepted_operation=accepted, now=_NOW
+        )
+        assert decision.kind == "destroy"
+    else:
+        with pytest.raises(ValueError):
+            module.validate_membership_successor(
+                binding, claim=claim, accepted_operation=accepted, now=_NOW
+            )
+
+
+@pytest.mark.parametrize("change", ("naive", "reversed", "unbounded", "not-started"))
+def test_successor_requires_bounded_current_operator_review(change):
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case("destroy", "terminal-not-committed")
+    if change == "naive":
+        values["reviewed_at"] = _NOW.replace(tzinfo=None).isoformat()
+    elif change == "reversed":
+        values["expires_at"] = (_NOW - timedelta(days=1)).isoformat()
+    elif change == "unbounded":
+        values["expires_at"] = (_NOW + timedelta(days=2)).isoformat()
+    else:
+        values["reviewed_at"] = (_NOW + timedelta(minutes=1)).isoformat()
+    with pytest.raises(ValueError):
+        binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(
+            json.dumps(values)
+        )
         module.validate_membership_successor(
             binding, claim=claim, accepted_operation=accepted, now=_NOW
         )
