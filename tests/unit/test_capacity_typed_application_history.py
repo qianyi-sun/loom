@@ -18,7 +18,7 @@ from loom_capacity_manager.typed_membership_events import validate_typed_members
 from tests.unit.test_capacity_typed_membership_events import event_row
 
 
-def application_row(previous=None, *, operation="create", managed=False, **changes):
+def application_row(previous=None, *, operation="create", managed=False, reincarnation=None, **changes):
     revision = 1 if previous is None else previous.revision + 1
     value, request, result, row = event_row(build=False, revision=revision,
         previous="0" * 64 if previous is None else previous.head_sha256,
@@ -59,7 +59,7 @@ def application_row(previous=None, *, operation="create", managed=False, **chang
     request = request.model_copy(update={"expected_revision": revision - 1,
         "command": request.command.model_copy(update={"projection": projection, "acknowledgement": ack})})
     member = PersonalApplicationMemberV1(revision=revision, owner_id=projection.owner_id,
-        configuration=_derive_development_subject(value.fleet, projection), acknowledgement=ack)
+        configuration=_derive_development_subject(value.fleet, projection), acknowledgement=ack, reincarnation=reincarnation)
     row.subject_id, row.subject_incarnation, row.owner_id = projection.subject_id, projection.subject_incarnation, projection.owner_id
     row.configuration_generation, row.deployment_generation = projection.configuration_generation, projection.deployment_generation
     row.reporter_incarnation = projection.demand_reporter_incarnation
@@ -83,6 +83,46 @@ def test_typed_managed_application_first_event_uses_pinned_base_without_fake_cre
     assert result.revision == 1
     assert result.member.configuration.configuration_generation == 2
     assert result.member.configuration.subject_id == value.preparation.managed_application_origins[0].configuration.subject_id
+
+
+@pytest.mark.parametrize("managed", (False, True))
+@pytest.mark.parametrize("wrong_origin", (False, True))
+def test_application_recreation_retains_first_immutable_origin(managed, wrong_origin):
+    from loom_capacity_manager.contracts import ConfigurationGenerationRefV1, SubjectConfigurationV1
+    from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
+
+    value, first = application_row(operation="destroy" if managed else "create", managed=managed)
+    rows = [first]
+    if not managed:
+        _, destroyed = application_row(first, operation="destroy")
+        rows.append(destroyed)
+    previous = rows[-1]
+    predecessor = SubjectConfigurationV1.model_validate_json(json.dumps(previous.result_payload["member"]["configuration"]))
+    origin = (value.preparation.managed_application_origins[0].configuration if managed else
+        SubjectConfigurationV1.model_validate_json(json.dumps(first.result_payload["member"]["configuration"])))
+    if wrong_origin:
+        origin = predecessor
+    evidence = PersonalReincarnationEvidenceV1(namespace_id=first.namespace_id,
+        execution_manifest_sha256=first.execution_manifest_sha256,
+        origin=ConfigurationGenerationRefV1(scope="subject", subject_id=origin.subject_id,
+            subject_incarnation=origin.subject_incarnation, generation=origin.configuration_generation, digest=canonical_digest(origin)),
+        predecessor=predecessor, predecessor_revision=previous.revision, predecessor_head_sha256=previous.head_sha256,
+        admission_revision=previous.revision + 1, successor_incarnation=UUID(int=85200), release_set_sha256="f" * 64)
+    _, recreated = application_row(previous, operation="create", reincarnation=evidence,
+        subject_incarnation=evidence.successor_incarnation, demand_reporter_incarnation=UUID(int=85201),
+        demand_reporter_token_sha256="4" * 64, candidate_generation=1, deployment_generation=1)
+    rows.append(recreated)
+    if wrong_origin:
+        with pytest.raises(ValueError, match="predecessor event"):
+            validate(value, *rows)
+    else:
+        _, resized = application_row(recreated, operation="capacity", reincarnation=evidence)
+        results = validate(value, *rows, resized)
+        assert results[-1].member.reincarnation == evidence
+        # Omitting the retained certificate from a later mutation breaks history.
+        _, dropped = application_row(recreated, operation="capacity")
+        with pytest.raises(ValueError):
+            validate(value, *rows, dropped)
 
 
 def test_typed_managed_application_history_adopts_then_rotates_and_disables():
