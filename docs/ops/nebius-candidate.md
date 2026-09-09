@@ -66,6 +66,13 @@ publication builds all six images without an incremental-release controller or
 another required CI gate. The resulting platform images and all deployed
 platform resources use Nebius; the build job itself uses GitHub infrastructure.
 
+The execution-actuator image copies a selected set of shared modules. Its image
+build imports both actuator and capacity-collector entrypoints as the runtime UID,
+without credentials or external connections. Keep copied shared dependencies in
+the image's component ownership so their changes rebuild the image. This catches
+missing packaged imports before publication; deployment readiness still verifies
+the actual database and Kubernetes connections.
+
 ## Publish and verify
 
 The workflow runs on pushes to `codex/nebius-main` once enabled; it also supports

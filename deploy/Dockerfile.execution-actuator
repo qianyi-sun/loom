@@ -6,7 +6,7 @@ COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requ
 RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requirements.txt
 COPY src/loom/__init__.py src/loom/execution_contract.py \
     src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
-    src/loom/startup_retry.py ./src/loom/
+    src/loom/startup_retry.py src/loom/terminal_result_semantics.py ./src/loom/
 COPY src/loom/db ./src/loom/db
 COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/mcp.py \
     src/loom/models/networking.py src/loom/models/skill.py src/loom/models/task.py \
@@ -20,5 +20,7 @@ COPY src/loom_execution_actuator ./src/loom_execution_actuator
 COPY src/loom_execution_capacity_collector ./src/loom_execution_capacity_collector
 COPY migrations ./migrations
 USER 65532:65532
+# Exercise both packaged entrypoints without credentials or external connections.
+RUN python -c "import loom_execution_actuator.__main__; import loom_execution_capacity_collector.__main__"
 EXPOSE 8093
 CMD ["python", "-m", "loom_execution_actuator"]
