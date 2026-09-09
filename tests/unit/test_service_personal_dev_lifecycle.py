@@ -12,6 +12,7 @@ from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlockError,
     PersonalDevOperationalInterlockError,
 )
+from loom_service.config import LoomServiceSettings
 from loom_service.personal_dev_lifecycle import build_personal_dev_capacity_runtime
 from loom_service.routes.health import router as health_router
 
@@ -26,7 +27,7 @@ def test_acceptance_binding_is_rejected_before_opening_capacity_credentials(
         "loom_service.personal_dev_lifecycle.CapacityManagerPersonalDevProjector.from_files",
         unexpected_projector,
     )
-    settings = SimpleNamespace(
+    settings = LoomServiceSettings.model_construct(
         dev_instances_enabled=True,
         personal_dev_builder_enabled=True,
         personal_dev_runtime_mode="acceptance",
@@ -35,7 +36,7 @@ def test_acceptance_binding_is_rejected_before_opening_capacity_credentials(
     )
 
     with pytest.raises(RuntimeError, match="acceptance binding"):
-        build_personal_dev_capacity_runtime(settings)  # type: ignore[arg-type]
+        build_personal_dev_capacity_runtime(settings)
 
 
 def test_acceptance_readiness_is_secret_free_and_fails_closed_on_drift() -> None:
