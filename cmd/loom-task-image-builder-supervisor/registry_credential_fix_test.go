@@ -43,10 +43,9 @@ func TestRegistryCredentialFixTimesAndJSON(t *testing.T) {
 				t.Fatalf("accepted=%v, want %v", err == nil, tc.ok)
 			}
 			if c != nil {
-				token := c.BearerToken
 				c.Close()
 				c.Close()
-				if !bytes.Equal(token, make([]byte, len(token))) || !secret.closed {
+				if c.BearerToken != nil || secret.data != nil || !secret.closed {
 					t.Fatal("token not zeroized")
 				}
 			}
@@ -241,7 +240,7 @@ func TestPublicationCredentialSourceFixFailures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !c.secret.closed || !bytes.Equal(token, make([]byte, len(token))) {
+				if !c.secret.closed || !bytes.Equal(c.secret.data, make([]byte, len(c.secret.data))) || c.BearerToken != nil {
 					t.Fatal("predecessor not zeroized")
 				}
 				return

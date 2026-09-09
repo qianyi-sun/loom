@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unsafe"
 )
 
 func TestSecretBufferReadsSealedMemfdAndRedactsFormatting(t *testing.T) {
@@ -119,24 +120,31 @@ func dupWithoutCloexec(t interface {
 	return duplicated
 }
 
-func TestSecretBufferCloseZeroesAndUnlocksBytes(t *testing.T) {
+func TestSecretBufferCloseZeroesSyntheticBytesAndUnmapsOwnedPages(t *testing.T) {
+	synthetic := &SecretBuffer{data: []byte("synthetic-test-secret")}
+	saved := synthetic.data
+	synthetic.Close()
+	if !bytes.Equal(saved, make([]byte, len(saved))) {
+		t.Fatal("synthetic secret not zeroed")
+	}
 	fd := createMemfdFixture(t, "close-zero", []byte("sentinel-secret-text"), requiredMemfdSeals, true)
 	buffer, err := NewSecretBuffer(fd, 4096)
 	if err != nil {
 		t.Fatalf("NewSecretBuffer() error = %v", err)
 	}
 
-	data := buffer.data
-	if len(data) == 0 {
+	if len(buffer.data) == 0 {
 		t.Fatal("buffer data is empty")
 	}
+	address := uintptr(unsafe.Pointer(&buffer.data[0]))
 	buffer.Close()
-	for index, value := range data {
-		if value != 0 {
-			t.Fatalf("data[%d] = %d, want 0", index, value)
-		}
+	buffer.Close()
+	if !buffer.closed || buffer.data != nil {
+		t.Fatal("buffer still accessible after close")
 	}
-	if !buffer.closed {
-		t.Fatal("buffer not marked closed")
+	var vec byte
+	_, _, errno := syscall.Syscall(syscall.SYS_MINCORE, address, uintptr(os.Getpagesize()), uintptr(unsafe.Pointer(&vec)))
+	if errno != syscall.ENOMEM {
+		t.Fatalf("closed secret still mapped: %v", errno)
 	}
 }
