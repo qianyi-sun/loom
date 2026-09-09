@@ -8,7 +8,8 @@ import httpx
 import pytest
 
 from loom.personal_dev_activation import PersonalDevActivationIntentRequest
-from loom.personal_dev_activation_agent import HttpPersonalDevActivationAuthority
+from loom.personal_dev_activation_agent import HttpPersonalDevActivationAuthority, KubectlPersonalDevActivationExecutor
+from loom.dev_instance_runtime import KubectlClient
 from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom_capacity_manager.contracts import canonical_digest
 from loom_service.routes.dev_instances import (
@@ -101,7 +102,12 @@ def test_owner_environment_response_uses_persisted_storage_names():
 
 @pytest.mark.parametrize("tamper", (None, "environment_binding", "environment_owner", "candidate_owner", "digest"))
 async def test_activation_reader_checks_durable_storage_before_returning_intent(monkeypatch, tamper):
-    from loom.db.schema import DevInstance, DevLifecycleOperation, DevLifecycleOperationAttempt, PersonalDevCandidate
+    from loom.db.schema import (
+        DevInstance,
+        DevLifecycleOperation,
+        DevLifecycleOperationAttempt,
+        PersonalDevCandidate,
+    )
     from loom.personal_dev_environment_store import (
         PersonalDevEnvironmentOperationFencedError,
         SqlAlchemyPersonalDevActivationIntentReader,
@@ -151,3 +157,21 @@ async def test_activation_reader_checks_durable_storage_before_returning_intent(
         assert intent.schema_version == 2
         assert intent.storage_binding == claim.operation.storage_binding
         assert intent.storage_binding_sha256 == canonical_digest(intent.storage_binding)
+
+
+async def test_independent_activation_observes_exact_bound_physical_identity(monkeypatch):
+    intent = _v2()
+    seen = []
+
+    async def observe(kubectl, identity, config):
+        seen.append(identity)
+        raise RuntimeError("stop before readiness/mutation")
+
+    monkeypatch.setattr("loom.personal_dev_activation_agent.observe_personal_dev_candidate_generation", observe)
+    executor = KubectlPersonalDevActivationExecutor(
+        KubectlClient("kubectl", field_manager="loom-personal-dev-activation-agent"),
+        "https://minio.example",
+    )
+    with pytest.raises(RuntimeError, match="stop before"):
+        await executor.activate(intent)
+    assert seen == [intent.storage_binding.identity]

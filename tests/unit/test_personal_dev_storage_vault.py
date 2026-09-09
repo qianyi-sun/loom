@@ -251,3 +251,15 @@ async def test_partial_recovery_with_mismatched_password_has_no_side_effects():
         await _vault(cluster).store(identity, "c" * 32)
     assert cluster.writes == before
     assert "loom-admin-secret" not in cluster.secrets
+
+
+async def test_partial_recovery_rejects_malformed_main_credentials_before_mutation():
+    cluster = _Cluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    await _vault(cluster).store(identity, _PASSWORD)
+    del cluster.secrets["loom-admin-secret"]
+    cluster.secrets["loom-secrets"]["minio-secret-key"] = b"\xff"
+    before = list(cluster.writes)
+    with pytest.raises(DevInstanceRuntimeError):
+        await _vault(cluster).store(identity, _PASSWORD)
+    assert cluster.writes == before
