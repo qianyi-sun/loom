@@ -672,6 +672,15 @@ release, replay, or a build-service installation. Those checks remain required
 in the durable admission and execution consumers. Legacy application request,
 result and endpoint formats remain unchanged.
 
+The successor event reader checks typed request/result semantics against every
+indexed event column, the pinned delegate, request digest and original head
+preimage. Its mixed-purpose prefix check enforces consecutive revision/head and
+operation/idempotency-key uniqueness. This is not yet the durable history reader:
+it does not prove lifecycle transitions, retained reporter credentials, actual
+predecessor release, latest-head currentness or SQL insertion authority. The old
+application event preimage is retained byte-for-byte, including its original
+request format; old history is not translated into typed commands.
+
 These new contracts are deliberately not accepted by execution preparation or
 promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a

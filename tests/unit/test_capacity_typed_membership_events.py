@@ -10,10 +10,15 @@ from loom_capacity_manager.contracts import canonical_digest
 from loom_capacity_manager.membership_contracts import PersonalApplicationMembershipMutationV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.models import CapacityPersonalMembershipEvent
-from tests.unit.test_capacity_typed_membership_commands import typed_application_mutation, typed_build_mutation
+from tests.unit.test_capacity_typed_membership_commands import (
+    typed_application_mutation,
+    typed_build_mutation,
+)
 
 
-def event_row(*, build=True, revision=1, previous="0" * 64, operation_id=UUID(int=771), key=UUID(int=772)):
+def event_row(*, build=True, revision=1, previous="0" * 64, operation_id=None, key=None):
+    operation_id = UUID(int=771) if operation_id is None else operation_id
+    key = UUID(int=772) if key is None else key
     module, value, request = typed_build_mutation() if build else typed_application_mutation()
     projection = request.command.projection.model_copy(update={"operation_id": operation_id})
     request = request.model_copy(update={"expected_revision": revision - 1, "command": request.command.model_copy(update={"projection": projection})})

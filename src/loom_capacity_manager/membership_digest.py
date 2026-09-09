@@ -4,7 +4,7 @@ import hashlib
 import json
 from uuid import UUID
 
-from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
+from loom_capacity_manager.build_membership_contracts import PersonalMemberV2
 
 
 def canonical_membership_event_head(
@@ -16,7 +16,7 @@ def canonical_membership_event_head(
     previous_sha256: str,
     request_digest: str,
     request_payload: dict[str, object],
-    member: PersonalApplicationMemberV1,
+    member: PersonalMemberV2,
     revision: int,
 ) -> str:
     """Retain the original event preimage and canonical bytes exactly."""

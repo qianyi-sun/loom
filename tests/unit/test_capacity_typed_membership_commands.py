@@ -223,8 +223,9 @@ def test_result_validation_rejects_changed_derived_configuration(field, changed)
 def test_result_parser_rejects_invalid_checkpoint_fields(field, changed):
     module, value, _request = typed_build_mutation()
     result = module.PersonalMembershipResultV2(revision=2, head_sha256="e" * 64, member=value.membership.members[-1], replayed=False)
+    payload = json.dumps(result.model_dump(mode="json") | {field: changed})
     with pytest.raises(ValueError):
-        module.parse_typed_membership_result(result.model_copy(update={field: changed}).model_dump_json())
+        module.parse_typed_membership_result(payload)
 
 
 def test_build_command_does_not_equate_service_deployment_to_feature_attempt():
