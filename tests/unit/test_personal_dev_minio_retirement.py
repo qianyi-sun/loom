@@ -6,7 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from loom.dev_instance_runtime import CommandResult, DevInstanceRuntimeError, KubectlClient
-from loom.personal_dev_minio_retirement import _lookup, _policy_shape, _result, _user_policies, _verify_policy
+from loom.personal_dev_minio_retirement import (
+    _lookup,
+    _policy_shape,
+    _result,
+    _user_policies,
+    _verify_policy,
+)
 
 
 @pytest.mark.parametrize("payload", ("", "{}", "[]", "null", "not-json", '{"status":"unknown"}',

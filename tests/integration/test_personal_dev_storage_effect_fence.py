@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import json
 
 import psycopg
 import pytest
@@ -18,6 +19,7 @@ from loom.dev_instance_runtime import (
     PsycopgSharedFixtureSqlExecutor,
 )
 from loom.personal_dev_capacity_runtime import PsycopgPersonalDevCapacityDatabase
+from loom.personal_dev_minio_retirement import _deny_name, _execute, _lookup
 from tests.integration.test_personal_dev_storage_minio import (
     _MinioRunner,
     pinned_minio,  # noqa: F401
@@ -128,3 +130,120 @@ async def test_retained_deny_policy_prevents_adopting_a_deleted_minio_user(pinne
     ))
     with pytest.raises(DevInstanceRuntimeError):
         await provisioner.converge(identity)
+
+
+@pytest.mark.parametrize("mutation", ("policy create", "user add", "policy attach"))
+async def test_minio_retirement_recovers_after_lost_mutation_reply(pinned_minio, mutation):  # noqa: F811
+    server, client_container = pinned_minio
+    identity = _bound_claim().operation.storage_binding.identity
+    vault = _vault(_Cluster())
+    await vault.store(identity, _PASSWORD)
+    runner = _MinioRunner(server, client_container)
+    provisioner = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=runner), vault)
+    admin = server.get_client()
+    admin.make_bucket(identity.task_bucket)
+    await provisioner.converge(identity)
+    access, secret = await vault.object_credentials(identity)
+    client = Minio(server.get_config()["endpoint"], access_key=access, secret_key=secret, secure=False)
+    client.put_object(identity.task_bucket, "retained", io.BytesIO(b"owned"), 5)
+
+    class LostReply:
+        lost = False
+
+        async def run(self, argv, *, stdin=None, timeout_seconds=60):
+            result = await runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+            if not self.lost and f"mc admin {mutation}" in argv[-1]:
+                self.lost = True
+                raise DevInstanceRuntimeError("injected lost mutation reply")
+            return result
+
+    transport = LostReply()
+    interrupted = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=transport), vault)
+    try:
+        await interrupted.delete(identity)
+    except DevInstanceRuntimeError as exc:
+        assert str(exc) == "injected lost mutation reply"
+    assert transport.lost
+    # A recorded decision must reject stale convergence even when Deny has
+    # not yet been attached. Retirement is not complete until a retry verifies it.
+    with pytest.raises(DevInstanceRuntimeError, match="permanently retired"):
+        await provisioner.converge(identity)
+    await provisioner.delete(identity)
+    await provisioner.delete(identity)
+    with pytest.raises(S3Error):
+        client.put_object(identity.task_bucket, "after-retirement", io.BytesIO(b"bad"), 3)
+    assert admin.stat_object(identity.task_bucket, "retained").size == 5
+
+
+async def test_incomplete_minio_retirement_rejects_already_started_convergence(pinned_minio):  # noqa: F811
+    server, client_container = pinned_minio
+    identity = _bound_claim().operation.storage_binding.identity
+    vault = _vault(_Cluster())
+    await vault.store(identity, _PASSWORD)
+    runner = _MinioRunner(server, client_container)
+    provisioner = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=runner), vault)
+    server.get_client().make_bucket(identity.task_bucket)
+    await provisioner.converge(identity)
+    paused, resume = asyncio.Event(), asyncio.Event()
+
+    class DelayedConvergence:
+        async def run(self, argv, *, stdin=None, timeout_seconds=60):
+            if "mc admin user add" in argv[-1]:
+                paused.set()
+                await resume.wait()
+            return await runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+    class InterruptedRetirement:
+        async def run(self, argv, *, stdin=None, timeout_seconds=60):
+            if "mc admin user add" in argv[-1]:
+                raise DevInstanceRuntimeError("interrupted before credential mutation")
+            return await runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+    stale = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=DelayedConvergence()), vault)
+    retiring = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=InterruptedRetirement()), vault)
+    task = asyncio.create_task(stale.converge(identity))
+    try:
+        async with asyncio.timeout(45):
+            await paused.wait()
+            with pytest.raises(DevInstanceRuntimeError, match="interrupted before"):
+                await retiring.delete(identity)
+            resume.set()
+            with pytest.raises(DevInstanceRuntimeError, match="permanently retired"):
+                await task
+            await provisioner.delete(identity)
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("policy_kind", ("allow", "deny"))
+async def test_minio_policy_drift_is_rejected_without_overwrite(pinned_minio, policy_kind):  # noqa: F811
+    server, client_container = pinned_minio
+    identity = _bound_claim().operation.storage_binding.identity
+    vault = _vault(_Cluster())
+    await vault.store(identity, _PASSWORD)
+    provisioner = KubectlMinioTenantProvisioner(
+        KubectlClient("kubectl", runner=_MinioRunner(server, client_container)), vault,
+    )
+    await provisioner.converge(identity)
+    name = provisioner._names(identity)[1] if policy_kind == "allow" else _deny_name(identity)
+    # Simulate actual administrative drift; neither normal converge nor
+    # retirement may silently adopt or overwrite an unexplained policy.
+    policy = {"Version": "2012-10-17", "Statement": [{
+        "Sid": "foreign", "Effect": "Allow", "Action": ["s3:*"], "Resource": ["*"],
+    }]}
+    await _execute(provisioner, '\n'.join((
+        "umask 077", "policy_file=$(mktemp)",
+        "trap 'rm -f -- \"$policy_file\"' EXIT HUP INT TERM",
+        'cat >"$policy_file"',
+        f'mc admin policy create fixture {name} "$policy_file" >/dev/null',
+    )), stdin=json.dumps(policy))
+    before = await _lookup(provisioner, "policy", name)
+    with pytest.raises(DevInstanceRuntimeError, match="immutable intent"):
+        await provisioner.converge(identity)
+    if policy_kind == "deny":
+        with pytest.raises(DevInstanceRuntimeError, match="immutable intent"):
+            await provisioner.delete(identity)
+    assert await _lookup(provisioner, "policy", name) == before
