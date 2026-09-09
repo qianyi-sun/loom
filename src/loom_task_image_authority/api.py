@@ -580,6 +580,8 @@ def create_app(
             [AsyncSession, LocalEncryptedSecretStore],
             Awaitable[_TransitionT],
         ],
+        *,
+        read_committed: bool = False,
     ) -> _TransitionT:
         if app.state.session_factory is None or app.state.keyring is None:
             raise HTTPException(status_code=503, detail="task-image authority not ready")
@@ -593,6 +595,11 @@ def create_app(
                 fallback_keys=dict(keyring.fallback_keys),
             )
             try:
+                if read_committed:
+                    # Credential insertion needs a fresh post-attempt-lock
+                    # retirement snapshot. Override only this owned connection,
+                    # before its first query; other routes retain SERIALIZABLE.
+                    await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
                 result = await operation(session, secret_store)
                 await session.commit()
             except TaskImageProjectionEquivocationError:
@@ -1259,7 +1266,7 @@ def create_app(
                 credential_id_factory=resolved_credential_id,
             )
 
-        return bounded_response(await transition(credential_transition))
+        return bounded_response(await transition(credential_transition, read_committed=True))
 
     @app.put(
         "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-candidate"
