@@ -112,3 +112,28 @@ async def test_runtime_owns_configured_backend_and_closes_on_exit(tmp_path, monk
     async with module.configured_bundle_provider(TaskImageAuthoritySettings(**_settings_values(tmp_path))) as provider:
         assert provider is None
     assert len(constructed) == 2
+
+
+async def test_runtime_closes_backend_when_provider_construction_fails(tmp_path, monkeypatch):
+    from loom_task_image_authority import bundle_runtime as module
+
+    settings = _native(tmp_path)
+    _owner_only(settings.bundle_credentials_file, b'{"schema_version":1,"access_key":"fixture-access","secret_key":"fixture-secret"}')
+    closed = []
+
+    class Backend:
+        def __init__(self, **options):
+            pass
+
+        async def aclose(self):
+            closed.append(True)
+
+    def fail(**options):
+        raise ValueError("provider failed")
+
+    monkeypatch.setattr(module, "MinioTaskImageBundleBackend", Backend)
+    monkeypatch.setattr(module, "AsyncTaskImageBundleCapabilityProvider", fail)
+    with pytest.raises(ValueError, match="provider failed"):
+        async with module.configured_bundle_provider(settings):
+            pytest.fail("construction unexpectedly succeeded")
+    assert closed == [True]
