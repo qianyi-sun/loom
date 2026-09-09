@@ -232,12 +232,26 @@ spec:
           value: app.kubernetes.io/name
         - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_MANAGER_PORT
           value: '8443'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_OBSERVER_BEARER_TOKEN_FILE
+          value: /var/run/loom-personal-dev-capacity/observer-token
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_OBSERVER_CA_FILE
+          value: /var/run/loom-personal-dev-capacity/observer-ca.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_OBSERVER_CERTIFICATE_FILE
+          value: /var/run/loom-personal-dev-capacity/observer-certificate.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_OBSERVER_PRIVATE_KEY_FILE
+          value: /var/run/loom-personal-dev-capacity/observer-private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_POOL_CAPABILITIES_JSON
           value: '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]},{"capability_id":"gb10-arm-none","pool_id":"gb10","operating_system":"linux","cpu_architecture":"arm64","gpu_vendor":"none","network_policies":["public"]}]'
         - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_PRIVATE_KEY_FILE
           value: /var/run/loom-personal-dev-capacity/private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT
           value: '16'
+        - name: LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_BINDING_JSON
+          value: '{}'
+        - name: LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_OBSERVER_PRINCIPAL_ID
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_PLAN_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_IMAGE
           value: ''
         - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_INSTANCE_ID
