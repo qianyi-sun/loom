@@ -120,3 +120,26 @@ def test_storage_namespace_pins_secret_suffix_without_parsing_canonical_json_in_
     identity = _bound_claim().operation.storage_binding.identity
     assert personal_dev_storage_annotations(identity)["loom.dev/storage-incarnation"] == identity.storage_incarnation.hex
     assert personal_dev_storage_annotations(derive_identity(identity.name)) == {}
+
+
+def test_bound_bootstrap_delegates_only_exact_incarnation_secret_gets():
+    identity = _bound_claim().operation.storage_binding.identity
+    config = _immutable_config()
+    config = replace(config, lifecycle_binding=replace(
+        config.lifecycle_binding, subject_id=identity.storage_binding.subject_id,
+        subject_incarnation=identity.storage_incarnation,
+    ))
+    documents = dev_instance_manifest_documents(identity, config)
+    roles = [document for document in documents if document["kind"] == "Role"]
+    assert len(roles) == 1
+    role = roles[0]
+    assert role["metadata"]["namespace"] == identity.namespace
+    assert role["rules"] == [{
+        "apiGroups": [""], "resources": ["secrets"], "verbs": ["get"],
+        "resourceNames": [f"{purpose}-{identity.storage_incarnation.hex}" for purpose in _PURPOSES],
+    }]
+    binding = next(document for document in documents if document["kind"] == "RoleBinding" and document["roleRef"].get("kind") == "Role")
+    assert binding["roleRef"]["name"] == role["metadata"]["name"]
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "loom-personal-dev-management", "namespace": "loom-dev"}]
+    legacy = dev_instance_manifest_documents(derive_identity(identity.name), _immutable_config())
+    assert not any(document["kind"] == "Role" for document in legacy)
