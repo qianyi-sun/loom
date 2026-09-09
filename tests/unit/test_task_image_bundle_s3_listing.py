@@ -67,7 +67,7 @@ def test_rejects_invalid_request_before_parser_allocation(monkeypatch, options):
     _xml().replace(b"opaque", b"x" * 8193),
     _xml().replace(b"<ETag>opaque</ETag>", b"<Owner><ID><Nested><Deep>x</Deep></Nested></ID></Owner>"),
     _xml().replace(b"<ETag>opaque</ETag>", b"<Owner>" + b"<ID/>" * 16384 + b"</Owner>"),
-    _xml().replace(b"<ETag>opaque</ETag>", b"<Owner>" + b"<ID>" + b"x&#32;" * 32769 + b"</ID></Owner>"),
+    _xml().replace(b"<ETag>opaque</ETag>", b"<Owner>" + (b"<ID>" + b"x&#32;" * 4000 + b"</ID>") * 9 + b"</Owner>"),
 ], ids=lambda _: "structural-limit")
 def test_rejects_bounded_structure_and_token_overflows(payload):
     with pytest.raises(RuntimeError):
@@ -107,6 +107,7 @@ def test_truncated_page_has_bounded_non_replayed_continuation():
     b"<!DOCTYPE x [<!ENTITY e 'expanded'>]>" + _xml(),
     b"<!DOCTYPE x SYSTEM 'file:///private'>" + _xml(),
     b"<?private instruction?>" + _xml(),
+    b"<?xml version='1.0' encoding='private-secret-encoding'?>" + _xml(),
     _xml() + _xml(),
 ], ids=lambda _: "invalid-page")
 def test_rejects_malformed_or_ambiguous_page_without_echo(payload):
