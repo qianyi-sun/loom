@@ -700,10 +700,10 @@ identity. Database consumer tests seed explicit strong receipts; they are not
 evidence that native admission or content download is complete.
 
 Native derivation still rejects strong provenance before changing a lease.
-Manifest-bearing derivation and production wiring of the real Go downloader are
-still required; inventory matching, V2 capability issuance and tested native
-data transfer do not open that admission boundary. Producer orchestration remains
-unswitched. Do not infer manifest
+The production orchestrator selects the real registered Go downloader and
+descriptor-owned executor, but manifest-bearing authority derivation and producer
+orchestration remain unswitched. Inventory matching, V2 capability issuance and
+tested data transfer do not open that admission boundary. Do not infer manifest
 authority from mutable stored objects. Native admission remains closed until the
 complete producer-to-downloader path and remaining activation boundaries are
 verified.
