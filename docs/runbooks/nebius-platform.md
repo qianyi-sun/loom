@@ -266,9 +266,13 @@ Service execution persists the verifier's named rewards and a scalar
 same rule as the worker: a single metric retains its value, multiple metrics
 use their mean, and absent rewards remain null. Zero is a valid score. Finalize
 replays and archive materialization preserve this projection and the raw runtime
-result. Installing this fix does not backfill older Trial rows; repair any
-historical missing scalar only from that row's committed verifier rewards,
-without rerunning the Trial or changing its state, raw rewards or usage.
+result. Alembic revision `0133` backfills older service-execution results that
+have a missing/null scalar and nonempty finite numeric rewards matching the
+runtime verifier rewards. It leaves explicit scores, unrelated results and
+invalid/missing rewards untouched. The migration changes only the derived
+scalar, without rerunning the Trial or changing state, raw rewards, usage or
+artifacts; downgrading does not erase corrected scores. Apply it through the
+ordinary deployment migration phase rather than a separate live repair script.
 
 Catalog configuration can be reapplied after a Control Plane restart. Execution
 class network capabilities are a set: JSON ordering does not change the class

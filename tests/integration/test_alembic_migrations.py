@@ -221,7 +221,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == "0132"
+            assert revision == "0133"
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",
@@ -2673,16 +2673,18 @@ def test_in_flight_count_trigger_is_safe_under_locked_search_path(
         connection.execute(text("SET LOCAL search_path = pg_catalog"))
         connection.execute(
             text(
-                "UPDATE public.trials SET state='claimed', worker_id=:worker_id "
-                "WHERE id=:trial_id"
+                "UPDATE public.trials SET state='claimed', worker_id=:worker_id WHERE id=:trial_id"
             ),
             {"worker_id": worker_id, "trial_id": trial_id},
         )
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT in_flight_count FROM team_quotas WHERE team_id=:team_id"),
-            {"team_id": team_id},
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                text("SELECT in_flight_count FROM team_quotas WHERE team_id=:team_id"),
+                {"team_id": team_id},
+            ).scalar_one()
+            == 1
+        )
     engine.dispose()
 
 
