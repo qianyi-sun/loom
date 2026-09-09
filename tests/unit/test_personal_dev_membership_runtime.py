@@ -1,6 +1,7 @@
 """Trusted membership observations reject caller substitutions and stale leases."""
 
 import base64
+import json
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
@@ -24,6 +25,67 @@ from loom_capacity_manager.contracts import canonical_digest
 from loom_capacity_manager.membership_contracts import PersonalApplicationMembershipMutationV1
 from tests.unit.test_personal_dev_membership_checkpoint import membership_envelope_values
 from tests.unit.test_personal_dev_reconciler import _NOW, _RUNTIME_DATABASE_URL, _claim
+
+
+@pytest.mark.parametrize("value", ((), (1, 1), (1, 2, 3), (0,), (-1,), (True,), (3,), [1]))
+def test_retirement_rejects_unbounded_or_nonmonotonic_generation_sets(value):
+    module = import_module("loom.personal_dev_membership_runtime")
+    with pytest.raises(ValueError, match="retirement"):
+        module._retirement_generations(value, target=3)
+
+
+def _successor_retirement_claim():
+    from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
+    from tests.unit.test_personal_dev_membership_successor import successor_case
+
+    parent, accepted, values = successor_case("destroy", "terminal-not-committed")
+    binding = PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    child = replace(
+        parent.operation, id=uuid4(), operation_epoch=3, expected_operation_epoch=2,
+        capacity_membership_envelope=None, membership_predecessor_operation_id=parent.operation.id,
+        membership_accepted_operation_id=accepted.id,
+        membership_predecessor_envelope_sha256=binding.predecessor_envelope_sha256,
+        membership_successor_binding=binding, membership_successor_binding_sha256=canonical_digest(binding),
+        membership_continuation_kind="destroy",
+    )
+    return replace(parent, operation=child), binding
+
+
+def test_successor_retirement_uses_only_exact_reviewed_adopted_and_failed_generations():
+    from loom.personal_dev_membership_runtime import retirement_from_generation
+
+    claim, binding = _successor_retirement_claim()
+    assert retirement_from_generation(claim, binding.authority.execution) == (1, 2)
+
+
+@pytest.mark.parametrize("change", (
+    "digest", "predecessor", "envelope", "accepted", "owner", "team", "subject", "incarnation",
+    "candidate", "publication", "deployment", "reporter", "admission", "epoch", "continuation", "execution",
+))
+def test_successor_retirement_rejects_reviewed_binding_drift(change):
+    from loom.personal_dev_membership_runtime import retirement_from_generation
+
+    claim, binding = _successor_retirement_claim()
+    fields = {
+        "digest": {"membership_successor_binding_sha256": "e" * 64},
+        "predecessor": {"membership_predecessor_operation_id": uuid4()},
+        "envelope": {"membership_predecessor_envelope_sha256": "e" * 64},
+        "accepted": {"membership_accepted_operation_id": uuid4()},
+        "owner": {"owner_user_id": uuid4()}, "team": {"owner_team_id": uuid4()},
+        "subject": {"subject_id": uuid4()}, "incarnation": {"subject_incarnation": uuid4()},
+        "candidate": {"candidate_sha": "e" * 64}, "deployment": {"deployment_generation": 2},
+        "reporter": {"capacity_reporter_incarnation": uuid4()},
+        "admission": {"protected_admission_sha256": "e" * 64},
+        "epoch": {"operation_epoch": 4}, "continuation": {"membership_continuation_kind": "update"},
+    }
+    claim = replace(claim, operation=replace(claim.operation, **fields.get(change, {})))
+    if change == "publication":
+        claim = replace(claim, candidate=replace(claim.candidate, publication_sha256="e" * 64))
+    execution = binding.authority.execution
+    if change == "execution":
+        execution = execution.model_copy(update={"execution_epoch": 100})
+    with pytest.raises(ValueError, match="successor"):
+        retirement_from_generation(claim, execution)
 
 
 def _membership_claim():
