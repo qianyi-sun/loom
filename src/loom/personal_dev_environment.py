@@ -21,6 +21,7 @@ from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelop
 from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
 
 if TYPE_CHECKING:
+    from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
     from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 
 PersonalDevEnvironmentStatus = Literal[
@@ -197,6 +198,7 @@ class PersonalDevEnvironmentRecord:
     operation_step: str
     created_at: datetime
     updated_at: datetime
+    storage_binding: PersonalDevStorageBindingV1 | None = None
     keep_data: bool = False
     ready_at: datetime | None = None
     deleted_at: datetime | None = None
@@ -240,6 +242,7 @@ class PersonalDevLifecycleOperationRecord:
     checkpoint: str
     created_at: datetime
     updated_at: datetime
+    storage_binding: PersonalDevStorageBindingV1 | None = None
     keep_data: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None

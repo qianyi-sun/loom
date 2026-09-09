@@ -49,6 +49,10 @@ from loom.personal_dev_environment import (
     PersonalDevOperationState,
     PersonalDevReconciliationClaim,
 )
+from loom.personal_dev_incarnation_storage import (
+    PersonalDevStorageBindingV1,
+    parse_personal_dev_storage_binding,
+)
 from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipEnvelopeV1,
     PersonalDevMembershipHistoricalOutcomeV1,
@@ -255,6 +259,26 @@ def _membership_checkpoint_from_jsonb(value: object) -> PersonalMembershipCheckp
     )
 
 
+def _storage_record(row: DevInstance | DevLifecycleOperation) -> PersonalDevStorageBindingV1 | None:
+    if row.storage_binding is None:
+        if row.storage_binding_sha256 is not None:
+            raise ValueError("personal storage binding is incomplete")
+        return None
+    binding = parse_personal_dev_storage_binding(
+        json.dumps(row.storage_binding, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        expected_sha256=row.storage_binding_sha256 or "",
+    )
+    name = row.name if isinstance(row, DevInstance) else row.environment_name
+    if (
+        binding.environment_name != name or binding.subject_id != row.subject_id
+        or binding.subject_incarnation != row.subject_incarnation
+        or binding.owner_user_id != row.owner_user_id or binding.owner_team_id != row.owner_team_id
+        or binding.layout != "incarnation-v1"
+    ):
+        raise ValueError("personal storage binding differs from durable ownership")
+    return binding
+
+
 def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
     accepted_checkpoint = (
         _membership_checkpoint_from_jsonb(row.accepted_capacity_membership_checkpoint)
@@ -262,6 +286,7 @@ def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
         else None
     )
     return PersonalDevEnvironmentRecord(
+        storage_binding=_storage_record(row),
         name=row.name,
         subject_id=row.subject_id,
         subject_incarnation=row.subject_incarnation,
@@ -315,6 +340,7 @@ def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperati
         else None
     )
     return PersonalDevLifecycleOperationRecord(
+        storage_binding=_storage_record(row),
         id=row.id,
         idempotency_key=row.idempotency_key,
         environment_name=row.environment_name,
@@ -466,10 +492,26 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         session: AsyncSession,
         *,
         limits: PersonalDevLifecycleLimits | None = None,
+        storage_layout: Literal["legacy-name-v1", "incarnation-v1"] = "legacy-name-v1",
     ) -> None:
+        if storage_layout not in {"legacy-name-v1", "incarnation-v1"}:
+            raise ValueError("personal storage layout is invalid")
         self.session = session
+        self._storage_layout = storage_layout
         self._candidates = SqlAlchemyPersonalDevCandidateStore(session)
         self._limits = limits or PersonalDevLifecycleLimits()
+
+    def _new_storage_binding(
+        self, requested: PersonalDevEnvironmentApplyRequest, *, subject_id: UUID,
+        subject_incarnation: UUID, previous: DevInstance | None = None,
+    ) -> PersonalDevStorageBindingV1 | None:
+        if self._storage_layout == "legacy-name-v1" and (previous is None or previous.storage_binding is None):
+            return None
+        return PersonalDevStorageBindingV1(
+            layout="incarnation-v1", environment_name=requested.name, subject_id=subject_id,
+            subject_incarnation=subject_incarnation, owner_user_id=requested.owner_user_id,
+            owner_team_id=requested.owner_team_id,
+        )
 
     async def apply(
         self,
@@ -690,6 +732,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             id=operation_id,
             idempotency_key=requested.idempotency_key,
             environment_name=environment.name,
+            storage_binding=environment.storage_binding,
+            storage_binding_sha256=environment.storage_binding_sha256,
             subject_id=environment.subject_id,
             subject_incarnation=environment.subject_incarnation,
             owner_user_id=environment.owner_user_id,
@@ -840,6 +884,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             id=operation_id,
             idempotency_key=requested.idempotency_key,
             environment_name=environment.name,
+            storage_binding=environment.storage_binding,
+            storage_binding_sha256=environment.storage_binding_sha256,
             subject_id=environment.subject_id,
             subject_incarnation=environment.subject_incarnation,
             owner_user_id=environment.owner_user_id,
@@ -1013,6 +1059,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             await self._assert_limits(requested, replacing_name=None)
             subject_id = uuid4()
             subject_incarnation = uuid4()
+            storage = self._new_storage_binding(requested, subject_id=subject_id, subject_incarnation=subject_incarnation)
+            identity = storage.identity if storage is not None else derive_identity(requested.name)
             operation_epoch = 1
             generation = 1
             kind: PersonalDevOperationKind = "create"
@@ -1029,8 +1077,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 deployment_generation=generation,
                 candidate_id=requested.candidate_id,
                 candidate_sha=requested.candidate_sha,
-                capacity_namespace=derive_identity(requested.name).namespace,
-                capacity_database=derive_identity(requested.name).database,
+                capacity_namespace=identity.namespace,
+                capacity_database=identity.database,
+                storage_binding=storage.model_dump(mode="json") if storage is not None else None,
+                storage_binding_sha256=canonical_digest(storage) if storage is not None else None,
                 operation_epoch=operation_epoch,
                 operation_id=operation_id,
                 operation_step="candidate_build",
@@ -1121,8 +1171,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                         "retained-data membership recreation requires a fresh storage binding"
                     )
                 await self._assert_limits(requested, replacing_name=None)
-                identity = derive_identity(requested.name)
                 subject_incarnation = uuid4()
+                storage = self._new_storage_binding(requested, subject_id=environment.subject_id,
+                                                   subject_incarnation=subject_incarnation, previous=environment)
+                identity = storage.identity if storage is not None else derive_identity(requested.name)
                 operation_epoch = environment.operation_epoch + 1
                 generation = 1
                 kind = "create"
@@ -1136,6 +1188,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment.candidate_sha = requested.candidate_sha
                 environment.capacity_namespace = identity.namespace
                 environment.capacity_database = identity.database
+                environment.storage_binding = storage.model_dump(mode="json") if storage is not None else None
+                environment.storage_binding_sha256 = canonical_digest(storage) if storage is not None else None
                 environment.operation_epoch = operation_epoch
                 environment.operation_id = operation_id
                 environment.operation_step = "candidate_build"
@@ -1244,6 +1298,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             id=operation_id,
             idempotency_key=requested.idempotency_key,
             environment_name=requested.name,
+            storage_binding=environment.storage_binding,
+            storage_binding_sha256=environment.storage_binding_sha256,
             subject_id=subject_id,
             subject_incarnation=subject_incarnation,
             owner_user_id=requested.owner_user_id,
@@ -2493,6 +2549,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         checkpoint = "capacity_retirement_requested" if decision.kind == "destroy" else "candidate_build"
         child = DevLifecycleOperation(
             id=child_id, idempotency_key=key, environment_name=operation.environment_name,
+            storage_binding=operation.storage_binding,
+            storage_binding_sha256=operation.storage_binding_sha256,
             subject_id=operation.subject_id, subject_incarnation=operation.subject_incarnation,
             owner_user_id=operation.owner_user_id, owner_team_id=operation.owner_team_id,
             operation_epoch=decision.operation_epoch, expected_operation_epoch=operation.operation_epoch,

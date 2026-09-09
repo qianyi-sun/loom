@@ -271,6 +271,10 @@ def validate_membership_successor(
     """
     binding = PersonalDevMembershipSuccessorBindingV1.model_validate_json(canonical_bytes(binding))
     operation, environment = claim.operation, claim.environment
+    if environment.storage_binding != operation.storage_binding or (
+        accepted_operation is not None and accepted_operation.storage_binding != operation.storage_binding
+    ):
+        raise ValueError("successor storage differs from current or independently accepted history")
     saved = operation.capacity_membership_envelope
     if (
         operation.capacity_mode != "membership-v1"

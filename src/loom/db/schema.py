@@ -40,6 +40,25 @@ from sqlalchemy.orm import Mapped, mapped_column
 from loom.db.base import Base
 
 
+def _personal_storage_binding_check(environment_name: str) -> str:
+    return (
+        "(storage_binding IS NULL AND storage_binding_sha256 IS NULL) OR (("
+        "storage_binding IS NOT NULL AND storage_binding_sha256 ~ '^[0-9a-f]{64}$' "
+        "AND storage_binding_sha256 <> repeat('0', 64) "
+        "AND storage_binding->>'schema_version' = '1' "
+        "AND subject_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+        "AND subject_incarnation <> '00000000-0000-0000-0000-000000000000'::uuid "
+        "AND owner_user_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+        "AND owner_team_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+        f"AND {environment_name} NOT IN ('dev', 'development', 'staging', 'production', "
+        "'prod', 'local', 'loom', 'shared', 'default') "
+        "AND storage_binding = jsonb_build_object('schema_version', 1, "
+        f"'layout', 'incarnation-v1', 'environment_name', {environment_name}, "
+        "'subject_id', subject_id::text, 'subject_incarnation', subject_incarnation::text, "
+        "'owner_user_id', owner_user_id::text, 'owner_team_id', owner_team_id::text)) IS TRUE)"
+    )
+
+
 class Team(Base):
     __tablename__ = "teams"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -536,6 +555,7 @@ class DevInstance(Base):
 
     __tablename__ = "dev_instances"
     __table_args__ = (
+        CheckConstraint(_personal_storage_binding_check("name"), name="dev_instances_storage_binding_check"),
         CheckConstraint(
             "name ~ '^[a-z]([-a-z0-9]{0,18}[a-z0-9])?$'",
             name="dev_instances_name_check",
@@ -616,7 +636,9 @@ class DevInstance(Base):
             "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
             "AND capacity_database IS NOT NULL "
             "AND capacity_namespace = 'loom-dev-' || name "
-            "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))",
+            "AND capacity_database = CASE WHEN storage_binding IS NULL THEN "
+            "'loom_dev_' || replace(name, '-', '_') ELSE "
+            "'ld_' || replace(name, '-', '_') || '_' || replace(subject_incarnation::text, '-', '') END)",
             name="dev_instances_personal_capacity_identity_check",
         ),
         CheckConstraint(
@@ -669,6 +691,8 @@ class DevInstance(Base):
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     capacity_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
     capacity_database: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_binding: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    storage_binding_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     operation_epoch: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
@@ -1380,6 +1404,7 @@ class DevLifecycleOperation(Base):
 
     __tablename__ = "dev_lifecycle_operations"
     __table_args__ = (
+        CheckConstraint(_personal_storage_binding_check("environment_name"), name="dev_lifecycle_operations_storage_binding_check"),
         CheckConstraint(
             "operation_epoch >= expected_operation_epoch "
             "AND operation_epoch <= expected_operation_epoch + 1 "
@@ -1734,6 +1759,8 @@ class DevLifecycleOperation(Base):
         JSONB(none_as_null=True),
         nullable=True,
     )
+    storage_binding: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    storage_binding_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     membership_predecessor_operation_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),

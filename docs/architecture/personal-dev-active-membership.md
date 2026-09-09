@@ -291,9 +291,25 @@ derives database/roles/buckets and object-store identities from the name plus
 full subject incarnation, retaining stable namespaces and routes. Short purpose
 suffixes keep every PostgreSQL and bucket name within 63 bytes. Bindings pin
 owner user/team and subject identities; resource paths are never caller overrides.
-This contract alone does not provision storage: durable lifecycle/activation
-propagation, credential fencing and allowlisted data transfer remain required
-before selecting the new layout or lifting the recreation interlock.
+Migration `0137` reserves the canonical binding and digest on each environment
+and lifecycle operation before external work. Historical NULL bindings retain
+the exact legacy mapping; there is no physical rename or historical backfill.
+Retries and same-incarnation operations retain their binding. Recreation inherits
+the incarnation layout even if management configuration rolls back, while
+allocating fresh physical names and preserving retired operation history.
+Database guards enforce canonical ownership, immutable history, current-operation
+handoff and release-gated fresh incarnation transitions. Downgrade refuses to
+discard any bound storage history.
+These new append-only protections apply once an environment has incarnation-bound
+history, including its retained legacy predecessor records. They do not redesign
+legacy-only administrative deletion before opt-in. The lifecycle controller has
+no environment/operation row-deletion path; destructive database administration
+is outside the supported recreation workflow.
+
+This durable contract does not enable storage provisioning. Runtime and independent
+activation propagation, credential fencing, UID-fenced namespace cleanup and
+allowlisted data transfer remain required before selecting the new layout in the
+live service or lifting the retained-data recreation interlock.
 
 The separate active acceptance binding pins the entire V3 preparation, exact
 execution authority and a finite reviewed window; it cannot reinterpret old
