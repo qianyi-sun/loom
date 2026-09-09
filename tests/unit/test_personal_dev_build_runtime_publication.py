@@ -119,3 +119,19 @@ def test_even_digest_pinned_evidence_requires_bounded_valid_shape(tmp_path, payl
 def test_evidence_wire_version_is_exact(tmp_path, version):
     with pytest.raises(ValueError):
         _load(tmp_path, mutate=lambda evidence: evidence.update(schema_version=version))
+
+
+@pytest.mark.parametrize("duplicate", (False, True))
+def test_digest_pinned_noncanonical_or_duplicate_key_evidence_is_rejected(tmp_path, duplicate):
+    release = _release()
+    payload = _canonical(_evidence(release))
+    if duplicate:
+        payload = payload.replace(b'"schema_version":4', b'"schema_version":4,"schema_version":4')
+    else:
+        payload += b"\n"
+    release["release_evidence_sha256"] = hashlib.sha256(payload).hexdigest()
+    path, digest = _write_release(tmp_path, release)
+    with pytest.raises(ValueError, match="JSON"):
+        import_module("loom.personal_dev_build_runtime_publication").load_personal_build_runtime_publication(
+            path, expected_release_sha256=digest, evidence_payload=payload,
+        )
