@@ -1,5 +1,6 @@
 """Configured runtime: real TLS storage plus HTTP/SQL lifecycle composition."""
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -27,6 +28,8 @@ from tests.integration.test_task_image_bundle_unlocked_issuance import _claim
 from tests.integration.test_task_image_projection_store import GRANT_ID
 from tests.unit.test_task_image_authority_config import _settings_values
 from tests.unit.test_task_image_bundle_capability import _plan
+
+pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 
 
 def _configured(tmp_path, minio_tls, values):
@@ -68,7 +71,7 @@ async def test_http_lifespan_constructs_native_provider_and_recreates_closed_bac
         # This HTTP/SQL fixture uses the authority's historical clock. Stub only
         # the wire read; the separate test above uses real wall time + TLS MinIO.
         reads.append(reader)
-        return b'<ListBucketResult><Name>loom-bundles</Name><Prefix>phase2c/session-bound/</Prefix><MaxKeys>256</MaxKeys><KeyCount>1</KeyCount><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><Contents><Key>phase2c/session-bound/task.toml</Key><Size>20</Size></Contents></ListBucketResult>'
+        return b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>loom-bundles</Name><Prefix>phase2c/session-bound/</Prefix><MaxKeys>256</MaxKeys><KeyCount>1</KeyCount><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><Contents><Key>phase2c/session-bound/task.toml</Key><Size>20</Size></Contents></ListBucketResult>'
 
     async def close(backend):
         closed.append(backend)
@@ -118,4 +121,45 @@ async def test_configured_startup_fails_closed_and_releases_owned_backend(author
         assert client.get("/healthz").status_code == 503
         assert app.state.ready is False
         assert len(closed) == (1 if failure == "schema" else 0)
+        assert app.state.engine is None, "failed startup retained a database pool while serving unready"
     assert len(closed) == (1 if failure == "schema" else 0)
+
+
+async def test_cancelled_startup_closes_native_backend_and_disposes_engine(authority_api, tmp_path, minio_tls, monkeypatch):
+    import loom_task_image_authority.api as api
+
+    settings = _configured(tmp_path, minio_tls, authority_api.settings.model_dump(mode="python"))
+    closed, disposed = [], []
+    entered = asyncio.Event()
+    original_close, original_dispose = MinioTaskImageBundleBackend.aclose, api.AsyncEngine.dispose
+
+    async def close(backend):
+        closed.append(backend)
+        await original_close(backend)
+
+    async def dispose(engine, *args, **kwargs):
+        disposed.append(engine)
+        await original_dispose(engine, *args, **kwargs)
+
+    async def schema_wait(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(MinioTaskImageBundleBackend, "aclose", close)
+    monkeypatch.setattr(api.AsyncEngine, "dispose", dispose)
+    monkeypatch.setattr(api, "assert_schema_at_head", schema_wait)
+    app = create_app(settings)
+
+    async def startup():
+        async with app.router.lifespan_context(app):
+            pytest.fail("cancelled startup became ready")
+
+    pending = asyncio.create_task(startup())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+    finally:
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    assert len(closed) == len(disposed) == 1
+    assert app.state.ready is False

@@ -32,6 +32,10 @@ def test_native_configuration_is_explicit_and_disabled_by_default(tmp_path, monk
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "unrelated-secret")
     monkeypatch.setenv("AWS_REGION", "unrelated-region")
     assert TaskImageAuthoritySettings().bundle_backend == "disabled"
+    for name, value in configured.model_dump(mode="python").items():
+        if name.startswith("bundle_") and value is not None:
+            monkeypatch.setenv("LOOM_TASK_IMAGE_AUTHORITY_" + name.upper(), str(value))
+    assert TaskImageAuthoritySettings() == configured
 
 
 @pytest.mark.parametrize("changes", [
@@ -137,3 +141,18 @@ async def test_runtime_closes_backend_when_provider_construction_fails(tmp_path,
         async with module.configured_bundle_provider(settings):
             pytest.fail("construction unexpectedly succeeded")
     assert closed == [True]
+
+
+def test_native_mode_cannot_be_bypassed_by_an_injected_provider(tmp_path):
+    from loom_task_image_authority.api import create_app
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        create_app(_native(tmp_path), bundle_capability_provider=object())
+
+
+async def test_runtime_revalidates_copied_settings_before_constructing_backend(tmp_path):
+    from loom_task_image_authority.bundle_runtime import configured_bundle_provider
+
+    with pytest.raises(ValidationError):
+        async with configured_bundle_provider(_native(tmp_path).model_copy(update={"bundle_region": None})):
+            pytest.fail("invalid settings bypassed startup admission")
