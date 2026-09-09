@@ -119,7 +119,10 @@ def _policy(tmp_path: Path, *, accepted: int = 56, target_id: str | None = None)
 
 
 def _monitor(
-    *, nodes: int, slots: int, occupied: int = 0,
+    *,
+    nodes: int,
+    slots: int,
+    occupied: int = 0,
     target_id: str = "nebius-eu-north1-development",
 ) -> dict[str, Any]:
     return {
@@ -261,7 +264,9 @@ def test_validate_trial_bundle_checks_manifest_and_every_member() -> None:
         )
 
 
-@pytest.mark.parametrize("target_id", [None, "nebius-eu-north1-integration"])
+@pytest.mark.parametrize(
+    "target_id", [None, "nebius-eu-north1-integration", "nebius-eu-west1-integration"]
+)
 @pytest.mark.parametrize("cleanup_state", ["complete", "retained", "running"])
 @pytest.mark.parametrize("connection", [{"id": _CONNECTION_ID}, None])
 @pytest.mark.parametrize("observed_running", [0, 1, 2])
@@ -278,7 +283,14 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
     batch_reads = 0
 
     def _target_monitor(**kwargs: int) -> dict[str, Any]:
-        return _monitor(**kwargs, target_id=target_id or "nebius-eu-north1-development")
+        monitor = _monitor(**kwargs, target_id=target_id or "nebius-eu-north1-development")
+        if target_id == "nebius-eu-west1-integration":
+            monitor["service_execution"]["targets"].extend(
+                _monitor(nodes=0, slots=0, target_id="nebius-eu-north1-integration")[
+                    "service_execution"
+                ]["targets"]
+            )
+        return monitor
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal batch_reads
@@ -719,6 +731,60 @@ def test_explicit_integration_target_rejects_wrong_or_absent_monitor_identity(
     monitor["service_execution"]["targets"][0]["target_id"] = actual_target
     with pytest.raises(NebiusAcceptanceError, match="target identity"):
         _capacity_sample(
-            monitor, pool_id="nebius-cpu", environment="development",
+            monitor,
+            pool_id="nebius-cpu",
+            environment="development",
             target_id="nebius-eu-north1-integration",
         )
+
+
+@pytest.mark.parametrize("target_id", [None, "nebius-eu-west1-integration"])
+def test_monitor_rejects_ambiguous_target_identity(target_id: str | None) -> None:
+    monitor = _monitor(nodes=0, slots=0, target_id="nebius-eu-west1-integration")
+    monitor["service_execution"]["targets"] *= 2
+    with pytest.raises(NebiusAcceptanceError, match="exactly one"):
+        _capacity_sample(
+            monitor,
+            pool_id="nebius-cpu",
+            environment="development",
+            target_id=target_id,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value", [("pool_id", "other"), ("environment", "production"), ("provider", "other")]
+)
+def test_explicit_target_still_requires_matching_scope(field: str, value: str) -> None:
+    monitor = _monitor(nodes=0, slots=0, target_id="nebius-eu-west1-integration")
+    monitor["service_execution"]["targets"][0][field] = value
+    with pytest.raises(NebiusAcceptanceError):
+        _capacity_sample(
+            monitor,
+            pool_id="nebius-cpu",
+            environment="development",
+            target_id="nebius-eu-west1-integration",
+        )
+
+
+@pytest.mark.parametrize(
+    "policies",
+    [
+        [],
+        [{"scope_kind": "global", "scope_key": "*", "enabled": False, "max_concurrent": 4}],
+        [{"scope_kind": "pool", "scope_key": "nebius-cpu", "enabled": True, "max_concurrent": 100}],
+    ],
+)
+def test_capacity_policy_separates_run_budget_from_live_admission(
+    tmp_path: Path,
+    policies: list[dict[str, Any]],
+) -> None:
+    _policy(tmp_path, accepted=1)
+    path = tmp_path / "policy.json"
+    body = json.loads(path.read_text())
+    body["admission_policies"] = policies
+    path.write_text(json.dumps(body))
+    loaded = load_capacity_policy(path)
+    assert acceptance_stages(loaded["accepted_concurrency"], [1]) == [1]
+    assert loaded["admission_policies"] == policies
+    with pytest.raises(NebiusAcceptanceError, match="exceeds persisted"):
+        acceptance_stages(loaded["accepted_concurrency"], [2])
