@@ -2,8 +2,8 @@
 
 The caller supplies an already authenticated management principal. This store
 checks its pinned delegation against current durable authority, never a caller
-preparation/fleet. Fresh application and pending-build lifecycle are supported;
-managed-base adoption, recreation and executable V4 admission remain closed.
+preparation/fleet. Fresh/managed application and pending-build lifecycle are
+supported; recreation and executable V4 admission remain closed.
 """
 
 from __future__ import annotations
@@ -274,8 +274,20 @@ async def _validated_materialization(
 ) -> tuple[list[CapacitySubject], tuple[AccountPolicyV1, ...]]:
     """Join immutable base references and the verified event overlay, not just JSON."""
     expected = await _load_base_configurations(session, epoch)
-    if set(expected) & latest.keys():
-        raise ConfigurationConflictError("typed membership base adoption is not yet admitted")
+    preparation = ExecutionPreparationV4.model_validate_json(json.dumps(epoch.manifest_payload))
+    origins = {origin.configuration.subject_id: origin for origin in preparation.managed_application_origins}
+    for identity in set(expected) & latest.keys():
+        member = latest[identity].member
+        base = origins.get(identity)
+        if (
+            not isinstance(member, PersonalApplicationMemberV1) or base is None
+            or member.configuration.subject_incarnation != base.configuration.subject_incarnation
+            or member.owner_id != base.base_projection.owner_id
+            or member.configuration.display_name != base.configuration.display_name
+            or member.configuration.configuration_generation <= base.configuration.configuration_generation
+            or member.reincarnation is not None
+        ):
+            raise ConfigurationConflictError("typed membership cannot replace the pinned managed base identity")
     expected.update({identity: result.member.configuration for identity, result in latest.items()})
     rows = list((await session.scalars(select(CapacitySubject).where(
         CapacitySubject.configuration_epoch == epoch.configuration_epoch,
@@ -399,13 +411,22 @@ class CapacityTypedMembershipStore:
         if previous is not None and projection.operation_kind == "create":
             raise ConfigurationConflictError("typed membership recreation requires authenticated release and is not yet admitted")
         if previous is None:
-            conflict = (await session.scalars(select(CapacitySubject.id).where(or_(
+            base = next((origin for origin in preparation.managed_application_origins
+                if origin.configuration.subject_id == subject.subject_id), None)
+            conflicts = (await session.scalars(select(CapacitySubject).where(or_(
                 CapacitySubject.subject_id == subject.subject_id,
                 CapacitySubject.subject_incarnation == subject.subject_incarnation,
                 CapacitySubject.display_name == subject.display_name,
-            )).limit(1))).first()
-            if conflict is not None:
-                raise ConfigurationConflictError("typed build identity was already used")
+            )).execution_options(populate_existing=True))).all()
+            for conflict in conflicts:
+                if (
+                    base is None or not isinstance(member, PersonalApplicationMemberV1)
+                    or conflict.subject_id != base.configuration.subject_id
+                    or conflict.subject_incarnation != base.configuration.subject_incarnation
+                    or conflict.display_name != base.configuration.display_name
+                    or conflict.account_id != base.configuration.account_id
+                ):
+                    raise ConfigurationConflictError("typed membership identity was already used")
         if len(set(preparation.personal_membership.managed_base_subject_ids) | set(latest) | {subject.subject_id}) > preparation.personal_membership.max_subjects:
             raise ConfigurationConflictError("typed membership exceeds its subject bound")
         next_subjects = {row.subject_id: _parse_contract(SubjectConfigurationV1, row.payload) for row in rows} | {subject.subject_id: subject}

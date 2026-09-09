@@ -679,7 +679,7 @@ operation/idempotency-key uniqueness. Build history additionally checks service
 generation monotonicity, reporter/token rotation versus retention, same-purpose
 identity and the selected predecessor event for recreation. This is not yet the
 durable history reader: it does not authenticate materialized reporter credentials,
-application lifecycle/base adoption, actual predecessor release, latest-head
+retained application installation, actual predecessor release, latest-head
 currentness or SQL insertion authority. The old
 application event preimage is retained byte-for-byte, including its original
 request format; old history is not translated into typed commands.
@@ -702,18 +702,20 @@ allocator joins the configuration to its immutable base reference. Historical
 projection input epochs are preserved; a later capacity epoch must not rewrite
 the original installation operation. This is an operator-authenticated origin,
 not a digest reconstructed from mutable database rows. It creates no synthetic
-membership revision. Durable adoption and reporter-currentness resolution remain
-separate requirements before any base mutation or executable V4 admission.
+membership revision. Durable adoption independently verifies these bindings and
+current reporter evidence; executable V4 admission remains closed.
 Persisted typed-history reads now verify these roots and installation records
 even at revision zero, without consulting mutable shadow projection rows for
 origin authority. Current materialization reuses the immutable base reader;
-base overlays remain rejected until lifecycle and SQL adoption are connected.
+managed application overlays replace the base exactly once after authenticated
+lifecycle validation. Static-base takeover and recreation remain rejected.
 The pure typed event validator now checks an adopted application's first
 update/capacity/destroy against that pinned base, without inventing a create
 event. It preserves identity and non-deployment service evidence, requires update
 to advance deployment and rotate reporting, and reserves base names, tokens and
-installation operation IDs. Durable mutation remains closed pending its SQL and
-current-reporter checks; passing this validator alone grants no adoption.
+installation operation IDs. The transaction and SQL guard additionally verify
+the original retained installation and reporter state; passing this pure
+validator alone grants no adoption.
 
 The retained application reader exposes installation-only validation separately
 from reporter validation. Historical installation reads still verify exact
@@ -748,8 +750,14 @@ installation attestation across capacity changes and teardown. Build deployments
 remain pending; application records require exact ready installation evidence.
 Names and digest fields require JSON strings, not SQL stringification of numbers
 or booleans. Application source/publication digests and operation/idempotency
-identities must be nonzero. This is not build execution admission. Managed-base
-adoption and recreation remain blocked pending their origin/release consumers.
+identities must be nonzero. Managed-application adoption takes its predecessor
+from this epoch's event or the exact operator-pinned origin, never from the
+largest historical epoch. It verifies the immutable configuration root and
+generation, fleet-derived base, original candidate/deployment/profile evidence
+and reporter fencing. First capacity/teardown retains the original installation
+attestation; first update fences the base reporter at its last base generation.
+Global identity conflicts remain enforced with only exact same-identity base
+exceptions. This is not build execution admission; recreation remains blocked.
 
 SQL UUID5 uses the standard `uuid-ossp` extension at its existing schema, or
 installs it in a new private `capacity_build_extensions` schema if absent.
@@ -775,8 +783,9 @@ each reporter, including reporters fenced by a later update. Destroy disables ne
 subject capacity but retains the current reporter/token and demand high-water for
 cleanup; it does not certify physical release or erase charges. Earlier receipts
 remain replayable after update or destroy. This internal transaction is not yet
-exposed as runtime admission; managed-base adoption and recreation remain
-separate unfinished work. Applications and builds share revision/replay identities,
+exposed as runtime admission, and recreation remains unfinished. Managed bases
+are adopted without a synthetic create event and without double-counting their
+allocation. Applications and builds share revision/replay identities,
 owner live-subject limits and the same serializable transaction retry behavior.
 
 Typed membership snapshots now read the exact persisted execution manifest,

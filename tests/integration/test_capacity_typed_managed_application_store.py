@@ -9,7 +9,12 @@ from sqlalchemy.exc import DBAPIError
 from loom_capacity_manager.models import CapacityCandidate, CapacityDemandReporter
 from loom_capacity_manager.store import WriterFence
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
-from tests.capacity_build_membership_fixtures import managed_application_request, staged_build_event
+from tests.capacity_build_membership_fixtures import (
+    build_request,
+    managed_application_request,
+    staged_build_event,
+)
+from tests.integration.test_capacity_build_membership_sql import _reseal
 from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_typed_managed_base_history import prepared
 
@@ -48,6 +53,18 @@ async def test_typed_managed_capacity_update_destroy_preserves_original_installa
     assert reporter.token_sha256 == origin.base_projection.demand_reporter_token_sha256
 
 
+async def test_managed_application_and_build_share_owner_account_and_global_revision(capacity_session):
+    management, preparation, _fleet, execution = await prepared(capacity_session)
+    owner = preparation.managed_application_origins[0].base_projection.owner_id
+    build = await apply(capacity_session, build_request(preparation, execution, owner=owner.int))
+    app = await apply(capacity_session, managed_application_request(preparation, execution, revision=1), key=100002)
+    assert app.revision == 2 and app.member.configuration.account_id == build.member.configuration.account_id
+    value = await management.load_allocation_input(capacity_session,
+        WriterFence(authority_incarnation=execution.authority_incarnation, writer_epoch=execution.writer_epoch))
+    assert value.membership.members == (build.member, app.member)
+    assert sum(subject.configuration.account_id == app.member.configuration.account_id for subject in value.subjects) == 2
+
+
 @pytest.mark.parametrize("operation", ("capacity", "update", "destroy"))
 async def test_sql_admits_exact_first_managed_lifecycle(capacity_session, operation):
     management, preparation, fleet, execution = await prepared(capacity_session)
@@ -69,3 +86,48 @@ async def test_sql_first_managed_update_requires_exact_fenced_base_reporter(capa
             capacity_session.add(row)
             await capacity_session.flush()
     assert error.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.parametrize("target", ("candidate-operation", "candidate-number", "deployment-number", "profile-number", "base-number"))
+async def test_sql_managed_update_checks_original_installation_before_new_candidate(capacity_session, target):
+    management, preparation, fleet, execution = await prepared(capacity_session)
+    row = await staged_build_event(capacity_session, management, preparation, fleet,
+        managed_application_request(preparation, execution, operation="update"), idempotency_key=UUID(int=88901))
+    statements = {
+        "candidate-operation": "UPDATE capacity_candidates SET attestation_payload=jsonb_set(attestation_payload,'{operation_id}','\"00000000-0000-0000-0000-000000000999\"') WHERE subject_id=:subject AND candidate_generation=1",
+        "candidate-number": "UPDATE capacity_candidates SET attestation_payload=jsonb_set(attestation_payload,'{operation_epoch}','1.0') WHERE subject_id=:subject AND candidate_generation=1",
+        "deployment-number": "UPDATE capacity_deployment_generations SET required_profiles=jsonb_set(required_profiles,'{0,worker_shapes,0,concurrency_slots}','1.0') WHERE subject_id=:subject AND deployment_generation=1",
+        "profile-number": "UPDATE capacity_worker_profiles SET shape_catalog=jsonb_set(shape_catalog,'{0,concurrency_slots}','1.0') WHERE subject_id=:subject AND deployment_generation=1",
+        "base-number": "UPDATE capacity_config_generations SET payload=jsonb_set(payload,'{max_slots}','2.0') WHERE subject_id=:subject",
+    }
+    await capacity_session.execute(text(statements[target]), {"subject": row.subject_id})
+    with pytest.raises(DBAPIError) as error:
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()
+    assert error.value.orig.sqlstate == "23514"
+
+
+async def test_sql_managed_origin_operation_identity_is_reserved_without_prior_event(capacity_session):
+    management, preparation, fleet, execution = await prepared(capacity_session)
+    row = await staged_build_event(capacity_session, management, preparation, fleet,
+        managed_application_request(preparation, execution), idempotency_key=UUID(int=88901))
+    row.operation_id = preparation.managed_application_origins[0].installation_projection.operation_id
+    row.request_payload["command"]["projection"]["operation_id"] = str(row.operation_id)
+    _reseal(row)
+    with pytest.raises(DBAPIError) as error:
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()
+    assert error.value.orig.sqlstate == "23514"
+
+
+async def test_sql_application_installation_helper_is_private_and_search_path_pinned(capacity_session):
+    row = (await capacity_session.execute(text(
+        "SELECT prosecdef, proconfig, EXISTS (SELECT 1 FROM aclexplode(coalesce(proacl, acldefault('f', proowner))) "
+        "WHERE grantee=0 AND privilege_type='EXECUTE') FROM pg_proc "
+        "WHERE oid='public.capacity_personal_application_installation_matches(jsonb,jsonb)'::regprocedure"
+    ))).one()
+    assert not row[0]
+    assert "search_path=pg_catalog" in row[1]
+    assert not row[2]

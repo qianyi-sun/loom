@@ -30,6 +30,50 @@ def _install_initial_build_guard() -> None:
         IS NOT DISTINCT FROM public.capacity_executable_canonical_jsonb_text(p_right)
     $$;
     REVOKE ALL ON FUNCTION public.capacity_personal_build_json_exact(jsonb,jsonb) FROM PUBLIC;
+    CREATE FUNCTION public.capacity_personal_application_installation_matches(p_config jsonb,p_projection jsonb)
+    RETURNS boolean LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+    DECLARE
+      retained jsonb;
+      profile jsonb;
+    BEGIN
+      SELECT to_jsonb(c) - ARRAY['id','subject_id','subject_incarnation','candidate_generation'] INTO retained
+        FROM public.capacity_candidates c WHERE c.subject_id=(p_config ->> 'subject_id')::uuid
+          AND c.subject_incarnation=(p_config ->> 'subject_incarnation')::uuid
+          AND c.candidate_generation=(p_config ->> 'candidate_generation')::bigint;
+      IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object(
+          'candidate_digest',p_projection -> 'candidate_sha256','candidate_identity_algorithm','source-sha256',
+          'candidate_identity',p_projection -> 'candidate_sha256',
+          'source_payload',jsonb_build_object('publication_sha256',p_projection -> 'candidate_publication_sha256'),
+          'artifact_payload',jsonb_build_object('candidate_sha256',p_projection -> 'candidate_sha256'),
+          'architecture_payload',jsonb_build_object('supported_architectures',p_projection -> 'supported_architectures','supported_pool_ids',p_projection -> 'supported_pool_ids'),
+          'launcher_payload',jsonb_build_object('local_activation_sha256',p_projection -> 'local_activation_sha256'),
+          'attestation_payload',jsonb_build_object('operation_id',p_projection -> 'operation_id','operation_epoch',p_projection -> 'operation_epoch',
+            'protected_admission_sha256',p_projection -> 'protected_admission_sha256','capacity_agent_installation_sha256',p_projection -> 'capacity_agent_installation_sha256'),
+          'protocol_payload',p_projection -> 'protocol_versions')) THEN RETURN false; END IF;
+      SELECT to_jsonb(d) - ARRAY['id','subject_id','subject_incarnation','deployment_generation'] INTO retained
+        FROM public.capacity_deployment_generations d WHERE d.subject_id=(p_config ->> 'subject_id')::uuid
+          AND d.subject_incarnation=(p_config ->> 'subject_incarnation')::uuid
+          AND d.deployment_generation=(p_config ->> 'deployment_generation')::bigint;
+      IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object(
+          'candidate_digest',p_projection -> 'candidate_sha256','required_profiles',p_config -> 'profiles',
+          'readiness_state','ready','lifecycle_state','active','cutover_payload',jsonb_build_object(
+            'local_activation_sha256',p_projection -> 'local_activation_sha256','candidate_publication_sha256',p_projection -> 'candidate_publication_sha256',
+            'protected_admission_sha256',p_projection -> 'protected_admission_sha256','capacity_agent_installation_sha256',p_projection -> 'capacity_agent_installation_sha256'))) THEN RETURN false; END IF;
+      IF (SELECT count(*) FROM public.capacity_worker_profiles p WHERE p.subject_id=(p_config ->> 'subject_id')::uuid
+          AND p.subject_incarnation=(p_config ->> 'subject_incarnation')::uuid
+          AND p.deployment_generation=(p_config ->> 'deployment_generation')::bigint) <> jsonb_array_length(p_config -> 'profiles') THEN RETURN false; END IF;
+      FOR profile IN SELECT value FROM jsonb_array_elements(p_config -> 'profiles') LOOP
+        SELECT to_jsonb(p) - ARRAY['id','subject_id','subject_incarnation','deployment_generation'] INTO retained
+          FROM public.capacity_worker_profiles p WHERE p.subject_id=(p_config ->> 'subject_id')::uuid
+            AND p.subject_incarnation=(p_config ->> 'subject_incarnation')::uuid
+            AND p.deployment_generation=(p_config ->> 'deployment_generation')::bigint AND p.pool_id=profile ->> 'pool_id';
+        IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object('pool_id',profile -> 'pool_id','pool_generation',profile -> 'pool_generation',
+            'profile_generation',profile -> 'profile_generation','profile_digest',profile -> 'profile_digest',
+            'shape_catalog',profile -> 'worker_shapes','narrowing_constraints',jsonb_build_object('eligible_resource_domains',profile -> 'eligible_resource_domains'))) THEN RETURN false; END IF;
+      END LOOP;
+      RETURN true;
+    END $$;
+    REVOKE ALL ON FUNCTION public.capacity_personal_application_installation_matches(jsonb,jsonb) FROM PUBLIC;
     CREATE FUNCTION public.capacity_personal_build_initial_insert_guard()
     RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
     DECLARE
@@ -38,7 +82,15 @@ def _install_initial_build_guard() -> None:
       previous_record record;
       prior_subject record;
       old_member jsonb;
+      old_config jsonb;
+      old_ack jsonb;
       old_projection jsonb;
+      base_origin jsonb;
+      base_config jsonb;
+      base_projection jsonb;
+      base_installation jsonb;
+      base_reference jsonb;
+      base_epoch record;
       mutation_kind text;
       member_purpose text;
       expected_projection jsonb;
@@ -283,41 +335,119 @@ def _install_initial_build_guard() -> None:
               public.capacity_executable_canonical_jsonb_text(NEW.request_payload),'UTF8')),'hex') THEN
         RAISE EXCEPTION 'typed membership event digest changed' USING ERRCODE = '23514';
       END IF;
+      -- A predecessor is either this epoch's event or its explicitly pinned
+      -- managed base, never the highest historical/prepared epoch.
+      SELECT value INTO base_origin FROM jsonb_array_elements(coalesce(preparation -> 'managed_application_origins','[]'::jsonb))
+        WHERE value #>> '{configuration,subject_id}'=NEW.subject_id::text;
+      IF FOUND THEN
+        base_config := base_origin -> 'configuration';
+        base_projection := base_origin -> 'base_projection';
+        base_installation := base_origin -> 'installation_projection';
+        IF member_purpose<>'personal-application' OR mutation_kind='create'
+           OR (SELECT count(*) FROM jsonb_array_elements(preparation -> 'managed_application_origins') value
+                WHERE value #>> '{configuration,subject_id}'=NEW.subject_id::text)<>1
+           OR NOT coalesce(policy -> 'managed_base_subject_ids' @> jsonb_build_array(NEW.subject_id::text),false)
+           OR base_config ->> 'subject_incarnation' IS DISTINCT FROM NEW.subject_incarnation::text
+           OR base_config ->> 'account_id' IS DISTINCT FROM derived_account_id
+           OR base_config ->> 'display_name' IS DISTINCT FROM expected_config ->> 'display_name'
+           OR base_projection ->> 'owner_id' IS DISTINCT FROM NEW.owner_id::text
+           OR base_projection ->> 'subject_id' IS DISTINCT FROM NEW.subject_id::text
+           OR base_projection ->> 'subject_incarnation' IS DISTINCT FROM NEW.subject_incarnation::text
+           OR base_projection ->> 'environment_name' IS DISTINCT FROM projection ->> 'environment_name'
+           OR base_installation ->> 'operation_kind' NOT IN ('create','update')
+           OR (base_installation ->> 'expected_configuration_epoch')::bigint > (base_projection ->> 'expected_configuration_epoch')::bigint
+           OR (base_projection ->> 'expected_configuration_epoch')::bigint > epoch_record.configuration_epoch
+           OR NOT public.capacity_personal_build_json_exact(
+                base_projection - ARRAY['expected_configuration_epoch','operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots'],
+                base_installation - ARRAY['expected_configuration_epoch','operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots'])
+           OR (base_projection ->> 'operation_kind' IN ('create','update') AND NOT public.capacity_personal_build_json_exact(base_projection,base_installation))
+           OR (base_projection ->> 'operation_kind' IN ('capacity','destroy') AND (
+                (base_projection ->> 'configuration_generation')::bigint <= (base_installation ->> 'configuration_generation')::bigint
+                OR base_projection -> 'operation_id'=base_installation -> 'operation_id'))
+           OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(preparation -> 'subject_acknowledgements') value
+                WHERE public.capacity_personal_build_json_exact(value,base_origin -> 'acknowledgement')) THEN
+          RAISE EXCEPTION 'typed managed origin identity or installation changed' USING ERRCODE = '23514';
+        END IF;
+        SELECT c.* INTO base_epoch FROM public.capacity_configuration_epochs c
+          WHERE c.configuration_epoch=epoch_record.configuration_epoch FOR SHARE;
+        IF NOT FOUND OR base_epoch.fleet_generation<>epoch_record.fleet_generation OR base_epoch.fleet_digest<>epoch_record.fleet_digest
+           OR base_epoch.canonical_digest IS DISTINCT FROM encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(jsonb_build_object(
+                'schema_version',1,'configuration_epoch',epoch_record.configuration_epoch,
+                'fleet',jsonb_build_object('schema_version',1,'scope','fleet','generation',epoch_record.fleet_generation,
+                  'digest',epoch_record.fleet_digest,'subject_id',NULL,'subject_incarnation',NULL),
+                'subjects',base_epoch.subject_generation_manifest)),'UTF8')),'hex') THEN
+          RAISE EXCEPTION 'typed managed immutable configuration root changed' USING ERRCODE = '23514';
+        END IF;
+        SELECT value INTO base_reference FROM jsonb_array_elements(base_epoch.subject_generation_manifest)
+          WHERE value ->> 'subject_id'=NEW.subject_id::text;
+        IF NOT FOUND OR NOT public.capacity_personal_build_json_exact(base_reference,jsonb_build_object(
+              'schema_version',1,'scope','subject','subject_id',NEW.subject_id::text,'subject_incarnation',NEW.subject_incarnation::text,
+              'generation',base_config -> 'configuration_generation',
+              'digest',encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(base_config),'UTF8')),'hex')))
+           OR NOT EXISTS (SELECT 1 FROM public.capacity_config_generations g WHERE g.scope='subject' AND g.subject_id=NEW.subject_id
+                AND g.subject_incarnation=NEW.subject_incarnation AND g.scope_generation=(base_config ->> 'configuration_generation')::bigint
+                AND g.digest=base_reference ->> 'digest' AND public.capacity_personal_build_json_exact(g.payload,base_config))
+           OR NOT public.capacity_personal_build_json_exact(base_config,expected_config || jsonb_build_object(
+                'min_slots',CASE WHEN base_projection ->> 'operation_kind'='destroy' THEN '0'::jsonb ELSE base_projection -> 'min_slots' END,
+                'max_slots',CASE WHEN base_projection ->> 'operation_kind'='destroy' THEN '0'::jsonb ELSE base_projection -> 'max_slots' END,
+                'lifecycle_state',CASE WHEN base_projection ->> 'operation_kind'='destroy' THEN 'disabled' ELSE 'active' END,
+                'configuration_generation',base_projection -> 'configuration_generation','candidate_generation',base_projection -> 'candidate_generation',
+                'deployment_generation',base_projection -> 'deployment_generation','demand_reporter_incarnation',base_projection -> 'demand_reporter_incarnation'))
+           OR NOT public.capacity_personal_application_installation_matches(base_config,base_installation) THEN
+          RAISE EXCEPTION 'typed managed origin differs from immutable base or retained installation' USING ERRCODE = '23514';
+        END IF;
+      END IF;
+      IF EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(preparation -> 'managed_application_origins','[]'::jsonb)) value WHERE
+          NEW.operation_id::text IN (value #>> '{installation_projection,operation_id}',value #>> '{base_projection,operation_id}')
+          OR (mutation_kind IN ('create','update') AND (
+            NEW.reporter_incarnation::text=value #>> '{base_projection,demand_reporter_incarnation}'
+            OR projection ->> 'demand_reporter_token_sha256'=value #>> '{base_projection,demand_reporter_token_sha256}'))) THEN
+        RAISE EXCEPTION 'typed managed base operation or reporter identity was already used' USING ERRCODE = '23514';
+      END IF;
       SELECT e.* INTO prior_subject FROM public.capacity_personal_membership_events e
-        WHERE e.subject_id=NEW.subject_id ORDER BY e.execution_epoch DESC,e.revision DESC LIMIT 1 FOR SHARE;
+        WHERE e.subject_id=NEW.subject_id AND e.execution_epoch=NEW.execution_epoch ORDER BY e.revision DESC LIMIT 1 FOR SHARE;
+      IF FOUND THEN
+        old_member := prior_subject.result_payload -> 'member';
+        old_config := old_member -> 'configuration';
+        old_ack := old_member -> 'acknowledgement';
+        old_projection := prior_subject.request_payload #> '{command,projection}';
+        IF prior_subject.owner_id<>NEW.owner_id OR prior_subject.request_payload #>> '{command,purpose}' IS DISTINCT FROM member_purpose THEN
+          RAISE EXCEPTION 'typed membership predecessor purpose or owner changed' USING ERRCODE = '23514';
+        END IF;
+      ELSIF base_origin IS NOT NULL THEN
+        old_config := base_config;
+        old_projection := base_projection;
+        old_ack := base_origin -> 'acknowledgement';
+      END IF;
       IF mutation_kind='create' THEN
-        IF FOUND OR service_candidate_generation<>1 OR NEW.deployment_generation<>1 THEN
+        IF old_config IS NOT NULL OR service_candidate_generation<>1 OR NEW.deployment_generation<>1
+           OR EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.subject_id=NEW.subject_id) THEN
           RAISE EXCEPTION 'typed build create cannot recreate retained membership' USING ERRCODE = '23514';
         END IF;
       ELSE
-        IF NOT FOUND OR prior_subject.execution_epoch IS DISTINCT FROM NEW.execution_epoch
-           OR prior_subject.owner_id IS DISTINCT FROM NEW.owner_id
-           OR prior_subject.subject_incarnation IS DISTINCT FROM NEW.subject_incarnation
-           OR prior_subject.configuration_generation >= NEW.configuration_generation
-           OR prior_subject.request_payload #>> '{command,purpose}' IS DISTINCT FROM member_purpose
-           OR prior_subject.result_payload #>> '{member,configuration,display_name}' IS DISTINCT FROM expected_config ->> 'display_name'
-           OR prior_subject.result_payload #>> '{member,configuration,lifecycle_state}' IS DISTINCT FROM 'active' THEN
+        IF old_config IS NULL OR old_config ->> 'subject_incarnation' IS DISTINCT FROM NEW.subject_incarnation::text
+           OR (old_config ->> 'configuration_generation')::bigint >= NEW.configuration_generation
+           OR old_config ->> 'display_name' IS DISTINCT FROM expected_config ->> 'display_name'
+           OR old_config ->> 'lifecycle_state' IS DISTINCT FROM 'active' THEN
           RAISE EXCEPTION 'typed build lifecycle predecessor changed' USING ERRCODE = '23514';
         END IF;
-        old_member := prior_subject.result_payload -> 'member';
-        old_projection := prior_subject.request_payload #> '{command,projection}';
         IF mutation_kind='update' THEN
-          IF NEW.deployment_generation <= prior_subject.deployment_generation
+          IF NEW.deployment_generation <= (old_config ->> 'deployment_generation')::bigint
              OR service_candidate_generation < (old_projection ->> 'candidate_generation')::bigint THEN
             RAISE EXCEPTION 'typed build update generations must advance' USING ERRCODE = '23514';
           END IF;
-        ELSIF NEW.deployment_generation IS DISTINCT FROM prior_subject.deployment_generation
-           OR NEW.reporter_incarnation IS DISTINCT FROM prior_subject.reporter_incarnation
+        ELSIF NEW.deployment_generation IS DISTINCT FROM (old_config ->> 'deployment_generation')::bigint
+           OR NEW.reporter_incarnation::text IS DISTINCT FROM old_config ->> 'demand_reporter_incarnation'
            OR projection -> 'candidate_generation' IS DISTINCT FROM old_projection -> 'candidate_generation'
            OR projection -> 'demand_reporter_token_sha256' IS DISTINCT FROM old_projection -> 'demand_reporter_token_sha256'
            OR (ack - ARRAY['configuration_generation','acknowledgement_sha256'])
-                IS DISTINCT FROM (old_member -> 'acknowledgement') - ARRAY['configuration_generation','acknowledgement_sha256'] THEN
+                IS DISTINCT FROM old_ack - ARRAY['configuration_generation','acknowledgement_sha256'] THEN
           RAISE EXCEPTION 'typed build non-deployment credentials must be retained' USING ERRCODE = '23514';
         END IF;
         IF member_purpose='personal-application' AND mutation_kind IN ('capacity','destroy')
            AND NOT public.capacity_personal_build_json_exact(
-             projection - ARRAY['operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots'],
-             old_projection - ARRAY['operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots']) THEN
+             projection - ARRAY['expected_configuration_epoch','operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots'],
+             old_projection - ARRAY['expected_configuration_epoch','operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots']) THEN
           RAISE EXCEPTION 'typed application must retain complete installation evidence' USING ERRCODE = '23514';
         END IF;
       END IF;
@@ -332,11 +462,18 @@ def _install_initial_build_guard() -> None:
       IF EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE
             e.subject_id<>NEW.subject_id AND (e.subject_incarnation=NEW.subject_incarnation
               OR e.result_payload #>> '{member,configuration,display_name}' = expected_config ->> 'display_name'))
+         OR EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.subject_id=NEW.subject_id
+              AND (e.subject_incarnation<>NEW.subject_incarnation OR e.owner_id<>NEW.owner_id
+                OR coalesce(e.request_payload #>> '{command,purpose}','personal-application')<>member_purpose
+                OR e.result_payload #>> '{member,configuration,display_name}' IS DISTINCT FROM expected_config ->> 'display_name'))
          OR EXISTS (SELECT 1 FROM public.capacity_config_generations g WHERE
-              g.subject_id = NEW.subject_id OR g.subject_incarnation = NEW.subject_incarnation)
+              (g.subject_id = NEW.subject_id OR g.subject_incarnation = NEW.subject_incarnation)
+              AND (base_origin IS NULL OR g.subject_id IS DISTINCT FROM NEW.subject_id OR g.subject_incarnation IS DISTINCT FROM NEW.subject_incarnation
+                OR g.payload ->> 'account_id' IS DISTINCT FROM derived_account_id OR g.payload ->> 'display_name' IS DISTINCT FROM expected_config ->> 'display_name'))
          OR EXISTS (SELECT 1 FROM public.capacity_subjects s WHERE
               (s.subject_id = NEW.subject_id AND (s.subject_incarnation <> NEW.subject_incarnation
-                OR s.configuration_epoch <> epoch_record.configuration_epoch))
+                OR (s.configuration_epoch <> epoch_record.configuration_epoch AND base_origin IS NULL)
+                OR s.account_id<>derived_account_id OR s.display_name<>expected_config ->> 'display_name'))
               OR (s.subject_id <> NEW.subject_id AND (s.subject_incarnation = NEW.subject_incarnation
                 OR s.display_name = expected_config ->> 'display_name')))
          OR (SELECT count(*) FROM (SELECT e.subject_id FROM public.capacity_personal_membership_events e
@@ -390,7 +527,10 @@ def _install_initial_build_guard() -> None:
               AND e.request_payload #>> '{command,projection,operation_kind}' IN ('create','update')
             ORDER BY e.revision DESC LIMIT 1;
           IF NOT FOUND THEN
-            RAISE EXCEPTION 'typed application installation origin is unavailable' USING ERRCODE = '23514';
+            IF base_origin IS NULL OR NEW.deployment_generation<>(base_config ->> 'deployment_generation')::bigint THEN
+              RAISE EXCEPTION 'typed application installation origin is unavailable' USING ERRCODE = '23514';
+            END IF;
+            origin_projection := base_installation;
           END IF;
         END IF;
         expected_candidate := jsonb_build_object('candidate_digest',runtime_digest,
@@ -460,6 +600,19 @@ def _install_initial_build_guard() -> None:
            )
          ) THEN
         RAISE EXCEPTION 'typed build retired reporter evidence changed' USING ERRCODE = '23514';
+      END IF;
+      IF base_origin IS NOT NULL AND base_config ->> 'demand_reporter_incarnation'<>NEW.reporter_incarnation::text THEN
+        SELECT e.result_payload #> '{member,configuration}',e.request_payload #> '{command,projection}' INTO old_config,old_projection
+          FROM public.capacity_personal_membership_events e WHERE e.execution_epoch=NEW.execution_epoch AND e.subject_id=NEW.subject_id
+            AND e.reporter_incarnation=(base_config ->> 'demand_reporter_incarnation')::uuid ORDER BY e.revision DESC LIMIT 1;
+        IF NOT FOUND THEN old_config := base_config; old_projection := base_projection; END IF;
+        IF NOT EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_id=NEW.subject_id AND r.subject_incarnation=NEW.subject_incarnation
+            AND r.reporter_incarnation=(old_config ->> 'demand_reporter_incarnation')::uuid AND r.state='fenced'
+            AND r.configuration_generation=(old_config ->> 'configuration_generation')::bigint
+            AND r.deployment_generation=(old_config ->> 'deployment_generation')::bigint
+            AND r.token_sha256=old_projection ->> 'demand_reporter_token_sha256') THEN
+          RAISE EXCEPTION 'typed managed base retired reporter evidence changed' USING ERRCODE = '23514';
+        END IF;
       END IF;
       RETURN NEW;
     END $$;
@@ -537,6 +690,7 @@ def downgrade() -> None:
     CREATE TRIGGER capacity_personal_membership_insert_guard BEFORE INSERT ON public.capacity_personal_membership_events
       FOR EACH ROW EXECUTE FUNCTION public.capacity_personal_membership_insert_guard();
     DROP FUNCTION public.capacity_personal_build_initial_insert_guard();
+    DROP FUNCTION public.capacity_personal_application_installation_matches(jsonb,jsonb);
     DROP FUNCTION public.capacity_personal_build_json_exact(jsonb,jsonb);
     DROP FUNCTION public.capacity_personal_build_subject_id(uuid,uuid);
     """)
