@@ -417,6 +417,22 @@ async def test_launch_authority_derives_base_and_member_provenance_from_database
                 assert authority.membership is None
 
 
+async def test_launch_authority_preserves_genuine_v2_base_allocation(capacity_session):
+    from tests.integration.test_capacity_manager_execution_store import _active_plan
+    module = import_module("loom_capacity_manager.membership_launch_authority")
+    active, allocation_id = await _active_plan(capacity_session)
+    epoch = await capacity_session.get(CapacityExecutionEpoch, active.execution_epoch)
+    allocation = await capacity_session.get(CapacityAllocationEpoch, allocation_id)
+    assert allocation.complete_payload["schema_version"] == 2
+    subject_id = UUID(allocation.complete_payload["configuration"]["subjects"][0]["subject_id"])
+    result = await module.resolve_allocation_launch_subject(capacity_session, epoch, allocation, subject_id=subject_id, require_current=True)
+    assert result.authority.source == "immutable-base"
+    assert result.authority.membership is None
+    assert result.authority.configuration.digest == canonical_digest(result.configuration)
+    assert result.authority.acknowledgement_sha256 == canonical_executable_digest(result.acknowledgement)
+    assert await module.resolve_allocation_launch_subject(capacity_session, epoch, allocation, subject_id=subject_id, require_current=False) == result
+
+
 async def test_launch_authority_preserves_selected_event_after_another_owner_joins(
     pinned_personal_allocation,
 ):
@@ -429,7 +445,7 @@ async def test_launch_authority_preserves_selected_event_after_another_owner_joi
         other = _projection(
             subject_id=UUID(int=22801), subject_incarnation=UUID(int=22802), owner_id=UUID(int=22803),
             environment_name="carol", reporter_incarnation=UUID(int=22804), operation_id=UUID(int=22805),
-        )
+        ).model_copy(update={"demand_reporter_token_sha256": "e" * 64})
         await CapacityMembershipStore(fixture.store).apply(session, _request(active, other, expected_revision=1), actor=DELEGATE, idempotency_key=UUID(int=22806))
         assert await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=True) == original
         # A newly sealed allocation contains both events, but this subject still

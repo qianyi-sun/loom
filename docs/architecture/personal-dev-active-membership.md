@@ -677,6 +677,15 @@ must authenticate base/member selection and join the configuration, actual
 candidate acknowledgement and event before signing. These contracts do not yet
 enable typed rendering, journal/inventory adoption or build execution.
 
+The application-only launch-subject producer now derives those references through
+the existing authenticated allocation/history reader. It returns the exact full
+configuration and acknowledgement, chooses immutable-base versus member origin
+from durable evidence, and binds a member's own event head rather than the latest
+shared log head. Current resolution rejects configuration supersession even when
+deployment generation is unchanged; historical resolution retains old evidence
+for accounting and cleanup. It does not accept build allocations or replace
+operation-specific intent, pool, executor and current-authority checks.
+
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,
