@@ -100,3 +100,36 @@ async def test_async_listing_yields_to_loop_and_cancellation_stops_signing():
 def test_addressing_style_must_be_explicit_supported_contract():
     with pytest.raises(ValueError):
         _provider(Backend(), addressing_style="guess")
+
+
+@pytest.mark.parametrize("changed", ["source", "checksum", "metadata", "session", "quota", "expired", "wrong_url", "duplicate"])
+async def test_replayed_capability_is_validated_against_current_plan_and_limits(changed):
+    from uuid import uuid4
+
+    backend = Backend()
+    provider = _provider(backend)
+    plan = _plan()
+    capability = await provider.issue(plan, now=NOW)
+    provider.validate(capability, plan, now=NOW)
+    now = NOW
+    if changed == "source":
+        plan = plan.model_copy(update={"bundle_prefix": "changed/source/"})
+    elif changed == "checksum":
+        plan = plan.model_copy(update={"task_checksum": "6" * 64})
+    elif changed == "metadata":
+        plan = plan.model_copy(update={"bundle_file_metadata_sha256": "6" * 64})
+    elif changed == "session":
+        plan = plan.model_copy(update={"session_id": uuid4()})
+    elif changed == "quota":
+        provider = _provider(backend, maximum_objects=2)
+    elif changed == "expired":
+        now = capability.expires_at
+    elif changed == "wrong_url":
+        objects = list(capability.objects)
+        objects[0] = objects[0].model_copy(update={"url": objects[0].url.replace("/loom-bundles/", "/other-bucket/")})
+        capability = capability.model_copy(update={"objects": tuple(objects)})
+    else:
+        objects = (capability.objects[0],) * 2
+        capability = capability.model_copy(update={"objects": objects, "file_count": 2, "total_bytes": objects[0].size_bytes * 2})
+    with pytest.raises(RuntimeError):
+        provider.validate(capability, plan, now=now)
