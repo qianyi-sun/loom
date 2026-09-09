@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -48,7 +49,12 @@ type BuildResult struct {
 }
 
 type Executor struct {
-	config Config
+	buildMu           sync.Mutex
+	closing           bool
+	activeBuildCancel context.CancelFunc
+	activeBuildDone   chan struct{}
+	closeDone         chan struct{}
+	config            Config
 	// capabilities contains borrowed guard-transferred descriptors. Executor uses
 	// these FDs for exact placement/cleanup but never closes caller-owned rights.
 	capabilities    *AllocationCapabilities
@@ -273,9 +279,27 @@ func (e *Executor) Start(ctx context.Context) (err error) {
 }
 
 func (e *Executor) Build(ctx context.Context, component BuildComponent) (result BuildResult, err error) {
-	if e == nil || !e.started {
+	if e == nil {
 		return BuildResult{}, errors.New("executor not started")
 	}
+	e.buildMu.Lock()
+	if e.closing || !e.started || e.activeBuildDone != nil {
+		e.buildMu.Unlock()
+		return BuildResult{}, errors.New("executor not started")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	e.activeBuildCancel, e.activeBuildDone = cancel, done
+	e.buildMu.Unlock()
+	// Registered before other deferred cleanup: completion means every input
+	// consumer and build-local cleanup has finished, not just child process exit.
+	defer func() {
+		cancel()
+		e.buildMu.Lock()
+		e.activeBuildCancel, e.activeBuildDone = nil, nil
+		close(done)
+		e.buildMu.Unlock()
+	}()
 	if err := validateBuildComponent(component); err != nil {
 		return BuildResult{}, err
 	}
@@ -490,6 +514,39 @@ func cleanupBuildCapture(jobFD, captureFD int, name string) (result error) {
 func (e *Executor) Close(ctx context.Context) error {
 	if e == nil {
 		return nil
+	}
+	for {
+		e.buildMu.Lock()
+		if e.closeDone == nil {
+			e.closeDone = make(chan struct{})
+			break
+		}
+		closing := e.closeDone
+		e.buildMu.Unlock()
+		select {
+		case <-closing:
+		case <-ctx.Done():
+			return errors.Join(errCleanupAmbiguous, errors.New("executor close owner unavailable"))
+		}
+	}
+	e.closing = true
+	cancel, done := e.activeBuildCancel, e.activeBuildDone
+	e.buildMu.Unlock()
+	defer func() {
+		e.buildMu.Lock()
+		close(e.closeDone)
+		e.closeDone = nil
+		e.buildMu.Unlock()
+	}()
+	if cancel != nil {
+		cancel()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			// Do not close descriptors or remove state while Build may still
+			// consume it. The allocation owner retains ambiguous cleanup.
+			return errors.Join(errCleanupAmbiguous, errors.New("active build did not join"))
+		}
 	}
 	var err error
 	if e.daemon != nil {

@@ -93,12 +93,16 @@ func TestExecutorCloseCancelsAndJoinsBeforeClosingInput(t *testing.T) {
 		t.Run(fmt.Sprint(timeout), func(t *testing.T) {
 			fixture := newExecutorFixture(t)
 			input := t.TempDir()
-			if err := os.Chmod(input, 0o700); err != nil { t.Fatal(err) }
+			if err := os.Chmod(input, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			fd := openDirectoryFD(t, input)
 			defer syscall.Close(fd)
 			component := BuildComponent{Name: "task", ContextDir: ".", Dockerfile: "Dockerfile"}
 			executor, err := NewExecutorWithContext(fixture.config, fixture.capabilities, BuildPlan{Architecture: "amd64", Components: []BuildComponent{component}}, fd)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			executor.started = true
 			previous := executorRunBuildctlWithContext
 			t.Cleanup(func() { executorRunBuildctlWithContext = previous })
@@ -119,19 +123,46 @@ func TestExecutorCloseCancelsAndJoinsBeforeClosingInput(t *testing.T) {
 			defer cancel()
 			closed := make(chan error, 1)
 			go func() { closed <- executor.Close(ctx) }()
-			select { case <-cancelled: case <-time.After(time.Second): close(release); t.Fatal("Close did not cancel build") }
-			if _, err := validateDirectoryDescriptor(ownedFD); err != nil { t.Fatal("input closed before consumer joined") }
+			select {
+			case <-cancelled:
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("Close did not cancel build")
+			}
+			if _, err := validateDirectoryDescriptor(ownedFD); err != nil {
+				t.Fatal("input closed before consumer joined")
+			}
 			if timeout {
 				cancel()
-				if err := <-closed; err == nil { t.Fatal("incomplete join claimed clean close") }
-				if _, err := validateDirectoryDescriptor(ownedFD); err != nil { t.Fatal("join timeout closed active input") }
+				if err := <-closed; err == nil {
+					t.Fatal("incomplete join claimed clean close")
+				}
+				if _, err := validateDirectoryDescriptor(ownedFD); err != nil {
+					t.Fatal("join timeout closed active input")
+				}
 			} else {
-				select { case <-closed: t.Fatal("Close returned before join"); case <-time.After(20*time.Millisecond): }
+				select {
+				case <-closed:
+					t.Fatal("Close returned before join")
+				case <-time.After(20 * time.Millisecond):
+				}
 			}
 			close(release)
-			if err := <-built; err == nil { t.Fatal("cancelled build accepted") }
-			if timeout { if err := executor.Close(context.Background()); err != nil { t.Fatal(err) } } else { if err := <-closed; err != nil { t.Fatal(err) } }
-			if _, err := validateDirectoryDescriptor(ownedFD); !errors.Is(err, syscall.EBADF) { t.Fatal("joined input not closed") }
+			if err := <-built; err == nil {
+				t.Fatal("cancelled build accepted")
+			}
+			if timeout {
+				if err := executor.Close(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := <-closed; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := validateDirectoryDescriptor(ownedFD); !errors.Is(err, syscall.EBADF) {
+				t.Fatal("joined input not closed")
+			}
 		})
 	}
 }
@@ -150,6 +181,37 @@ func TestExecutorRejectsComponentSubstitutionWithinNamedPlan(t *testing.T) {
 		mutate(&changed)
 		if _, err := executor.Build(context.Background(), changed); err == nil {
 			t.Fatal("accepted component substitution")
+		}
+	}
+}
+
+func TestExecutorConcurrentCloseHasOneDescriptorCleanupOwner(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd := openDirectoryFD(t, root)
+	defer syscall.Close(fd)
+	for i := 0; i < 50; i++ {
+		input, err := duplicatePrivateInputDirectory(fd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownedFD := int(input.Fd())
+		executor := &Executor{input: input, inputRequired: true}
+		start := make(chan struct{})
+		done := make(chan error, 2)
+		for n := 0; n < 2; n++ {
+			go func() { <-start; done <- executor.Close(context.Background()) }()
+		}
+		close(start)
+		for n := 0; n < 2; n++ {
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := validateDirectoryDescriptor(ownedFD); !errors.Is(err, syscall.EBADF) {
+			t.Fatal("concurrent close leaked descriptor")
 		}
 	}
 }
