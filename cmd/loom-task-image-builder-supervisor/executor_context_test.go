@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestExecutorRegisteredContextHandoffIsSeparateOwnedAndPinned(t *testing.T) {
@@ -84,6 +85,54 @@ func TestExecutorRegisteredContextHandoffIsSeparateOwnedAndPinned(t *testing.T) 
 	}
 	if _, err := executor.Build(context.Background(), component); err == nil {
 		t.Fatal("closed executor fell back to pathname input")
+	}
+}
+
+func TestExecutorCloseCancelsAndJoinsBeforeClosingInput(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		t.Run(fmt.Sprint(timeout), func(t *testing.T) {
+			fixture := newExecutorFixture(t)
+			input := t.TempDir()
+			if err := os.Chmod(input, 0o700); err != nil { t.Fatal(err) }
+			fd := openDirectoryFD(t, input)
+			defer syscall.Close(fd)
+			component := BuildComponent{Name: "task", ContextDir: ".", Dockerfile: "Dockerfile"}
+			executor, err := NewExecutorWithContext(fixture.config, fixture.capabilities, BuildPlan{Architecture: "amd64", Components: []BuildComponent{component}}, fd)
+			if err != nil { t.Fatal(err) }
+			executor.started = true
+			previous := executorRunBuildctlWithContext
+			t.Cleanup(func() { executorRunBuildctlWithContext = previous })
+			started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var ownedFD int
+			executorRunBuildctlWithContext = func(ctx context.Context, _ ExecutableMember, _, _ []string, _, inputFD int) error {
+				ownedFD = inputFD
+				close(started)
+				<-ctx.Done()
+				close(cancelled)
+				<-release
+				return ctx.Err()
+			}
+			built := make(chan error, 1)
+			go func() { _, err := executor.Build(context.Background(), component); built <- err }()
+			<-started
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			closed := make(chan error, 1)
+			go func() { closed <- executor.Close(ctx) }()
+			select { case <-cancelled: case <-time.After(time.Second): close(release); t.Fatal("Close did not cancel build") }
+			if _, err := validateDirectoryDescriptor(ownedFD); err != nil { t.Fatal("input closed before consumer joined") }
+			if timeout {
+				cancel()
+				if err := <-closed; err == nil { t.Fatal("incomplete join claimed clean close") }
+				if _, err := validateDirectoryDescriptor(ownedFD); err != nil { t.Fatal("join timeout closed active input") }
+			} else {
+				select { case <-closed: t.Fatal("Close returned before join"); case <-time.After(20*time.Millisecond): }
+			}
+			close(release)
+			if err := <-built; err == nil { t.Fatal("cancelled build accepted") }
+			if timeout { if err := executor.Close(context.Background()); err != nil { t.Fatal(err) } } else { if err := <-closed; err != nil { t.Fatal(err) } }
+			if _, err := validateDirectoryDescriptor(ownedFD); !errors.Is(err, syscall.EBADF) { t.Fatal("joined input not closed") }
+		})
 	}
 }
 
