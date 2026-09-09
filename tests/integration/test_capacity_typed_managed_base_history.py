@@ -6,7 +6,11 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select, text
 
-from loom_capacity_manager.models import CapacityCandidate, CapacityConfigGeneration, CapacityDevelopmentProjection
+from loom_capacity_manager.models import (
+    CapacityCandidate,
+    CapacityConfigGeneration,
+    CapacityDevelopmentProjection,
+)
 from loom_capacity_manager.store import ConfigurationConflictError, WriterFence
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
 from tests.capacity_build_membership_fixtures import build_request, typed_sql_execution

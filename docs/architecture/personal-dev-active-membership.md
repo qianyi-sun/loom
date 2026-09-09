@@ -704,6 +704,10 @@ the original installation operation. This is an operator-authenticated origin,
 not a digest reconstructed from mutable database rows. It creates no synthetic
 membership revision. Durable adoption and reporter-currentness resolution remain
 separate requirements before any base mutation or executable V4 admission.
+Persisted typed-history reads now verify these roots and installation records
+even at revision zero, without consulting mutable shadow projection rows for
+origin authority. Current materialization reuses the immutable base reader;
+base overlays remain rejected until lifecycle and SQL adoption are connected.
 
 The retained application reader exposes installation-only validation separately
 from reporter validation. Historical installation reads still verify exact

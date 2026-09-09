@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.application_generation_store import (
     require_application_generation_evidence,
+    require_application_installation_evidence,
 )
 from loom_capacity_manager.build_generation_store import (
     _require_staged_facts,
@@ -62,6 +63,7 @@ from loom_capacity_manager.store import (
     ExecutionConflictError,
     IdempotencyConflictError,
     _canonical_json_digest,
+    _derive_development_subject,
     _derive_owner_account,
     _parse_contract,
     _subject_scalars_match,
@@ -142,6 +144,15 @@ async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _T
         fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
         if fleet.fleet_generation != epoch.fleet_generation or canonical_digest(fleet) != epoch.fleet_digest:
             raise ConfigurationConflictError("typed membership fleet changed")
+        bases = await _load_base_configurations(session, epoch)
+        for pinned_origin in preparation.managed_application_origins:
+            base = bases.get(pinned_origin.configuration.subject_id)
+            if base is None or canonical_bytes(base) != canonical_bytes(pinned_origin.configuration):
+                raise ConfigurationConflictError("typed managed origin differs from immutable base generation")
+            derived = _derive_development_subject(fleet, pinned_origin.base_projection)
+            if canonical_bytes(derived) != canonical_bytes(base):
+                raise ConfigurationConflictError("typed managed base differs from pinned fleet projection")
+            await require_application_installation_evidence(session, pinned_origin)
         events = tuple((await session.scalars(select(CapacityPersonalMembershipEvent).where(
             CapacityPersonalMembershipEvent.execution_epoch == execution_epoch,
         ).order_by(CapacityPersonalMembershipEvent.revision).execution_options(populate_existing=True))).all())
@@ -190,11 +201,10 @@ def _require_subject(row: CapacitySubject | None, expected: SubjectConfiguration
         raise ConfigurationConflictError("typed membership subject materialization changed")
 
 
-async def _validated_materialization(
-    session: AsyncSession, epoch: CapacityExecutionEpoch, fleet: FleetManifestV1,
-    latest: dict[UUID, PersonalMembershipResultV2],
-) -> tuple[list[CapacitySubject], tuple[AccountPolicyV1, ...]]:
-    """Join immutable base references and the verified event overlay, not just JSON."""
+async def _load_base_configurations(
+    session: AsyncSession, epoch: CapacityExecutionEpoch,
+) -> dict[UUID, SubjectConfigurationV1]:
+    """Authenticate immutable roots without consulting current materialization."""
     configuration = await session.get(CapacityConfigurationEpoch, epoch.configuration_epoch, populate_existing=True)
     if configuration is None:
         raise ConfigurationConflictError("typed membership base configuration is missing")
@@ -203,10 +213,8 @@ async def _validated_materialization(
         fleet=ConfigurationGenerationRefV1(scope="fleet", generation=epoch.fleet_generation, digest=epoch.fleet_digest), subjects=references)
     if configuration.fleet_generation != epoch.fleet_generation or configuration.fleet_digest != epoch.fleet_digest or canonical_digest(snapshot) != configuration.canonical_digest:
         raise ConfigurationConflictError("typed membership base configuration changed")
-    expected = {identity: result.member.configuration for identity, result in latest.items()}
+    expected: dict[UUID, SubjectConfigurationV1] = {}
     for reference in references:
-        if reference.subject_id in expected:
-            raise ConfigurationConflictError("build membership cannot adopt a base subject")
         generation = (await session.scalars(select(CapacityConfigGeneration).where(
             CapacityConfigGeneration.scope == "subject", CapacityConfigGeneration.subject_id == reference.subject_id,
             CapacityConfigGeneration.subject_incarnation == reference.subject_incarnation,
@@ -218,6 +226,18 @@ async def _validated_materialization(
         if subject.subject_id != reference.subject_id or subject.subject_incarnation != reference.subject_incarnation or subject.configuration_generation != reference.generation or canonical_digest(subject) != reference.digest:
             raise ConfigurationConflictError("typed membership base generation changed")
         expected[subject.subject_id] = subject
+    return expected
+
+
+async def _validated_materialization(
+    session: AsyncSession, epoch: CapacityExecutionEpoch, fleet: FleetManifestV1,
+    latest: dict[UUID, PersonalMembershipResultV2],
+) -> tuple[list[CapacitySubject], tuple[AccountPolicyV1, ...]]:
+    """Join immutable base references and the verified event overlay, not just JSON."""
+    expected = await _load_base_configurations(session, epoch)
+    if set(expected) & latest.keys():
+        raise ConfigurationConflictError("typed membership base adoption is not yet admitted")
+    expected.update({identity: result.member.configuration for identity, result in latest.items()})
     rows = list((await session.scalars(select(CapacitySubject).where(
         CapacitySubject.configuration_epoch == epoch.configuration_epoch,
     ).with_for_update().execution_options(populate_existing=True))).all())
