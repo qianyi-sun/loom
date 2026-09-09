@@ -102,3 +102,20 @@ def test_old_application_only_release_cannot_become_build_runtime(tmp_path):
         import_module("loom.personal_dev_build_runtime_publication").load_personal_build_runtime_publication(
             path, expected_release_sha256=digest, evidence_payload=b"{}",
         )
+
+
+@pytest.mark.parametrize("payload", (b"[]", b"{}", b"{", b"\xff", b"[" * 2000, b'{"a":NaN}', b"x" * (8 * 1024 * 1024 + 1)))
+def test_even_digest_pinned_evidence_requires_bounded_valid_shape(tmp_path, payload):
+    release = _release()
+    release["release_evidence_sha256"] = hashlib.sha256(payload).hexdigest()
+    path, digest = _write_release(tmp_path, release)
+    with pytest.raises(ValueError):
+        import_module("loom.personal_dev_build_runtime_publication").load_personal_build_runtime_publication(
+            path, expected_release_sha256=digest, evidence_payload=payload,
+        )
+
+
+@pytest.mark.parametrize("version", (True, 4.0, "4", 3))
+def test_evidence_wire_version_is_exact(tmp_path, version):
+    with pytest.raises(ValueError):
+        _load(tmp_path, mutate=lambda evidence: evidence.update(schema_version=version))

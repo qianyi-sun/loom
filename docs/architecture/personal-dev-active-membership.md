@@ -645,6 +645,16 @@ fairness. The pool executor routes build intents to a management admission
 adapter, not environment trial procedures. Builder launch profiles must match
 the real CI publication, not merely contain an unrelated publication digest.
 
+The runtime-publication loader reuses the owner-only, digest-pinned trusted
+release descriptor and its canonical CI evidence. It checks the evidence digest,
+exact source commit/tree/repository/ref, component index references and both
+native platform subject digests, then derives the builder and agent image
+references. Its service candidate remains the trusted Git commit plus release
+publication digest, not the feature-source hash. The existing CI assembler's
+output is exercised against this consumer. The expected release digest must be
+independently approved operator input; this loader does not query CI, certify a
+node/runtime profile, or authorize executable membership.
+
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,

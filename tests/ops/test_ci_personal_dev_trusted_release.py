@@ -257,6 +257,28 @@ def _assemble_inputs(
     )
 
 
+def test_build_runtime_consumer_resolves_actual_ci_assembled_platform_subjects(tmp_path: Path) -> None:
+    from loom.personal_dev_build_runtime_publication import load_personal_build_runtime_publication
+
+    release, evidence = _assemble(tmp_path)
+    payload = _canonical(release)
+    path = tmp_path / "trusted-build-runtime.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    result = load_personal_build_runtime_publication(
+        path, expected_release_sha256=hashlib.sha256(payload).hexdigest(), evidence_payload=_canonical(evidence),
+    )
+    assert result.candidate.identity == _SOURCE_SHA
+    assert result.source_tree == _SOURCE_TREE
+    for images in result.platforms:
+        for component, reference in (
+            ("personal-dev-builder", images.builder_image),
+            ("personal-dev-native-builder-agent", images.agent_image),
+        ):
+            record = json.loads((tmp_path / "records" / f"{component}-{images.platform.removeprefix('linux/')}.json").read_bytes())
+            assert reference == record["subject"]["name"] + "@" + record["subject"]["digest"]
+
+
 def test_assembly_binds_exact_internal_external_and_release_evidence(
     tmp_path: Path,
 ) -> None:
