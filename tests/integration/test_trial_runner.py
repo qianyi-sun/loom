@@ -730,7 +730,10 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
             bucket: str,
             key: str,
             body: bytes,
+            metadata=None,
+            require_versioning: bool = False,
         ) -> object:
+            assert metadata is None and not require_versioning
             uri = await super().put_object(bucket=bucket, key=key, body=body)
             version_id = (
                 "artifact-version-789"

@@ -67,7 +67,10 @@ async def test_collect_preserves_post_upload_object_version(
             bucket: str,
             key: str,
             body: bytes,
+            metadata=None,
+            require_versioning: bool = False,
         ) -> object:
+            assert metadata is None and not require_versioning
             uri = await super().put_object(bucket=bucket, key=key, body=body)
             return SimpleNamespace(uri=uri, version_id=f"version:{key}")
 

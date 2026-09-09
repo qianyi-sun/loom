@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -102,7 +102,11 @@ class LocalDiskObjectStore:
         bucket: str,
         key: str,
         body: bytes,
+        metadata: Mapping[str, str] | None = None,
+        require_versioning: bool = False,
     ) -> ObjectWriteResult:
+        if require_versioning or metadata is not None:
+            raise ValueError("local object store does not support versioning or user metadata")
         uri = await self.put_object(bucket=bucket, key=key, body=body)
         return ObjectWriteResult(uri=uri, version_id=None)
 
