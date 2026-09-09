@@ -60,7 +60,7 @@ def test_upgrade_preserves_legacy_ready_map_without_inventing_binding(
 
 
 @pytest.mark.parametrize(
-    "table", ["task_image_materializations", "task_image_registry_credentials"]
+    "table", ["task_image_materializations", "task_image_registry_credentials", "trials"]
 )
 async def test_upgrade_fails_fast_when_existing_authority_tables_are_busy(
     isolated_migration_postgres_url, table
