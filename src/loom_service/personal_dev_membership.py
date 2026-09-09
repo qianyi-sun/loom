@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
+from uuid import UUID
 
 from loom.personal_dev_capacity import (
     CapacityManagerPersonalDevProjector,
@@ -15,16 +19,22 @@ from loom.personal_dev_capacity import (
 )
 from loom.personal_dev_capacity_runtime import PersonalDevCapacityStatusReader
 from loom.personal_dev_membership_admission import (
+    PersonalDevMembershipAcceptanceBindingV1,
     PersonalDevMembershipAdmissionError,
     PersonalDevMembershipAdmissionInterlock,
     parse_membership_acceptance_binding,
 )
 from loom.personal_dev_membership_client import CapacityManagerPersonalDevMembershipClient
+from loom.personal_dev_membership_successor import (
+    PersonalDevMembershipSuccessorBindingV1,
+    parse_membership_successor_plan,
+)
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
     read_owner_only_bearer_token,
     read_owner_only_bytes,
 )
+from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES
 from loom_service.config import LoomServiceSettings
 from loom_service.personal_dev_lifecycle import (
     PersonalDevCapacityRuntime,
@@ -67,6 +77,22 @@ class PersonalDevMembershipServiceAdmission:
         )
 
 
+def load_membership_successor_bindings(
+    settings: LoomServiceSettings,
+    authority: PersonalDevMembershipAcceptanceBindingV1,
+) -> Mapping[UUID, PersonalDevMembershipSuccessorBindingV1]:
+    filename = settings.personal_dev_membership_successor_plan_file
+    digest = settings.personal_dev_membership_successor_plan_sha256
+    if not filename and not digest:
+        return MappingProxyType({})
+    if not filename or not digest or settings.personal_dev_runtime_mode != "membership-v1":
+        raise ValueError("successor plan requires paired file/digest in membership mode")
+    return parse_membership_successor_plan(
+        read_owner_only_bytes(Path(filename), max_bytes=MAX_CONTRACT_BYTES),
+        expected_plan_sha256=digest, current_authority=authority,
+    )
+
+
 async def build_personal_dev_membership_runtime(
     settings: LoomServiceSettings,
 ) -> PersonalDevCapacityRuntime:
@@ -86,13 +112,14 @@ async def build_personal_dev_membership_runtime(
             settings.personal_dev_membership_binding_json,
             expected_plan_sha256=settings.personal_dev_membership_plan_sha256,
         )
+        successor_bindings = load_membership_successor_bindings(settings, binding)
         observer_id = settings.personal_dev_membership_observer_principal_id
         if (
             re.fullmatch(r"[a-z0-9-]{1,128}", observer_id) is None
             or observer_id == binding.management_principal_id
         ):
             raise ValueError("observer must be a separate current principal")
-    except (TypeError, ValueError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         raise RuntimeError("personal-dev membership binding is invalid") from exc
 
     installer, kubectl, connection = build_personal_dev_capacity_installation(
@@ -149,6 +176,7 @@ async def build_personal_dev_membership_runtime(
                 membership=PersonalDevMembershipRuntime(
                     installer=installer, client=client, observer=observer,
                     admission=admission, management_principal_id=binding.management_principal_id,
+                    successor_bindings=successor_bindings,
                 ),
                 owned_membership_clients=(client, observer),
             )

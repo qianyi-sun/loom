@@ -104,6 +104,14 @@ def build_personal_dev_capacity_runtime(
     mode = settings.personal_dev_runtime_mode
     if mode not in {"shadow", "acceptance", "operational"}:
         raise RuntimeError("personal-dev runtime mode is invalid")
+    if (
+        settings.personal_dev_membership_binding_json != "{}"
+        or settings.personal_dev_membership_plan_sha256
+        or settings.personal_dev_membership_observer_principal_id
+        or settings.personal_dev_membership_successor_plan_file
+        or settings.personal_dev_membership_successor_plan_sha256
+    ):
+        raise RuntimeError("legacy personal-dev runtime cannot use membership bindings")
     if not settings.dev_instances_enabled:
         if mode != "shadow":
             raise RuntimeError("disabled personal-dev runtime must remain shadow")
@@ -129,12 +137,6 @@ def build_personal_dev_capacity_runtime(
             )
         except PersonalDevOperationalInterlockError as exc:
             raise RuntimeError("personal-dev operational binding is invalid") from exc
-    if (
-        settings.personal_dev_membership_binding_json != "{}"
-        or settings.personal_dev_membership_plan_sha256
-        or settings.personal_dev_membership_observer_principal_id
-    ):
-        raise RuntimeError("legacy personal-dev runtime cannot use membership bindings")
     installer, kubectl, connection = build_personal_dev_capacity_installation(settings)
     try:
         projector = CapacityManagerPersonalDevProjector.from_files(connection)

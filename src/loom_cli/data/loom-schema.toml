@@ -316,6 +316,18 @@ python_type = "str"
 default     = ""
 description = "Exact current unbound capacity:read observer, distinct from the immutable membership delegate."
 
+[service_config.personal_dev_membership_successor_plan_file]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Optional owner-only canonical successor-plan file; empty disables reviewed cross-authority continuation. Never supplied by personal source."
+
+[service_config.personal_dev_membership_successor_plan_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Independent canonical SHA-256 of the protected multi-predecessor successor plan, paired with its file."
+
 [service_config.personal_dev_operational_binding_json]
 used_by     = ["loom-service"]
 python_type = "str"

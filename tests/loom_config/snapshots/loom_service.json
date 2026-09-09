@@ -239,6 +239,16 @@
     "default": "''",
     "required": false
   },
+  "personal_dev_membership_successor_plan_file": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_membership_successor_plan_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_membership_observer_principal_id": {
     "annotation": "<class 'str'>",
     "default": "''",

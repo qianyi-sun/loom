@@ -128,6 +128,8 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_membership_binding_json: str = "{}"
     personal_dev_membership_observer_principal_id: str = ""
     personal_dev_membership_plan_sha256: str = ""
+    personal_dev_membership_successor_plan_file: str = ""
+    personal_dev_membership_successor_plan_sha256: str = ""
     personal_dev_native_builder_agent_image: str = ""
     personal_dev_native_builder_agent_instance_id: str = ""
     personal_dev_native_builder_agent_key_id: str = ""

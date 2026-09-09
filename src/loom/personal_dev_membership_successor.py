@@ -7,12 +7,14 @@ its lease before running the ordinary installation/membership protocol.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Literal
 from uuid import UUID
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from loom.personal_dev_environment import (
     PersonalDevEnvironmentApplyRequest,
@@ -128,6 +130,35 @@ class PersonalDevMembershipSuccessorDecision:
     kind: Literal["create", "update", "destroy"]
     operation_epoch: int
     deployment_generation: int
+
+
+class PersonalDevMembershipSuccessorPlanV1(StrictV1Model):
+    """Protected local bundle; not a manager receipt or an owner API payload."""
+
+    bindings: tuple[PersonalDevMembershipSuccessorBindingV1, ...] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _unique_predecessors(self) -> PersonalDevMembershipSuccessorPlanV1:
+        if len({binding.predecessor_operation_id for binding in self.bindings}) != len(self.bindings):
+            raise ValueError("successor plan has duplicate predecessor bindings")
+        return self
+
+
+def parse_membership_successor_plan(
+    payload: bytes,
+    *,
+    expected_plan_sha256: str,
+    current_authority: PersonalDevMembershipAcceptanceBindingV1,
+) -> Mapping[UUID, PersonalDevMembershipSuccessorBindingV1]:
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= MAX_CONTRACT_BYTES:
+        raise ValueError("successor plan exceeds its byte bound")
+    plan = PersonalDevMembershipSuccessorPlanV1.model_validate_json(payload)
+    if (
+        canonical_bytes(plan) != payload or canonical_digest(plan) != expected_plan_sha256
+        or any(binding.authority != current_authority for binding in plan.bindings)
+    ):
+        raise ValueError("successor plan differs from reviewed current authority")
+    return MappingProxyType({binding.predecessor_operation_id: binding for binding in plan.bindings})
 
 
 def parse_membership_successor_binding(

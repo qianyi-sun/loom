@@ -252,6 +252,10 @@ spec:
           value: ''
         - name: LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_PLAN_SHA256
           value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_SUCCESSOR_PLAN_FILE
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_SUCCESSOR_PLAN_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_IMAGE
           value: ''
         - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_INSTANCE_ID
