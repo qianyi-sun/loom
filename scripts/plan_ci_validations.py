@@ -75,7 +75,6 @@ NEBIUS_IAC_EXACT = {
 NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
 
 NEBIUS_PLATFORM_EXACT = {
-    ".github/workflows/nebius-candidate.yml",
     "scripts/ops/deploy_nebius_platform.py",
     "scripts/ops/nebius_registry_auth.py",
     "scripts/ops/render_nebius_platform.py",
@@ -85,6 +84,7 @@ NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 # Publication tools have root-test coverage, not application integration consumers.
 # The shared report validator additionally exercises every image scan below.
 PUBLICATION_TOOL_EXACT = {
+    ".github/workflows/nebius-candidate.yml",
     "scripts/ops/nebius_candidate.py",
     "scripts/validate_trivy_release_report.py",
 }

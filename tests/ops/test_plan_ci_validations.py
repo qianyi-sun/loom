@@ -281,7 +281,6 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
         "scripts/ops/deploy_nebius_platform.py",
         "scripts/ops/nebius_registry_auth.py",
         "deploy/nebius/integration.platform.json.example",
-        ".github/workflows/nebius-candidate.yml",
     ],
 )
 def test_nebius_platform_tools_do_not_fall_back_to_unrelated_heavy_lanes(path: str) -> None:
@@ -293,6 +292,7 @@ def test_nebius_platform_tools_do_not_fall_back_to_unrelated_heavy_lanes(path: s
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
+        (".github/workflows/nebius-candidate.yml", set()),
         ("scripts/ops/nebius_candidate.py", set()),
         ("scripts/validate_trivy_release_report.py", {"images"}),
     ],
@@ -306,6 +306,7 @@ def test_publication_tools_select_only_their_consumers(path: str, expected: set[
 
 def test_publication_scan_change_preserves_all_shared_image_compatibility() -> None:
     paths = (
+        ".github/workflows/nebius-candidate.yml",
         "scripts/ops/nebius_candidate.py",
         "scripts/validate_trivy_release_report.py",
         "tests/ops/test_nebius_candidate.py",
@@ -331,7 +332,7 @@ def test_publication_scan_change_preserves_all_shared_image_compatibility() -> N
             component.id for component in manifest.release_components()
         }
         assert len(images) == 13
-    for path in paths[2:4]:
+    for path in (path for path in paths if path.startswith("tests/")):
         assert manifest.test_owner_for_path(path).lane == "tests-root"
 
 
@@ -356,7 +357,11 @@ def test_publication_scan_change_preserves_all_shared_image_compatibility() -> N
 def test_publication_ownership_preserves_other_coverage(
     extra_path: str, labels: set[str], expected: set[str], unowned: bool
 ) -> None:
-    paths = ["scripts/ops/nebius_candidate.py", "scripts/validate_trivy_release_report.py"]
+    paths = [
+        ".github/workflows/nebius-candidate.yml",
+        "scripts/ops/nebius_candidate.py",
+        "scripts/validate_trivy_release_report.py",
+    ]
     if extra_path:
         paths.append(extra_path)
     plan = plan_validations(changed_paths=paths, labels=labels, event_name="pull_request")
