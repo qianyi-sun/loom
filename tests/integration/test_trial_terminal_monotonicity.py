@@ -10,7 +10,7 @@ from sqlalchemy import delete, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Task, Team, Trial
+from loom.db.schema import Task, Team, TeamQuota, Trial
 
 
 @pytest.fixture
@@ -180,20 +180,60 @@ async def test_terminal_guard_rolls_back_entire_multirow_statement(terminal_tria
             task_id=trial.task_id,
             config={},
             requires_caps={},
-            state="claimed",
+            state="queued",
         )
-        session.add(other)
+        quota = TeamQuota(team_id=trial.team_id, in_flight_count=0)
+        session.add_all([other, quota])
         await session.flush()
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 await session.execute(
                     text(
-                        "UPDATE trials SET state='queued', failure_message='changed' WHERE id IN (:a,:b)"
+                        "UPDATE trials SET state='claimed', failure_message='changed' WHERE id IN (:a,:b)"
                     ),
                     {"a": trial_id, "b": other.id},
                 )
         await session.refresh(trial)
         await session.refresh(other)
+        await session.refresh(quota)
         assert trial.state == "failed" and trial.failure_message is None
-        assert other.state == "claimed" and other.failure_message is None
+        assert other.state == "queued" and other.failure_message is None
+        # The earlier trials_inflight_count AFTER trigger increments this for
+        # failed -> claimed before our guard rejects, regardless of row order.
+        assert quota.in_flight_count == 0
         await session.rollback()  # discard this test's second Trial
+
+
+async def test_terminal_guard_applies_to_restricted_writer_without_function_grant(
+    terminal_trial_sessions,
+):
+    sessions, trial_id = terminal_trial_sessions
+    role = f"terminal_writer_{uuid4().hex}"
+    async with sessions() as session:
+        await session.execute(update(Trial).where(Trial.id == trial_id).values(state="failed"))
+        await session.commit()
+        # Disposable transaction-local role, not an application owner or a
+        # superuser. The trigger function itself has no PUBLIC execution grant.
+        await session.execute(text(f"CREATE ROLE {role} NOLOGIN NOSUPERUSER"))
+        await session.execute(text(f"GRANT SELECT, UPDATE ON trials TO {role}"))
+        await session.execute(text(f"SET LOCAL ROLE {role}"))
+        try:
+            assert await session.scalar(text("SELECT current_user")) == role
+            await session.execute(
+                text("UPDATE trials SET failure_message='ordinary writer' WHERE id=:id"),
+                {"id": trial_id},
+            )
+            with pytest.raises(IntegrityError) as rejected:
+                async with session.begin_nested():
+                    await session.execute(
+                        text("UPDATE trials SET state='queued' WHERE id=:id"), {"id": trial_id}
+                    )
+            assert rejected.value.orig.diag.constraint_name == "trials_terminal_state_monotonic"
+            assert (
+                await session.scalar(
+                    text("SELECT state FROM trials WHERE id=:id"), {"id": trial_id}
+                )
+                == "failed"
+            )
+        finally:
+            await session.rollback()  # discard role, grants and metadata update
