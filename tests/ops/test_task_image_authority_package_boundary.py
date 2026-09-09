@@ -6,6 +6,8 @@ import ast
 import tomllib
 from pathlib import Path
 
+import pytest
+
 AUTHORITY_ROOT = Path("src/loom_task_image_authority")
 PRODUCTION_ROOT = Path("src")
 STORE_MODULE = "loom_task_image_authority.store"
@@ -55,6 +57,15 @@ ALLOWED_AUTHORITY_IMPORTS = {
     "loom.task_image_build_plan",
     "loom.task_image_materialization",
 }
+# Reviewed D2 adapters only: no ambient SDK session/client or general storage
+# composition becomes available to the authority API or its other modules.
+ALLOWED_AUTHORITY_MODULE_IMPORTS = {
+    "bundle_capability.py": {"loom.task_image_bundle_manifest"},
+    "bundle_s3_backend.py": {"loom.task_image_bundle_manifest", "loom.trajectory.storage"},
+    "bundle_s3_listing.py": {"xml.parsers"},
+    "bundle_s3_signing.py": {"botocore.auth", "botocore.awsrequest", "botocore.credentials"},
+    "bundle_s3_transport.py": {"loom.task_image_bundle_manifest"},
+}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -92,12 +103,18 @@ def _imports_store(tree: ast.AST) -> bool:
     return False
 
 
-def _unexpected_authority_imports(imports: set[str]) -> set[str]:
+def _unexpected_authority_imports(imports: set[str], *, source: Path | None = None) -> set[str]:
+    scoped = (
+        ALLOWED_AUTHORITY_MODULE_IMPORTS.get(source.name, set())
+        if source is not None and source.parent == AUTHORITY_ROOT
+        else set()
+    )
     return {
         imported
         for imported in imports
         if imported not in ALLOWED_AUTHORITY_IMPORTS
         and imported not in ALLOWED_AUTHORITY_STDLIB_IMPORTS
+        and imported not in scoped
         and imported.partition(".")[0] not in ALLOWED_AUTHORITY_IMPORT_ROOTS
     }
 
@@ -109,7 +126,7 @@ def test_authority_package_has_only_the_closed_service_dependency_set() -> None:
     unexpected: dict[Path, list[str]] = {}
     for path in sources:
         imports = _imported_modules(_tree(path))
-        disallowed = _unexpected_authority_imports(imports)
+        disallowed = _unexpected_authority_imports(imports, source=path)
         if disallowed:
             unexpected[path] = sorted(disallowed)
     assert not unexpected
@@ -118,6 +135,15 @@ def test_authority_package_has_only_the_closed_service_dependency_set() -> None:
 def test_authority_package_rejects_unreviewed_stdlib_import_roots() -> None:
     assert _unexpected_authority_imports({"asyncio"}) == set()
     assert _unexpected_authority_imports({"subprocess"}) == {"subprocess"}
+
+
+@pytest.mark.parametrize("module,imports", ALLOWED_AUTHORITY_MODULE_IMPORTS.items())
+def test_adapter_dependencies_are_scoped_to_reviewed_modules(module, imports) -> None:
+    assert _unexpected_authority_imports(imports, source=AUTHORITY_ROOT / module) == set()
+    assert _unexpected_authority_imports(imports, source=AUTHORITY_ROOT / "api.py") == imports
+    assert _unexpected_authority_imports(imports, source=Path("other") / module) == imports
+    unreviewed = {"boto3", "botocore.session", "botocore.client", "xml.etree.ElementTree"}
+    assert _unexpected_authority_imports(unreviewed, source=AUTHORITY_ROOT / module) == unreviewed
 
 
 def test_only_the_dedicated_authority_api_imports_the_projection_store() -> None:

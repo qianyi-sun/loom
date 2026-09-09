@@ -89,6 +89,55 @@ async def test_live_build_pin_resets_observed_grace(registry_authority_session, 
     assert fresh.status == "observing" and fresh.unreferenced_since == instant + timedelta(hours=24)
 
 
+async def test_idle_timeout_releases_fence_without_observation_and_fresh_retry_succeeds(
+    registry_authority_session,
+    registry_issuer,
+    monkeypatch,
+):
+    factory = registry_authority_session
+    row, attempt, _ = await _setup(factory, registry_issuer)
+    module = store()
+    original = module.revalidate_retirement_inventory
+    expired_backends = []
+
+    async def wait_for_backend_timeout(session, *, prepared):
+        backend = await session.scalar(text("SELECT pg_backend_pid()"))
+        assert (
+            await session.scalar(
+                text("SELECT current_setting('idle_in_transaction_session_timeout')")
+            )
+            == "1s"
+        )
+        # Deliberately leave the real retirement transaction idle at the CI
+        # failure boundary. Observe server termination rather than guess a delay.
+        async with factory.kw["bind"].connect() as probe:
+            await probe.execution_options(isolation_level="AUTOCOMMIT")
+            async with asyncio.timeout(3):
+                while await probe.scalar(
+                    text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = :pid)"),
+                    {"pid": backend},
+                ):
+                    await asyncio.sleep(0.02)
+        expired_backends.append(backend)
+        await original(session, prepared=prepared)
+
+    monkeypatch.setattr(module, "revalidate_retirement_inventory", wait_for_backend_timeout)
+    with pytest.raises(DBAPIError) as error:
+        await observe(factory, attempt.id, NOW + timedelta(seconds=12))
+    assert error.value.orig.sqlstate == "25P03"
+    assert len(expired_backends) == 1
+    async with factory() as probe:
+        await probe.execute(text("LOCK TABLE public.tasks IN ROW EXCLUSIVE MODE NOWAIT"))
+        assert await probe.get(TaskImageAttemptRetention, attempt.id) is None
+        current = await probe.get(TaskImageMaterialization, row.id)
+        assert current.state == row.state and current.lease_expires_at == row.lease_expires_at
+
+    monkeypatch.setattr(module, "revalidate_retirement_inventory", original)
+    recovered = await observe(factory, attempt.id, NOW + timedelta(seconds=12))
+    assert recovered.status == "pinned" and recovered.pins == ("build_lease",)
+    assert recovered.unreferenced_since is None and recovered.retired_at is None
+
+
 async def test_job_total_deadline_pins_after_builder_lease_expires(
     registry_authority_session,
     registry_issuer,
