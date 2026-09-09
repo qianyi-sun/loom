@@ -160,10 +160,48 @@ def test_generic_owner_store_preserves_and_validates_bound_storage():
 @pytest.mark.parametrize("method", ("converge_create", "converge_destroy"))
 async def test_legacy_provisioner_cannot_operate_bound_record(method):
     from loom.dev_instance_provisioner import DevInstanceConflictError
-    from tests.unit.test_dev_instance_provisioner import _FakeStore, _Recorder, _access, _provisioner, _record
+    from tests.unit.test_dev_instance_provisioner import (
+        _access,
+        _FakeStore,
+        _provisioner,
+        _record,
+        _Recorder,
+    )
 
     recorder = _Recorder()
     record = replace(_record("alice"), storage_binding=_bound_claim().operation.storage_binding)
+    store = _FakeStore()
+    store._rows[record.name] = record
     with pytest.raises(DevInstanceConflictError, match="personal"):
-        await getattr(_provisioner(_FakeStore(), recorder), method)(record, **({"access": _access()} if method == "converge_create" else {}))
+        await getattr(_provisioner(store, recorder), method)(record, **({"access": _access()} if method == "converge_create" else {}))
     assert recorder.calls == []
+    assert store._rows[record.name] == record
+
+
+@pytest.mark.parametrize("method", ("create", "claim_create", "destroy", "claim_destroy"))
+@pytest.mark.parametrize("status", ("ready", "failed", "deleted"))
+async def test_legacy_public_entrypoints_reject_bound_records_before_reserving(method, status):
+    from loom.dev_instance_provisioner import DevInstanceConflictError
+    from tests.unit.test_dev_instance_provisioner import (
+        _access,
+        _FakeStore,
+        _provisioner,
+        _record,
+        _Recorder,
+    )
+
+    recorder = _Recorder()
+    record = replace(_record("alice"), status=status,
+                     storage_binding=_bound_claim().operation.storage_binding)
+    store = _FakeStore()
+    store._rows[record.name] = record
+    arguments = {}
+    if method in ("create", "claim_create"):
+        arguments.update(owner_user_id=record.owner_user_id, owner_team_id=record.owner_team_id,
+                         min_slots=record.min_slots, max_slots=record.max_slots)
+    if method == "create":
+        arguments["access"] = _access()
+    with pytest.raises(DevInstanceConflictError, match="personal"):
+        await getattr(_provisioner(store, recorder), method)(record.name, **arguments)
+    assert recorder.calls == []
+    assert store._rows[record.name] == record
