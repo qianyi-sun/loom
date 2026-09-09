@@ -54,6 +54,15 @@ def test_new_whole_attempt_lease_cannot_reuse_platform_demand_identity():
     assert original.attempt_ids != renewed.attempt_ids
 
 
+def test_heartbeat_extension_preserves_platform_work_identity():
+    request = _request()
+    renewed = _request(attempt=_attempt(
+        state="running", lease_expires_at=_NOW + timedelta(seconds=120),
+        updated_at=_NOW + timedelta(seconds=10),
+    ))
+    assert _project((request,)) == _project((renewed,))
+
+
 @pytest.mark.parametrize("changes", (
     {"owner_user_id": UUID(int=90)}, {"owner_user_id": UUID(int=0)},
     {"owner_team_id": UUID(int=0)}, {"id": UUID(int=0)},
