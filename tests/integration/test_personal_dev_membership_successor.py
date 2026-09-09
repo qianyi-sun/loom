@@ -25,8 +25,8 @@ from loom.personal_dev_environment_store import (
     PersonalDevEnvironmentOperationFencedError,
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
-from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
+from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 from loom_capacity_manager.contracts import canonical_digest
 from tests.unit.test_personal_dev_membership_reconciler import _NOW
 from tests.unit.test_personal_dev_membership_successor import successor_case
@@ -48,7 +48,7 @@ def _row_values(model, record):
     return values
 
 
-async def _seed(sessions, kind, outcome, *, incarnation_storage=False):
+async def _seed(sessions, kind, outcome, *, incarnation_storage=False, legacy_accepted_storage=False):
     claim, accepted, values = successor_case(kind, outcome)
     if incarnation_storage:
         storage = PersonalDevStorageBindingV1(
@@ -60,7 +60,7 @@ async def _seed(sessions, kind, outcome, *, incarnation_storage=False):
         )
         claim = replace(claim, environment=replace(claim.environment, storage_binding=storage),
                         operation=replace(claim.operation, storage_binding=storage))
-        if accepted is not None:
+        if accepted is not None and not legacy_accepted_storage:
             accepted = replace(accepted, storage_binding=storage)
     # Match real durable rows, rather than the reconciler's lightweight fixtures.
     if kind in {"capacity", "destroy"}:

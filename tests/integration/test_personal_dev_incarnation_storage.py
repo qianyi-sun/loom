@@ -15,7 +15,10 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import DevInstance, DevLifecycleOperation, PersonalDevCandidate, Team, User
-from loom.personal_dev_environment import PersonalDevEnvironmentApplyRequest, PersonalDevEnvironmentDestroyRequest
+from loom.personal_dev_environment import (
+    PersonalDevEnvironmentApplyRequest,
+    PersonalDevEnvironmentDestroyRequest,
+)
 from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
 from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_membership_successor import _arguments, _row_values, _seed
@@ -75,6 +78,38 @@ async def test_storage_layout_is_reserved_once_and_replay_cannot_downgrade(isola
             assert not replay.acquired
             assert replay.operation.storage_binding == binding
             assert replay.operation.id == result.operation.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_pins_successor_storage_to_accepted_source(isolated_migration_postgres_url, monkeypatch):
+    from loom import personal_dev_environment_store as store
+
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        claim, binding = await _seed(sessions, "update", "terminal-not-committed",
+                                     incarnation_storage=True, legacy_accepted_storage=True)
+        original_validate = store.validate_membership_successor
+
+        def bypass_application_comparison(*args, **kwargs):
+            # Deliberately lie only to the pure validator: the DB must enforce
+            # the actual retained source independently at child insertion.
+            kwargs["accepted_operation"] = replace(
+                kwargs["accepted_operation"], storage_binding=claim.operation.storage_binding,
+            )
+            return original_validate(*args, **kwargs)
+
+        monkeypatch.setattr(store, "validate_membership_successor", bypass_application_comparison)
+        async with sessions() as session:
+            with pytest.raises(DBAPIError, match="storage"):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(
+                    **_arguments(claim, binding),
+                )
+            await session.rollback()
+            parent = await session.get(DevLifecycleOperation, claim.operation.id)
+            assert parent.state != "superseded"
     finally:
         await engine.dispose()
 
@@ -318,5 +353,50 @@ async def test_storage_database_rejects_unparseable_binding(isolated_migration_p
                 )
             await session.rollback()
             assert await session.get(DevInstance, request.name) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_storage_database_rejects_malformed_new_bindings(isolated_migration_postgres_url, monkeypatch):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        request, access = await _candidate(sessions)
+        for defect in ("null", "array", "scalar", "missing", "extra", "layout", "version", "boolean",
+                       "missing_digest", "uppercase_digest", "zero_digest", "malformed_digest"):
+            async with sessions() as session:
+                original_flush = session.flush
+
+                async def corrupt_flush(*args, **kwargs):
+                    for row in session.new:
+                        if not isinstance(row, DevInstance):
+                            continue
+                        binding = dict(row.storage_binding)
+                        if defect in {"null", "array", "scalar"}:
+                            binding = {"null": None, "array": [], "scalar": "invalid"}[defect]
+                        elif defect == "missing":
+                            binding.pop("owner_team_id")
+                        elif defect == "extra":
+                            binding["database"] = "loom_staging"
+                        elif defect == "layout":
+                            binding["layout"] = "legacy-name-v1"
+                        elif defect in {"version", "boolean"}:
+                            binding["schema_version"] = 2 if defect == "version" else True
+                        row.storage_binding = binding
+                        digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                        row.storage_binding_sha256 = {
+                            "missing_digest": None, "uppercase_digest": digest.upper(),
+                            "zero_digest": "0" * 64, "malformed_digest": "not-a-digest",
+                        }.get(defect, digest)
+                    await original_flush(*args, **kwargs)
+
+                monkeypatch.setattr(session, "flush", corrupt_flush)
+                with pytest.raises(DBAPIError, match="storage|non-object"):
+                    await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1").apply(
+                        request, access_binding=access, now=_NOW,
+                    )
+                await session.rollback()
+                assert await session.get(DevInstance, request.name) is None, defect
     finally:
         await engine.dispose()
