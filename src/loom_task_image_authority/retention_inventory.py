@@ -48,11 +48,12 @@ def derive_attempt_repository_inventory(
     credentials: Sequence[TaskImageRegistryCredentialGeneration],
     registry_origin: str,
 ) -> AttemptRepositoryInventory:
-    """Validate a caller's complete locked row snapshot without reading secrets.
+    """Validate a supplied row snapshot without reading secrets.
 
-    The future retirement transaction must load ALL retained credentials under
-    the shared attempt fence. This pure function cannot prove database inventory
-    completeness, absence of live references, retirement or writer quiescence.
+    Retirement must establish ALL retained credentials under its shared attempt
+    fence, either by a direct complete read or by rechecking a prepared immutable
+    snapshot. This pure function cannot prove database inventory completeness,
+    absence of live references, retirement or writer quiescence.
     """
     try:
         return _derive(materialization, attempt, credentials, registry_origin)
