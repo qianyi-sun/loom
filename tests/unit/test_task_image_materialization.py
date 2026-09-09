@@ -235,7 +235,7 @@ def test_strong_execution_grant_requires_manifest_qualified_key() -> None:
         task_source_provenance={"bundle_content_manifest_sha256": "b" * 64},
         registry_images={"task": "registry.example/task@sha256:" + "c" * 64},
     )
-    with pytest.raises(ValueError, match="manifest.*identity"):
+    with pytest.raises(ValueError, match=r"manifest.*identity"):
         TaskImageExecutionGrantV1.model_validate(payload)
     payload["materialization_key"] = task_image_materialization_key(
         task_id="benchmark/task-1",

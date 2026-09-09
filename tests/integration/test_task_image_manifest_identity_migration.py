@@ -269,7 +269,7 @@ def test_manifest_identity_downgrade_refuses_one_strong_row_without_collision(
         engine.dispose()
 
 
-async def test_legacy_ensure_cannot_silently_reuse_ready_row_for_strong_provenance(
+async def test_legacy_insert_cannot_silently_reuse_ready_row_for_strong_provenance(
     isolated_migration_postgres_url,
 ):
     engine = create_async_engine(isolated_migration_postgres_url)
@@ -289,11 +289,27 @@ async def test_legacy_ensure_cannot_silently_reuse_ready_row_for_strong_provenan
                 )
             ).all()
             task.source_provenance = {**task.source_provenance, COLUMN: "b" * 64}
-            # Transitional safety: producers remain unswitched. The v1 insert
-            # must reject, not win ON CONFLICT and reuse a weak ready snapshot.
+            # An older writer omitting the discriminator must still reject,
+            # not win ON CONFLICT and reuse a weak ready snapshot.
             with pytest.raises(DBAPIError, match="manifest_binding_check"):
                 async with session.begin_nested():
-                    await ensure_task_image_materializations(session, task_row=task)
+                    await session.execute(
+                        text(f"""
+                        INSERT INTO {TABLE} (id, materialization_key, task_id,
+                          task_checksum, cpu_arch, task_config, task_source_provenance)
+                        VALUES (:id, :key, :task, :checksum, :arch, CAST(:config AS jsonb),
+                          CAST(:provenance AS jsonb)) ON CONFLICT (materialization_key) DO NOTHING
+                    """),
+                        dict(
+                            id=uuid4(),
+                            key=rows[0].materialization_key,
+                            task=task.id,
+                            checksum=CHECKSUM,
+                            arch=rows[0].cpu_arch,
+                            config=json.dumps(task.config),
+                            provenance=json.dumps(task.source_provenance),
+                        ),
+                    )
             assert (
                 await session.execute(
                     text(

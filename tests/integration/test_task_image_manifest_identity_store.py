@@ -101,7 +101,7 @@ async def test_strong_ensure_rejects_different_frozen_snapshot(
                 task.source = "s3://another-bucket/another-prefix/"
             else:
                 task.source_provenance = {**task.source_provenance, "extra": "changed"}
-            with pytest.raises(ValueError, match="frozen.*snapshot"):
+            with pytest.raises(ValueError, match=r"frozen.*snapshot"):
                 await ensure_task_image_materializations(session, task_row=task)
             assert all(row.task_config["task"]["name"] == "manifest-store" for row in original)
     finally:

@@ -8,6 +8,7 @@ import pytest
 
 from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom.task_image_materialization import task_image_materialization_key
+from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_worker import main_loop, task_image_builder
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.vllm_registry import WorkerVLLMRegistry
@@ -17,10 +18,12 @@ from tests.unit.test_task_image_bundle_content_manifest import _legacy_collision
 
 
 @pytest.mark.parametrize("matching", [False, True])
+@pytest.mark.parametrize("sidecar", ["absent", "valid", "tampered"])
 async def test_builder_verifies_manifest_before_both_component_cache_lookups(
     tmp_path,
     monkeypatch,
     matching,
+    sidecar,
 ):
     left, right = _legacy_collision(tmp_path)
     manifest = capture_task_image_bundle_manifest(left)
@@ -40,15 +43,21 @@ async def test_builder_verifies_manifest_before_both_component_cache_lookups(
     )
     calls = []
     downloaded = left if matching else right
+    if sidecar != "absent":
+        (downloaded / BUNDLE_FILE_METADATA_NAME).write_bytes(
+            manifest.mode_metadata_bytes if sidecar == "valid" else b"unverified input"
+        )
 
     async def materialize(**_kwargs):
         return downloaded
 
     async def main(**kwargs):
+        assert not (downloaded / BUNDLE_FILE_METADATA_NAME).exists()
         calls.append(("main", kwargs["task_checksum"]))
         return "loom-task:main"
 
     async def sidecars(**kwargs):
+        assert not (downloaded / BUNDLE_FILE_METADATA_NAME).exists()
         calls.append(("sidecar", kwargs["task_checksum"]))
         return {"database": "loom-task:sidecar"}
 
@@ -65,7 +74,7 @@ async def test_builder_verifies_manifest_before_both_component_cache_lookups(
     monkeypatch.setattr(task_image_builder, "build_task_sidecar_images", sidecars)
     monkeypatch.setattr(task_image_builder, "publish_local_image_to_registry", publish)
     monkeypatch.setattr(task_image_builder, "verify_local_image_architecture", architecture)
-    if matching:
+    if matching and sidecar != "tampered":
         result = await task_image_builder.materialize_and_publish_task_images(claim, _settings())
         assert set(result) == {"task", "sidecar:database"}
         assert calls == [
@@ -80,9 +89,11 @@ async def test_builder_verifies_manifest_before_both_component_cache_lookups(
 
 
 @pytest.mark.parametrize("matching", [False, True])
+@pytest.mark.parametrize("sidecar", ["absent", "valid", "tampered"])
 async def test_trial_verifies_manifest_before_runtime_and_preserves_legacy_metadata(
     tmp_path,
     matching,
+    sidecar,
 ):
     left, right = _legacy_collision(tmp_path)
     manifest = capture_task_image_bundle_manifest(left)
@@ -91,6 +102,10 @@ async def test_trial_verifies_manifest_before_runtime_and_preserves_legacy_metad
     pool = RunnerPool(max_concurrent=1)
     calls = {}
     downloaded = left if matching else right
+    if sidecar != "absent":
+        (downloaded / BUNDLE_FILE_METADATA_NAME).write_bytes(
+            manifest.mode_metadata_bytes if sidecar == "valid" else b"unverified input"
+        )
 
     class Runner(_RunnerDouble):
         def __init__(self, **kwargs):
@@ -104,6 +119,7 @@ async def test_trial_verifies_manifest_before_runtime_and_preserves_legacy_metad
 
     async def resolve(**kwargs):
         calls["image"] = kwargs
+        assert not (downloaded / BUNDLE_FILE_METADATA_NAME).exists()
         return kwargs["registry_image"]
 
     payload = {
@@ -152,7 +168,7 @@ async def test_trial_verifies_manifest_before_runtime_and_preserves_legacy_metad
             vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
-    if matching:
+    if matching and sidecar != "tampered":
         assert calls["image"]["task_checksum"] == "bundle-manifest-sha256:" + manifest.digest
         assert calls["runner"]["task_checksum"] == manifest.task_checksum
         assert (
