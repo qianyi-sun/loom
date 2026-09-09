@@ -17,7 +17,7 @@ from loom.db.schema import (
     TaskImageMaterializationAttempt,
     TaskImageRegistryCredentialGeneration,
 )
-from loom.task_image_build_plan import derive_task_image_build_plan
+from loom.task_image_build_plan import TaskImageBuildComponentV1, derive_task_image_build_plan
 from loom.task_image_materialization import task_image_materialization_key
 from loom_task_image_authority.registry_token import publication_repository
 from tests.unit.test_task_image_build_plan import _authorization, _row
@@ -217,6 +217,26 @@ def test_stored_claim_and_registry_readers_preserve_versioned_plan(strong):
     row.bundle_content_manifest_sha256 = "7" * 64
     with pytest.raises(RuntimeError):
         _stored_claim_component(attempt, row, authorization=authorization, component="task")
+
+
+@pytest.mark.parametrize("strong", [False, True])
+def test_registry_and_retention_read_valid_large_unicode_receipts(strong):
+    from loom_task_image_authority.registry_credentials import _stored_claim_component
+
+    row, attempt, plan = strong_fixture() if strong else fixture()
+    plan = plan.model_copy(update={"components": tuple(
+        TaskImageBuildComponentV1(
+            name=name, dockerfile_path="x/" + "☃" * 4090, context_path=".",
+            oci_output_path=f"oci/{index:04d}.tar",
+        )
+        for index, name in enumerate(("task", "sidecar:a", "sidecar:b"))
+    )})
+    attempt.claim_plan_json = plan.model_dump(mode="json")
+    attempt.claim_plan_sha256 = hashlib.sha256(rfc8785.dumps(attempt.claim_plan_json)).hexdigest()
+    assert len(plan.model_dump_json().encode()) < 64 * 1024 < len(json.dumps(attempt.claim_plan_json))
+    authorization = _authorization(grant_id=plan.grant_id, session_id=plan.session_id, session_generation=plan.session_generation)
+    assert _stored_claim_component(attempt, row, authorization=authorization, component="task") == plan
+    assert derive(row, attempt, [credential_row(plan)]).repositories[0].component == "task"
 
 
 def test_historical_registry_identity_rotation_preserves_inventory():

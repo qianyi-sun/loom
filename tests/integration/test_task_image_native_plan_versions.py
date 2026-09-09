@@ -30,6 +30,7 @@ from tests.integration.test_task_image_registry_credentials import (
 from tests.integration.test_task_image_registry_credentials import (
     registry_issuer as registry_issuer,
 )
+from tests.integration.test_task_image_retirement_store import observe
 from tests.unit.test_task_image_build_plan_versions import strong_payload
 
 
@@ -108,6 +109,10 @@ async def test_v2_receipt_flows_through_credentials_publication_and_retirement_s
     assert parse_task_image_build_plan(prepared.canonical_plan).content_manifest_digest == row.bundle_content_manifest_sha256
     assert prepared.materialization_values[-1] == row.bundle_content_manifest_sha256
     assert prepared.inventory.repositories[0].repository == credential.repository
+    # Exercise the retirement owner's publication-snapshot parser too; preparing
+    # only credential inventory would not cover its independent plan read.
+    instant = max(job.deadline, row.lease_expires_at) + timedelta(seconds=1)
+    assert (await observe(registry_authority_session, attempt.id, instant)).status == "observing"
 
 
 async def test_v2_receipt_digest_mismatch_rejects_credential_and_detached_retirement(registry_authority_session, registry_issuer):

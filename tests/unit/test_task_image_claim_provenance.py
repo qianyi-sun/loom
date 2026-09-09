@@ -45,15 +45,17 @@ def test_successor_can_validate_attempt_provenance_but_not_replay_original_claim
         _stored_claim_plan(attempt, authorization=authorization, materialization_id=plan.materialization_id)
 
 
-def test_stored_receipt_budget_counts_compact_utf8_not_ascii_reencoding():
-    _, attempt, authorization = _receipt()
-    plan = _plan(components=tuple(
+@pytest.mark.parametrize("strong", [False, True])
+def test_stored_receipt_budget_counts_compact_utf8_not_ascii_reencoding(strong):
+    plan, attempt, authorization = _receipt(strong)
+    components = tuple(
         TaskImageBuildComponentV1(
             name=name, dockerfile_path="x/" + "☃" * 4090, context_path=".",
             oci_output_path=f"oci/{index:04d}.tar",
         )
         for index, name in enumerate(("task", "sidecar:a", "sidecar:b"))
-    ))
+    )
+    plan = plan.model_copy(update={"components": components})
     payload, digest = _plan_snapshot(plan)
     assert len(plan.model_dump_json().encode()) < 64 * 1024
     assert len(json.dumps(payload)) > 64 * 1024
