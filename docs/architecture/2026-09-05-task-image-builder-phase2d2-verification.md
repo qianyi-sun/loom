@@ -476,9 +476,18 @@ and binds the decoded task checksum and mode digest to the supplied frozen
 values. It rechecks authorization after parsing and does not return expired
 results. Tests exercise the actual signer/reader/parser over TLS and pinned
 MinIO, including missing and corrupted objects. This establishes manifest-read
-integrity only: complete data-prefix inventory matching and one shared issuance
-deadline across manifest and inventory reads remain required in the native
-capability owner. Manifest presence is never proof of a completed prefix upload.
+integrity only. The storage backend's stronger composition also matches the
+complete prefix key/size set against the registered data descriptors plus the
+exact canonical mode-sidecar size. One clock history and shrinking operation
+deadline cover manifest retrieval and every listing page. Data limits remain
+2,000 files / 512 MiB, with one separate transport object and its authenticated
+size added only after manifest verification. Full terminal pages may require an
+empty continuation probe; that probe retains all page/byte/deadline bounds and
+rejects any additional object. The legacy listing entrypoint retains its limits.
+This comparison does not hash stored data or sidecar bytes: native download must
+verify every data-file hash, and must never download the transport sidecar into
+the build context. Native capability issuance still needs to consume this
+composition. Manifest presence is never proof of a completed prefix upload.
 
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention

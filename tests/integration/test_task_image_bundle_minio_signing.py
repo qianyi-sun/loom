@@ -14,6 +14,7 @@ import docker
 import httpx
 import pytest
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -87,7 +88,17 @@ def minio_tls(tmp_path_factory):
                 verify=str(cert_file), config=Config(signature_version="s3v4", proxies={}, retries={"max_attempts": 0}),
             )
             for bucket in ("loom-bundles", "other-bundles"):
-                admin.create_bucket(Bucket=bucket)
+                # HTTP liveness can precede storage initialization. Retry only
+                # that explicit fixture startup condition under the same budget;
+                # permission/signature/other storage failures must still fail.
+                while True:
+                    try:
+                        admin.create_bucket(Bucket=bucket)
+                        break
+                    except ClientError as error:
+                        if error.response.get("Error", {}).get("Code") != "XMinioServerNotInitialized" or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.1)
                 for key in (*KEYS, FORM_PREFIX_KEY):
                     admin.put_object(Bucket=bucket, Key=key, Body=PAYLOAD)
             yield origin, credentials, client, admin, cert_file
@@ -355,7 +366,10 @@ async def test_verified_upload_and_real_minio_inventory_match_registered_manifes
     from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
     from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
     from loom_benchmark_tool.upload import upload_task_dir
-    from loom_task_image_authority.bundle_s3_backend import MinioTaskImageBundleBackend, S3InventoryLimits
+    from loom_task_image_authority.bundle_s3_backend import (
+        MinioTaskImageBundleBackend,
+        S3InventoryLimits,
+    )
 
     (tmp_path / "Dockerfile").write_bytes(f"FROM scratch\n# {change}\n".encode())
     script = tmp_path / "run +%😀.sh"

@@ -14,12 +14,14 @@ from typing import Self
 from loom.task_image_build_plan import (
     MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
     MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
+    _canonical_bundle_location,
 )
 from loom.task_image_bundle_manifest import (
     TaskImageBundleContentManifestV1,
     parse_task_image_bundle_manifest,
     task_image_bundle_manifest_key,
 )
+from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_task_image_authority.bundle_capability import (
     TaskImageBundleCapabilityError,
     TaskImageBundleObject,
@@ -58,6 +60,30 @@ class S3InventoryLimits:
 
 _DEFAULT_LIMITS = S3InventoryLimits()
 _DEFAULT_READ_LIMITS = S3ListingReadLimits()
+
+
+class _S3ReadBudget:
+    """One clock history/deadline through manifest, signing and every list page."""
+
+    def __init__(
+        self, observer: Callable[[datetime, datetime | None], datetime],
+        *, expires_at: datetime, total_timeout_seconds: float,
+    ) -> None:
+        self._observer = observer
+        self._expires_at = expires_at
+        self._previous = observer(expires_at, None)
+        self._loop = asyncio.get_running_loop()
+        self.deadline = self._loop.time() + min(total_timeout_seconds, (expires_at - self._previous).total_seconds())
+        self.timeout = asyncio.timeout_at(self.deadline)
+
+    def observe(self) -> datetime:
+        current = self._observer(self._expires_at, self._previous)
+        self._previous = current
+        self.deadline = min(self.deadline, self._loop.time() + (self._expires_at - current).total_seconds())
+        if self._loop.time() >= self.deadline:
+            raise TimeoutError
+        self.timeout.reschedule(self.deadline)
+        return current
 
 
 class MinioTaskImageBundleBackend:
@@ -149,16 +175,10 @@ class MinioTaskImageBundleBackend:
         observe()
         return result
 
-    async def get_manifest(
+    def _manifest_key(
         self, *, bucket: str, expected_sha256: str, task_checksum: str,
-        bundle_file_metadata_sha256: str, expires_at: datetime,
-    ) -> TaskImageBundleContentManifestV1:
-        """Read only the exact registered manifest, never infer source authority.
-
-        This does not certify completion of any bundle prefix. The capability
-        owner must also match its complete inventory and impose a shared outer
-        deadline across these operations, then reauthorize before committing.
-        """
+        bundle_file_metadata_sha256: str,
+    ) -> str:
         self._require_open()
         try:
             if bucket != self._bucket or any(
@@ -166,48 +186,49 @@ class MinioTaskImageBundleBackend:
                 for value in (expected_sha256, task_checksum, bundle_file_metadata_sha256)
             ):
                 raise ValueError("invalid frozen scope")
-            key = task_image_bundle_manifest_key(expected_sha256)
+            return task_image_bundle_manifest_key(expected_sha256)
         except (ValueError, TypeError):
             raise TaskImageBundleCapabilityError("MinIO manifest scope is invalid") from None
-        previous = self._observe(expires_at)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + min(self._limits.total_timeout_seconds, (expires_at - previous).total_seconds())
 
-        def observe() -> datetime:
-            nonlocal previous
-            previous = self._observe(expires_at, previous)
-            return previous
-
+    async def get_manifest(
+        self, *, bucket: str, expected_sha256: str, task_checksum: str,
+        bundle_file_metadata_sha256: str, expires_at: datetime,
+    ) -> TaskImageBundleContentManifestV1:
+        """Read only the registered manifest; this does not certify a data prefix."""
+        key = self._manifest_key(
+            bucket=bucket, expected_sha256=expected_sha256, task_checksum=task_checksum,
+            bundle_file_metadata_sha256=bundle_file_metadata_sha256,
+        )
+        budget = _S3ReadBudget(self._observe, expires_at=expires_at, total_timeout_seconds=self._limits.total_timeout_seconds)
         try:
-            async with asyncio.timeout_at(deadline) as budget:
-                url = presign_bundle_get(
-                    public_origin=self._origin, bucket=bucket, key=key, region=self._region,
-                    credentials=self._credentials, expires_at=expires_at, clock=observe,
+            async with budget.timeout:
+                return await self._read_manifest(
+                    bucket=bucket, key=key, expected_sha256=expected_sha256, task_checksum=task_checksum,
+                    bundle_file_metadata_sha256=bundle_file_metadata_sha256, expires_at=expires_at, budget=budget,
                 )
-                current = observe()
-                deadline = min(deadline, loop.time() + (expires_at - current).total_seconds())
-                if loop.time() >= deadline:
-                    raise TimeoutError
-                budget.reschedule(deadline)
-                payload = await self._reader.fetch_manifest(url, expected_sha256=expected_sha256, deadline=deadline)
-                observe()
-                result = parse_task_image_bundle_manifest(payload, expected_sha256=expected_sha256)
-                if result.task_checksum != task_checksum or result.bundle_file_metadata_sha256 != bundle_file_metadata_sha256:
-                    raise ValueError("manifest differs from frozen provenance")
-                observe()
-                if loop.time() >= deadline:
-                    raise TimeoutError
-                return result
         except TaskImageBundleCapabilityError:
             raise
         except Exception:
             raise TaskImageBundleCapabilityError("MinIO registered manifest is unavailable or invalid") from None
 
-    async def list_objects(
-        self, *, bucket: str, prefix: str, maximum_objects: int,
-        maximum_bytes: int, expires_at: datetime,
-    ) -> tuple[TaskImageBundleObject, ...]:
-        """Return one nonempty complete inventory or fail without partial results."""
+    async def _read_manifest(
+        self, *, bucket: str, key: str, expected_sha256: str, task_checksum: str,
+        bundle_file_metadata_sha256: str, expires_at: datetime, budget: _S3ReadBudget,
+    ) -> TaskImageBundleContentManifestV1:
+        url = presign_bundle_get(
+            public_origin=self._origin, bucket=bucket, key=key, region=self._region,
+            credentials=self._credentials, expires_at=expires_at, clock=budget.observe,
+        )
+        budget.observe()
+        payload = await self._reader.fetch_manifest(url, expected_sha256=expected_sha256, deadline=budget.deadline)
+        budget.observe()
+        result = parse_task_image_bundle_manifest(payload, expected_sha256=expected_sha256)
+        if result.task_checksum != task_checksum or result.bundle_file_metadata_sha256 != bundle_file_metadata_sha256:
+            raise ValueError("manifest differs from frozen provenance")
+        budget.observe()
+        return result
+
+    def _data_scope(self, *, bucket: str, maximum_objects: int, maximum_bytes: int) -> None:
         self._require_open()
         if (
             bucket != self._bucket or type(maximum_objects) is not int
@@ -215,69 +236,119 @@ class MinioTaskImageBundleBackend:
             or type(maximum_bytes) is not int or not 0 <= maximum_bytes <= MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES
         ):
             raise TaskImageBundleCapabilityError("MinIO inventory scope or limits are invalid")
-        previous = self._observe(expires_at)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + min(self._limits.total_timeout_seconds, (expires_at - previous).total_seconds())
 
-        def observe() -> datetime:
-            nonlocal previous
-            previous = self._observe(expires_at, previous)
-            return previous
+    async def get_verified_bundle_manifest(
+        self, *, bucket: str, prefix: str, expected_sha256: str, task_checksum: str,
+        bundle_file_metadata_sha256: str, maximum_objects: int, maximum_bytes: int,
+        expires_at: datetime,
+    ) -> TaskImageBundleContentManifestV1:
+        """Bind complete inventory to registered descriptors under one budget.
 
+        Limits count DATA only; the exact canonical mode-sidecar size and one
+        transport object are added after manifest verification. No sidecar URL
+        or bytes are returned. Its modes are authenticated by the manifest, not
+        by listing metadata. Consumers must still hash every downloaded file.
+        """
+        key = self._manifest_key(
+            bucket=bucket, expected_sha256=expected_sha256, task_checksum=task_checksum,
+            bundle_file_metadata_sha256=bundle_file_metadata_sha256,
+        )
+        self._data_scope(bucket=bucket, maximum_objects=maximum_objects, maximum_bytes=maximum_bytes)
+        try:
+            if type(prefix) is not str or not prefix.endswith(f"/{expected_sha256}/"):
+                raise ValueError("unbound prefix")
+            _canonical_bundle_location(f"s3://{bucket}/{prefix}")
+        except ValueError:
+            raise TaskImageBundleCapabilityError("MinIO registered bundle prefix is invalid") from None
+        budget = _S3ReadBudget(self._observe, expires_at=expires_at, total_timeout_seconds=self._limits.total_timeout_seconds)
+        try:
+            async with budget.timeout:
+                manifest = await self._read_manifest(
+                    bucket=bucket, key=key, expected_sha256=expected_sha256, task_checksum=task_checksum,
+                    bundle_file_metadata_sha256=bundle_file_metadata_sha256, expires_at=expires_at, budget=budget,
+                )
+                total_bytes = sum(item.size_bytes for item in manifest.files)
+                if len(manifest.files) > maximum_objects or total_bytes > maximum_bytes:
+                    raise ValueError("registered data exceeds limits")
+                expected = {prefix + item.path: item.size_bytes for item in manifest.files}
+                mode_bytes = len(manifest.mode_metadata_bytes)
+                expected[prefix + BUNDLE_FILE_METADATA_NAME] = mode_bytes
+                objects = await self._list_objects(
+                    bucket=bucket, prefix=prefix, maximum_objects=len(expected),
+                    maximum_bytes=total_bytes + mode_bytes, expires_at=expires_at, budget=budget,
+                )
+                if {item.key: item.size_bytes for item in objects} != expected:
+                    raise ValueError("registered inventory changed")
+                budget.observe()
+                return manifest
+        except TaskImageBundleCapabilityError:
+            raise
+        except Exception:
+            raise TaskImageBundleCapabilityError("MinIO registered bundle inventory is unavailable or invalid") from None
+
+    async def list_objects(
+        self, *, bucket: str, prefix: str, maximum_objects: int,
+        maximum_bytes: int, expires_at: datetime,
+    ) -> tuple[TaskImageBundleObject, ...]:
+        """Return one nonempty complete legacy inventory without partial results."""
+        self._data_scope(bucket=bucket, maximum_objects=maximum_objects, maximum_bytes=maximum_bytes)
+        budget = _S3ReadBudget(self._observe, expires_at=expires_at, total_timeout_seconds=self._limits.total_timeout_seconds)
+        try:
+            async with budget.timeout:
+                return await self._list_objects(
+                    bucket=bucket, prefix=prefix, maximum_objects=maximum_objects,
+                    maximum_bytes=maximum_bytes, expires_at=expires_at, budget=budget,
+                )
+        except TaskImageBundleCapabilityError:
+            raise
+        except Exception:
+            raise TaskImageBundleCapabilityError("MinIO bundle inventory is unavailable or exceeds limits") from None
+
+    async def _list_objects(
+        self, *, bucket: str, prefix: str, maximum_objects: int,
+        maximum_bytes: int, expires_at: datetime, budget: _S3ReadBudget,
+    ) -> tuple[TaskImageBundleObject, ...]:
         objects: list[TaskImageBundleObject] = []
         tokens: set[str] = set()
         token: str | None = None
         total_bytes = 0
         listing_bytes = 0
-        try:
-            async with asyncio.timeout_at(deadline) as budget:
-                for _ in range(self._limits.maximum_pages):
-                    current = observe()
-                    # Forward wall-clock movement can shorten a read's authority,
-                    # but no elapsed network call can reset the overall budget.
-                    deadline = min(deadline, loop.time() + (expires_at - current).total_seconds())
-                    maximum_keys = min(self._limits.page_size, maximum_objects - len(objects) + 1)
-                    url = presign_bundle_list(
-                        public_origin=self._origin, bucket=bucket, prefix=prefix,
-                        maximum_keys=maximum_keys, continuation_token=token, region=self._region,
-                        credentials=self._credentials, expires_at=expires_at, clock=observe,
-                    )
-                    current = observe()
-                    deadline = min(deadline, loop.time() + (expires_at - current).total_seconds())
-                    if loop.time() >= deadline:
-                        raise TimeoutError
-                    budget.reschedule(deadline)
-                    payload = await self._reader.fetch(url, deadline=deadline)
-                    observe()
-                    listing_bytes += len(payload)
-                    if listing_bytes > self._limits.maximum_listing_bytes:
-                        raise ValueError("listing byte limit")
-                    page = parse_list_objects_v2(
-                        payload, expected_bucket=bucket, prefix=prefix, maximum_keys=maximum_keys,
-                        continuation_token=token, url_encoding="form",
-                    )
-                    observe()
-                    for item in page.objects:
-                        if objects and item.key.encode("utf-8") <= objects[-1].key.encode("utf-8"):
-                            raise ValueError("inventory order changed")
-                        total_bytes += item.size_bytes
-                        if len(objects) >= maximum_objects or total_bytes > maximum_bytes:
-                            raise ValueError("inventory exceeds limits")
-                        objects.append(item)
-                    token = page.next_token
-                    if token is None:
-                        if not objects:
-                            raise ValueError("empty inventory")
-                        result = tuple(objects)
-                        observe()
-                        if loop.time() >= deadline:
-                            raise TimeoutError
-                        return result
-                    if token in tokens or len(objects) >= maximum_objects:
-                        raise ValueError("inventory progression exceeds limits")
-                    tokens.add(token)
-                raise ValueError("listing page limit")
-        except TaskImageBundleCapabilityError:
-            raise
-        except Exception:
-            raise TaskImageBundleCapabilityError("MinIO bundle inventory is unavailable or exceeds limits") from None
+        for _ in range(self._limits.maximum_pages):
+            budget.observe()
+            maximum_keys = min(self._limits.page_size, maximum_objects - len(objects) + 1)
+            url = presign_bundle_list(
+                public_origin=self._origin, bucket=bucket, prefix=prefix,
+                maximum_keys=maximum_keys, continuation_token=token, region=self._region,
+                credentials=self._credentials, expires_at=expires_at, clock=budget.observe,
+            )
+            budget.observe()
+            payload = await self._reader.fetch(url, deadline=budget.deadline)
+            budget.observe()
+            listing_bytes += len(payload)
+            if listing_bytes > self._limits.maximum_listing_bytes:
+                raise ValueError("listing byte limit")
+            page = parse_list_objects_v2(
+                payload, expected_bucket=bucket, prefix=prefix, maximum_keys=maximum_keys,
+                continuation_token=token, url_encoding="form",
+            )
+            budget.observe()
+            for item in page.objects:
+                if objects and item.key.encode("utf-8") <= objects[-1].key.encode("utf-8"):
+                    raise ValueError("inventory order changed")
+                total_bytes += item.size_bytes
+                if len(objects) >= maximum_objects or total_bytes > maximum_bytes:
+                    raise ValueError("inventory exceeds limits")
+                objects.append(item)
+            token = page.next_token
+            if token is None:
+                if not objects:
+                    raise ValueError("empty inventory")
+                budget.observe()
+                return tuple(objects)
+            # A full last page may still advertise continuation. Probe one more
+            # object under the same page/byte/deadline bounds: an extra object
+            # rejects above, an empty terminal page proves exact completion.
+            if token in tokens:
+                raise ValueError("inventory progression exceeds limits")
+            tokens.add(token)
+        raise ValueError("listing page limit")
