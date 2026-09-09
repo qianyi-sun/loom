@@ -65,6 +65,78 @@ async def test_managed_application_and_build_share_owner_account_and_global_revi
     assert sum(subject.configuration.account_id == app.member.configuration.account_id for subject in value.subjects) == 2
 
 
+async def test_managed_application_cross_epoch_capacity_import_and_reporter_rotation(capacity_session):
+    """Real retirement/reprojection and SQL lifecycle; V4 activation is still seeded."""
+    from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
+    from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
+    from loom_capacity_manager.executable_contracts import ExecutableExecutorHeartbeatV2
+    from loom_capacity_manager.execution_store import CapacityExecutionStore
+    from loom_capacity_manager.models import CapacityExecutionEpoch
+    from loom_capacity_manager.store import (
+        AuthorityRecoveryError,
+        CapacityManagementStore,
+        ExecutionConflictError,
+    )
+    from tests.capacity_build_membership_fixtures import seed_typed_sql_execution
+    from tests.capacity_execution_fixtures import PreparedExecutionFixture
+    from tests.integration.test_capacity_manager_execution_epoch import (
+        _drain_request,
+        _publish_final_safe_evidence,
+        _retirement_request,
+    )
+
+    management, preparation, _fleet, execution = await prepared(capacity_session)
+    request = managed_application_request(preparation, execution)
+    resized = await apply(capacity_session, request)
+    typed = CapacityTypedMembershipStore()
+    old_snapshot = await typed.snapshot(capacity_session, execution.execution_epoch)
+    writer = WriterFence(authority_incarnation=execution.authority_incarnation, writer_epoch=execution.writer_epoch)
+    fixture = PreparedExecutionFixture(store=management, writer=writer, request=preparation)
+    executions = CapacityExecutionStore()
+    for binding in preparation.executors:
+        await executions.heartbeat_executor(capacity_session, ExecutableExecutorHeartbeatV2(
+            execution=execution, executor_id=binding.executor_id, executor_incarnation=binding.executor_incarnation,
+            pool_id=binding.pool_id, pool_generation=binding.pool_generation, heartbeat_sequence=1,
+            journal_sequence=0, journal_digest="0" * 64))
+    drained = await management.begin_execution_drain(capacity_session, _drain_request(execution),
+        actor="retirement-operator", idempotency_key=UUID(int=88988))
+    checkpoints = await _publish_final_safe_evidence(capacity_session, drained)
+    await management.retire_execution_epoch(capacity_session, _retirement_request(drained, checkpoints),
+        actor="retirement-operator", idempotency_key=UUID(int=88989))
+
+    projected = await management.project_development_subject(capacity_session, request.command.projection,
+        actor="configuration-operator", idempotency_key=UUID(int=88990))
+    assert projected.subject == resized.member.configuration
+    origin = ManagedApplicationOriginV1(configuration=projected.subject,
+        installation_projection=preparation.managed_application_origins[0].installation_projection,
+        base_projection=request.command.projection, acknowledgement=request.command.acknowledgement)
+    assert origin.installation_projection.operation_id != origin.base_projection.operation_id
+    successor = ExecutionPreparationV4.model_validate(preparation.model_dump(mode="python") | {
+        "configuration_epoch": projected.configuration_epoch,
+        "executors": tuple(binding.model_copy(update={"executor_incarnation": UUID(int=88980 + index)})
+            for index, binding in enumerate(preparation.executors)),
+        "managed_application_origins": (origin,),
+        "subject_acknowledgements": tuple(origin.acknowledgement if ack.subject_id == origin.configuration.subject_id else ack
+            for ack in preparation.subject_acknowledgements),
+    })
+    policy = management.execution_policy.model_copy(update={"executors": successor.executors})
+    management = CapacityManagementStore(execution_policy=policy)
+    fixture = PreparedExecutionFixture(store=management, writer=writer, request=successor)
+    active = await seed_typed_sql_execution(capacity_session, fixture, successor, execution_epoch=43)
+    next_request = managed_application_request(successor, active)
+    await apply(capacity_session, next_request, key=88991)
+    updated = await apply(capacity_session, transition(next_request, "update", revision=1), key=88992)
+    value = await management.load_allocation_input(capacity_session, writer)
+    assert value.membership.members == (updated.member,)
+    assert sum(subject.configuration.subject_id == origin.configuration.subject_id for subject in value.subjects) == 1
+    assert await typed.snapshot(capacity_session, execution.execution_epoch) == old_snapshot
+    old_epoch = await capacity_session.get(CapacityExecutionEpoch, execution.execution_epoch)
+    with pytest.raises(AuthorityRecoveryError):
+        await typed.verify_snapshot_materialization(capacity_session, old_epoch, old_snapshot)
+    with pytest.raises(ExecutionConflictError):
+        await apply(capacity_session, request)
+
+
 @pytest.mark.parametrize("operation", ("capacity", "update", "destroy"))
 async def test_sql_admits_exact_first_managed_lifecycle(capacity_session, operation):
     management, preparation, fleet, execution = await prepared(capacity_session)

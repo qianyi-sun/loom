@@ -109,8 +109,14 @@ async def typed_sql_execution(session, *, max_subjects=8, managed_projection=Non
             management_principal_id="build-management", development_template_sha256=canonical_digest(fleet.development_subject_template), max_subjects=max_subjects,
             managed_base_subject_ids=tuple(origin.configuration.subject_id for origin in origins)),
     })
+    execution = await seed_typed_sql_execution(session, fixture, preparation, activate=activate)
+    return fixture.store, preparation, fleet, execution
+
+
+async def seed_typed_sql_execution(session, fixture, preparation, *, execution_epoch=42, activate=True):
+    """Seed only the SQL harness boundary; this is not production V4 activation."""
     digest = canonical_executable_digest(preparation)
-    values = dict(execution_epoch=42, authority_incarnation=preparation.authority_incarnation,
+    values = dict(execution_epoch=execution_epoch, authority_incarnation=preparation.authority_incarnation,
         prepared_writer_epoch=preparation.expected_writer_epoch, current_writer_epoch=preparation.expected_writer_epoch,
         configuration_epoch=preparation.configuration_epoch, fleet_generation=preparation.fleet_generation,
         fleet_digest=preparation.fleet_digest, execution_manifest_sha256=digest,
@@ -119,7 +125,7 @@ async def typed_sql_execution(session, *, max_subjects=8, managed_projection=Non
         legacy_writer_manifest_sha256=_canonical_json_digest([fence.model_dump(mode="json") for fence in preparation.legacy_writer_fences]),
         rollback_evidence_sha256=preparation.rollback_evidence_sha256, requested_ceiling=preparation.requested_ceiling,
         requested_rate_per_minute=preparation.requested_rate_per_minute, effective_ceiling=0, effective_rate_per_minute=0,
-        state="prepared", actor="sql-test-preparation", idempotency_key=UUID(int=88002), request_digest=digest)
+        state="prepared", actor="sql-test-preparation", idempotency_key=UUID(int=88002 + execution_epoch - 42), request_digest=digest)
     for executor in preparation.executors:
         for field in ("executor_id", "executor_incarnation", "pool_id", "pool_generation", "signing_key_sha256", "local_authority_sha256", "controller_authority_sha256"):
             values[f"{executor.pool_id}_{field}"] = getattr(executor, field)
@@ -127,27 +133,28 @@ async def typed_sql_execution(session, *, max_subjects=8, managed_projection=Non
     session.add(row)
     await session.flush()
     authority = (await session.scalars(select(CapacityAuthorityState).with_for_update())).one()
-    authority.execution_epoch = 42
+    authority.execution_epoch = execution_epoch
     authority.execution_state = "prepared"
     authority.execution_manifest_sha256 = digest
     authority.executable_new_capacity_ceiling = 0
     await session.flush()
     prepared = fixture.store._execution_context(authority, row)
-    await register_execution_executors(session, replace(fixture, request=preparation), prepared)
+    await register_execution_executors(session, replace(fixture, request=preparation), prepared,
+        idempotency_base=740 + 2 * (execution_epoch - 42))
     if not activate:
-        return fixture.store, preparation, fleet, prepared
+        return prepared
     row.state = "active"
     row.effective_ceiling = preparation.requested_ceiling
     row.effective_rate_per_minute = preparation.requested_rate_per_minute
     row.activation_actor = "sql-test-activation"
-    row.activation_idempotency_key = UUID(int=88003)
+    row.activation_idempotency_key = UUID(int=88003 + execution_epoch - 42)
     row.activation_request_digest = "c" * 64
     row.activated_at = await session.scalar(select(func.now()))
     await session.flush()
     authority.execution_state = "active"
     authority.executable_new_capacity_ceiling = preparation.requested_ceiling
     await session.flush()
-    return fixture.store, preparation, fleet, fixture.store._execution_context(authority, row)
+    return fixture.store._execution_context(authority, row)
 
 
 def build_request(preparation, execution, *, owner=88010, revision=0):

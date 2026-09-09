@@ -599,7 +599,7 @@ async def test_direct_build_preparation_cannot_create_legacy_execution_epoch(cap
     fixture = await _setup(capacity_session, execution_policy=_policy())
     proposed = build_membership_input().preparation
     request = ExecutionPreparationV4.model_validate(fixture.request.model_dump(mode="python") | {
-        "schema_version": 4, "personal_membership": proposed.personal_membership,
+        "schema_version": 4, "personal_membership": proposed.personal_membership.model_copy(update={"managed_base_subject_ids": ()}),
         "personal_builds": proposed.personal_builds,
     })
     with pytest.raises(ExecutionConflictError, match="unsupported execution preparation schema"):
