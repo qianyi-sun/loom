@@ -51,6 +51,8 @@ class PersonalDevMembershipSuccessorBindingV1(StrictV1Model):
     owner_team_id: UUID
     request_sha256: Digest
     adopted_member: PersonalApplicationMemberV1 | None
+    accepted_operation_id: UUID | None = None
+    accepted_membership_envelope_sha256: Digest | None = None
     accepted_shadow_configuration: ConfigurationSnapshotV1 | None = None
     accepted_shadow_projection: DynamicDevelopmentSubjectProjectionV1 | None = None
 
@@ -214,6 +216,14 @@ def _validate_envelope_intent(
         raise ValueError("successor envelope differs from durable operation intent")
 
 
+_RETAINED_FIELDS = (
+    "capacity_reporter_incarnation", "capacity_reporter_token_sha256",
+    "local_activation_sha256", "protected_admission_sha256",
+    "capacity_agent_installation_sha256", "capacity_supported_pool_ids",
+    "capacity_supported_architectures",
+)
+
+
 def validate_membership_successor(
     binding: PersonalDevMembershipSuccessorBindingV1,
     *,
@@ -275,12 +285,17 @@ def validate_membership_successor(
         or claim.candidate.owner_user_id != operation.owner_user_id
         or claim.candidate.owner_team_id != operation.owner_team_id
         or claim.candidate.publication_sha256 != projection.candidate_publication_sha256
+        or (operation.kind != "destroy" and claim.candidate.status != "ready")
     ):
         raise ValueError("successor differs from reviewed historical owner intent")
     historical = envelope.historical_outcome
     member = binding.adopted_member
     if isinstance(historical, PersonalMembershipOperationCommittedV1):
-        if binding.accepted_shadow_configuration is not None:
+        if (
+            binding.accepted_shadow_configuration is not None
+            or binding.accepted_operation_id is not None
+            or binding.accepted_membership_envelope_sha256 is not None
+        ):
             raise ValueError("historical membership commit cannot use shadow acceptance")
         if operation.kind == "destroy":
             raise ValueError("committed destroy must use existing release recovery")
@@ -294,6 +309,11 @@ def validate_membership_successor(
             or environment.ready_at is not None
             or environment.accepted_capacity_membership_checkpoint is not None
             or environment.capacity_configuration_epoch is not None
+            or environment.capacity_configuration_sha256 is not None
+            or environment.accepted_capacity_mode != "shadow-v1"
+            or binding.accepted_operation_id is not None
+            or binding.accepted_membership_envelope_sha256 is not None
+            or any(getattr(environment, field) is not None for field in _RETAINED_FIELDS)
             or operation.subject_id
             in binding.authority.preparation.personal_membership.managed_base_subject_ids
             or any(
@@ -325,6 +345,16 @@ def validate_membership_successor(
             or previous.owner_team_id != operation.owner_team_id
             or previous.environment_name != operation.environment_name
             or previous.operation_epoch >= operation.operation_epoch
+            or binding.accepted_operation_id != previous.id
+            or environment.candidate_id != previous.candidate_id
+            or environment.candidate_sha != previous.candidate_sha
+            or environment.deployment_generation != previous.deployment_generation
+            or environment.min_slots != previous.min_slots
+            or environment.max_slots != previous.max_slots
+            or any(
+                getattr(environment, field) != getattr(previous, field)
+                for field in _RETAINED_FIELDS
+            )
         ):
             raise ValueError("successor adoption differs from locally accepted history")
         if previous.capacity_mode == "membership-v1":
@@ -335,18 +365,39 @@ def validate_membership_successor(
                 canonical_bytes(accepted)
             )
             _validate_envelope_intent(previous, accepted)
+            if canonical_digest(accepted) != binding.accepted_membership_envelope_sha256:
+                raise ValueError("successor accepted receipt differs from operator review")
+            accepted_projection = accepted.request.projection
             receipt = accepted.result
             if (
                 receipt is None
                 or member != receipt.result.member
                 or environment.accepted_capacity_mode != "membership-v1"
                 or environment.accepted_capacity_membership_checkpoint != receipt.checkpoint
+                or environment.capacity_configuration_epoch is not None
+                or environment.capacity_configuration_sha256 is not None
             ):
                 raise ValueError("successor adoption differs from locally accepted membership")
         elif previous.capacity_mode == "shadow-v1":
+            if binding.accepted_membership_envelope_sha256 is not None:
+                raise ValueError("shadow acceptance cannot use a membership source receipt")
             _validate_shadow_adoption(binding, claim=claim, previous=previous, member=member)
+            assert binding.accepted_shadow_projection is not None
+            accepted_projection = binding.accepted_shadow_projection
         else:
             raise ValueError("successor accepted capacity mode is unsupported")
+        if operation.kind in {"capacity", "destroy"}:
+            # Only capacity/configuration intent can change on a retained deployment.
+            varying = {
+                "expected_configuration_epoch", "operation_kind", "operation_id",
+                "operation_epoch", "configuration_generation", "min_slots", "max_slots",
+            }
+            if (
+                operation.candidate_id != previous.candidate_id
+                or projection.model_dump(exclude=varying)
+                != accepted_projection.model_dump(exclude=varying)
+            ):
+                raise ValueError("successor retirement or capacity request changed retained deployment")
     if member is not None and (
         member.configuration.subject_id != operation.subject_id
         or member.configuration.subject_incarnation != operation.subject_incarnation

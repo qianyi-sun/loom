@@ -52,6 +52,12 @@ from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipHistoricalOutcomeV1,
     refresh_membership_checkpoint,
 )
+from loom.personal_dev_membership_successor import (
+    PersonalDevMembershipSuccessorBindingV1,
+    parse_membership_successor_binding,
+    validate_membership_successor,
+)
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMembershipResponseV1,
     PersonalMembershipCheckpointV1,
@@ -330,6 +336,20 @@ def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperati
         failure_reason=row.failure_reason,
         capacity_mode=cast(PersonalDevCapacityMode, row.capacity_mode),
         capacity_membership_envelope=membership_envelope,
+        membership_predecessor_operation_id=row.membership_predecessor_operation_id,
+        membership_accepted_operation_id=row.membership_accepted_operation_id,
+        membership_predecessor_envelope_sha256=row.membership_predecessor_envelope_sha256,
+        membership_successor_binding=(
+            parse_membership_successor_binding(
+                json.dumps(row.membership_successor_binding, sort_keys=True, separators=(",", ":")),
+                expected_binding_sha256=row.membership_successor_binding_sha256 or "",
+            ) if row.membership_successor_binding is not None else None
+        ),
+        membership_successor_binding_sha256=row.membership_successor_binding_sha256,
+        membership_continuation_kind=cast(
+            Literal["create", "update", "capacity", "destroy"] | None,
+            row.membership_continuation_kind,
+        ),
         readiness_evidence_sha256=row.readiness_evidence_sha256,
         activation_acknowledgement_sha256=(row.activation_acknowledgement_sha256),
         local_activation_sha256=row.local_activation_sha256,
@@ -380,7 +400,7 @@ def _attempt_record(row: DevLifecycleOperationAttempt) -> PersonalDevLifecycleAt
         operation_epoch=row.operation_epoch,
         attempt_sequence=row.attempt_sequence,
         state=cast(
-            Literal["running", "activating", "succeeded", "failed", "cancelled"],
+            Literal["running", "activating", "succeeded", "failed", "cancelled", "superseded"],
             row.state,
         ),
         checkpoint=row.checkpoint,
@@ -2366,6 +2386,168 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         environment.updated_at = now
         await self.session.flush()
         result = self._reservation(environment, operation, acquired=acquired)
+        await self.session.commit()
+        return result
+
+    async def create_membership_successor(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        binding: PersonalDevMembershipSuccessorBindingV1,
+        expected_binding_sha256: str,
+        current_checkpoint: PersonalMembershipCheckpointV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Continue exact owner intent once, without replacing historical authority.
+
+        The caller supplies an authenticated current checkpoint and a protected
+        operator binding. This transaction validates consistency, not transport
+        authenticity; neither artifact may come from a personal owner request.
+        """
+        now = now or datetime.now(UTC)
+        binding = parse_membership_successor_binding(
+            canonical_bytes(binding), expected_binding_sha256=expected_binding_sha256,
+        )
+        current_checkpoint = PersonalMembershipCheckpointV1.model_validate_json(
+            canonical_bytes(current_checkpoint)
+        )
+        operation = (await self.session.scalars(
+            select(DevLifecycleOperation).where(
+                DevLifecycleOperation.id == operation_id,
+                DevLifecycleOperation.operation_epoch == operation_epoch,
+            ).with_for_update()
+        )).one_or_none()
+        if operation is None:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError("successor predecessor is absent")
+        environment = await self._locked_environment(operation.environment_name)
+        if environment is None:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError("successor environment is absent")
+        child = (await self.session.scalars(select(DevLifecycleOperation).where(
+            DevLifecycleOperation.membership_predecessor_operation_id == operation_id
+        ))).one_or_none()
+        if child is not None:
+            if (
+                operation.state != "superseded"
+                or child.membership_successor_binding_sha256 != expected_binding_sha256
+                or child.membership_successor_binding != binding.model_dump(mode="json")
+            ):
+                await self.session.rollback()
+                raise PersonalDevEnvironmentConflictError("successor review changed after persistence")
+            result = self._reservation(environment, child, acquired=False)
+            await self.session.commit()
+            return result
+        attempt = await self._locked_current_attempt_lease(
+            operation, attempt_id=attempt_id, reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch, now=now,
+        )
+        candidate = await self.session.get(PersonalDevCandidate, operation.candidate_id)
+        previous = (
+            (await self.session.scalars(select(DevLifecycleOperation).where(
+                DevLifecycleOperation.id == binding.accepted_operation_id,
+            ).with_for_update())).one_or_none()
+            if binding.accepted_operation_id is not None else None
+        )
+        try:
+            if candidate is None:
+                raise ValueError("successor candidate is absent")
+            if (
+                current_checkpoint.execution != binding.authority.execution
+                or current_checkpoint.namespace_id != binding.authority.namespace_id
+            ):
+                raise ValueError("successor current mutation authority changed")
+            decision = validate_membership_successor(
+                binding,
+                claim=PersonalDevReconciliationClaim(
+                    environment=_environment_record(environment),
+                    operation=_operation_record(operation), attempt=_attempt_record(attempt),
+                    candidate=_candidate_record(candidate),
+                ),
+                accepted_operation=_operation_record(previous) if previous is not None else None,
+                now=now,
+            )
+        except (TypeError, ValueError) as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError("successor authority or intent changed") from exc
+        child_id, child_attempt_id, key = uuid4(), uuid4(), uuid4()
+        intent = (
+            PersonalDevEnvironmentDestroyRequest(
+                name=operation.environment_name, owner_user_id=operation.owner_user_id,
+                owner_team_id=operation.owner_team_id, expected_operation_epoch=operation.operation_epoch,
+                idempotency_key=key, keep_data=operation.keep_data,
+            )
+            if decision.kind == "destroy" else PersonalDevEnvironmentApplyRequest(
+                name=operation.environment_name, owner_user_id=operation.owner_user_id,
+                owner_team_id=operation.owner_team_id, expected_operation_epoch=operation.operation_epoch,
+                idempotency_key=key, candidate_id=operation.candidate_id, candidate_sha=operation.candidate_sha,
+                min_slots=operation.min_slots, max_slots=operation.max_slots,
+            )
+        )
+        checkpoint = "capacity_retirement_requested" if decision.kind == "destroy" else "candidate_build"
+        child = DevLifecycleOperation(
+            id=child_id, idempotency_key=key, environment_name=operation.environment_name,
+            subject_id=operation.subject_id, subject_incarnation=operation.subject_incarnation,
+            owner_user_id=operation.owner_user_id, owner_team_id=operation.owner_team_id,
+            operation_epoch=decision.operation_epoch, expected_operation_epoch=operation.operation_epoch,
+            kind=decision.kind, state="running", attempt_id=child_attempt_id, attempt_sequence=0,
+            request_sha256=intent.request_sha256, capacity_mode="membership-v1",
+            candidate_id=operation.candidate_id, candidate_sha=operation.candidate_sha,
+            min_slots=operation.min_slots, max_slots=operation.max_slots,
+            deployment_generation=decision.deployment_generation, keep_data=operation.keep_data,
+            checkpoint=checkpoint, created_at=now, updated_at=now, started_at=now,
+            membership_predecessor_operation_id=operation.id,
+            membership_accepted_operation_id=binding.accepted_operation_id,
+            membership_predecessor_envelope_sha256=binding.predecessor_envelope_sha256,
+            membership_successor_binding=binding.model_dump(mode="json"),
+            membership_successor_binding_sha256=canonical_digest(binding),
+            membership_continuation_kind=operation.membership_continuation_kind or operation.kind,
+        )
+        if decision.kind == "destroy":
+            # These were cross-checked against accepted history above. No active
+            # reporter, activation or credentials may be created for retirement.
+            for field in (
+                "capacity_reporter_incarnation", "capacity_reporter_token_sha256",
+                "local_activation_sha256", "protected_admission_sha256",
+                "capacity_agent_installation_sha256", "capacity_supported_pool_ids",
+                "capacity_supported_architectures",
+            ):
+                setattr(child, field, getattr(operation, field))
+        operation.state = "superseded"
+        operation.checkpoint = "membership_successor_created"
+        operation.updated_at = operation.finished_at = now
+        attempt.state = "superseded"
+        attempt.checkpoint = "membership_successor_created"
+        attempt.updated_at = attempt.finished_at = now
+        attempt.claimed_by = attempt.lease_expires_at = None
+        # Release active-operation uniqueness before inserting the child. The
+        # deferred transition guard requires the complete link at commit.
+        await self.session.flush()
+        self.session.add(child)
+        await self.session.flush()
+        self.session.add(DevLifecycleOperationAttempt(
+            id=child_attempt_id, operation_id=child_id, subject_id=child.subject_id,
+            subject_incarnation=child.subject_incarnation, operation_epoch=child.operation_epoch,
+            attempt_sequence=0, state="running", checkpoint=checkpoint,
+            credential_binding_version=attempt.credential_binding_version,
+            bootstrap_auth_kind=attempt.bootstrap_auth_kind,
+            bootstrap_credential_hash=attempt.bootstrap_credential_hash,
+            created_at=now, updated_at=now, started_at=now,
+        ))
+        environment.operation_id = child_id
+        environment.operation_epoch = child.operation_epoch
+        environment.operation_step = checkpoint
+        environment.status = (
+            "deleting" if decision.kind == "destroy" else
+            "provisioning" if decision.kind == "create" else "updating"
+        )
+        environment.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, child, acquired=True)
         await self.session.commit()
         return result
 

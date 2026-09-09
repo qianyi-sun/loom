@@ -12,13 +12,16 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
 from loom.personal_dev_candidate import PersonalDevCandidateRecord
 from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelopeV1
 from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
+
+if TYPE_CHECKING:
+    from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 
 PersonalDevEnvironmentStatus = Literal[
     "provisioning",
@@ -39,6 +42,7 @@ PersonalDevOperationState = Literal[
     "failed",
     "cancelling",
     "cancelled",
+    "superseded",
 ]
 PersonalDevAccessKind = Literal["bearer", "session"]
 PersonalDevCapacityMode = Literal["shadow-v1", "membership-v1"]
@@ -242,6 +246,12 @@ class PersonalDevLifecycleOperationRecord:
     failure_reason: str | None = None
     capacity_mode: PersonalDevCapacityMode = "shadow-v1"
     capacity_membership_envelope: PersonalDevMembershipEnvelopeV1 | None = None
+    membership_predecessor_operation_id: UUID | None = None
+    membership_accepted_operation_id: UUID | None = None
+    membership_predecessor_envelope_sha256: str | None = None
+    membership_successor_binding: PersonalDevMembershipSuccessorBindingV1 | None = None
+    membership_successor_binding_sha256: str | None = None
+    membership_continuation_kind: Literal["create", "update", "capacity", "destroy"] | None = None
     readiness_evidence_sha256: str | None = None
     activation_acknowledgement_sha256: str | None = None
     local_activation_sha256: str | None = None
@@ -267,7 +277,7 @@ class PersonalDevLifecycleAttemptRecord:
     subject_incarnation: UUID
     operation_epoch: int
     attempt_sequence: int
-    state: Literal["running", "activating", "succeeded", "failed", "cancelled"]
+    state: Literal["running", "activating", "succeeded", "failed", "cancelled", "superseded"]
     checkpoint: str
     access_binding: PersonalDevAccessBinding
     lease_epoch: int

@@ -223,6 +223,17 @@ def successor_case(kind="create", outcome="committed"):
     original = replace(original, operation=replace(op, request_sha256=request.request_sha256))
     original = replace(original, operation=_persisted_evidence(original.operation))
     accepted = _persisted_evidence(accepted)
+    if kind != "create":
+        original = replace(original, environment=replace(
+            original.environment,
+            capacity_reporter_incarnation=accepted.capacity_reporter_incarnation,
+            capacity_reporter_token_sha256=accepted.capacity_reporter_token_sha256,
+            local_activation_sha256=accepted.local_activation_sha256,
+            protected_admission_sha256=accepted.protected_admission_sha256,
+            capacity_agent_installation_sha256=accepted.capacity_agent_installation_sha256,
+            capacity_supported_pool_ids=accepted.capacity_supported_pool_ids,
+            capacity_supported_architectures=accepted.capacity_supported_architectures,
+        ))
     return (
         original,
         accepted if kind != "create" else None,
@@ -236,6 +247,10 @@ def successor_case(kind="create", outcome="committed"):
             "owner_team_id": str(original.operation.owner_team_id),
             "request_sha256": original.operation.request_sha256,
             "adopted_member": None if member is None else member.model_dump(mode="json"),
+            "accepted_operation_id": str(accepted.id)
+            if kind != "create" and outcome != "committed" else None,
+            "accepted_membership_envelope_sha256": canonical_digest(accepted.capacity_membership_envelope)
+            if kind != "create" and outcome != "committed" else None,
         },
     )
 
@@ -403,6 +418,7 @@ def test_shadow_adoption_requires_full_exact_retained_projection_and_snapshot(ki
     )
     values["accepted_shadow_configuration"] = snapshot.model_dump(mode="json")
     values["accepted_shadow_projection"] = projection.model_dump(mode="json")
+    values["accepted_membership_envelope_sha256"] = None
     if tamper == "snapshot":
         values["accepted_shadow_configuration"]["configuration_epoch"] += 1
     elif tamper == "projection":
@@ -536,3 +552,87 @@ def test_successor_requires_bounded_current_operator_review(change):
         module.validate_membership_successor(
             binding, claim=claim, accepted_operation=accepted, now=_NOW
         )
+
+
+@pytest.mark.parametrize("change", ("mode", "digest", "reporter", "candidate-failed"))
+def test_first_create_recovery_requires_exact_unaccepted_state_and_ready_candidate(change):
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case("create", "terminal-not-committed")
+    if change == "mode":
+        claim = replace(claim, environment=replace(claim.environment, accepted_capacity_mode="membership-v1"))
+    elif change == "digest":
+        claim = replace(claim, environment=replace(claim.environment, capacity_configuration_sha256="e" * 64))
+    elif change == "reporter":
+        claim = replace(claim, environment=replace(claim.environment, capacity_reporter_incarnation=uuid4()))
+    else:
+        claim = replace(claim, candidate=replace(claim.candidate, status="failed"))
+    binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    with pytest.raises(ValueError):
+        module.validate_membership_successor(binding, claim=claim, accepted_operation=accepted, now=_NOW)
+
+
+@pytest.mark.parametrize("kind", ("update", "capacity", "destroy"))
+def test_successor_rejects_environment_retained_evidence_drift(kind):
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case(kind, "terminal-not-committed")
+    claim = replace(claim, environment=replace(claim.environment, capacity_reporter_token_sha256="e" * 64))
+    binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    with pytest.raises(ValueError):
+        module.validate_membership_successor(binding, claim=claim, accepted_operation=accepted, now=_NOW)
+
+
+def test_operator_review_pins_exact_accepted_receipt_not_only_member():
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case("destroy", "terminal-not-committed")
+    original = accepted.capacity_membership_envelope
+    namespace = uuid4()
+    request = original.request.model_copy(update={"namespace_id": namespace})
+    receipt = membership_response(request, key=original.idempotency_key)
+    changed = PersonalDevMembershipEnvelopeV1.model_validate(original.model_dump(mode="python") | {
+        "expected_checkpoint": original.expected_checkpoint.model_copy(update={"namespace_id": namespace}),
+        "request": request, "request_sha256": canonical_digest(request), "result": receipt,
+    })
+    accepted = replace(accepted, capacity_membership_envelope=changed)
+    claim = replace(claim, environment=replace(claim.environment, accepted_capacity_membership_checkpoint=receipt.checkpoint))
+    binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    with pytest.raises(ValueError):
+        module.validate_membership_successor(binding, claim=claim, accepted_operation=accepted, now=_NOW)
+
+
+@pytest.mark.parametrize("kind", ("capacity", "destroy"))
+def test_retained_operation_cannot_rebind_its_own_valid_envelope_away_from_acceptance(kind):
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case(kind, "terminal-not-committed")
+    original = claim.operation.capacity_membership_envelope
+    projection = original.request.projection.model_copy(update={
+        "demand_reporter_token_sha256": "e" * 64,
+        "local_activation_sha256": "e" * 64,
+    })
+    request = original.request.model_copy(update={"projection": projection})
+    unobserved = PersonalDevMembershipEnvelopeV1.model_validate(original.model_dump(mode="python") | {
+        "historical_outcome": None, "request": request, "request_sha256": canonical_digest(request),
+        "observation": original.observation.model_copy(update={"local_activation_sha256": "e" * 64}),
+    })
+    changed = PersonalDevMembershipEnvelopeV1.model_validate(unobserved.model_dump(mode="python") | {
+        "historical_outcome": _Observer(unobserved, "terminal-not-committed").outcome,
+    })
+    claim = replace(claim, operation=_persisted_evidence(replace(claim.operation, capacity_membership_envelope=changed)))
+    values["predecessor_envelope_sha256"] = canonical_digest(changed)
+    binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    with pytest.raises(ValueError):
+        module.validate_membership_successor(binding, claim=claim, accepted_operation=accepted, now=_NOW)
+
+
+@pytest.mark.parametrize("kind", ("update", "capacity", "destroy"))
+@pytest.mark.parametrize("field,value", (
+    ("candidate_id", uuid4()), ("candidate_sha", "e" * 64),
+    ("deployment_generation", 99), ("min_slots", 1), ("max_slots", 4),
+    ("capacity_configuration_epoch", 8), ("capacity_configuration_sha256", "e" * 64),
+))
+def test_accepted_environment_target_and_mode_must_match_pinned_receipt(kind, field, value):
+    module = import_module("loom.personal_dev_membership_successor")
+    claim, accepted, values = successor_case(kind, "terminal-not-committed")
+    claim = replace(claim, environment=replace(claim.environment, **{field: value}))
+    binding = module.PersonalDevMembershipSuccessorBindingV1.model_validate_json(json.dumps(values))
+    with pytest.raises(ValueError):
+        module.validate_membership_successor(binding, claim=claim, accepted_operation=accepted, now=_NOW)

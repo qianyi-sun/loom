@@ -1392,7 +1392,7 @@ class DevLifecycleOperation(Base):
         ),
         CheckConstraint(
             "state IN ('requested', 'running', 'activating', 'succeeded', "
-            "'failed', 'cancelling', 'cancelled')",
+            "'failed', 'cancelling', 'cancelled', 'superseded')",
             name="dev_lifecycle_operations_state_check",
         ),
         CheckConstraint(
@@ -1601,7 +1601,7 @@ class DevLifecycleOperation(Base):
         CheckConstraint(
             "(state IN ('requested', 'running', 'activating', 'cancelling') "
             "AND finished_at IS NULL AND failure_reason IS NULL) OR "
-            "(state = 'succeeded' AND finished_at IS NOT NULL "
+            "(state IN ('succeeded', 'superseded') AND finished_at IS NOT NULL "
             "AND failure_reason IS NULL) OR "
             "(state IN ('failed', 'cancelled') AND finished_at IS NOT NULL)",
             name="dev_lifecycle_operations_terminal_fields_check",
@@ -1615,9 +1615,51 @@ class DevLifecycleOperation(Base):
             "AND readiness_evidence_sha256 IS NULL "
             "AND activation_acknowledgement_sha256 IS NULL) OR "
             "(state = 'activating' AND readiness_evidence_sha256 IS NOT NULL) OR "
-            "(state = 'succeeded' AND readiness_evidence_sha256 IS NOT NULL "
+            "(state IN ('succeeded', 'superseded') AND readiness_evidence_sha256 IS NOT NULL "
             "AND activation_acknowledgement_sha256 IS NOT NULL)))",
             name="dev_lifecycle_operations_activation_evidence_check",
+        ),
+        CheckConstraint(
+            "(membership_predecessor_operation_id IS NULL "
+            "AND membership_accepted_operation_id IS NULL "
+            "AND membership_predecessor_envelope_sha256 IS NULL "
+            "AND membership_successor_binding IS NULL "
+            "AND membership_successor_binding_sha256 IS NULL "
+            "AND membership_continuation_kind IS NULL) OR (("
+            "membership_predecessor_operation_id IS NOT NULL "
+            "AND membership_predecessor_operation_id <> id "
+            "AND capacity_mode = 'membership-v1' AND kind IN ('create', 'update', 'destroy') "
+            "AND membership_predecessor_envelope_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND membership_predecessor_envelope_sha256 <> repeat('0', 64) "
+            "AND membership_successor_binding_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND membership_successor_binding_sha256 <> repeat('0', 64) "
+            "AND membership_continuation_kind IN ('create', 'update', 'capacity', 'destroy') "
+            "AND jsonb_typeof(membership_successor_binding) = 'object' "
+            "AND membership_successor_binding->>'schema_version' = '1' "
+            "AND membership_successor_binding->>'predecessor_operation_id' "
+            "= membership_predecessor_operation_id::text "
+            "AND membership_successor_binding->>'predecessor_envelope_sha256' "
+            "= membership_predecessor_envelope_sha256 "
+            "AND (membership_successor_binding->>'accepted_operation_id') "
+            "IS NOT DISTINCT FROM membership_accepted_operation_id::text "
+            "AND membership_successor_binding->>'owner_team_id' = owner_team_id::text) IS TRUE)",
+            name="dev_lifecycle_operations_successor_fields_check",
+        ),
+        CheckConstraint(
+            "(state = 'superseded') = (checkpoint = 'membership_successor_created') "
+            "AND (state <> 'superseded' OR ((capacity_mode = 'membership-v1' "
+            "AND jsonb_typeof(capacity_membership_envelope->'result') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope->'historical_outcome') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope->'release') = 'null' "
+            "AND capacity_membership_envelope->'historical_outcome'->>'outcome' "
+            "IN ('committed', 'terminal-not-committed') "
+            "AND NOT (kind = 'destroy' AND capacity_membership_envelope "
+            "->'historical_outcome'->>'outcome' = 'committed')) IS TRUE))",
+            name="dev_lifecycle_operations_superseded_check",
+        ),
+        UniqueConstraint(
+            "membership_predecessor_operation_id",
+            name="dev_lifecycle_operations_successor_predecessor_uidx",
         ),
         UniqueConstraint(
             "owner_user_id",
@@ -1692,6 +1734,26 @@ class DevLifecycleOperation(Base):
         JSONB(none_as_null=True),
         nullable=True,
     )
+    membership_predecessor_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    membership_predecessor_envelope_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
+    membership_accepted_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    membership_successor_binding: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+    )
+    membership_successor_binding_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
+    membership_continuation_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     candidate_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("personal_dev_candidates.id", ondelete="RESTRICT"),
@@ -1790,13 +1852,13 @@ class DevLifecycleOperationAttempt(Base):
             name="dev_lifecycle_operation_attempts_lease_check",
         ),
         CheckConstraint(
-            "state IN ('running', 'activating', 'succeeded', 'failed', 'cancelled')",
+            "state IN ('running', 'activating', 'succeeded', 'failed', 'cancelled', 'superseded')",
             name="dev_lifecycle_operation_attempts_state_check",
         ),
         CheckConstraint(
             "(state IN ('running', 'activating') AND finished_at IS NULL "
             "AND failure_reason IS NULL) OR "
-            "(state = 'succeeded' AND finished_at IS NOT NULL "
+            "(state IN ('succeeded', 'superseded') AND finished_at IS NOT NULL "
             "AND failure_reason IS NULL) OR "
             "(state IN ('failed', 'cancelled') AND finished_at IS NOT NULL)",
             name="dev_lifecycle_operation_attempts_terminal_fields_check",
