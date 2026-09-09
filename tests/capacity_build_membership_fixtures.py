@@ -187,6 +187,26 @@ def application_request(preparation, execution, *, owner=88010, revision=0):
         expected_revision=revision, command=PersonalApplicationCommandV2(projection=projection, acknowledgement=acknowledgement))
 
 
+def managed_application_request(preparation, execution, *, operation="capacity", revision=0):
+    from loom_capacity_manager.typed_membership_commands import PersonalApplicationCommandV2
+
+    origin = preparation.managed_application_origins[0]
+    old = origin.base_projection
+    generation = old.configuration_generation + 1
+    fields = dict(expected_configuration_epoch=execution.configuration_epoch,
+        operation_kind=operation, operation_id=UUID(int=88800 + generation),
+        configuration_generation=generation, operation_epoch=generation, max_slots=1)
+    if operation == "update":
+        fields.update(candidate_generation=old.candidate_generation + 1,
+            deployment_generation=old.deployment_generation + 1,
+            demand_reporter_incarnation=UUID(int=88810 + generation), demand_reporter_token_sha256=f"{88810 + generation:064x}")
+    projection = old.model_copy(update=fields)
+    ack = origin.acknowledgement.model_copy(update={"configuration_generation": generation,
+        "deployment_generation": projection.deployment_generation, "reporter_incarnation": projection.demand_reporter_incarnation})
+    return PersonalMembershipMutationV2(execution=execution, namespace_id=preparation.personal_membership.namespace_id,
+        expected_revision=revision, command=PersonalApplicationCommandV2(projection=projection, acknowledgement=ack))
+
+
 async def staged_build_event(session, management, preparation, fleet, request, *, previous_head="0" * 64, previous=None, previous_request=None, idempotency_key=None):
     from loom_capacity_manager.build_generation_store import stage_build_generation_evidence
     from loom_capacity_manager.membership_digest import canonical_membership_event_head
