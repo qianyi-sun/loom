@@ -621,6 +621,27 @@ cancelled/unjoined input consumers, cleanup retention and no built outcome after
 failed close. Guard/runtime assembly and the remaining publication/execution/
 capacity activation gates still prevent production activation.
 
+Supervisor startup no longer requires embedding the composite release digest
+inside the ELF whose bytes contribute to that digest. It opens the kernel's
+`/proc/self/exe`, derives a selector only from the exact fixed
+`releases/<sha256>/bin/loom-task-builder-supervisor` path, and walks installation
+ancestors through no-follow directory descriptors. Ancestors must be root-owned
+and non-writable by group/other; the release and `bin` directories must be 0555.
+The running executable must be the same root-owned, single-link 0555 inode as the
+installed member, with unchanged metadata. Deleted paths, replacements, hardlinks,
+symlinks and noncanonical selectors fail before guard access or environment changes.
+The fixed root-owned supervisor config must name that same release.
+
+This resolves a digest circularity, not a new source of release authority: the
+installer still validates the composite inventory and member hashes, and the guard
+independently verifies the ELF digest and grant-bound release before credentials.
+There is no argv, environment or `current` symlink selector. Tests cover descriptor
+identity failures and a real subprocess's kernel executable path; the latter
+substitutes only the already-trusted fixture installation root and owner UID.
+Offline conformance rejects a live config at both its historical path and the
+actual `/etc/loom-task-image-builder/supervisor-config.json` path. No live config
+is created by staging or by these startup changes.
+
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention
 bindings, capability metadata and the real Go downloader must change together.
