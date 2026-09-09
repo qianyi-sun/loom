@@ -19,6 +19,8 @@ from loom.personal_dev_capacity_runtime import (
     protected_capacity_database_admission_digest,
 )
 from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelopeV1
+from loom.personal_dev_capacity_identity import capacity_runtime_database_url
+from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1, personal_dev_storage_secret_data
 from loom_capacity_agent.client import DemandReporterTLSFiles
 from loom_capacity_agent.contracts import AgentPoolCapabilityV1
 from loom_capacity_manager.contracts import canonical_digest
@@ -48,7 +50,28 @@ def _successor_retirement_claim():
         membership_successor_binding=binding, membership_successor_binding_sha256=canonical_digest(binding),
         membership_continuation_kind="destroy",
     )
-    return replace(parent, operation=child), binding
+    return _current_claim(parent, child), binding
+
+
+def _current_claim(claim, operation):
+    return replace(claim, operation=operation,
+                   environment=replace(claim.environment, operation_id=operation.id, operation_epoch=operation.operation_epoch),
+                   attempt=replace(claim.attempt, operation_id=operation.id, operation_epoch=operation.operation_epoch))
+
+
+def _bind_storage(claim, installer):
+    op = claim.operation
+    binding = PersonalDevStorageBindingV1(layout="incarnation-v1", environment_name=op.environment_name,
+        subject_id=op.subject_id, subject_incarnation=op.subject_incarnation,
+        owner_user_id=op.owner_user_id, owner_team_id=op.owner_team_id)
+    claim = replace(claim, operation=replace(op, storage_binding=binding),
+                    environment=replace(claim.environment, storage_binding=binding))
+    installer._kubectl.storage_identity = binding.identity
+    installer._kubectl.secrets["loom-protected-worker-runtime"] = {
+        **personal_dev_storage_secret_data(binding.identity),
+        "database-url": capacity_runtime_database_url(_RUNTIME_DATABASE_URL, binding.identity, "r" * 48).encode(),
+    }
+    return claim
 
 
 def test_successor_retirement_uses_only_exact_reviewed_adopted_and_failed_generations():
@@ -143,6 +166,10 @@ class _Kubectl:
     async def read_secret_optional(self, namespace, name):
         return self.secrets.get(name)
 
+    async def read_storage_namespace(self, identity):
+        assert identity == self.storage_identity
+        return {"metadata": {"name": identity.namespace, "uid": "fixture-uid"}}
+
     async def read_resource_json(self, *, namespace, kind, name):
         return deepcopy(self.resources[(kind, name)])
 
@@ -168,14 +195,15 @@ class _Database:
 
     async def converge(self, *, identity, configuration, credentials, **kwargs):
         self.convergences += 1
+        runtime_url = capacity_runtime_database_url(_RUNTIME_DATABASE_URL, identity, credentials.runtime_password)
         return CapacityDatabaseInstallation(
             protected_admission_sha256=protected_capacity_database_admission_digest(
                 identity=identity,
                 configuration=configuration,
-                runtime_database_url=_RUNTIME_DATABASE_URL,
+                runtime_database_url=runtime_url,
             ),
-            agent_database_url=f"postgresql+psycopg://agent:{credentials.agent_password}@db/loom_dev_alice",
-            runtime_database_url=_RUNTIME_DATABASE_URL,
+            agent_database_url=f"postgresql+psycopg://agent:{credentials.agent_password}@db/{identity.database}",
+            runtime_database_url=runtime_url,
         )
 
     async def observe_membership(self, **kwargs):
@@ -227,9 +255,12 @@ def installer(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_observation_reads_installed_state_and_retry_verification_is_read_only(installer):
+@pytest.mark.parametrize("bound_storage", (False, True))
+async def test_observation_reads_installed_state_and_retry_verification_is_read_only(installer, bound_storage):
     checkpoint = membership_envelope_values()["expected_checkpoint"]
     claim = _membership_claim()
+    if bound_storage:
+        claim = _bind_storage(claim, installer)
     installation = await installer.converge(claim)
     observation = await installer.observe_membership(
         claim, installation, checkpoint, observed_at=_NOW
@@ -314,9 +345,12 @@ async def test_observation_rejects_forged_installed_evidence(installer, corrupti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("candidate_status", ("ready", "failed"))
-async def test_retirement_preserves_credentials_and_stable_installation(installer, candidate_status):
+@pytest.mark.parametrize("bound_storage", (False, True))
+async def test_retirement_preserves_credentials_and_stable_installation(installer, candidate_status, bound_storage):
     checkpoint = membership_envelope_values()["expected_checkpoint"]
     claim = _membership_claim()
+    if bound_storage:
+        claim = _bind_storage(claim, installer)
     installation = await installer.converge(claim)
     secrets = deepcopy(installer._kubectl.secrets)
     prior_deployment = deepcopy(installer._kubectl.resources[("Deployment", "loom-capacity-agent")])
@@ -334,9 +368,7 @@ async def test_retirement_preserves_credentials_and_stable_installation(installe
         capacity_supported_architectures=installation.supported_architectures,
     )
     claim = replace(
-        claim,
-        operation=operation,
-        attempt=replace(claim.attempt, operation_id=operation.id, operation_epoch=2),
+        _current_claim(claim, operation),
         candidate=replace(claim.candidate, status=candidate_status),
     )
     observation = await installer.observe_membership_retirement(claim, checkpoint, observed_at=_NOW)
@@ -385,7 +417,7 @@ async def test_successor_retirement_resumes_exact_retained_kubernetes_generation
         operation, id=binding.accepted_operation_id, kind="create", operation_epoch=1,
         expected_operation_epoch=0, **dict.fromkeys((*retained_fields, *lineage_fields)),
     )
-    initial = replace(claim, operation=initial_operation)
+    initial = _current_claim(claim, initial_operation)
     installation = await installer.converge(initial)
     snapshots = {1: (deepcopy(installer._kubectl.secrets), deepcopy(installer._kubectl.resources))}
     installed_values = {
@@ -398,8 +430,7 @@ async def test_successor_retirement_resumes_exact_retained_kubernetes_generation
     }
     prior = replace(operation, id=binding.predecessor_operation_id, operation_epoch=2,
                     expected_operation_epoch=1, **installed_values, **dict.fromkeys(lineage_fields))
-    prior_claim = replace(claim, operation=prior,
-                          attempt=replace(claim.attempt, operation_id=prior.id, operation_epoch=2))
+    prior_claim = _current_claim(claim, prior)
     checkpoint = membership_envelope_values()["expected_checkpoint"]
     await installer.observe_membership_retirement(prior_claim, checkpoint, observed_at=_NOW)
     snapshots[2] = (deepcopy(installer._kubectl.secrets), deepcopy(installer._kubectl.resources))
@@ -424,8 +455,7 @@ async def test_successor_retirement_resumes_exact_retained_kubernetes_generation
     }).model_dump_json())
     operation = replace(operation, **installed_values, membership_successor_binding=binding,
                         membership_successor_binding_sha256=canonical_digest(binding))
-    claim = replace(claim, operation=operation,
-                    attempt=replace(claim.attempt, operation_id=operation.id, operation_epoch=3))
+    claim = _current_claim(claim, operation)
     installer._membership_execution = execution
     checkpoint = checkpoint.model_copy(update={"execution": execution, "namespace_id": authority.namespace_id})
     installer._kubectl.secrets = deepcopy(snapshots[secret_generation][0])
