@@ -364,13 +364,13 @@ async def test_storage_database_rejects_malformed_new_bindings(isolated_migratio
     try:
         request, access = await _candidate(sessions)
         for defect in ("null", "array", "scalar", "missing", "extra", "layout", "version", "boolean",
-                       "missing_digest", "uppercase_digest", "zero_digest", "malformed_digest"):
+                       "missing_digest", "uppercase_digest", "zero_digest", "malformed_digest", "reserved"):
             async with sessions() as session:
                 original_flush = session.flush
 
-                async def corrupt_flush(*args, **kwargs):
+                async def corrupt_flush(*args, defect=defect, original_flush=original_flush, **kwargs):
                     for row in session.new:
-                        if not isinstance(row, DevInstance):
+                        if not isinstance(row, (DevInstance, DevLifecycleOperation)):
                             continue
                         binding = dict(row.storage_binding)
                         if defect in {"null", "array", "scalar"}:
@@ -383,6 +383,14 @@ async def test_storage_database_rejects_malformed_new_bindings(isolated_migratio
                             binding["layout"] = "legacy-name-v1"
                         elif defect in {"version", "boolean"}:
                             binding["schema_version"] = 2 if defect == "version" else True
+                        elif defect == "reserved":
+                            binding["environment_name"] = "shared"
+                            if isinstance(row, DevInstance):
+                                row.name = "shared"
+                                row.capacity_namespace = "loom-dev-shared"
+                                row.capacity_database = f"ld_shared_{row.subject_incarnation.hex}"
+                            else:
+                                row.environment_name = "shared"
                         row.storage_binding = binding
                         digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                         row.storage_binding_sha256 = {
@@ -392,7 +400,7 @@ async def test_storage_database_rejects_malformed_new_bindings(isolated_migratio
                     await original_flush(*args, **kwargs)
 
                 monkeypatch.setattr(session, "flush", corrupt_flush)
-                with pytest.raises(DBAPIError, match="storage|non-object"):
+                with pytest.raises(DBAPIError, match=r"storage|non-object"):
                     await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1").apply(
                         request, access_binding=access, now=_NOW,
                     )

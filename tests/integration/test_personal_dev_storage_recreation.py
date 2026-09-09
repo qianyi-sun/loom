@@ -1,5 +1,6 @@
 """Upgrading a legacy name must preserve its exact retired cleanup evidence."""
 
+import asyncio
 from dataclasses import replace
 from uuid import uuid4
 
@@ -79,4 +80,70 @@ async def test_legacy_upgrade_requires_matching_retirement_evidence(isolated_mig
                 )
             await session.rollback()
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_deletion_serializes_with_incarnation_opt_in(isolated_migration_postgres_url, monkeypatch):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    prepared, deletion_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    backend_pids = {}
+    tasks = []
+    try:
+        request, access, retired = await _retired_legacy(sessions)
+
+        async def recreate():
+            async with sessions() as session:
+                backend_pids["recreate"] = (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+                commit = session.commit
+
+                async def held_commit():
+                    prepared.set()
+                    await release.wait()
+                    await commit()
+
+                monkeypatch.setattr(session, "commit", held_commit)
+                return await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1").apply(
+                    request, access_binding=access, now=_NOW,
+                )
+
+        async def delete_retired():
+            async with sessions() as session:
+                backend_pids["delete"] = (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+                await session.execute(text("DELETE FROM dev_lifecycle_operation_attempts WHERE operation_id = :id"),
+                                      {"id": retired.operation.id})
+                deletion_started.set()
+                await session.execute(text("DELETE FROM dev_lifecycle_operations WHERE id = :id"),
+                                      {"id": retired.operation.id})
+                await session.commit()
+
+        creating = asyncio.create_task(recreate())
+        tasks.append(creating)
+        await asyncio.wait_for(prepared.wait(), timeout=10)
+        deleting = asyncio.create_task(delete_retired())
+        tasks.append(deleting)
+        await asyncio.wait_for(deletion_started.wait(), timeout=10)
+        # Observe the actual database lock, not a guessed scheduling delay.
+        async with asyncio.timeout(10), engine.connect() as observer:
+            while True:
+                if deleting.done():
+                    await deleting
+                    pytest.fail("legacy deletion escaped the concurrent storage opt-in lock")
+                blocked = (await observer.execute(text(
+                    "SELECT :recreate = ANY(pg_blocking_pids(:delete))"
+                ), backend_pids)).scalar_one()
+                if blocked:
+                    break
+                await asyncio.sleep(0.02)
+        release.set()
+        assert (await asyncio.wait_for(creating, timeout=10)).operation.storage_binding is not None
+        with pytest.raises(DBAPIError, match="storage"):
+            await asyncio.wait_for(deleting, timeout=10)
+        async with sessions() as session:
+            assert await session.get(DevLifecycleOperation, retired.operation.id) is not None
+    finally:
+        release.set()
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15)
         await engine.dispose()
