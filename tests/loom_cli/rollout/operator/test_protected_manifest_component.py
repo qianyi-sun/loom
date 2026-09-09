@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from loom_cli.rollout.operator.protected_manifest_component import (
 from tests.loom_cli.rollout.operator.test_protected_migration_component import (
     _published_plan,
 )
+from tests.support.protected_application_deployments import application_manifest, ready_application
 
 
 class Runner:
@@ -24,9 +26,16 @@ class Runner:
         self.status = status
         self.calls: list[tuple[tuple[str, ...], bytes | None]] = []
 
+    def capture_stdout(self, argv, *, env, timeout_seconds):
+        assert env == {"KUBECONFIG": "/exact"}
+        assert 0 < timeout_seconds <= 30
+        assert tuple(argv[:4]) == ("kubectl", "--namespace", "loom-staging", "get")
+        assert argv[4] == "deployment"
+        return json.dumps(ready_application(application_manifest(argv[5]))).encode()
+
     def run_status(self, argv, *, env, input_payload, timeout_seconds):
         assert env == {"KUBECONFIG": "/exact"}
-        assert timeout_seconds == 120.0
+        assert 0 < timeout_seconds <= 120.0
         assert "diff" in argv
         self.calls.append((tuple(argv), input_payload))
         return self.status
