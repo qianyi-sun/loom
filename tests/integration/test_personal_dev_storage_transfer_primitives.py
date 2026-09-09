@@ -23,8 +23,9 @@ def test_conditional_capture_rejects_replaced_source_and_preserves_captured_byte
     try:
         client.create_bucket(Bucket=source)
         client.create_bucket(Bucket=snapshot)
+        client.put_bucket_versioning(Bucket=snapshot, VersioningConfiguration={"Status": "Enabled"})
         original = client.put_object(Bucket=source, Key="task/data", Body=b"original")
-        client.copy_object(
+        captured_reply = client.copy_object(
             Bucket=snapshot, Key="capture-1", CopySource={"Bucket": source, "Key": "task/data"},
             CopySourceIfMatch=original["ETag"],
         )
@@ -38,7 +39,12 @@ def test_conditional_capture_rejects_replaced_source_and_preserves_captured_byte
         with pytest.raises(ClientError) as read_error:
             client.get_object(Bucket=source, Key="task/data", IfMatch=original["ETag"])
         assert read_error.value.response["Error"]["Code"] == "PreconditionFailed"
-        captured = client.get_object(Bucket=snapshot, Key="capture-1")["Body"]
+        version = captured_reply["VersionId"]
+        assert version and version != "null"
+        # A retry or later capture at the same logical key cannot alter the
+        # version pinned into the manifest, even with unrelated newer bytes.
+        client.put_object(Bucket=snapshot, Key="capture-1", Body=b"newer-capture")
+        captured = client.get_object(Bucket=snapshot, Key="capture-1", VersionId=version)["Body"]
         try:
             assert captured.read() == b"original"
         finally:
