@@ -558,8 +558,11 @@ derived from the transfer, capture ID and object intent. Later writes to the sam
 key create new versions and cannot change a pinned capture. A lost completion
 reply yields no success receipt; retry may leave an additional unreferenced
 version for subsequent scoped cleanup. Part failures abort only their own upload.
-Unknown paths, source changes, suspended versioning and inconsistent/truncated
-readback reject capture. These are tested storage primitives, not a wired
+Source replacement between multipart parts rejects an unversioned source; a
+versioned source continues reading the originally pinned version. Suspending
+snapshot-bucket versioning before or after completion yields no receipt, even
+when the copy left unreferenced bytes. Unknown paths, inconsistent/truncated
+readback and source changes before pinning reject capture. These are tested storage primitives, not a wired
 snapshot ledger, restoration path, IAM policy deployment or in-flight drain.
 
 Object inventory scans all three exact source buckets with bounded pagination;

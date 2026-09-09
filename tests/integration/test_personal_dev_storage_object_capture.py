@@ -134,3 +134,85 @@ def test_failed_part_aborts_only_its_own_snapshot_upload(object_store):
         assert not client.list_objects_v2(Bucket=bucket).get("Contents")
     finally:
         client.abort_multipart_upload(Bucket=bucket, Key="foreign-upload", UploadId=foreign["UploadId"])
+
+
+@pytest.mark.parametrize("versioned_source", (False, True))
+def test_source_replaced_between_parts_requires_a_pinned_source_version(object_store, versioned_source):
+    module = import_module("loom.personal_dev_storage_object_capture")
+    client, recipe, bucket = object_store
+    source = recipe.source.identity.task_bucket
+    if versioned_source:
+        client.put_bucket_versioning(Bucket=source, VersioningConfiguration={"Status": "Enabled"})
+    payload = b"a" * (8 * 1024 * 1024) + b"b" * (1024 * 1024)
+    replacement = b"c" * len(payload)
+    uploaded = client.put_object(Bucket=source, Key="task/data", Body=payload)
+
+    class ReplaceAfterFirstPart:
+        def __init__(self):
+            self.parts = []
+
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def upload_part_copy(self, **kwargs):
+            self.parts.append(kwargs["CopySource"].copy())
+            result = client.upload_part_copy(**kwargs)
+            if kwargs["PartNumber"] == 1:
+                client.put_object(Bucket=source, Key="task/data", Body=replacement)
+            return result
+
+    transport = ReplaceAfterFirstPart()
+    capture = module.S3RetainedObjectCapture(transport, snapshot_bucket=bucket)
+    arguments = dict(capture_id=UUID(int=800), purpose="tasks", key="task/data",
+                     expected_etag=uploaded["ETag"], size_bytes=len(payload))
+    if versioned_source:
+        receipt = capture.capture(recipe, **arguments)
+        assert receipt.payload_sha256 == hashlib.sha256(payload).hexdigest()
+        assert all(part["VersionId"] == uploaded["VersionId"] for part in transport.parts)
+        captured = client.get_object(Bucket=bucket, Key=receipt.snapshot_key, VersionId=receipt.snapshot_version_id)
+        try:
+            assert captured["Body"].read() == payload
+        finally:
+            captured["Body"].close()
+    else:
+        with pytest.raises(module.StorageObjectCaptureError):
+            capture.capture(recipe, **arguments)
+        assert not client.list_objects_v2(Bucket=bucket).get("Contents")
+        assert not client.list_multipart_uploads(Bucket=bucket).get("Uploads")
+        assert all("VersionId" not in part for part in transport.parts)
+    assert len(transport.parts) == 2
+    assert client.head_object(Bucket=source, Key="task/data")["ETag"] != uploaded["ETag"]
+
+
+@pytest.mark.parametrize("boundary", ("before_complete", "after_complete"))
+def test_snapshot_versioning_suspended_during_capture_returns_no_receipt(object_store, boundary):
+    module = import_module("loom.personal_dev_storage_object_capture")
+    client, recipe, bucket = object_store
+    payload = b"x" * (9 * 1024 * 1024)
+    uploaded = client.put_object(Bucket=recipe.source.identity.task_bucket, Key="task/data", Body=payload)
+
+    class SuspendAtCompletion:
+        completed = False
+
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def complete_multipart_upload(self, **kwargs):
+            if boundary == "before_complete":
+                client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Suspended"})
+            result = client.complete_multipart_upload(**kwargs)
+            self.completed = True
+            if boundary == "after_complete":
+                client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Suspended"})
+            return result
+
+    transport = SuspendAtCompletion()
+    with pytest.raises(module.StorageObjectCaptureError):
+        module.S3RetainedObjectCapture(transport, snapshot_bucket=bucket).capture(
+            recipe, capture_id=UUID(int=800), purpose="tasks", key="task/data",
+            expected_etag=uploaded["ETag"], size_bytes=len(payload),
+        )
+    assert transport.completed
+    # Completed but unacknowledged bytes remain evidence, not a success receipt.
+    assert len(client.list_objects_v2(Bucket=bucket)["Contents"]) == 1
+    assert not client.list_multipart_uploads(Bucket=bucket).get("Uploads")
