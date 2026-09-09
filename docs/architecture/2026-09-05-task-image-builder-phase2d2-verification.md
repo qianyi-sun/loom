@@ -419,8 +419,8 @@ A subsequent actual Phase 1 completion after explicit retry can own a new
 unbound map; historical rootless receipt replay
 does not restore its old readiness. This binding is current ownership/provenance,
 not signature verification, execution authority or permission to delete bytes.
-Rootless retirement must still validate the exact immutable attempt, completed
-job, image map and receipt under the full reference fence. A NULL pointer alone
+Rootless retirement validates the exact immutable attempt, completed job,
+image map and receipt under its database reference fence. A NULL pointer alone
 does not prove arbitrary repository history safe for deletion.
 
 Attempt repository discovery uses retained registry credentials, not only
@@ -435,8 +435,9 @@ in the canonical evidence; no bearer or secret-store read is needed.
 
 This inventory does not itself prove that all database rows were loaded, that
 they are immutable, or that the attempt is unreferenced, retired or safe to
-delete. Those guarantees belong to the pending locked retirement and host
-maintenance composition. Claim replay shares materialization-before-attempt
+delete. The owned retirement transaction establishes database inventory and pin
+observations; host maintenance and execution-start composition remain pending.
+Claim replay shares materialization-before-attempt
 locking with publication: its initial identity lookup is non-authoritative,
 and both rows are freshly reloaded and revalidated after acquiring the locks.
 
@@ -458,7 +459,7 @@ transaction: inherited engine hooks can override derived-engine options. Tests
 inspect PostgreSQL's actual isolation and read-only settings, including callers
 configured for REPEATABLE READ or AUTOCOMMIT.
 
-The recheck helper requires its future caller to own the catalog/parent/attempt
+The recheck helper requires its caller to own the catalog/parent/attempt
 fence and transaction deadlines. It does not acquire locks, inspect references,
 retire an attempt, or make later raw database INSERT safe. Prepared evidence is
 internal data, never a caller-supplied retirement authorization.
@@ -470,8 +471,9 @@ and read-only replay remain available. This protects the first-credential/no-
 candidate inventory gap without changing published migration `0131` or rewriting
 historical evidence. Application validation remains necessary; database-owner
 fault injection is not prevented by triggers that such an owner can disable.
-Retirement transactions still must establish the complete inventory under their
-shared fence and separately prove references and registry quiescence.
+The owned retirement transaction establishes the complete inventory under its
+shared fence. Execution-start references and registry quiescence remain separate
+activation requirements.
 
 Attempt retention now has a restrictive attempt foreign key and a durable
 observation record. Observation time cannot regress or move to another attempt.
@@ -493,13 +495,52 @@ their normal identity, session and lease checks; skipping the artifact-retiremen
 check does not grant build inputs or publication authority. Historical completion
 receipt replay remains read-only and cannot restore readiness.
 
-The actual reference/eligibility retirement transaction is still pending. These
-admission checks rely on that writer holding the same materialization lock;
-the scalar marker lookup alone is not standalone concurrency authority. Terminal
-verifier reservations can add execution uses without reopening a Trial, so the
-terminal-state invariant below is not a substitute for rootless execution-start
-admission. Offline maintenance, writer quiescence and clock-revival protection
-remain separate requirements before any registry deletion or activation.
+`observe_or_retire_attempt` now owns one bounded, READ COMMITTED transaction per
+attempt. Credential inventory and publication metadata are prepared in separate
+read-only transactions; their connections close before bulk schema/canonical
+validation runs off the event loop. The writer takes `tasks SHARE NOWAIT` before
+materialization, exact attempt, publication job and retention-row `FOR UPDATE
+NOWAIT` locks. It rechecks the full prepared identities, bounded credential count,
+exact job/candidate values and completed envelope identities before mutation.
+The five-second monotonic transaction deadline includes commit; one-second SQL
+and idle-in-transaction deadlines additionally bound catalog-barrier ownership.
+Before commit, contention, changed evidence, cancellation or timeout roll back
+the whole transaction. A transport failure during commit can leave its outcome
+unknown; retry recovers the immutable marker rather than assuming rollback.
+A future collector must retry from preparation and observe skipped passes and
+backlog age; catalog-wide locking does not guarantee progress under sustained
+registration writes.
+
+Pins include the exact live builder lease, queued/running publication before its
+total deadline regardless of worker-lease expiry, the current ready owner with
+a matching catalog checksum, and every completed attempt needed by a nonterminal
+linked Trial or an execution lease without both deletion and completed cleanup.
+The latter includes verifier leases and terminal Trials. Observing any pin resets
+the grace observation. Otherwise the default grace is 168 hours for completed
+publication and 24 hours for abandoned/no-envelope attempts. This is observation-
+based grace, not proof of continuous absence between observations.
+
+Retirement freezes the exact inventory and digest. Only the target attempt's
+validated current ready operation/map/time is cleared, atomically with marking
+the materialization retired; a newer lease or ready owner and legacy history are
+preserved. Historical retirement replay does not rewrite evidence, including
+when presented with an older clock. Later catalog registration or trial-link
+ensure sees unavailable readiness and queues a rebuild. Earlier writers either
+pin the images or make retirement fail promptly. Admission's scalar marker check
+depends on this shared materialization fence, not a standalone racy lookup.
+
+Publication preparation validates the stored canonical job/receipt, frozen-plan
+identity, credential/candidate binding and complete envelope identity/time set.
+It trusts the existing atomic completion writer and retained database metadata;
+it does not reverify signatures or issue execution authority. Historical
+cryptographic receipt replay remains independently implemented and unchanged.
+The retirement entrypoint is deliberately not wired to a collector or runtime API.
+Terminal verifier reservations can still add execution uses without reopening
+a Trial or taking this fence, so the terminal-state invariant below is not a
+substitute for rootless execution-start admission. Permanent raw credential
+ingress denial, source lifecycle, authenticated offline maintenance, writer
+quiescence and clock-revival protection remain requirements before deletion or
+activation.
 
 The same unpublished migration prevents a terminal Trial from becoming
 nonterminal through UPDATE, including changes made by BEFORE triggers. Its
@@ -508,8 +549,9 @@ whole statement. It permits nonterminal retries (including protected-pending),
 metadata changes and terminal-to-terminal corrections. Installation and inactive
 downgrade include `trials` in their upfront NOWAIT lock sets; runtime retention
 does not gain a trials-table barrier. This closes later UPDATE reopening, not
-new link insertion or deletion/reinsertion of Trial identities. Those races
-remain part of the pending retirement reference proof.
+deletion/reinsertion of Trial identities or later terminal-verifier admission.
+The actual trial-link writer is covered by the shared materialization fence;
+identity-recreation and execution-start safety remain activation requirements.
 
 Reference ensure freshly reloads existing materializations under consistently
 ordered row locks, so a cached ready object cannot survive committed retirement.
