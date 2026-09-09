@@ -186,6 +186,13 @@ period before registry deletion and garbage collection. Content-addressed tags
 make deletion safe: a later reference recreates the same queue key, rebuilds
 the components, and records fresh immutable digest evidence before scheduling.
 
+Service-execution reservation, retry, and finalized-event projection reject
+terminal-to-nonterminal reopening using fresh locked Trial state; exact event
+replay does not reproject state. Terminal reruns require a new Trial and its
+image prerequisites. Rootless irreversible retirement still requires its own
+transactional reference proof across all writers; these service guards alone
+do not authorize deletion.
+
 ## Rollout safety
 
 The schema migration backfills materializations and links for existing
