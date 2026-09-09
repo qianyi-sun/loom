@@ -1091,14 +1091,25 @@ def test_image_selection_ignores_retired_paths_but_preserves_active_and_forced_c
     ) == component_ownership.release_image_matrix(manifest)
 
 
-def test_execution_actuator_image_owns_capacity_collector_source() -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/loom_execution_capacity_collector/nebius.py",
+        "src/loom/terminal_result_semantics.py",
+        "src/loom/execution_image_admission.py",
+        "src/loom_control_plane/execution_admission.py",
+        "src/loom_control_plane/execution_capacity.py",
+        "src/loom_control_plane/execution_finance.py",
+    ],
+)
+def test_execution_actuator_image_owns_its_shared_runtime_dependencies(path: str) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
-    owners = manifest.component_owners_for_path("src/loom_execution_capacity_collector/nebius.py")
+    owners = manifest.component_owners_for_path(path)
     assert "execution-actuator" in {component.id for component in owners}
     selected = component_ownership.select_release_image_matrix(
         manifest,
-        changed_paths=("src/loom_execution_capacity_collector/nebius.py",),
+        changed_paths=(path,),
         force_all=False,
     )
     assert any(item["image"] == "execution-actuator" for item in selected)
