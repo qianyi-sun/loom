@@ -3,9 +3,12 @@
 import asyncio
 import json
 from dataclasses import fields, replace
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -355,5 +358,50 @@ async def test_partial_successor_transition_rolls_back_without_losing_history(
             assert env.operation_id == parent.id
             retry = await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(**arguments)
             assert retry.acquired
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("with_successor", (False, True))
+@pytest.mark.asyncio
+async def test_successor_migration_preserves_history_and_rejects_lossy_downgrade(
+    isolated_migration_postgres_url, with_successor,
+):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    repo = Path(__file__).resolve().parents[2]
+    cfg = Config(str(repo / "migrations/alembic.ini"))
+    cfg.set_main_option("script_location", str(repo / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
+
+    async def snapshot():
+        async with sessions() as session:
+            return {
+                table: (await session.execute(text(
+                    f"SELECT to_jsonb(row) FROM {table} row ORDER BY to_jsonb(row)::text"
+                ))).scalars().all()
+                for table in ("dev_lifecycle_operations", "dev_lifecycle_operation_attempts", "dev_instances")
+            }
+
+    try:
+        claim, binding = await _seed(sessions, "update", "terminal-not-committed")
+        if with_successor:
+            async with sessions() as session:
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(
+                    **_arguments(claim, binding)
+                )
+        before = await snapshot()
+        if with_successor:
+            with pytest.raises(DBAPIError, match="cannot downgrade 0136 with membership successor history"):
+                await asyncio.to_thread(command.downgrade, cfg, "0135")
+        else:
+            await asyncio.to_thread(command.downgrade, cfg, "0135")
+            await asyncio.to_thread(command.upgrade, cfg, "0136")
+        assert await snapshot() == before
+        async with sessions() as session:
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0136"
+            # Existing historical outcomes never gain invented successor authority.
+            parent = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(claim.operation.id)
+            assert (parent.membership_successor_operation_id is not None) is with_successor
     finally:
         await engine.dispose()
