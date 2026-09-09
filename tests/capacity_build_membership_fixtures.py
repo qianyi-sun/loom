@@ -112,7 +112,7 @@ def build_request(preparation, execution, *, owner=88010, revision=0):
         expected_revision=revision, command=PersonalBuildCommandV2(projection=projection, acknowledgement=acknowledgement))
 
 
-async def staged_build_event(session, management, preparation, fleet, request, *, previous_head="0" * 64):
+async def staged_build_event(session, management, preparation, fleet, request, *, previous_head="0" * 64, previous=None, previous_request=None, idempotency_key=None):
     from loom_capacity_manager.build_generation_store import stage_build_generation_evidence
     from loom_capacity_manager.membership_digest import canonical_membership_event_head
     from loom_capacity_manager.membership_store import CapacityMembershipStore
@@ -123,12 +123,12 @@ async def staged_build_event(session, management, preparation, fleet, request, *
         derive_build_member,
     )
     member = derive_build_member(request, preparation, fleet)
-    await stage_build_generation_evidence(session, request, member, preparation, fleet)
+    await stage_build_generation_evidence(session, request, member, preparation, fleet, previous=previous, previous_request=previous_request)
     rows = (await session.scalars(select(CapacitySubject).where(CapacitySubject.configuration_epoch == preparation.configuration_epoch))).all()
     await CapacityMembershipStore(management)._materialize_subject(session, preparation.configuration_epoch,
         member.configuration, _derive_owner_account(fleet, member.owner_id), rows)
     await session.flush()
-    key = UUID(int=member.owner_id.int + 4000)
+    key = idempotency_key or UUID(int=member.owner_id.int + 4000)
     digest = canonical_digest(request)
     actor = preparation.personal_membership.management_principal_id
     head = canonical_membership_event_head(actor=actor, execution_epoch=request.execution.execution_epoch,
