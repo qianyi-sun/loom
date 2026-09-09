@@ -255,6 +255,13 @@ preserves the suite's session-scoped Postgres setup/cleanup contract while the
 two shards start directly after the planner, in parallel with the fast tier.
 The local commands remain serial equivalents so they are easy to reproduce.
 
+Tests using `isolated_migration_postgres_url` receive separate disposable
+databases cloned from an independently migrated, connection-disabled template.
+The template runs the full application migration history once per test session;
+each test keeps its own data and runs any requested upgrade/downgrade operations
+in its clone. Neither the shared suite database nor another test's data is used
+as the template. Clones and the template are removed during fixture teardown.
+
 Every relevant non-draft PR runs its path-selected validation plan and emits
 the four protected contexts. Drafts and unrelated metadata events use only a
 `*-filtered` context. No label, author, reviewer, or merge coordinator grants

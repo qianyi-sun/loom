@@ -17,11 +17,11 @@ type startupOptions struct {
 }
 
 var (
-	compiledConfigPath      = "/etc/loom-task-image-builder/supervisor-config.json"
-	compiledGuardSocketPath = "/run/loom-task-image-builder-guard/guard.sock"
-	compiledReleaseSHA256   = ""
-	compiledReleaseBasePath = "/opt/loom-task-image-builder-provider/releases"
-	guardClientFactory      = func(cfg Config) TaskImageGuard {
+	compiledConfigPath        = "/etc/loom-task-image-builder/supervisor-config.json"
+	compiledGuardSocketPath   = "/run/loom-task-image-builder-guard/guard.sock"
+	compiledReleaseBasePath   = "/opt/loom-task-image-builder-provider/releases"
+	supervisorReleaseIdentity = installedSupervisorRelease
+	guardClientFactory        = func(cfg Config) TaskImageGuard {
 		return NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second)
 	}
 	applyProcessEnvironment = replaceProcessEnvironment
@@ -45,10 +45,11 @@ func run(args []string, environ []string) error {
 	if err != nil {
 		return err
 	}
-	if compiledReleaseSHA256 == "" {
-		return errors.New("supervisor release digest not compiled")
+	release, err := supervisorReleaseIdentity()
+	if err != nil {
+		return err
 	}
-	cfg, err := LoadConfig(compiledConfigPath, compiledReleaseSHA256)
+	cfg, err := LoadConfig(compiledConfigPath, release)
 	if err != nil {
 		return err
 	}
@@ -72,10 +73,13 @@ func run(args []string, environ []string) error {
 
 func productionOrchestrator(grantID string, cfg Config) *Orchestrator {
 	return &Orchestrator{
-		GrantID:      grantID,
-		Config:       cfg,
-		Guard:        NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second),
-		NewExecutor:  productionSupervisorNewExec,
+		GrantID:     grantID,
+		Config:      cfg,
+		Guard:       NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second),
+		NewExecutor: productionSupervisorNewExec,
+		NewRegisteredExecutor: func(cfg Config, caps *AllocationCapabilities, plan BuildPlan, fd int) (BuildExecutor, error) {
+			return NewExecutorWithContext(cfg, caps, plan, fd)
+		},
 		Download:     productionSupervisorDownload,
 		Handoff:      productionPublicationHandoff,
 		CleanupGrace: time.Duration(cfg.Guard.AckTimeoutSeconds) * time.Second,

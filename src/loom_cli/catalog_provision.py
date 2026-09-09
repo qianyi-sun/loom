@@ -31,6 +31,7 @@ from loom.db.schema import Agent as AgentModel
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskModel
 from loom.models.task import TaskConfig
+from loom.task_image_materialization import ensure_task_image_materializations
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_service.agent_catalog import AgentEntry, list_agents
 
@@ -458,7 +459,7 @@ class PostgresCatalogStore:
 
                 if rows.tasks:
                     for task_batch in _batched(
-                        rows.tasks,
+                        sorted(rows.tasks, key=lambda row: row.id),
                         POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
                     ):
                         task_values = [
@@ -475,20 +476,33 @@ class PostgresCatalogStore:
                             for row in task_batch
                         ]
                         task_insert = pg_insert(TaskModel).values(task_values)
-                        await session.execute(
-                            task_insert.on_conflict_do_update(
-                                index_elements=["id"],
-                                set_={
-                                    "checksum": task_insert.excluded.checksum,
-                                    "config": task_insert.excluded.config,
-                                    "source": task_insert.excluded.source,
-                                    "license": task_insert.excluded.license,
-                                    "benchmark_id": (task_insert.excluded.benchmark_id),
-                                    "tags": task_insert.excluded.tags,
-                                    "source_provenance": (task_insert.excluded.source_provenance),
-                                },
-                            ),
+                        stored_tasks = (
+                            (
+                                await session.execute(
+                                    task_insert.on_conflict_do_update(
+                                        index_elements=["id"],
+                                        set_={
+                                            "checksum": task_insert.excluded.checksum,
+                                            "config": task_insert.excluded.config,
+                                            "source": task_insert.excluded.source,
+                                            "license": task_insert.excluded.license,
+                                            "benchmark_id": (task_insert.excluded.benchmark_id),
+                                            "tags": task_insert.excluded.tags,
+                                            "source_provenance": (
+                                                task_insert.excluded.source_provenance
+                                            ),
+                                        },
+                                    )
+                                    .returning(TaskModel)
+                                    .execution_options(populate_existing=True),
+                                )
+                            )
+                            .scalars()
+                            .all()
                         )
+                        for task_row in sorted(stored_tasks, key=lambda row: row.id):
+                            if task_row.config:
+                                await ensure_task_image_materializations(session, task_row=task_row)
                 await session.commit()
         finally:
             await engine.dispose()

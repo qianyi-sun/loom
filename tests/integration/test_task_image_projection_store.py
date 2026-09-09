@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -105,7 +105,7 @@ def _policy() -> SlurmBuildEnvironmentPolicyV1:
     )
 
 
-def _grant(*, expires_at: datetime = NOW + timedelta(hours=2)):
+def _grant(*, expires_at: datetime = NOW + timedelta(hours=2), grant_id: UUID = GRANT_ID):
     policy = _policy()
     authority = TaskImageBuildGrantAuthorityV2(
         schema_version=2,
@@ -126,7 +126,7 @@ def _grant(*, expires_at: datetime = NOW + timedelta(hours=2)):
     )
     return issue_slurm_build_grant(
         policy,
-        grant_id=GRANT_ID,
+        grant_id=grant_id,
         authority=authority,
     )
 
@@ -214,8 +214,10 @@ async def _release_grant(
     session: AsyncSession,
     *,
     expires_at: datetime = NOW + timedelta(hours=2),
+    grant_id: UUID = GRANT_ID,
+    job_id: str = "12345",
 ):
-    grant = _grant(expires_at=expires_at)
+    grant = _grant(expires_at=expires_at, grant_id=grant_id)
     await issue_task_image_build_grant(
         session,
         environment="staging",
@@ -223,14 +225,14 @@ async def _release_grant(
         ambiguity_settle_seconds=30,
         now=NOW,
     )
-    await begin_task_image_build_submission(session, grant_id=GRANT_ID, now=NOW)
+    await begin_task_image_build_submission(session, grant_id=grant_id, now=NOW)
     inventory = SlurmBuildInventoryV1(
         controller_authoritative=True,
         accounting_authoritative=True,
         observed_at=NOW + timedelta(seconds=1),
         jobs=(
             SlurmBuildJobObservationV1(
-                job_id="12345",
+                job_id=job_id,
                 state="pending",
                 held=True,
                 comment=grant.comment,
@@ -241,14 +243,14 @@ async def _release_grant(
     )
     await reconcile_task_image_build_submission(
         session,
-        grant_id=GRANT_ID,
+        grant_id=grant_id,
         inventory=inventory,
         now=NOW + timedelta(seconds=1),
     )
     await record_task_image_build_release(
         session,
-        grant_id=GRANT_ID,
-        job_id="12345",
+        grant_id=grant_id,
+        job_id=job_id,
         now=NOW + timedelta(seconds=2),
     )
     return grant
@@ -295,6 +297,25 @@ async def projection_session(
         yield factory
     finally:
         async with factory() as session:
+            # Break the current-generation FK cycle for committed session fixtures.
+            await session.execute(
+                update(TaskImageBuildProjection)
+                .where(TaskImageBuildProjection.state == "exchanged")
+                .values(
+                    state="projected",
+                    exchange_id=None,
+                    exchange_json=null(),
+                    exchange_sha256=None,
+                    session_id=None,
+                    session_generation=None,
+                    session_token_hash=None,
+                    session_secret_ref=None,
+                    session_json=null(),
+                    session_sha256=None,
+                    session_issued_at=None,
+                    session_expires_at=None,
+                )
+            )
             await session.execute(delete(TaskImageBuildSessionGeneration))
             await session.execute(delete(TaskImageBuildContainmentAttestation))
             await session.execute(delete(TaskImageBuildProjectionEvent))

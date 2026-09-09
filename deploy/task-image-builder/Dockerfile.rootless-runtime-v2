@@ -151,17 +151,373 @@ PATCH_B64
 RUN base64 -d /tmp/buildkit-runtime-v2.patch.b64 > /tmp/buildkit-runtime-v2.patch \
     && git apply --check /tmp/buildkit-runtime-v2.patch \
     && git apply /tmp/buildkit-runtime-v2.patch
+
+# Loom's opt-in same-solve image-resolution evidence; no history/source/log payload.
+COPY <<'LOOM_BASE_RESOLUTION_GO' /src/buildkit/solver/llbsolver/loom_base_resolution.go
+package llbsolver
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"regexp"
+	"slices"
+	"strings"
+
+	"github.com/moby/buildkit/frontend"
+)
+
+const loomBaseResolutionKey = "loom.task-image-base-resolution.v1"
+
+var loomSolveRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+var loomImageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func loomImageDigestValid(value string) bool {
+	return len(value) == 71 && loomImageDigestPattern.MatchString(value) && value != "sha256:"+strings.Repeat("0", 64)
+}
+
+func (b *provenanceBridge) loomRecordedDockerfileFrontend(mode, platform string) bool {
+	const maximumBridges = 4096
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	if len(b.subBridges) != 1 {
+		b.mu.Unlock()
+		return false
+	}
+	pending := []*provenanceBridge{b.subBridges[0]}
+	b.mu.Unlock()
+	bridges := 1 // Count the outer provenance bridge too.
+	for len(pending) != 0 {
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		bridges++
+		if current == nil || bridges > maximumBridges {
+			return false
+		}
+		current.mu.Lock()
+		if current.req == nil || current.req.Frontend != "dockerfile.v0" ||
+			current.req.FrontendOpt["loom.capture-base-resolution"] != mode ||
+			current.req.FrontendOpt["platform"] != platform ||
+			len(current.subBridges) > maximumBridges-bridges-len(pending) {
+			current.mu.Unlock()
+			return false
+		}
+		pending = append(pending, current.subBridges...)
+		current.mu.Unlock()
+	}
+	return true
+}
+
+// addLoomBaseResolutionMetadata runs after successful export, after all frontend
+// metadata copying. Only this solver-owned recorder may supply the reserved key.
+// No filesystem ResultProxy is required: scratch and image-derived empty results
+// still carry explicit observations from their successful metadata resolutions.
+func (b *provenanceBridge) addLoomBaseResolutionMetadata(id string, req frontend.SolveRequest, response map[string]string) error {
+	delete(response, loomBaseResolutionKey)
+	mode, requested := req.FrontendOpt["loom.capture-base-resolution"]
+	if !requested {
+		return nil
+	}
+	platform := req.FrontendOpt["platform"]
+	if mode != "v1" || b == nil || response == nil ||
+		len(id) > 128 || !loomSolveRefPattern.MatchString(id) ||
+		(platform != "linux/amd64" && platform != "linux/arm64") ||
+		!loomImageDigestValid(response["containerimage.digest"]) ||
+		!b.loomRecordedDockerfileFrontend(mode, platform) {
+		return errors.New("Loom base-resolution capture is unavailable")
+	}
+	observed, err := b.loomObservedImageDigests()
+	if err != nil {
+		return err
+	}
+	metadata := struct {
+		Schema              string   `json:"schema"`
+		SolveRef            string   `json:"solve_ref"`
+		Platform            string   `json:"platform"`
+		OutputDigest        string   `json:"output_digest"`
+		ObservedBaseDigests []string `json:"observed_base_digests"`
+	}{"loom.task-image-base-resolution/v1", id, platform, response["containerimage.digest"], observed}
+	payload, err := json.Marshal(metadata)
+	if err != nil || len(payload) > 16*1024 {
+		return errors.New("Loom base-resolution metadata exceeds its bound")
+	}
+	// buildctl --metadata-file decodes base64 JSON objects to structured fields,
+	// matching the existing containerimage.descriptor exporter convention.
+	response[loomBaseResolutionKey] = base64.StdEncoding.EncodeToString(payload)
+	return nil
+}
+
+func (b *provenanceBridge) loomObservedImageDigests() ([]string, error) {
+	const maximumObservations = 4096
+	const maximumBridges = 4096
+	const maximumUniqueImages = 128
+	pending := []*provenanceBridge{b}
+	unique := make(map[string]struct{})
+	observations, bridges := 0, 0
+	for len(pending) != 0 {
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		bridges++
+		if current == nil || bridges > maximumBridges {
+			return nil, errors.New("Loom base-resolution bridge is unavailable")
+		}
+		current.mu.Lock()
+		// Check before copying or traversing: the metadata path must not clone an
+		// unbounded solve graph simply to discover it exceeded its output limit.
+		if len(current.images) > maximumObservations-observations ||
+			len(current.subBridges) > maximumBridges-bridges-len(pending) {
+			current.mu.Unlock()
+			return nil, errors.New("Loom base-resolution capture exceeds its bound")
+		}
+		observations += len(current.images)
+		for _, image := range current.images {
+			value := string(image.Digest)
+			if !loomImageDigestValid(value) {
+				current.mu.Unlock()
+				return nil, errors.New("Loom base-resolution digest is unavailable")
+			}
+			unique[value] = struct{}{}
+			if len(unique) > maximumUniqueImages {
+				current.mu.Unlock()
+				return nil, errors.New("Loom base-resolution image count exceeds its bound")
+			}
+		}
+		pending = append(pending, current.subBridges...)
+		current.mu.Unlock()
+	}
+	observed := make([]string, 0, len(unique))
+	for value := range unique {
+		observed = append(observed, value)
+	}
+	slices.Sort(observed)
+	return observed, nil
+}
+LOOM_BASE_RESOLUTION_GO
+COPY <<'LOOM_BASE_RESOLUTION_TEST_GO' /src/buildkit/solver/llbsolver/loom_base_resolution_test.go
+package llbsolver
+
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/moby/buildkit/frontend"
+	provenancetypes "github.com/moby/buildkit/solver/llbsolver/provenance/types"
+	digest "github.com/opencontainers/go-digest"
+)
+
+func loomTestFrontendRequest(platform string) frontend.SolveRequest {
+	return frontend.SolveRequest{
+		Frontend: "dockerfile.v0",
+		FrontendOpt: map[string]string{
+			"platform":                     platform,
+			"loom.capture-base-resolution": "v1",
+		},
+	}
+}
+
+func loomTestBridge(req frontend.SolveRequest) (*provenanceBridge, *provenanceBridge) {
+	recorded := req.Clone()
+	frontendBridge := &provenanceBridge{req: &recorded}
+	return &provenanceBridge{subBridges: []*provenanceBridge{frontendBridge}}, frontendBridge
+}
+
+func TestLoomBaseResolutionEmptyAndNestedSources(t *testing.T) {
+	for _, populated := range []bool{false, true} {
+		t.Run(fmt.Sprint(populated), func(t *testing.T) {
+			req := loomTestFrontendRequest("linux/amd64")
+			bridge, frontendBridge := loomTestBridge(req)
+			bases := `[]`
+			if populated {
+				frontendBridge.images = []provenancetypes.ImageSource{{Digest: digest.Digest("sha256:" + strings.Repeat("b", 64))}}
+				nestedRequest := req.Clone()
+				frontendBridge.subBridges = []*provenanceBridge{{req: &nestedRequest, images: []provenancetypes.ImageSource{
+					{Digest: digest.Digest("sha256:" + strings.Repeat("a", 64))},
+					{Digest: digest.Digest("sha256:" + strings.Repeat("b", 64))},
+				}}}
+				bases = `["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]`
+			}
+			response := map[string]string{"containerimage.digest": "sha256:" + strings.Repeat("c", 64), "loom.task-image-base-resolution.v1": "substitution"}
+			req.Frontend = ""
+			if err := bridge.addLoomBaseResolutionMetadata("same-solve-1", req, response); err != nil {
+				t.Fatal(err)
+			}
+			want := `{"schema":"loom.task-image-base-resolution/v1","solve_ref":"same-solve-1","platform":"linux/amd64","output_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","observed_base_digests":` + bases + `}`
+			payload, err := base64.StdEncoding.DecodeString(response["loom.task-image-base-resolution.v1"])
+			if err != nil {
+				t.Fatal("structured metadata must use buildctl's base64 JSON carrier")
+			}
+			if string(payload) != want {
+				t.Fatalf("unexpected evidence: %s", response["loom.task-image-base-resolution.v1"])
+			}
+		})
+	}
+}
+
+func TestLoomBaseResolutionAcceptsBuildctlGatewayFrontendRequest(t *testing.T) {
+	frontendRequest := loomTestFrontendRequest("linux/amd64")
+	bridge, _ := loomTestBridge(frontendRequest)
+	response := map[string]string{"containerimage.digest": "sha256:" + strings.Repeat("c", 64)}
+	outerRequest := frontend.SolveRequest{FrontendOpt: frontendRequest.FrontendOpt}
+
+	if err := bridge.addLoomBaseResolutionMetadata("same-solve-1", outerRequest, response); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(response[loomBaseResolutionKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"observed_base_digests":[]`) {
+		t.Fatalf("gateway frontend solve did not emit observed empty evidence: %s", payload)
+	}
+}
+
+func TestLoomBaseResolutionCollectsSupportedNestedFrontendSources(t *testing.T) {
+	frontendRequest := loomTestFrontendRequest("linux/amd64")
+	nestedRequest := frontendRequest.Clone()
+	frontendBridge := &provenanceBridge{
+		req:    &frontendRequest,
+		images: []provenancetypes.ImageSource{{Digest: digest.Digest("sha256:" + strings.Repeat("b", 64))}},
+		subBridges: []*provenanceBridge{{
+			req:    &nestedRequest,
+			images: []provenancetypes.ImageSource{{Digest: digest.Digest("sha256:" + strings.Repeat("a", 64))}},
+		}},
+	}
+	bridge := &provenanceBridge{subBridges: []*provenanceBridge{frontendBridge}}
+	response := map[string]string{"containerimage.digest": "sha256:" + strings.Repeat("c", 64)}
+	outerRequest := frontend.SolveRequest{FrontendOpt: frontendRequest.FrontendOpt}
+
+	if err := bridge.addLoomBaseResolutionMetadata("same-solve-1", outerRequest, response); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(response[loomBaseResolutionKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `"observed_base_digests":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]`
+	if !strings.Contains(string(payload), want) {
+		t.Fatalf("nested supported frontend sources were not collected: %s", payload)
+	}
+}
+
+func TestLoomBaseResolutionDisabledCannotRetainClaimedEvidence(t *testing.T) {
+	response := map[string]string{"loom.task-image-base-resolution.v1": "substitution", "unrelated": "unchanged"}
+	if err := (&provenanceBridge{}).addLoomBaseResolutionMetadata("", frontend.SolveRequest{}, response); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := response["loom.task-image-base-resolution.v1"]; ok {
+		t.Fatal("disabled capture retained claimed evidence")
+	}
+	if response["unrelated"] != "unchanged" {
+		t.Fatal("capture changed unrelated exporter metadata")
+	}
+}
+
+func TestLoomBaseResolutionRejectsIncompleteOrUnboundedEvidence(t *testing.T) {
+	mutations := []string{
+		"version", "platform", "solve", "long-solve", "output", "zero-output",
+		"base", "zero-base", "unique-limit", "raw-limit", "bridge-limit",
+		"missing-recorded", "nil-recorded", "ambiguous-recorded",
+		"recorded-frontend", "recorded-version", "recorded-platform",
+		"nested-unsupported",
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation, func(t *testing.T) {
+			req := loomTestFrontendRequest("linux/arm64")
+			bridge, frontendBridge := loomTestBridge(req)
+			response := map[string]string{"containerimage.digest": "sha256:" + strings.Repeat("c", 64), "loom.task-image-base-resolution.v1": "substitution"}
+			req.Frontend = ""
+			ref := "same-solve-1"
+			switch mutation {
+			case "version":
+				req.FrontendOpt["loom.capture-base-resolution"] = "v2"
+			case "platform":
+				req.FrontendOpt["platform"] = "linux/amd64,linux/arm64"
+			case "solve":
+				ref = "../outside"
+			case "long-solve":
+				ref = strings.Repeat("a", 129)
+			case "output":
+				delete(response, "containerimage.digest")
+			case "zero-output":
+				response["containerimage.digest"] = "sha256:" + strings.Repeat("0", 64)
+			case "base":
+				frontendBridge.images = []provenancetypes.ImageSource{{Digest: "sha256:INVALID"}}
+			case "zero-base":
+				frontendBridge.images = []provenancetypes.ImageSource{{Digest: digest.Digest("sha256:" + strings.Repeat("0", 64))}}
+			case "unique-limit":
+				for i := 1; i <= 129; i++ {
+					frontendBridge.images = append(frontendBridge.images, provenancetypes.ImageSource{Digest: digest.Digest(fmt.Sprintf("sha256:%064x", i))})
+				}
+			case "raw-limit":
+				for i := 0; i < 4097; i++ {
+					frontendBridge.images = append(frontendBridge.images, provenancetypes.ImageSource{Digest: digest.Digest("sha256:" + strings.Repeat("a", 64))})
+				}
+			case "bridge-limit":
+				current := frontendBridge
+				for i := 0; i < 4095; i++ {
+					nestedRequest := loomTestFrontendRequest("linux/arm64")
+					nested := &provenanceBridge{req: &nestedRequest}
+					current.subBridges = []*provenanceBridge{nested}
+					current = nested
+				}
+			case "missing-recorded":
+				bridge.subBridges = nil
+			case "nil-recorded":
+				bridge.subBridges[0] = nil
+			case "ambiguous-recorded":
+				otherRequest := loomTestFrontendRequest("linux/arm64")
+				bridge.subBridges = append(bridge.subBridges, &provenanceBridge{req: &otherRequest})
+			case "recorded-frontend":
+				frontendBridge.req.Frontend = "gateway.v0"
+			case "recorded-version":
+				frontendBridge.req.FrontendOpt["loom.capture-base-resolution"] = "v2"
+			case "recorded-platform":
+				frontendBridge.req.FrontendOpt["platform"] = "linux/amd64"
+			case "nested-unsupported":
+				nestedRequest := loomTestFrontendRequest("linux/arm64")
+				nestedRequest.Frontend = "gateway.v0"
+				frontendBridge.subBridges = []*provenanceBridge{{req: &nestedRequest}}
+			}
+			if err := bridge.addLoomBaseResolutionMetadata(ref, req, response); err == nil {
+				t.Fatal("invalid evidence was accepted")
+			}
+			if _, ok := response["loom.task-image-base-resolution.v1"]; ok {
+				t.Fatal("failure retained incomplete evidence")
+			}
+		})
+	}
+}
+LOOM_BASE_RESOLUTION_TEST_GO
+COPY <<'LOOM_BASE_RESOLUTION_PATCH_B64' /tmp/buildkit-base-resolution-v1.patch.b64
+LS0tIGEvc29sdmVyL2xsYnNvbHZlci9zb2x2ZXIuZ28KKysrIGIvc29sdmVyL2xsYnNvbHZlci9z
+b2x2ZXIuZ28KQEAgLTQ0Myw2ICs0NDMsOSBAQAogCQkJZXhwb3J0ZXJSZXNwb25zZVtrXSA9IHYK
+IAkJfQogCX0KKwlpZiBlcnIgOj0gYnIuYWRkTG9vbUJhc2VSZXNvbHV0aW9uTWV0YWRhdGEoaWQs
+IHJlcSwgZXhwb3J0ZXJSZXNwb25zZSk7IGVyciAhPSBuaWwgeworCQlyZXR1cm4gbmlsLCBlcnIK
+Kwl9CiAJaWYgZXhwLkVuYWJsZVNlc3Npb25FeHBvcnRlciB7CiAJCWlmIGVyciA6PSBzLmZpbmFs
+aXplU2Vzc2lvbkV4cG9ydChjdHgsIGouU2Vzc2lvbklELCBleHBvcnRlclJlc3BvbnNlKTsgZXJy
+ICE9IG5pbCB7CiAJCQlyZXR1cm4gbmlsLCBlcnIK
+LOOM_BASE_RESOLUTION_PATCH_B64
+RUN base64 -d /tmp/buildkit-base-resolution-v1.patch.b64 > /tmp/buildkit-base-resolution-v1.patch \
+    && git apply --check /tmp/buildkit-base-resolution-v1.patch \
+    && git apply /tmp/buildkit-base-resolution-v1.patch
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go test -mod=vendor -p 2 ./solver/llbsolver \
+      -run '^TestLoomBaseResolution' -count=1
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -mod=vendor -trimpath -buildvcs=false \
-      -ldflags "-X github.com/moby/buildkit/version.Version=v0.32.2-loom.1 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
+      -ldflags "-X github.com/moby/buildkit/version.Version=v0.32.2-loom.2 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
       -o /out/buildctl ./cmd/buildctl
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -mod=vendor -trimpath -buildvcs=false \
-      -ldflags "-extldflags '-static' -X github.com/moby/buildkit/version.Version=v0.32.2-loom.1 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
+      -ldflags "-extldflags '-static' -X github.com/moby/buildkit/version.Version=v0.32.2-loom.2 -X github.com/moby/buildkit/version.Revision=991535e0973488b6a429096d21fa13f81f2d89d8 -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit" \
       -tags "osusergo netgo static_build seccomp" \
       -o /out/buildkitd ./cmd/buildkitd
 
@@ -296,12 +652,12 @@ RUN cp /usr/bin/buildkit-runc /out/buildkit-runc \
     && cp /out/rootlessctl /runtime/rootlessctl \
     && cp /out/slirp4netns /runtime/slirp4netns \
     && cp /out/fuse-overlayfs /runtime/fuse-overlayfs \
-    && test "$(/runtime/buildctl --version)" = "buildctl github.com/moby/buildkit v0.32.2-loom.1 991535e0973488b6a429096d21fa13f81f2d89d8" \
-    && test "$(/runtime/buildkitd --version)" = "buildkitd github.com/moby/buildkit v0.32.2-loom.1 991535e0973488b6a429096d21fa13f81f2d89d8" \
+    && test "$(/runtime/buildctl --version)" = "buildctl github.com/moby/buildkit v0.32.2-loom.2 991535e0973488b6a429096d21fa13f81f2d89d8" \
+    && test "$(/runtime/buildkitd --version)" = "buildkitd github.com/moby/buildkit v0.32.2-loom.2 991535e0973488b6a429096d21fa13f81f2d89d8" \
     && test "$(/runtime/rootlesskit --version)" = "rootlesskit version 3.1.0" \
     && case "$TARGETARCH" in \
-        amd64) buildctl_sha256=b2dc3eb537b912717670347cf449ca501e769d5a6beeebaad0aab8abb7f495e1; buildkitd_sha256=0e01e2cac7df591ac129ee86543ac36bc6ef08b50aee8550f5675675208564e7; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
-        arm64) buildctl_sha256=8913f65a380be955abe4f5a155970ece8a2b3a26408c16431e806963e6acc97a; buildkitd_sha256=fded12c1a4ab70a21278dc860a1d000bca68421e9f45a9e0fcf1e1807ae19c03; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
+        amd64) buildctl_sha256=72c814d179243e0e0149a6b0ae563837371f138fb9bafde726baa139284b4c32; buildkitd_sha256=258f03600dcf3999096d468aefc23f864ee7feb1382e359c9bc5a15f845d3998; buildkit_runc_sha256=b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c; rootlesskit_sha256=b607adb41b2537c3b6335e0ecdd4a269d9531c9258ec9261ff36220c820801db; rootlessctl_sha256=5f04200c8a5167f73b04b790fe59ebfb7fbffb505521002ef8bdaf254e220a96; slirp4netns_sha256=e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2; fuse_overlayfs_sha256=1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90 ;; \
+        arm64) buildctl_sha256=f3362995d0bbd0e44ec238439907cd0fb9355179c64b3d98a70e16b72bea661e; buildkitd_sha256=e210729d8acf9705fef08584d18ff7b9d3d2dce732cafc3a50ffb25e18fb8d4f; buildkit_runc_sha256=1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441; rootlesskit_sha256=5f002d6f6ce9ff5e3e0e7730ed5b2518bfebe65cd4a4d51c6ed23ca41832cbb2; rootlessctl_sha256=d415cfe3f60e4cd00a9fc8b20c18dc8b5df99b56a9e1a513715e56ef71e4bf94; slirp4netns_sha256=fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0; fuse_overlayfs_sha256=34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23 ;; \
         *) exit 1 ;; \
     esac \
     && printf '%s  %s\n' \

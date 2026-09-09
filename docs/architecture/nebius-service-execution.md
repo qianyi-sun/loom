@@ -445,6 +445,20 @@ resource usage, and final-result writeback. Legacy Trials with no execution
 lease retain their existing path; once any lease exists, missing fence headers
 fail closed.
 
+Reservation, retry, and finalized-event projection read fresh locked Trial state.
+A terminal Trial (`succeeded`, `failed`, or `cancelled`) cannot receive a new
+attempt reservation, be retried back to queued, or be projected back to
+materializing. A terminal rerun uses a new Trial and its own image prerequisites.
+Nonterminal retries still advance the attempt after cleanup, and exact event
+replay still returns its original event without projecting again. Transition/event admission also
+refreshes the locked lease so a cached generation cannot bypass revocation.
+The unpublished `0135` migration additionally rejects terminal-to-nonterminal
+Trial updates in PostgreSQL, including BEFORE-trigger rewrites. Metadata updates
+and terminal-to-terminal corrections remain permitted. The row-local invariant
+adds no related-row locks; migration installation/removal fails without waiting
+if an ordinary Trial writer is active. This is not a complete image-retirement
+serialization guarantee or protection against deletion/reinsertion of Trial IDs.
+
 `0114` additionally freezes the canonical Pod-native runtime plan and digest on
 the lease. The plan binds candidate, task revision, command identity, execution
 role, task/runtime image digests, resources, process phases, sidecars, probes,

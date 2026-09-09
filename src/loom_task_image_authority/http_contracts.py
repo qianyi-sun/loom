@@ -8,13 +8,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_build_plan import TaskImageBuildPlan
 from loom_task_image_authority.contracts import (
     Digest,
     ManifestDigest,
     NonzeroUUID,
     PositiveSignedBigint,
     RegistryCredentialGeneration,
+    TaskImageBaseResolutionEvidenceV1,
     TaskImageComponent,
 )
 from loom_task_image_authority.registry_token import publication_repository
@@ -35,7 +36,7 @@ class TaskImageMaterializationClaimResponseV1(_StrictResponse):
     state: Literal["claimed", "running"]
     deterministic_failure_count: Annotated[int, Field(ge=0)]
     lease_expires_at: datetime
-    plan: TaskImageBuildPlanV1
+    plan: TaskImageBuildPlan
 
     @field_validator("claim_id", "materialization_id", "attempt_id")
     @classmethod
@@ -149,8 +150,25 @@ class TaskImagePublicationCandidateResponseV1(_StrictResponse):
         return self
 
 
+class TaskImagePublicationCandidateResponseV2(TaskImagePublicationCandidateResponseV1):
+    """Canonical acknowledgement binding the required same-build observations."""
+
+    schema_version: Literal["loom.task-image-publication-candidate.v2"] = Field(...)  # type: ignore[assignment]
+    base_resolution: TaskImageBaseResolutionEvidenceV1
+
+    @model_validator(mode="after")
+    def _metadata_matches_output(self) -> TaskImagePublicationCandidateResponseV2:
+        if (
+            self.base_resolution.output_digest != self.manifest_digest
+            or self.base_resolution.platform != self.platform
+        ):
+            raise ValueError("candidate base-resolution binding is invalid")
+        return self
+
+
 __all__ = [
     "TaskImageMaterializationClaimResponseV1",
     "TaskImageMaterializationOperationResponseV1",
     "TaskImagePublicationCandidateResponseV1",
+    "TaskImagePublicationCandidateResponseV2",
 ]

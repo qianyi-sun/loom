@@ -34,6 +34,38 @@ var (
 )
 
 func LaunchInCgroup(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupDirFD int) (*Process, error) {
+	return launchInCgroup(ctx, executable, argv, env, cgroupDirFD, nil)
+}
+
+// LaunchInCgroupWithContext lends exactly one owned private input directory to
+// buildctl as child FD 3. The caller retains its FD and joins the child before
+// removing input bytes. Daemon/readiness launches use LaunchInCgroup instead.
+func LaunchInCgroupWithContext(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupDirFD, inputDirFD int) (*Process, error) {
+	input, err := duplicatePrivateInputDirectory(inputDirFD)
+	if err != nil {
+		return nil, err
+	}
+	defer input.Close()
+	return launchInCgroup(ctx, executable, argv, env, cgroupDirFD, input)
+}
+
+func duplicatePrivateInputDirectory(fd int) (*os.File, error) {
+	if fd < 0 {
+		return nil, errors.New("input directory unavailable")
+	}
+	duplicate, err := fcntlInt(fd, syscall.F_DUPFD_CLOEXEC, 4)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(duplicate), "verified build input")
+	if err := validateBuildCaptureDirectory(duplicate); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func launchInCgroup(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupDirFD int, input *os.File) (*Process, error) {
 	if err := validateLaunchEnvironment(env); err != nil {
 		return nil, err
 	}
@@ -50,6 +82,16 @@ func LaunchInCgroup(ctx context.Context, executable ExecutableMember, argv []str
 	if err != nil {
 		return nil, err
 	}
+	if input != nil && executableFD < 4 {
+		// ExtraFiles remaps the context to child FD 3 before exec. Never let
+		// that overwrite the descriptor used to resolve the executable itself.
+		pinned, err := fcntlInt(executableFD, syscall.F_DUPFD_CLOEXEC, 4)
+		syscall.Close(executableFD)
+		if err != nil {
+			return nil, err
+		}
+		executableFD = pinned
+	}
 	defer syscall.Close(executableFD)
 
 	fdPath := fmt.Sprintf("/proc/self/fd/%d", executableFD)
@@ -57,6 +99,9 @@ func LaunchInCgroup(ctx context.Context, executable ExecutableMember, argv []str
 	cmd.Args[0] = executable.Path
 	cmd.Env = append([]string{}, env...)
 	cmd.ExtraFiles = nil
+	if input != nil {
+		cmd.ExtraFiles = []*os.File{input}
+	}
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{

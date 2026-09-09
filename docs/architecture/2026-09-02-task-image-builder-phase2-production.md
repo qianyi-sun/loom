@@ -343,9 +343,30 @@ must obtain a higher epoch.
 
 ## Scheduling and starvation
 
-The overlapping builder partition has a strictly higher Slurm `PriorityTier`
-than Loom's trial partition and the builder QoS caps one allocation per native
-architecture. This does not reserve a node and does not preempt running work.
+The overlapping builder partition uses dynamically eligible native capacity;
+the builder QoS caps one allocation per native architecture. It does not reserve
+a permanent builder node. Nonpreemption is an explicit certified property of
+each cluster profile, not a consequence of assigning a higher `PriorityTier`.
+
+For OLDLAB's disabled-preemption profile, a higher builder tier may provide queue
+preference without interrupting running jobs. GB10 instead uses Slurm23.11.4's
+`preempt/partition_prio` with cluster mode `REQUEUE`: a higher builder tier could
+preempt trials or external work. Its target builder partition therefore has
+`PriorityTier=0` and explicit `PreemptMode=OFF`, leaving trial/debug partitions
+and cluster policy unchanged. Zero is a supported partition tier, distinct from
+job priority zero or a held job. The pinned plugin requires a strictly greater
+tier to select ordinary preemption victims; minimum tier prevents outbound
+preemption, while explicit partition OFF protects a running builder as victim.
+Effective readback must also exclude inherited legacy `Priority=` overrides.
+
+This proof is specific to the certified Slurm version and plugin. Reservation
+borrowing/reclaim through `MaxStartDelay` has a separate preemption path: builders
+must neither acquire reservation-reclaiming authority nor borrow revocable
+reservation capacity. Preserve the existing Phase 1 reservations. Plugin,
+effective tier/mode, reservation-policy or eligibility drift invalidates the
+corresponding certification. The tier-zero profile is a design target, not
+native acceptance evidence; its two-direction nonpreemption canaries remain
+required before activation.
 
 One durable `ArchitectureCapacityFence` per environment/cluster/architecture is
 the serialization authority for both builder demand and trial-capacity writes.
@@ -361,9 +382,34 @@ ceiling. On builder termination it moves atomically either back to
 `builder_pending` if demand remains or to `open`. Stale or ambiguous state has no
 valid witness and suppresses new trial capacity.
 
-This prevents new Loom trials from starving a builder. A builder may still wait
-for already-running trials or external/equal-higher-tier jobs. A hard start-time
-SLA would require an explicit later reservation or preemption decision.
+The fence must cover scheduler overlap and shared account/QoS limits, not just
+a pending trial's predicted host. Confirm pending cancellation and actual release
+of drained workers' Slurm allocations; marking workers as draining is insufficient.
+Never cancel a trial that has raced from pending into running. Stale or ambiguous
+cancellation cannot count as released capacity.
+
+Resource admission fencing alone is not a scheduler-fairness proof. Main/backfill
+queue-depth and time limits can keep a low-tier builder out of consideration;
+unfenced Loom work on disjoint nodes can contribute to that pressure. Loom's
+submission bounds must also prevent its own queue pressure from exhausting
+scheduler consideration before a pending builder. Certification includes effective
+scheduler limits, queue-pressure observations and owned deep-queue canaries, as
+well as continuing-arrival, restart, stale-witness and cancellation/start races.
+
+With complete Loom admission coverage and scheduler consideration, new Loom
+trials cannot continually take capacity needed by a pending builder. A builder
+may still wait for current trials to finish or for external jobs and reservation/
+backfill constraints; tier-zero builders yield queue position to all positive
+tiers. No eventual-start guarantee under indefinite external pressure or hard
+start-time SLA is claimed. Either stronger guarantee would require a separately
+authorized reservation, scheduler-policy or preemption decision.
+
+Pinned scheduling references: Slurm `slurm-23-11-4-1`
+[`preempt_partition_prio.c`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/plugins/preempt/partition_prio/preempt_partition_prio.c),
+[`preempt.c`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/interfaces/preempt.c),
+[`read_config.c`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/common/read_config.c),
+[`job_scheduler.c`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/slurmctld/job_scheduler.c)
+and [`backfill.c`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/plugins/sched/backfill/backfill.c).
 
 ## Failure handling and observability
 

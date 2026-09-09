@@ -44,6 +44,28 @@ func TestOrchestratorBuiltHandoffReleasesAndFinishesInOrder(t *testing.T) {
 	h.wantOutcome(t, BuildOutcomeBuilt, "built")
 }
 
+// Break caught: orchestration drops or substitutes same-solve evidence before handoff.
+func TestOrchestratorCarriesBaseResolutionEvidenceIntoBuiltComponents(t *testing.T) {
+	h := newOrchestratorHarness(t)
+	taskEvidence := BaseResolutionEvidence{json: `{"schema":"task-evidence"}`}
+	sidecarEvidence := BaseResolutionEvidence{json: `{"schema":"sidecar-evidence"}`}
+	h.executor.baseResolutions = map[string]BaseResolutionEvidence{
+		"task":          taskEvidence,
+		"sidecar:cache": sidecarEvidence,
+	}
+
+	if err := h.orchestrator().Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(h.handoff.accepted) != 1 || len(h.handoff.accepted[0].Components) != 2 {
+		t.Fatalf("handoff components = %#v", h.handoff.accepted)
+	}
+	components := h.handoff.accepted[0].Components
+	if components[0].BaseResolution != taskEvidence || components[1].BaseResolution != sidecarEvidence {
+		t.Fatalf("handoff evidence = %#v", components)
+	}
+}
+
 // Break caught: unavailable work exits immediately instead of retrying once after bounded IdleGrace.
 func TestOrchestratorIdleClaimExitsAfterBoundedIdleGrace(t *testing.T) {
 	h := newOrchestratorHarness(t)
@@ -1106,6 +1128,10 @@ func (g *fakeOrchestratorGuard) PublicationCandidate(context.Context, Publicatio
 	return nil, errors.New("publication candidate not configured")
 }
 
+func (g *fakeOrchestratorGuard) PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
+	return nil, errors.New("publication candidate V2 not configured")
+}
+
 func (g *fakeOrchestratorGuard) Start(ctx context.Context, grantID string, operationID string, materializationID string, attemptID string, leaseEpoch int, current *SecretBuffer) (*LeaseResponse, error) {
 	g.h.events = append(g.h.events, "start")
 	return testLease("start", operationID, g.leaseExpires), nil
@@ -1267,16 +1293,17 @@ func testClaimJSON(m claimMutation) string {
 }
 
 type fakeOrchestratorExecutor struct {
-	h          *orchestratorHarness
-	outputs    map[string]OCIOutput
-	buildErr   map[string]error
-	closeErr   error
-	closeCalls int
-	closeInit  sync.Once
-	closeOnce  sync.Once
-	closeCh    chan struct{}
-	afterBuild func(string)
-	blockBuild func(context.Context, string) (OCIOutput, error)
+	h               *orchestratorHarness
+	outputs         map[string]OCIOutput
+	baseResolutions map[string]BaseResolutionEvidence
+	buildErr        map[string]error
+	closeErr        error
+	closeCalls      int
+	closeInit       sync.Once
+	closeOnce       sync.Once
+	closeCh         chan struct{}
+	afterBuild      func(string)
+	blockBuild      func(context.Context, string) (OCIOutput, error)
 }
 
 func (e *fakeOrchestratorExecutor) Start(ctx context.Context) error {
@@ -1284,18 +1311,19 @@ func (e *fakeOrchestratorExecutor) Start(ctx context.Context) error {
 	return nil
 }
 
-func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildComponent) (OCIOutput, error) {
+func (e *fakeOrchestratorExecutor) Build(ctx context.Context, component BuildComponent) (BuildResult, error) {
 	e.h.events = append(e.h.events, "build:"+component.Name)
 	if e.blockBuild != nil {
-		return e.blockBuild(ctx, component.Name)
+		output, err := e.blockBuild(ctx, component.Name)
+		return BuildResult{Output: output}, err
 	}
 	if err := e.buildErr[component.Name]; err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
 	if e.afterBuild != nil {
 		e.afterBuild(component.Name)
 	}
-	return e.outputs[component.Name], nil
+	return BuildResult{Output: e.outputs[component.Name], BaseResolution: e.baseResolutions[component.Name]}, nil
 }
 
 func (e *fakeOrchestratorExecutor) Close(ctx context.Context) error {
@@ -1452,6 +1480,7 @@ func handoffBuiltSet() BuiltComponentSet {
 					OS:                "linux",
 					Architecture:      "arm64",
 				},
+				BaseResolution: testBaseResolutionEvidence("solve-task", "linux/arm64", "sha256:"+strings.Repeat("a", 64)),
 			},
 			{
 				Name: "sidecar:db",
@@ -1465,6 +1494,7 @@ func handoffBuiltSet() BuiltComponentSet {
 					OS:                "linux",
 					Architecture:      "arm64",
 				},
+				BaseResolution: testBaseResolutionEvidence("solve-sidecar-db", "linux/arm64", "sha256:"+strings.Repeat("c", 64), "sha256:"+strings.Repeat("a", 64)),
 			},
 		},
 	}
@@ -1478,7 +1508,7 @@ type handoffCredentialGuard struct {
 	secrets            []*SecretBuffer
 	lastHeartbeat      string
 	failFirstCandidate error
-	candidateRequests  []PublicationCandidateRequest
+	candidateRequests  []PublicationCandidateV2Request
 }
 
 func newHandoffCredentialGuard(t *testing.T, events *[]string) *handoffCredentialGuard {
@@ -1537,6 +1567,10 @@ func (g *handoffCredentialGuard) RegistryCredential(ctx context.Context, request
 }
 
 func (g *handoffCredentialGuard) PublicationCandidate(ctx context.Context, request PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	return nil, errors.New("legacy publication candidate unexpectedly selected")
+}
+
+func (g *handoffCredentialGuard) PublicationCandidateV2(ctx context.Context, request PublicationCandidateV2Request, current *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1545,27 +1579,30 @@ func (g *handoffCredentialGuard) PublicationCandidate(ctx context.Context, reque
 	if g.failFirstCandidate != nil && len(g.candidateRequests) == 1 {
 		return nil, g.failFirstCandidate
 	}
-	return &PublicationCandidateAcknowledgement{
-		CandidateID:             uuidWithTail(0x9000 + len(g.candidateRequests)),
-		OperationID:             request.OperationID,
-		CredentialID:            request.CredentialID,
-		CredentialGeneration:    request.CredentialGeneration,
-		GrantID:                 request.GrantID,
-		SessionID:               request.SessionID,
-		SessionGeneration:       request.SessionGeneration,
-		MaterializationID:       request.MaterializationID,
-		AttemptID:               request.AttemptID,
-		AttemptNumber:           request.AttemptNumber,
-		LeaseEpoch:              request.LeaseEpoch,
-		BuilderID:               request.BuilderID,
-		Component:               request.Component,
-		ManifestDigest:          request.ManifestDigest,
-		ManifestSize:            request.ManifestSize,
-		OCIFileSHA256:           request.OCIFileSHA256,
-		OCIFileSize:             request.OCIFileSize,
-		Platform:                request.Platform,
-		RecordedAt:              testNow,
-		AuthorityResponseSHA256: strings.Repeat("c", 64),
+	return &PublicationCandidateV2Acknowledgement{
+		PublicationCandidateAcknowledgement: PublicationCandidateAcknowledgement{
+			CandidateID:             uuidWithTail(0x9000 + len(g.candidateRequests)),
+			OperationID:             request.OperationID,
+			CredentialID:            request.CredentialID,
+			CredentialGeneration:    request.CredentialGeneration,
+			GrantID:                 request.GrantID,
+			SessionID:               request.SessionID,
+			SessionGeneration:       request.SessionGeneration,
+			MaterializationID:       request.MaterializationID,
+			AttemptID:               request.AttemptID,
+			AttemptNumber:           request.AttemptNumber,
+			LeaseEpoch:              request.LeaseEpoch,
+			BuilderID:               request.BuilderID,
+			Component:               request.Component,
+			ManifestDigest:          request.ManifestDigest,
+			ManifestSize:            request.ManifestSize,
+			OCIFileSHA256:           request.OCIFileSHA256,
+			OCIFileSize:             request.OCIFileSize,
+			Platform:                request.Platform,
+			RecordedAt:              testNow,
+			AuthorityResponseSHA256: strings.Repeat("c", 64),
+		},
+		BaseResolution: request.BaseResolution,
 	}, nil
 }
 

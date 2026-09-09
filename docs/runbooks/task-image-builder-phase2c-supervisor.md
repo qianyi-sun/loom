@@ -19,10 +19,27 @@ complete.
 - Use only explicit digest-named release directories under
   `/opt/loom-task-image-builder-provider/releases/<sha256>/`.
 
+The supervisor derives its release selector from the kernel's running executable
+path and verifies that inode against the exact root-owned 0555 installed member.
+It does not embed the composite digest in its ELF or accept a release selector
+from arguments, environment variables or a `current` link. Later activation must
+install a root-owned 0444 `/etc/loom-task-image-builder/supervisor-config.json`
+naming the same release. Staging must not create that file; offline conformance
+rejects it as a live surface. Installer hash checks and the guard's independent
+ELF/grant checks remain mandatory.
+
 ## Assemble an offline provider release
 
 Build the guard bundles and rootless runtimes through their pinned release
-procedures first. Then certify both architectures in one all-or-nothing
+procedures first. When guard sources change, refresh both architecture bundle
+digests in `deploy/task-image-builder/provider-release-v1.json` together with its
+guard-spec digest. Updating only the spec digest leaves an incompatible input
+pair that the assembler correctly rejects. Derive bundle digests from repeated
+assembly and verify the retained tool bytes against their previously pinned
+release; cache presence alone is not provenance. Offline assembly does not
+establish native containment or authorize activation.
+
+Then certify both architectures in one all-or-nothing
 assembler invocation:
 
 ```bash

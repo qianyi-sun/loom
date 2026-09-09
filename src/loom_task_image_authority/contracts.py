@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ModelWrapValidatorHandler,
     field_validator,
     model_validator,
 )
@@ -24,7 +25,10 @@ from loom_task_image_authority.config import (
     _validate_https_origin,
     _validate_registry_identity,
 )
-from loom_task_image_authority.registry_token import publication_repository
+from loom_task_image_authority.registry_token import (
+    MAX_REGISTRY_BEARER_TOKEN_BYTES,
+    publication_repository,
+)
 
 MAX_SIGNED_BIGINT = (1 << 63) - 1
 MAX_CONTRACT_BYTES = 64 * 1024
@@ -400,21 +404,20 @@ class TaskImageProjectionRevocationV1(StrictTaskImageAuthorityModel):
     observed_at: datetime
 
 
-class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
+class _TaskImageBuildSessionFields(StrictTaskImageAuthorityModel):
     grant_id: NonzeroUUID
     session_id: NonzeroUUID
     purpose: BuildPurpose
     shadow_campaign_id: NonzeroUUID | None
     pool_id: Identifier
     cpu_arch: CpuArchitecture
-    session_token: Annotated[str, Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$")]
     attestation_generation: PositiveSignedBigint
     attestation_sha256: Digest
     issued_at: datetime
     expires_at: datetime
 
     @model_validator(mode="after")
-    def _session_is_bounded(self) -> TaskImageBuildSessionV1:
+    def _session_is_bounded(self) -> _TaskImageBuildSessionFields:
         if (self.purpose == "production") != (self.shadow_campaign_id is None):
             raise ValueError("authority session purpose and shadow campaign disagree")
         _validate_interval(
@@ -424,6 +427,21 @@ class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
             label="session",
         )
         return self
+
+
+class TaskImageBuildSessionPublicBindingV1(_TaskImageBuildSessionFields):
+    """Strict persisted session facts; never proof of a caller's possession."""
+
+    session_token_sha256: Digest
+
+
+class TaskImageBuildSessionPublicBindingV2(TaskImageBuildSessionPublicBindingV1):
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    generation: PositiveSignedBigint
+
+
+class TaskImageBuildSessionV1(_TaskImageBuildSessionFields, _SecretBearingAuthorityModel):
+    session_token: Annotated[str, Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$")]
 
     def public_binding(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"session_token"})
@@ -546,9 +564,7 @@ class TaskImageRegistryCredentialRequestV1(_TaskImageCurrentSessionRequestV1):
 
     @model_validator(mode="after")
     def _predecessor_pair_is_complete(self) -> TaskImageRegistryCredentialRequestV1:
-        if (self.predecessor_credential_id is None) != (
-            self.predecessor_generation is None
-        ):
+        if (self.predecessor_credential_id is None) != (self.predecessor_generation is None):
             raise ValueError("registry credential predecessor pair is incomplete")
         return self
 
@@ -593,7 +609,7 @@ class TaskImageRegistryCredentialV1(_SecretBearingAuthorityModel):
         str,
         Field(
             min_length=5,
-            max_length=16 * 1024,
+            max_length=MAX_REGISTRY_BEARER_TOKEN_BYTES,
             pattern=r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$",
             repr=False,
         ),
@@ -649,6 +665,53 @@ class TaskImageRegistryCredentialV1(_SecretBearingAuthorityModel):
         return payload
 
 
+class TaskImageBaseResolutionEvidenceV1(BaseModel):
+    """Immutable same-solve observations; never publication authority."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        serialize_by_alias=True,
+        revalidate_instances="always",
+    )
+
+    schema_name: Literal["loom.task-image-base-resolution/v1"] = Field(alias="schema")
+    solve_ref: Annotated[str, Field(min_length=1, max_length=128)]
+    platform: Literal["linux/amd64", "linux/arm64"]
+    output_digest: ManifestDigest
+    observed_base_digests: Annotated[tuple[ManifestDigest, ...], Field(max_length=128)]
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _own_observations(
+        cls, value: Any, handler: ModelWrapValidatorHandler[TaskImageBaseResolutionEvidenceV1]
+    ) -> TaskImageBaseResolutionEvidenceV1:
+        if isinstance(value, cls):
+            # Revalidate model instances through the same exact wire keys as dicts.
+            # Pydantic's internal field-name dict otherwise loses the schema alias.
+            value = value.model_dump(mode="python", by_alias=True)
+        if isinstance(value, dict) and isinstance(value.get("observed_base_digests"), list):
+            value = dict(value)
+            value["observed_base_digests"] = tuple(value["observed_base_digests"])
+        return handler(value)
+
+    @model_validator(mode="after")
+    def _bounded_exact_record(self) -> TaskImageBaseResolutionEvidenceV1:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", self.solve_ref) is None:
+            raise ValueError("base-resolution solve reference is invalid")
+        if any(
+            left >= right
+            for left, right in zip(
+                self.observed_base_digests, self.observed_base_digests[1:], strict=False
+            )
+        ):
+            raise ValueError("base-resolution observations must be sorted and unique")
+        if len(rfc8785.dumps(self.model_dump(mode="json"))) > 16 * 1024:
+            raise ValueError("base-resolution evidence exceeds maximum byte size")
+        return self
+
+
 class TaskImagePublicationCandidateRequestV1(_TaskImageCurrentSessionRequestV1):
     """Immutable local OCI evidence with no caller-selected registry authority."""
 
@@ -664,6 +727,29 @@ class TaskImagePublicationCandidateRequestV1(_TaskImageCurrentSessionRequestV1):
     oci_file_sha256: Digest
     oci_file_size: PositiveSignedBigint
     platform: Literal["linux/amd64", "linux/arm64"]
+
+
+class TaskImagePublicationCandidateRequestV2(TaskImagePublicationCandidateRequestV1):
+    """Explicit same-build metadata, with no upgrade of legacy missing evidence."""
+
+    schema_version: Literal[2] = Field(...)  # type: ignore[assignment]
+    base_resolution: TaskImageBaseResolutionEvidenceV1
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _version_is_integer(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("candidate schema version must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def _metadata_matches_output(self) -> TaskImagePublicationCandidateRequestV2:
+        if (
+            self.base_resolution.output_digest != self.manifest_digest
+            or self.base_resolution.platform != self.platform
+        ):
+            raise ValueError("candidate base-resolution binding is invalid")
+        return self
 
 
 def canonical_authority_bytes(model: StrictTaskImageAuthorityModel) -> bytes:
@@ -731,9 +817,12 @@ __all__ = [
     "SlurmJobId",
     "StrictTaskImageAuthorityModel",
     "TaskImageAttachmentProofV1",
+    "TaskImageBaseResolutionEvidenceV1",
     "TaskImageBootstrapExchangeV1",
     "TaskImageBuildGrantAuthorityV1",
     "TaskImageBuildGrantAuthorityV2",
+    "TaskImageBuildSessionPublicBindingV1",
+    "TaskImageBuildSessionPublicBindingV2",
     "TaskImageBuildSessionV1",
     "TaskImageBuildSessionV2",
     "TaskImageComponent",
@@ -748,6 +837,7 @@ __all__ = [
     "TaskImageProjectionRequestV1",
     "TaskImageProjectionRevocationV1",
     "TaskImagePublicationCandidateRequestV1",
+    "TaskImagePublicationCandidateRequestV2",
     "TaskImageRegistryCredentialRequestV1",
     "TaskImageRegistryCredentialV1",
     "TaskImageSessionRenewalV1",

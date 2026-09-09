@@ -2145,10 +2145,26 @@ class Task(Base):
 
 
 class TaskImageMaterialization(Base):
-    """Immutable per-architecture build prerequisite for one task checksum."""
+    """Per-architecture prerequisite, optionally qualified by a strong manifest."""
 
     __tablename__ = "task_image_materializations"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["ready_publication_operation_id", "id"],
+            [
+                "task_image_publication_jobs.operation_id",
+                "task_image_publication_jobs.materialization_id",
+            ],
+            name="task_image_materializations_ready_publication_fkey",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        CheckConstraint(
+            "ready_publication_operation_id IS NULL OR "
+            "(state = 'ready' AND jsonb_typeof(registry_images) = 'object' "
+            "AND registry_images <> '{}'::jsonb AND ready_at IS NOT NULL)",
+            name="task_image_materializations_ready_publication_check",
+        ),
         CheckConstraint(
             "materialization_key ~ '^[0-9a-f]{64}$'",
             name="task_image_materializations_key_check",
@@ -2156,6 +2172,25 @@ class TaskImageMaterialization(Base):
         CheckConstraint(
             "task_checksum ~ '^[0-9a-f]{64}$'",
             name="task_image_materializations_checksum_check",
+        ),
+        CheckConstraint(
+            "(bundle_content_manifest_sha256 = '' AND NOT "
+            "(task_source_provenance ? 'bundle_content_manifest_sha256')) OR "
+            "(bundle_content_manifest_sha256 ~ '^[0-9a-f]{64}$' AND COALESCE("
+            "jsonb_typeof(task_source_provenance) = 'object' AND "
+            "jsonb_typeof(task_source_provenance -> 'bundle_content_manifest_sha256') = 'string' "
+            "AND task_source_provenance ->> 'bundle_content_manifest_sha256' = "
+            "bundle_content_manifest_sha256, false))",
+            name="task_image_materializations_manifest_binding_check",
+        ),
+        CheckConstraint(
+            "bundle_content_manifest_sha256 = '' OR materialization_key = encode(sha256("
+            "convert_to('task-image-materialization-v2', 'UTF8') || decode('00', 'hex') || "
+            "convert_to(task_id, 'UTF8') || decode('00', 'hex') || "
+            "convert_to(task_checksum, 'UTF8') || decode('00', 'hex') || "
+            "convert_to(cpu_arch, 'UTF8') || decode('00', 'hex') || "
+            "convert_to(bundle_content_manifest_sha256, 'UTF8')), 'hex')",
+            name="task_image_materializations_manifest_key_check",
         ),
         CheckConstraint(
             "cpu_arch IN ('x86_64', 'arm64')",
@@ -2177,6 +2212,7 @@ class TaskImageMaterialization(Base):
             "task_id",
             "task_checksum",
             "cpu_arch",
+            "bundle_content_manifest_sha256",
             name="task_image_materializations_task_arch_uidx",
         ),
         Index(
@@ -2203,6 +2239,9 @@ class TaskImageMaterialization(Base):
     materialization_key: Mapped[str] = mapped_column(String(64), nullable=False)
     task_id: Mapped[str] = mapped_column(Text, nullable=False)
     task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    bundle_content_manifest_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default=text("''"), default="",
+    )
     cpu_arch: Mapped[str] = mapped_column(String(16), nullable=False)
     task_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     task_source: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -2250,6 +2289,10 @@ class TaskImageMaterialization(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
         default=dict,
+    )
+    ready_publication_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=True,
     )
     registry_image_history: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB,
@@ -3037,6 +3080,52 @@ class TaskImageMaterializationAttempt(Base):
     )
 
 
+class TaskImageAttemptRetention(Base):
+    """Observation until retirement, then immutable exact-attempt evidence.
+
+    This record is not proof of reference eligibility or registry quiescence.
+    Alembic installs guards against rewriting retired evidence or moving its
+    observation clock backward. Maintenance receipts are a separate lifecycle.
+    """
+
+    __tablename__ = "task_image_attempt_retention"
+    __table_args__ = (
+        CheckConstraint(
+            "isfinite(observed_at) AND (unreferenced_since IS NULL OR "
+            "(isfinite(unreferenced_since) AND unreferenced_since <= observed_at))",
+            name="task_image_attempt_retention_time_check",
+        ),
+        CheckConstraint(
+            "(retired_at IS NULL AND canonical_inventory IS NULL AND inventory_sha256 IS NULL) OR "
+            "(retired_at IS NOT NULL AND unreferenced_since IS NOT NULL "
+            "AND canonical_inventory IS NOT NULL AND inventory_sha256 IS NOT NULL "
+            "AND retired_at = observed_at AND retired_at >= unreferenced_since "
+            "AND octet_length(canonical_inventory) BETWEEN 1 AND 131072 "
+            "AND inventory_sha256 = encode(sha256(canonical_inventory), 'hex'))",
+            name="task_image_attempt_retention_shape_check",
+        ),
+        Index(
+            "task_image_attempt_retention_pending_idx", "unreferenced_since", "attempt_id",
+            postgresql_where=text("retired_at IS NULL"),
+        ),
+        Index(
+            "task_image_attempt_retention_retired_idx", "retired_at", "attempt_id",
+            postgresql_where=text("retired_at IS NOT NULL"),
+        ),
+    )
+
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_image_materialization_attempts.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    unreferenced_since: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    canonical_inventory: Mapped[bytes | None] = mapped_column(LargeBinary)
+    inventory_sha256: Mapped[str | None] = mapped_column(String(64))
+
+
 class TaskImageMaterializationOperationEvent(Base):
     """One bounded idempotent transition result for a session-owned lease."""
 
@@ -3330,6 +3419,94 @@ class TaskImageRegistryCredentialGeneration(Base):
     recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
+class TaskImagePublicationJob(Base):
+    """Immutable attempt input with independently renewable worker ownership."""
+
+    __tablename__ = "task_image_publication_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "materialization_id",
+            name="task_image_publication_jobs_materialization_uidx",
+        ),
+        UniqueConstraint(
+            "materialization_attempt_id", name="task_image_publication_jobs_attempt_uidx"
+        ),
+        ForeignKeyConstraint(
+            [
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+                "grant_id",
+            ],
+            [
+                "task_image_materialization_attempts." + name
+                for name in (
+                    "id",
+                    "materialization_id",
+                    "attempt_number",
+                    "lease_epoch",
+                    "builder_id",
+                    "grant_id",
+                )
+            ],
+            name="task_image_publication_jobs_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "operation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND attempt_number BETWEEN 1 AND 9007199254740991 AND lease_epoch BETWEEN 1 AND 9007199254740991 AND worker_generation BETWEEN 0 AND 9007199254740991",
+            name="task_image_publication_jobs_identity_check",
+        ),
+        CheckConstraint(
+            "octet_length(canonical_snapshot) BETWEEN 1 AND 4194304 AND snapshot_sha256 = encode(sha256(canonical_snapshot), 'hex')",
+            name="task_image_publication_jobs_snapshot_check",
+        ),
+        CheckConstraint(
+            "isfinite(created_at) AND isfinite(deadline) AND isfinite(available_at) AND deadline > created_at AND deadline <= created_at + interval '7200 seconds' AND available_at >= created_at AND (worker_expires_at IS NULL OR (isfinite(worker_expires_at) AND worker_expires_at <= deadline))",
+            name="task_image_publication_jobs_time_check",
+        ),
+        CheckConstraint(
+            "(state = 'running' AND worker_id IS NOT NULL AND worker_id <> '00000000-0000-0000-0000-000000000000'::uuid AND worker_generation > 0 AND worker_expires_at IS NOT NULL AND failure_code IS NULL) OR (state IN ('queued', 'completed') AND worker_id IS NULL AND worker_expires_at IS NULL AND failure_code IS NULL) OR (state = 'failed' AND worker_id IS NULL AND worker_expires_at IS NULL AND failure_code IS NOT NULL AND failure_code IN ('integrity', 'authority_lost', 'verification_failed', 'deadline'))",
+            name="task_image_publication_jobs_state_check",
+        ),
+        Index("task_image_publication_jobs_work_idx", "state", "available_at", "deadline"),
+        CheckConstraint(
+            "(state = 'completed' AND completed_at IS NOT NULL AND canonical_receipt IS NOT NULL "
+            "AND receipt_sha256 IS NOT NULL AND isfinite(completed_at) "
+            "AND completed_at >= created_at AND completed_at < deadline "
+            "AND octet_length(canonical_receipt) BETWEEN 1 AND 2048 "
+            "AND receipt_sha256 = encode(sha256(canonical_receipt), 'hex')) OR "
+            "(state <> 'completed' AND completed_at IS NULL AND canonical_receipt IS NULL AND receipt_sha256 IS NULL)",
+            name="task_image_publication_jobs_completion_check",
+        ),
+    )
+
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    canonical_snapshot: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    deadline: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    worker_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    worker_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    worker_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    canonical_receipt: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class TaskImagePublicationCandidate(Base):
     """Inert immutable upload evidence awaiting independent verification."""
 
@@ -3384,6 +3561,12 @@ class TaskImagePublicationCandidate(Base):
             "materialization_attempt_id",
             "component",
             name="task_image_publication_candidates_attempt_component_uidx",
+        ),
+        UniqueConstraint(
+            "candidate_id",
+            "materialization_attempt_id",
+            "component",
+            name="task_image_publication_candidates_envelope_binding_uidx",
         ),
         CheckConstraint(
             "candidate_id <> '00000000-0000-0000-0000-000000000000'::uuid "
@@ -3448,6 +3631,130 @@ class TaskImagePublicationCandidate(Base):
     response_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     response_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class TaskImagePublicationState(Base):
+    """Lock singleton first, before keys and all other publication/start authority.
+
+    Zero keyset version is deliberately inactive. This row is not evidence of
+    distribution; a future authenticated adapter must prove current membership.
+    """
+
+    __tablename__ = "task_image_publication_state"
+    __table_args__ = (
+        CheckConstraint("singleton_id = 1", name="task_image_publication_state_singleton_check"),
+        CheckConstraint(
+            "revocation_epoch BETWEEN 0 AND 9007199254740991 "
+            "AND keyset_version BETWEEN 0 AND 9007199254740991",
+            name="task_image_publication_state_counters_check",
+        ),
+    )
+    singleton_id: Mapped[int] = mapped_column(Integer, primary_key=True, server_default=text("1"))
+    revocation_epoch: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    keyset_version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+
+
+class TaskImagePublicationKey(Base):
+    """Retained public identity; migrations enforce immutable and monotonic fields."""
+
+    __tablename__ = "task_image_publication_keys"
+    __table_args__ = (
+        CheckConstraint(
+            "key_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$' AND octet_length(public_key) = 32",
+            name="task_image_publication_keys_identity_check",
+        ),
+        CheckConstraint(
+            "(status = 'active' AND retired_at IS NULL AND revoked_at IS NULL) OR "
+            "(status = 'verify_only' AND retired_at IS NOT NULL AND revoked_at IS NULL) OR "
+            "(status = 'revoked' AND revoked_at IS NOT NULL)",
+            name="task_image_publication_keys_lifecycle_check",
+        ),
+        CheckConstraint(
+            "isfinite(activated_at) AND date_trunc('second', activated_at) = activated_at "
+            "AND (retired_at IS NULL OR (isfinite(retired_at) AND retired_at >= activated_at "
+            "AND date_trunc('second', retired_at) = retired_at)) "
+            "AND (revoked_at IS NULL OR (isfinite(revoked_at) AND revoked_at >= activated_at "
+            "AND date_trunc('second', revoked_at) = revoked_at)) "
+            "AND (retired_at IS NULL OR revoked_at IS NULL OR revoked_at >= retired_at)",
+            name="task_image_publication_keys_interval_check",
+        ),
+    )
+    key_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    retired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class TaskImagePublicationEnvelope(Base):
+    """Immutable signed audit bytes, distinct from live artifact retention pins.
+
+    Closed canonical schema and Ed25519 verification belong to the application
+    boundary; these database constraints preserve exact stored bytes and binds.
+    """
+
+    __tablename__ = "task_image_publication_envelopes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["candidate_id", "materialization_attempt_id", "component"],
+            [
+                "task_image_publication_candidates.candidate_id",
+                "task_image_publication_candidates.materialization_attempt_id",
+                "task_image_publication_candidates.component",
+            ],
+            name="task_image_publication_envelopes_candidate_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["key_id"],
+            ["task_image_publication_keys.key_id"],
+            name="task_image_publication_envelopes_key_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("candidate_id", name="task_image_publication_envelopes_candidate_uidx"),
+        UniqueConstraint(
+            "materialization_attempt_id",
+            "component",
+            name="task_image_publication_envelopes_attempt_component_uidx",
+        ),
+        CheckConstraint(
+            "envelope_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND distributed_keyset_version BETWEEN 1 AND 9007199254740991 "
+            "AND revocation_epoch BETWEEN 0 AND 9007199254740991",
+            name="task_image_publication_envelopes_binding_check",
+        ),
+        CheckConstraint(
+            "octet_length(canonical_statement) BETWEEN 1 AND 65536 "
+            "AND statement_sha256 = encode(sha256(canonical_statement), 'hex') "
+            "AND algorithm = 'Ed25519' AND signature ~ '^[A-Za-z0-9_-]{86}$'",
+            name="task_image_publication_envelopes_bytes_check",
+        ),
+        CheckConstraint(
+            "isfinite(issued_at) AND isfinite(recorded_at) "
+            "AND date_trunc('second', issued_at) = issued_at "
+            "AND recorded_at >= issued_at - interval '5 seconds'",
+            name="task_image_publication_envelopes_time_check",
+        ),
+        Index("task_image_publication_envelopes_key_idx", "key_id", "envelope_id"),
+    )
+    envelope_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    candidate_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    component: Mapped[str] = mapped_column(String(136), nullable=False)
+    key_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_statement: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    statement_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(16), nullable=False)
+    signature: Mapped[str] = mapped_column(String(86), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    distributed_keyset_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class TaskImagePublicationEvidence(Base):

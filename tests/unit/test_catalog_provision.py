@@ -99,6 +99,16 @@ async def test_postgres_catalog_store_batches_large_task_upserts(
         async def dispose(self) -> None:
             self.disposed = True
 
+    class FakeResult:
+        def __init__(self, values: list[TaskRow]) -> None:
+            self.values = values
+
+        def scalars(self) -> FakeResult:
+            return self
+
+        def all(self) -> list[TaskRow]:
+            return self.values
+
     class FakeSession:
         def __init__(self) -> None:
             self.execute_count = 0
@@ -110,8 +120,14 @@ async def test_postgres_catalog_store_batches_large_task_upserts(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def execute(self, _statement: object) -> None:
+        async def execute(self, _statement: object) -> FakeResult:
+            start = self.execute_count * POSTGRES_CATALOG_UPSERT_BATCH_SIZE
             self.execute_count += 1
+            return FakeResult(
+                sorted(rows.tasks, key=lambda row: row.id)[
+                    start : start + POSTGRES_CATALOG_UPSERT_BATCH_SIZE
+                ]
+            )
 
         async def commit(self) -> None:
             self.commits += 1

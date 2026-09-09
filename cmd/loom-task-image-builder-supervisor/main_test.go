@@ -19,12 +19,12 @@ func TestRunRejectsInheritedEnvironmentAuthority(t *testing.T) {
 	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
 
 	previousConfigPath := compiledConfigPath
-	previousRelease := compiledReleaseSHA256
+	previousRelease := supervisorReleaseIdentity
 	compiledConfigPath = configPath
-	compiledReleaseSHA256 = release
+	supervisorReleaseIdentity = func() (string, error) { return release, nil }
 	t.Cleanup(func() {
 		compiledConfigPath = previousConfigPath
-		compiledReleaseSHA256 = previousRelease
+		supervisorReleaseIdentity = previousRelease
 	})
 
 	err := run([]string{"--grant-id", "11111111-1111-4111-8111-111111111111"}, []string{"UNSAFE_KEY=value"})
@@ -49,11 +49,11 @@ func TestRunConstructsEnvironmentFromProjectedQuotaDirectory(t *testing.T) {
 	}
 
 	previousConfigPath := compiledConfigPath
-	previousRelease := compiledReleaseSHA256
+	previousRelease := supervisorReleaseIdentity
 	previousFactory := guardClientFactory
 	previousApply := applyProcessEnvironment
 	compiledConfigPath = configPath
-	compiledReleaseSHA256 = release
+	supervisorReleaseIdentity = func() (string, error) { return release, nil }
 	var applied []string
 	guardClientFactory = func(cfg Config) TaskImageGuard {
 		return supervisorProjectClientFunc(func(ctx context.Context, grantID string) (*AllocationCapabilities, error) {
@@ -84,7 +84,7 @@ func TestRunConstructsEnvironmentFromProjectedQuotaDirectory(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		compiledConfigPath = previousConfigPath
-		compiledReleaseSHA256 = previousRelease
+		supervisorReleaseIdentity = previousRelease
 		guardClientFactory = previousFactory
 		applyProcessEnvironment = previousApply
 	})
@@ -147,6 +147,21 @@ func TestProductionOrchestratorKeepsDisabledPublicationHandoffInert(t *testing.T
 
 type supervisorProjectClientFunc func(context.Context, string) (*AllocationCapabilities, error)
 
+func TestRunRejectsUntrustedReleaseBeforeGuardOrEnvironmentEffects(t *testing.T) {
+	previousIdentity, previousFactory, previousApply := supervisorReleaseIdentity, guardClientFactory, applyProcessEnvironment
+	supervisorReleaseIdentity = func() (string, error) { return "", errors.New("untrusted installed release") }
+	guardClientFactory = func(Config) TaskImageGuard { t.Fatal("guard constructed before release validation"); return nil }
+	applyProcessEnvironment = func([]string) error { t.Fatal("environment modified before release validation"); return nil }
+	t.Cleanup(func() {
+		supervisorReleaseIdentity = previousIdentity
+		guardClientFactory = previousFactory
+		applyProcessEnvironment = previousApply
+	})
+	if err := run([]string{"--grant-id", testGrantID}, nil); err == nil || !strings.Contains(err.Error(), "untrusted installed release") {
+		t.Fatalf("startup failure lost: %v", err)
+	}
+}
+
 func (fn supervisorProjectClientFunc) Project(ctx context.Context, grantID string) (*AllocationCapabilities, error) {
 	return fn(ctx, grantID)
 }
@@ -172,6 +187,10 @@ func (fn supervisorProjectClientFunc) RegistryCredential(context.Context, Regist
 }
 
 func (fn supervisorProjectClientFunc) PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+	return nil, nil
+}
+
+func (fn supervisorProjectClientFunc) PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
 	return nil, nil
 }
 

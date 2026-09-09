@@ -22,8 +22,9 @@ const (
 var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 type BuiltComponent struct {
-	Name   string
-	Output OCIOutput
+	Name           string
+	Output         OCIOutput
+	BaseResolution BaseResolutionEvidence
 }
 
 type BuiltComponentSet struct {
@@ -168,38 +169,64 @@ func (h *RegistryPublicationHandoff) Accept(context.Context, BuiltComponentSet) 
 }
 
 func (h *RegistryPublicationHandoff) AcceptWithCredentials(ctx context.Context, set BuiltComponentSet, source *PublicationCredentialSource) error {
-	if h == nil || h.uploader == nil || source == nil || ctx == nil {
-		return errors.New("registry publication handoff invalid")
-	}
-	if err := validatePublicationBuiltSet(set); err != nil {
+	if _, err := h.UploadWithCredentials(ctx, set, source); err != nil {
 		return err
 	}
+	// Preserve the inactive legacy handoff until the supervisor's publication
+	// liveness/receipt lifecycle is composed. Upload alone never means ready.
+	return ErrPublicationVerificationUnavailable
+}
+
+// UploadWithCredentials returns complete, owned V2 acknowledgements as inputs
+// to verification, not completion or execution authority.
+func (h *RegistryPublicationHandoff) UploadWithCredentials(ctx context.Context, set BuiltComponentSet, source *PublicationCredentialSource) ([]PublicationCandidateV2Acknowledgement, error) {
+	if h == nil || h.uploader == nil || source == nil || ctx == nil {
+		return nil, errors.New("registry publication handoff invalid")
+	}
+	if err := validatePublicationBuiltSet(set); err != nil {
+		return nil, err
+	}
+	acknowledgements := make([]PublicationCandidateV2Acknowledgement, 0, len(set.Components))
+	identities := make([]publicationCandidateIdentity, 0, len(set.Components))
 	for _, component := range set.Components {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		adapter := publicationUploadCredentialSource{
 			set:       set,
 			component: component,
 			source:    source,
 		}
-		if _, err := h.uploader.Upload(ctx, component.Output, &adapter); err != nil {
+		manifest, err := h.uploader.Upload(ctx, component.Output, &adapter)
+		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
+				return nil, ctxErr
 			}
-			return errors.New("registry publication upload failed")
+			return nil, errors.New("registry publication upload failed")
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
+		if adapter.acknowledgement == nil || manifest != adapter.manifest {
+			return nil, errors.New("registry publication candidate acknowledgement missing")
+		}
+		acknowledgements = append(acknowledgements, *adapter.acknowledgement)
+		identities = append(identities, publicationCandidateIdentity{
+			CandidateID: adapter.acknowledgement.CandidateID, Component: component.Name,
+		})
 	}
-	return ErrPublicationVerificationUnavailable
+	if _, err := publicationCandidateSetSHA256(identities); err != nil {
+		return nil, errors.New("registry publication candidate set invalid")
+	}
+	return acknowledgements, nil
 }
 
 type publicationUploadCredentialSource struct {
-	set       BuiltComponentSet
-	component BuiltComponent
-	source    *PublicationCredentialSource
+	set             BuiltComponentSet
+	component       BuiltComponent
+	source          *PublicationCredentialSource
+	acknowledgement *PublicationCandidateV2Acknowledgement
+	manifest        UploadedManifest
 }
 
 func (s *publicationUploadCredentialSource) Next(ctx context.Context, predecessor *RegistryCredential) (*RegistryCredential, error) {
@@ -210,7 +237,7 @@ func (s *publicationUploadCredentialSource) Next(ctx context.Context, predecesso
 }
 
 func (s *publicationUploadCredentialSource) UploadSucceeded(ctx context.Context, manifest UploadedManifest, credential *RegistryCredential) error {
-	if s == nil || s.source == nil || credential == nil {
+	if s == nil || s.source == nil || credential == nil || s.acknowledgement != nil {
 		return errors.New("registry publication candidate adapter invalid")
 	}
 	expectedRepository, err := publicationRepositoryForOutput(s.set.AttemptID, s.component)
@@ -226,8 +253,16 @@ func (s *publicationUploadCredentialSource) UploadSucceeded(ctx context.Context,
 		credential.AttemptID != s.set.AttemptID {
 		return errors.New("registry publication manifest acknowledgement invalid")
 	}
-	_, err = s.source.Record(ctx, s.set, credential, s.component)
-	return err
+	ack, err := s.source.Record(ctx, s.set, credential, s.component)
+	if err != nil {
+		return err
+	}
+	// Record validated every V2 binding. Own its value before the synchronous
+	// uploader callback returns; no adapter-returned mutable pointer escapes.
+	owned := *ack
+	s.acknowledgement = &owned
+	s.manifest = manifest
+	return nil
 }
 
 func (s *publicationUploadCredentialSource) Close(credential *RegistryCredential) {
@@ -254,12 +289,12 @@ func validatePublicationBuiltSet(set BuiltComponentSet) error {
 		if !componentPattern.MatchString(component.Name) {
 			return errors.New("registry publication component invalid")
 		}
-		if index == 0 {
-			if component.Name != "task" {
+		if component.Name == "task" {
+			if index != 0 {
 				return errors.New("registry publication component order invalid")
 			}
 		} else {
-			if component.Name == "task" || component.Name <= previousSidecar {
+			if previousSidecar != "" && component.Name <= previousSidecar {
 				return errors.New("registry publication component order invalid")
 			}
 			previousSidecar = component.Name

@@ -240,6 +240,7 @@ def _verify_inert_paths(root: Path) -> str:
     forbidden = (
         Path("etc/loom/task-image-builder/activation-v1.json"),
         Path("etc/loom/task-image-builder/supervisor-config.json"),
+        Path("etc/loom-task-image-builder/supervisor-config.json"),
         Path("opt/loom-task-image-builder-provider/current"),
         Path("run/loom-task-image-builder-provider/supervisor.sock"),
         Path("sys/fs/bpf/loom-task-image-builder"),

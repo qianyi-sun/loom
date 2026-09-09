@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -40,8 +41,20 @@ type BuildComponent struct {
 	Dockerfile string
 }
 
+// BuildResult keeps archive contents separate from same-solve evidence while
+// remaining comparable for immutable orchestration snapshots.
+type BuildResult struct {
+	Output         OCIOutput
+	BaseResolution BaseResolutionEvidence
+}
+
 type Executor struct {
-	config Config
+	buildMu           sync.Mutex
+	closing           bool
+	activeBuildCancel context.CancelFunc
+	activeBuildDone   chan struct{}
+	closeDone         chan struct{}
+	config            Config
 	// capabilities contains borrowed guard-transferred descriptors. Executor uses
 	// these FDs for exact placement/cleanup but never closes caller-owned rights.
 	capabilities    *AllocationCapabilities
@@ -50,6 +63,8 @@ type Executor struct {
 	buildkitAddress string
 	daemon          *Process
 	started         bool
+	input           *os.File // Owned duplicate; lent only to the context-sending buildctl child.
+	inputRequired   bool
 }
 
 const (
@@ -69,6 +84,14 @@ var (
 	executorLaunchInCgroup         = LaunchInCgroup
 	executorRunBuildctl            = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) error {
 		process, err := LaunchInCgroup(ctx, executable, argv, env, cgroupFD)
+		if err != nil {
+			return err
+		}
+		defer process.Close()
+		return process.Wait()
+	}
+	executorRunBuildctlWithContext = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD, inputFD int) error {
+		process, err := LaunchInCgroupWithContext(ctx, executable, argv, env, cgroupFD, inputFD)
 		if err != nil {
 			return err
 		}
@@ -120,6 +143,7 @@ func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Exe
 		return nil, err
 	}
 	address := "unix://" + socketPath
+	plan.Components = append([]BuildComponent(nil), plan.Components...)
 	return &Executor{
 		config:          cfg,
 		capabilities:    caps,
@@ -129,9 +153,36 @@ func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Exe
 	}, nil
 }
 
+// NewExecutorWithContext retains its own descriptor for the already verified,
+// private input tree. The caller owns input content cleanup and must finish all
+// Build calls and Close before removing that content. It never downloads data
+// or treats an arbitrary descriptor as content verification.
+func NewExecutorWithContext(cfg Config, caps *AllocationCapabilities, plan BuildPlan, inputFD int) (*Executor, error) {
+	input, err := duplicatePrivateInputDirectory(inputFD)
+	if err != nil {
+		return nil, err
+	}
+	executor, err := NewExecutor(cfg, caps, plan)
+	if err != nil {
+		input.Close()
+		return nil, err
+	}
+	inputStat, err := input.Stat()
+	jobStat, jobErr := validateDirectoryDescriptor(caps.JobDirectoryFD)
+	if err != nil || jobErr != nil || (inputStat.Sys().(*syscall.Stat_t).Dev == jobStat.Dev && inputStat.Sys().(*syscall.Stat_t).Ino == jobStat.Ino) {
+		input.Close()
+		return nil, errors.New("build input must be separate from runtime state")
+	}
+	executor.input, executor.inputRequired = input, true
+	return executor, nil
+}
+
 func (e *Executor) Start(ctx context.Context) (err error) {
 	if e == nil {
 		return errors.New("executor unavailable")
+	}
+	if e.inputRequired && e.input == nil {
+		return errors.New("executor input closed")
 	}
 	if e.started {
 		return errors.New("executor already started")
@@ -227,19 +278,44 @@ func (e *Executor) Start(ctx context.Context) (err error) {
 	return nil
 }
 
-func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOutput, err error) {
-	if e == nil || !e.started {
-		return OCIOutput{}, errors.New("executor not started")
+func (e *Executor) Build(ctx context.Context, component BuildComponent) (result BuildResult, err error) {
+	if e == nil {
+		return BuildResult{}, errors.New("executor not started")
 	}
+	e.buildMu.Lock()
+	if e.closing || !e.started || e.activeBuildDone != nil {
+		e.buildMu.Unlock()
+		return BuildResult{}, errors.New("executor not started")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	e.activeBuildCancel, e.activeBuildDone = cancel, done
+	e.buildMu.Unlock()
+	// Registered before other deferred cleanup: completion means every input
+	// consumer and build-local cleanup has finished, not just child process exit.
+	defer func() {
+		cancel()
+		e.buildMu.Lock()
+		e.activeBuildCancel, e.activeBuildDone = nil, nil
+		close(done)
+		e.buildMu.Unlock()
+	}()
 	if err := validateBuildComponent(component); err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
-	if !e.planContainsComponent(component.Name) {
-		return OCIOutput{}, errors.New("build component not in plan")
+	if !e.planContainsComponent(component) {
+		return BuildResult{}, errors.New("build component not in plan")
+	}
+	inputRoot := e.jobRoot
+	if e.inputRequired {
+		if e.input == nil {
+			return BuildResult{}, errors.New("executor input closed")
+		}
+		inputRoot = "/proc/self/fd/3"
 	}
 	outputDir := filepath.Join(e.jobRoot, "oci")
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
 	}
 	outputPath := filepath.Join(outputDir, component.Name+".tar")
 	cleanupOutput := true
@@ -250,35 +326,238 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (_ OCIOu
 			}
 		}
 	}()
+	captureDir, captureFD, err := createBuildCaptureDirectory(e.capabilities.JobDirectoryFD, e.jobRoot)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	defer func() {
+		if cleanupErr := cleanupBuildCapture(e.capabilities.JobDirectoryFD, captureFD, filepath.Base(captureDir)); cleanupErr != nil {
+			result = BuildResult{}
+			cleanupOutput = true
+			err = errors.Join(err, fmt.Errorf("cleanup build capture: %w", cleanupErr))
+		}
+	}()
+	refPath := filepath.Join(captureDir, "solve-ref")
+	metadataPath := filepath.Join(captureDir, "metadata.json")
 	platform := "linux/" + e.plan.Architecture
 	argv := []string{
 		"--addr", e.buildkitAddress,
 		"build",
 		"--no-cache",
 		"--frontend", "dockerfile.v0",
-		"--local", "context=" + filepath.Join(e.jobRoot, component.ContextDir),
-		"--local", "dockerfile=" + filepath.Join(e.jobRoot, filepath.Dir(component.Dockerfile)),
+		"--local", "context=" + filepath.Join(inputRoot, component.ContextDir),
+		"--local", "dockerfile=" + filepath.Join(inputRoot, filepath.Dir(component.Dockerfile)),
 		"--opt", "filename=" + filepath.Base(component.Dockerfile),
 		"--opt", "platform=" + platform,
+		"--opt", "loom.capture-base-resolution=v1",
+		"--ref-file", refPath,
+		"--metadata-file", metadataPath,
 		"--output", "type=oci,dest=" + outputPath,
 	}
 	env := []string{"LANG=C.UTF-8", "TZ=UTC", "BUILDKIT_HOST=" + e.buildkitAddress}
-	if err := executorRunBuildctl(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD); err != nil {
-		return OCIOutput{}, err
+	var buildErr error
+	if e.inputRequired {
+		buildErr = executorRunBuildctlWithContext(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD, int(e.input.Fd()))
+	} else {
+		buildErr = executorRunBuildctl(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD)
+	}
+	if buildErr != nil {
+		return BuildResult{}, buildErr
 	}
 	output, err := executorValidateOCIOutput(outputPath, platform)
 	if err != nil {
-		return OCIOutput{}, err
+		return BuildResult{}, err
+	}
+	if err := validateBuildCaptureDirectory(captureFD); err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
+	if err := validateBuildCapturePath(e.capabilities.JobDirectoryFD, captureFD, filepath.Base(captureDir)); err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
+	ref, err := readBoundedBuildCapture(captureFD, "solve-ref", 128)
+	if err != nil || len(ref) == 0 {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
+	metadata, err := readBoundedBuildCapture(captureFD, "metadata.json", maxBuildMetadataBytes)
+	if err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
+	}
+	evidence, err := parseBaseResolutionMetadata(metadata, string(ref), platform, output.TopLevelDigest)
+	if err != nil {
+		return BuildResult{}, errBaseResolutionInvalid
 	}
 	cleanupOutput = false
-	return output, nil
+	return BuildResult{Output: output, BaseResolution: evidence}, nil
+}
+
+func createBuildCaptureDirectory(jobFD int, jobRoot string) (string, int, error) {
+	id, err := newUUID()
+	if err != nil {
+		return "", -1, err
+	}
+	name := ".build-capture-" + id
+	if err := syscall.Mkdirat(jobFD, name, 0o700); err != nil {
+		return "", -1, err
+	}
+	path := filepath.Join(jobRoot, name)
+	fd, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		// Without a pinned descriptor we cannot safely clean a replaced pathname.
+		return "", -1, err
+	}
+	if err := validateBuildCaptureDirectory(fd); err != nil {
+		return "", -1, errors.Join(err, cleanupBuildCapture(jobFD, fd, name))
+	}
+	return path, fd, nil
+}
+
+func validateBuildCaptureDirectory(fd int) error {
+	if fd < 0 {
+		return errors.New("build capture directory invalid")
+	}
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(fd, &statValue); err != nil ||
+		statValue.Mode&syscall.S_IFMT != syscall.S_IFDIR ||
+		os.FileMode(statValue.Mode).Perm() != 0o700 ||
+		statValue.Uid != uint32(os.Geteuid()) {
+		if err != nil {
+			return err
+		}
+		return errors.New("build capture directory invalid")
+	}
+	return nil
+}
+
+func readBoundedBuildCapture(dirFD int, name string, maxBytes int) ([]byte, error) {
+	if dirFD < 0 || (name != "solve-ref" && name != "metadata.json") || maxBytes <= 0 {
+		return nil, errBaseResolutionInvalid
+	}
+	fd, err := syscall.Openat(dirFD, name, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errBaseResolutionInvalid
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		syscall.Close(fd)
+		return nil, errBaseResolutionInvalid
+	}
+	defer file.Close()
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(fd, &statValue); err != nil ||
+		statValue.Mode&syscall.S_IFMT != syscall.S_IFREG ||
+		statValue.Size < 0 || statValue.Size > int64(maxBytes) {
+		return nil, errBaseResolutionInvalid
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
+	if err != nil || len(payload) > maxBytes {
+		return nil, errBaseResolutionInvalid
+	}
+	return payload, nil
+}
+
+func validateBuildCapturePath(jobFD, captureFD int, name string) error {
+	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		return errors.New("build capture directory identity changed")
+	}
+	namedFD, err := syscall.Openat(jobFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return errors.New("build capture directory identity changed")
+	}
+	defer syscall.Close(namedFD)
+	var pinned, named syscall.Stat_t
+	if syscall.Fstat(captureFD, &pinned) != nil || syscall.Fstat(namedFD, &named) != nil ||
+		pinned.Dev != named.Dev || pinned.Ino != named.Ino {
+		return errors.New("build capture directory identity changed")
+	}
+	return nil
+}
+
+func cleanupBuildCapture(jobFD, captureFD int, name string) (result error) {
+	directory := os.NewFile(uintptr(captureFD), "build capture directory")
+	if directory == nil {
+		return errors.New("build capture cleanup descriptor invalid")
+	}
+	defer func() { result = errors.Join(result, directory.Close()) }()
+	var errs []error
+	// The kernel procfd link anchors every recursive removal to the pinned
+	// directory, even if its original name has been moved or replaced. Never
+	// recursively remove through the original, now possibly foreign, pathname.
+	pinnedPath := filepath.Join("/proc/self/fd", strconv.Itoa(captureFD))
+	for batches := 0; ; batches++ {
+		if batches == 64 {
+			errs = append(errs, errors.New("build capture cleanup entry bound exceeded"))
+			break
+		}
+		names, readErr := directory.Readdirnames(64)
+		for _, leaf := range names {
+			if err := os.RemoveAll(filepath.Join(pinnedPath, leaf)); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				errs = append(errs, readErr)
+			}
+			break
+		}
+	}
+	if err := validateBuildCapturePath(jobFD, captureFD, name); err != nil {
+		// Contents were cleaned through the FD, but an unnamed/moved directory
+		// still requires allocation cleanup. Surface that residual and fail closed.
+		errs = append(errs, err)
+	} else if err := os.Remove(filepath.Join("/proc/self/fd", strconv.Itoa(jobFD), name)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (e *Executor) Close(ctx context.Context) error {
-	if e == nil || e.daemon == nil {
+	if e == nil {
 		return nil
 	}
-	return e.stopDaemon(ctx)
+	for {
+		e.buildMu.Lock()
+		if e.closeDone == nil {
+			e.closeDone = make(chan struct{})
+			break
+		}
+		closing := e.closeDone
+		e.buildMu.Unlock()
+		select {
+		case <-closing:
+		case <-ctx.Done():
+			return errors.Join(errCleanupAmbiguous, errors.New("executor close owner unavailable"))
+		}
+	}
+	e.closing = true
+	cancel, done := e.activeBuildCancel, e.activeBuildDone
+	e.buildMu.Unlock()
+	defer func() {
+		e.buildMu.Lock()
+		close(e.closeDone)
+		e.closeDone = nil
+		e.buildMu.Unlock()
+	}()
+	if cancel != nil {
+		cancel()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			// Do not close descriptors or remove state while Build may still
+			// consume it. The allocation owner retains ambiguous cleanup.
+			return errors.Join(errCleanupAmbiguous, errors.New("active build did not join"))
+		}
+	}
+	var err error
+	if e.daemon != nil {
+		err = e.stopDaemon(ctx)
+	}
+	if e.input != nil {
+		err = errors.Join(err, e.input.Close())
+		e.input = nil
+	}
+	e.started = false
+	return err
 }
 
 func (e *Executor) waitForBuildkitReady(ctx context.Context) error {
@@ -840,15 +1119,18 @@ func validateBuildPlan(plan BuildPlan) error {
 }
 
 func validateBuildComponent(component BuildComponent) error {
-	if component.Name == "" {
+	if component.Name == "" || len(component.Name) > 136 {
 		return errors.New("build component name invalid")
 	}
-	for _, r := range component.Name {
-		if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
-			return errors.New("build component name invalid")
+	if !componentPattern.MatchString(component.Name) {
+		// Preserve legacy executor-only names; authority claims use task/sidecar.
+		for _, r := range component.Name {
+			if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
+				return errors.New("build component name invalid")
+			}
 		}
 	}
-	if err := validateRelativeBundlePath(component.ContextDir); err != nil {
+	if err := validateRelativeBundlePath(component.ContextDir); component.ContextDir != "." && err != nil {
 		return err
 	}
 	if err := validateRelativeBundlePath(component.Dockerfile); err != nil {
@@ -857,9 +1139,9 @@ func validateBuildComponent(component BuildComponent) error {
 	return nil
 }
 
-func (e *Executor) planContainsComponent(name string) bool {
+func (e *Executor) planContainsComponent(expected BuildComponent) bool {
 	for _, component := range e.plan.Components {
-		if component.Name == name {
+		if component == expected {
 			return true
 		}
 	}

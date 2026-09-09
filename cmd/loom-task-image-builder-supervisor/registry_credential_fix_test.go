@@ -43,10 +43,9 @@ func TestRegistryCredentialFixTimesAndJSON(t *testing.T) {
 				t.Fatalf("accepted=%v, want %v", err == nil, tc.ok)
 			}
 			if c != nil {
-				token := c.BearerToken
 				c.Close()
 				c.Close()
-				if !bytes.Equal(token, make([]byte, len(token))) || !secret.closed {
+				if c.BearerToken != nil || secret.data != nil || !secret.closed {
 					t.Fatal("token not zeroized")
 				}
 			}
@@ -87,12 +86,13 @@ type fixGuard struct {
 	renewErr, heartbeatFailure, transportErr error
 	mutate                                   func(*registryCredentialMutation)
 	ackMutate                                func(*PublicationCandidateAcknowledgement)
+	v2AckMutate                              func(*PublicationCandidateV2Acknowledgement)
 	renewMutate                              func(*SessionEnvelope)
 	heartbeatHook                            func(*SecretBuffer)
 	credentialHook                           func(*SecretBuffer)
 	predecessor                              *RegistryCredential
 	lastSecret                               *SecretBuffer
-	request                                  PublicationCandidateRequest
+	request                                  PublicationCandidateV2Request
 	generation                               int
 }
 
@@ -149,11 +149,14 @@ func (g *fixGuard) RegistryCredential(_ context.Context, r RegistryCredentialReq
 	g.lastSecret = &SecretBuffer{data: []byte(validRegistryCredentialJSON(m))}
 	return g.lastSecret, nil
 }
-func (g *fixGuard) PublicationCandidate(ctx context.Context, r PublicationCandidateRequest, current *SecretBuffer) (*PublicationCandidateAcknowledgement, error) {
+func (g *fixGuard) PublicationCandidateV2(ctx context.Context, r PublicationCandidateV2Request, current *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error) {
 	g.request = r
-	ack, err := g.credentialSourceGuard.PublicationCandidate(ctx, r, current)
+	ack, err := g.credentialSourceGuard.PublicationCandidateV2(ctx, r, current)
 	if g.ackMutate != nil {
-		g.ackMutate(ack)
+		g.ackMutate(&ack.PublicationCandidateAcknowledgement)
+	}
+	if g.v2AckMutate != nil {
+		g.v2AckMutate(ack)
 	}
 	return ack, err
 }
@@ -237,7 +240,7 @@ func TestPublicationCredentialSourceFixFailures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !c.secret.closed || !bytes.Equal(token, make([]byte, len(token))) {
+				if !c.secret.closed || !bytes.Equal(c.secret.data, make([]byte, len(c.secret.data))) || c.BearerToken != nil {
 					t.Fatal("predecessor not zeroized")
 				}
 				return
@@ -255,7 +258,7 @@ func TestPublicationCredentialSourceFixFailures(t *testing.T) {
 	}
 }
 func TestPublicationCredentialSourceFixRejectInputsBeforeEffects(t *testing.T) {
-	for _, name := range []string{"absent component", "foreign source", "attempt", "component", "closed", "generation", "limit", "frozen evidence", "record evidence", "missing manifest", "negative manifest"} {
+	for _, name := range []string{"absent component", "foreign source", "attempt", "component", "closed", "generation", "limit", "frozen evidence", "frozen base resolution", "record evidence", "missing manifest", "negative manifest"} {
 		t.Run(name, func(t *testing.T) {
 			s, g, set := fixSource(t)
 			c := firstCredential(t, s, set)
@@ -281,6 +284,8 @@ func TestPublicationCredentialSourceFixRejectInputsBeforeEffects(t *testing.T) {
 				c.Generation = 512
 			case "frozen evidence":
 				set.Components[0].Output.FileSHA256 = strings.Repeat("c", 64)
+			case "frozen base resolution":
+				set.Components[0].BaseResolution = BaseResolutionEvidence{json: `{"schema":"replacement"}`}
 			case "record evidence":
 				record = true
 				candidate.Output.SizeBytes++
@@ -342,6 +347,17 @@ func TestPublicationCredentialSourceFixCandidateRequest(t *testing.T) {
 				t.Fatal("ack drift accepted")
 			}
 		})
+	}
+}
+
+func TestPublicationCredentialSourceRejectsSubstitutedBaseResolutionAcknowledgement(t *testing.T) {
+	s, g, set := fixSource(t)
+	c := firstCredential(t, s, set)
+	g.v2AckMutate = func(ack *PublicationCandidateV2Acknowledgement) {
+		ack.BaseResolution = testBaseResolutionEvidence("other-solve", "linux/arm64", set.Components[0].Output.TopLevelDigest)
+	}
+	if ack, err := s.Record(context.Background(), set, c, set.Components[0]); err == nil || ack != nil {
+		t.Fatalf("ack=%#v err=%v, want substituted evidence rejection", ack, err)
 	}
 }
 func TestPublicationCredentialSourceFixSessionCriticalSection(t *testing.T) {

@@ -20,7 +20,7 @@ from typing import BinaryIO
 SOURCE_FILENAME = "aider_chat-0.86.2-py3-none-any.whl"
 SOURCE_SHA256 = "64f6a0c66c9f4633ad9f479bca3e64ebcba02b9da03c6b604b74a44736b2416e"
 SOURCE_VERSION = "0.86.2"
-LOCAL_VERSION = "0.86.2+loom.1"
+LOCAL_VERSION = "0.86.2+loom.2"
 OUTPUT_FILENAME = f"aider_chat-{LOCAL_VERSION}-py3-none-any.whl"
 SOURCE_DIST_INFO = f"aider_chat-{SOURCE_VERSION}.dist-info"
 LOCAL_DIST_INFO = f"aider_chat-{LOCAL_VERSION}.dist-info"
@@ -28,6 +28,8 @@ OLD_LITELLM_REQUIREMENT = "litellm==1.81.10"
 NEW_LITELLM_REQUIREMENT = "litellm==1.84.1"
 OLD_IMPORTLIB_METADATA_REQUIREMENT = "importlib-metadata==7.2.1"
 NEW_IMPORTLIB_METADATA_REQUIREMENT = "importlib-metadata==8.9.0"
+OLD_GITPYTHON_REQUIREMENT = "gitpython==3.1.46"
+NEW_GITPYTHON_REQUIREMENT = "gitpython==3.1.59"
 MAX_MEMBERS = 512
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
@@ -183,6 +185,12 @@ def _transform_metadata(payload: bytes) -> bytes:
         f"Requires-Dist: {NEW_IMPORTLIB_METADATA_REQUIREMENT}".encode(),
         "target requirement for importlib-metadata",
     )
+    transformed = _replace_exact_line(
+        transformed,
+        f"Requires-Dist: {OLD_GITPYTHON_REQUIREMENT}".encode(),
+        f"Requires-Dist: {NEW_GITPYTHON_REQUIREMENT}".encode(),
+        "target requirement for GitPython",
+    )
     try:
         metadata = BytesParser().parsebytes(transformed)
     except (TypeError, ValueError) as error:
@@ -194,6 +202,8 @@ def _transform_metadata(payload: bytes) -> bytes:
         raise _fail("wheel METADATA has the wrong LiteLLM requirement")
     if requirements.count(NEW_IMPORTLIB_METADATA_REQUIREMENT) != 1:
         raise _fail("wheel METADATA has the wrong importlib-metadata requirement")
+    if requirements.count(NEW_GITPYTHON_REQUIREMENT) != 1:
+        raise _fail("wheel METADATA has the wrong GitPython requirement")
     return transformed
 
 
@@ -301,7 +311,7 @@ def _rebuild_aider_wheel(
     *,
     expected_source_sha256: str,
 ) -> Path:
-    """Rebuild an exact Aider source wheel with the two reviewed dependency pins."""
+    """Rebuild an exact Aider source wheel with the reviewed dependency pins."""
 
     directory_descriptor: int | None = None
     temporary_descriptor: int | None = None

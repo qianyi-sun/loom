@@ -34,10 +34,44 @@ type sessionRenewer interface {
 }
 
 type SessionManager struct {
-	mu      sync.Mutex
-	grantID string
-	client  sessionRenewer
-	current *SessionEnvelope
+	mu             sync.Mutex
+	grantID        string
+	client         sessionRenewer
+	current        *SessionEnvelope
+	snapshotActive bool
+}
+
+// WithSnapshot owns one bounded locked-memory copy while a bundle operation
+// runs without the renewal mutex. At most one snapshot may be outstanding.
+// The callback must join its consumers before returning and must not retain the
+// secret. Its captured generation is provenance, not fresh admission authority.
+func (m *SessionManager) WithSnapshot(fn func(*SessionEnvelope, *SecretBuffer) error) error {
+	m.mu.Lock()
+	if fn == nil || m.snapshotActive || m.current == nil || m.current.Secret == nil || m.current.Secret.closed {
+		m.mu.Unlock()
+		return errors.New("session snapshot unavailable")
+	}
+	fd, err := m.current.Secret.cloneSealedMemfd("bundle-session-snapshot", maxSecretBytes)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	secret, err := NewSecretBuffer(fd, maxSecretBytes)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	snapshot := *m.current
+	snapshot.Secret = secret
+	m.snapshotActive = true
+	m.mu.Unlock()
+	defer func() {
+		secret.Close()
+		m.mu.Lock()
+		m.snapshotActive = false
+		m.mu.Unlock()
+	}()
+	return fn(&snapshot, secret)
 }
 
 func NewSessionManager(grantID string, current *SessionEnvelope, client sessionRenewer) *SessionManager {
@@ -123,6 +157,18 @@ func (m *SessionManager) ExpiresAt() time.Time {
 		return time.Time{}
 	}
 	return m.current.ExpiresAt
+}
+
+// Close destroys the owned current credential, including successors installed
+// by publication refresh rather than by the orchestrator's cached envelope.
+// Callers must stop and join work using the manager before terminal cleanup.
+func (m *SessionManager) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.Secret != nil {
+		m.current.Secret.Close()
+	}
+	m.current = nil
 }
 
 func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {

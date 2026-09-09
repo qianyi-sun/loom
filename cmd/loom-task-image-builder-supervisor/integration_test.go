@@ -280,14 +280,14 @@ func (e *externalFlowExecutor) Start(ctx context.Context) error {
 	return nil
 }
 
-func (e *externalFlowExecutor) Build(ctx context.Context, component BuildComponent) (OCIOutput, error) {
+func (e *externalFlowExecutor) Build(ctx context.Context, component BuildComponent) (BuildResult, error) {
 	*e.events = append(*e.events, "build:"+component.Name)
 	if component.Name != "task" {
-		return OCIOutput{}, errors.New("unexpected component")
+		return BuildResult{}, errors.New("unexpected component")
 	}
 	e.clock.advance(31 * time.Second)
 	time.Sleep(10 * time.Millisecond)
-	return e.output, nil
+	return BuildResult{Output: e.output}, nil
 }
 
 func (e *externalFlowExecutor) Close(ctx context.Context) error {

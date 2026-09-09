@@ -256,21 +256,23 @@ def test_claim_is_native_architecture_specific_and_atomic(
     assert _claim(client, builder_token, builder_id="other-x86").status_code == 204
 
 
+@pytest.mark.parametrize("legacy_builder_id", ["builder-a", "rootless:legacy-diagnostic-name"])
 def test_start_heartbeat_and_complete_reject_stale_lease(
     client: TestClient,
     builder_token: str,
     create_materialization: Callable[..., UUID],
     postgres_url: str,
+    legacy_builder_id: str,
 ) -> None:
     materialization_id = create_materialization()
-    claim = _claim(client, builder_token, builder_id="builder-a").json()
+    claim = _claim(client, builder_token, builder_id=legacy_builder_id).json()
 
     started = _mutation(
         client,
         builder_token,
         str(materialization_id),
         "start",
-        builder_id="builder-a",
+        builder_id=legacy_builder_id,
         lease_epoch=claim["lease_epoch"],
     )
     assert started.status_code == 200, started.text
@@ -282,7 +284,7 @@ def test_start_heartbeat_and_complete_reject_stale_lease(
         builder_token,
         str(materialization_id),
         "heartbeat",
-        builder_id="builder-a",
+        builder_id=legacy_builder_id,
         lease_epoch=claim["lease_epoch"] + 1,
     )
     assert stale.status_code == 409
@@ -292,7 +294,7 @@ def test_start_heartbeat_and_complete_reject_stale_lease(
         builder_token,
         str(materialization_id),
         "heartbeat",
-        builder_id="builder-a",
+        builder_id=legacy_builder_id,
         lease_epoch=claim["lease_epoch"],
     )
     assert heartbeat.status_code == 200, heartbeat.text
@@ -304,7 +306,7 @@ def test_start_heartbeat_and_complete_reject_stale_lease(
         builder_token,
         str(materialization_id),
         "complete",
-        builder_id="builder-a",
+        builder_id=legacy_builder_id,
         lease_epoch=claim["lease_epoch"],
         extra={
             "registry_images": {

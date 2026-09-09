@@ -33,6 +33,7 @@ _REPOSITORY_RE = re.compile(
 )
 _MAX_TOKEN_LIFETIME = timedelta(seconds=45)
 _MAX_SIGNING_KEY_BYTES = 64 * 1024
+MAX_REGISTRY_BEARER_TOKEN_BYTES = 16 * 1024
 
 
 def publication_repository(
@@ -70,15 +71,17 @@ def _base64url_uint(value: int) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _public_jwk_thumbprint(private_key: rsa.RSAPrivateKey) -> str:
+def _public_jwk(private_key: rsa.RSAPrivateKey) -> dict[str, str]:
     numbers = private_key.public_key().public_numbers()
-    canonical_jwk = rfc8785.dumps(
-        {
-            "e": _base64url_uint(numbers.e),
-            "kty": "RSA",
-            "n": _base64url_uint(numbers.n),
-        }
-    )
+    return {
+        "e": _base64url_uint(numbers.e),
+        "kty": "RSA",
+        "n": _base64url_uint(numbers.n),
+    }
+
+
+def _public_jwk_thumbprint(private_key: rsa.RSAPrivateKey) -> str:
+    canonical_jwk = rfc8785.dumps(_public_jwk(private_key))
     return base64.urlsafe_b64encode(hashlib.sha256(canonical_jwk).digest()).rstrip(
         b"="
     ).decode("ascii")
@@ -197,6 +200,45 @@ class DistributionRegistryTokenIssuer:
     ) -> IssuedRegistryToken:
         """Sign one short-lived pull/push grant for an exact repository."""
 
+        return self._issue(
+            credential_id=credential_id,
+            repository=repository,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            subject_prefix="loom-task-image-builder",
+            actions=("pull", "push"),
+        )
+
+    def issue_pull(
+        self,
+        *,
+        credential_id: UUID,
+        repository: str,
+        issued_at: datetime,
+        expires_at: datetime,
+    ) -> IssuedRegistryToken:
+        """Sign one independently identified verifier pull grant."""
+
+        return self._issue(
+            credential_id=credential_id,
+            repository=repository,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            subject_prefix="loom-task-image-verifier",
+            actions=("pull",),
+        )
+
+    def _issue(
+        self,
+        *,
+        credential_id: UUID,
+        repository: str,
+        issued_at: datetime,
+        expires_at: datetime,
+        subject_prefix: str,
+        actions: tuple[str, ...],
+    ) -> IssuedRegistryToken:
+
         if type(credential_id) is not UUID or credential_id.int == 0:
             raise TypeError("registry credential ID must be a nonzero UUID")
         repository = _validate_repository(repository)
@@ -208,7 +250,7 @@ class DistributionRegistryTokenIssuer:
         issued_epoch = int(issued_at.timestamp())
         claims: dict[str, Any] = {
             "iss": self._issuer,
-            "sub": f"loom-task-image-builder:{credential_id}",
+            "sub": f"{subject_prefix}:{credential_id}",
             "aud": self._service,
             "exp": int(expires_at.timestamp()),
             "nbf": issued_epoch,
@@ -218,7 +260,7 @@ class DistributionRegistryTokenIssuer:
                 {
                     "type": "repository",
                     "name": repository,
-                    "actions": ["pull", "push"],
+                    "actions": list(actions),
                 }
             ],
         }
@@ -226,10 +268,21 @@ class DistributionRegistryTokenIssuer:
             claims,
             self._private_key,
             algorithm="RS256",
-            headers={"kid": self._key_id, "typ": "JWT"},
+            # Distribution 2.8.3 interprets kid-only tokens as libtrust IDs,
+            # not RFC 7638 thumbprints. Its public-JWK path derives that ID
+            # and checks the configured trusted roots before signature use.
+            # Keep Loom's audited kid stable; never include private JWK fields
+            # or an inner kid (which libtrust interprets differently as well).
+            headers={
+                "kid": self._key_id,
+                "typ": "JWT",
+                "jwk": _public_jwk(self._private_key),
+            },
         )
         if type(token) is not str:
             raise RuntimeError("registry token signer returned an invalid result")
+        if len(token.encode("ascii")) > MAX_REGISTRY_BEARER_TOKEN_BYTES:
+            raise TaskImageAuthorityConfigurationError("registry token exceeds the supported limit")
         return IssuedRegistryToken(
             token=token,
             key_id=self._key_id,
@@ -280,6 +333,7 @@ def load_distribution_registry_token_issuer(
 
 
 __all__ = [
+    "MAX_REGISTRY_BEARER_TOKEN_BYTES",
     "DistributionRegistryTokenIssuer",
     "IssuedRegistryToken",
     "load_distribution_registry_token_issuer",

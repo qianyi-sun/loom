@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob, TeamQuota
 from loom.models.taskset import UserTaskSetManifest
+from loom.task_image_materialization import ensure_task_image_materializations
 from loom.taskset.materialize import MaterializeOutput, materialize_task_set
 from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
@@ -367,18 +368,23 @@ async def publish_if_current(
     )
     if has_publishable_rows:
         await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
-        for row in output.task_rows:
-            session.add(
-                Task(
-                    id=row.id,
-                    checksum=row.checksum,
-                    config=row.config,
-                    source=row.source,
-                    source_provenance=row.source_provenance,
-                    task_set_id=task_set_id,
-                    benchmark_id=None,
-                ),
+        published_tasks = [
+            Task(
+                id=row.id,
+                checksum=row.checksum,
+                config=row.config,
+                source=row.source,
+                source_provenance=row.source_provenance,
+                task_set_id=task_set_id,
+                benchmark_id=None,
             )
+            for row in sorted(output.task_rows, key=lambda row: row.id)
+        ]
+        session.add_all(published_tasks)
+        await session.flush()
+        for task_row in published_tasks:
+            if task_row.config:
+                await ensure_task_image_materializations(session, task_row=task_row)
     else:
         has_previous_publication = (await session.execute(
             select(Task.id)

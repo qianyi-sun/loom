@@ -7,13 +7,14 @@ import hmac
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstanceState
 
 from loom.db.schema import (
     TaskImageBuildContainmentAttestation,
@@ -31,6 +32,8 @@ from loom_task_image_authority.contracts import (
     TaskImageBootstrapExchangeV1,
     TaskImageBuildGrantAuthorityV1,
     TaskImageBuildGrantAuthorityV2,
+    TaskImageBuildSessionPublicBindingV1,
+    TaskImageBuildSessionPublicBindingV2,
     TaskImageBuildSessionV1,
     TaskImageBuildSessionV2,
     TaskImageContainmentAttestationV1,
@@ -51,6 +54,7 @@ _ATTEST_SCOPE = "task-image:attest"
 
 GrantAuthority = TaskImageBuildGrantAuthorityV1 | TaskImageBuildGrantAuthorityV2
 BuildSession = TaskImageBuildSessionV1 | TaskImageBuildSessionV2
+PublicBuildSession = TaskImageBuildSessionPublicBindingV1 | TaskImageBuildSessionPublicBindingV2
 
 
 class TaskImageProjectionConflictError(RuntimeError):
@@ -71,7 +75,7 @@ class TaskImageProjectionExpiredError(TaskImageProjectionAuthorizationError):
 
 @dataclass(frozen=True)
 class TaskImageBuildSessionAuthorization:
-    """Nonsecret authority returned after bearer and attestation validation."""
+    """Validated live DB authority, not by itself proof of caller authentication."""
 
     grant_id: UUID
     session_id: UUID
@@ -975,7 +979,7 @@ def _require_bootstrap_token(
         )
 
 
-def _parse_stored_build_session(
+def _parse_stored_public_build_session(
     *,
     grant_id: UUID,
     generation: int,
@@ -986,39 +990,32 @@ def _parse_stored_build_session(
     issued_at: datetime,
     expires_at: datetime,
     authority: GrantAuthority,
-    raw_session_token: str,
     initial_not_before: datetime | None = None,
     initial_not_after: datetime | None = None,
-) -> BuildSession:
-    if not hmac.compare_digest(
-        hashlib.sha256(raw_session_token.encode("utf-8")).digest(), token_hash
-    ):
-        raise TaskImageProjectionAuthorizationError(
-            "task-image build session credential is not authorized"
-        )
-    public_binding = dict(session_json)
-    token_sha256 = public_binding.pop("session_token_sha256", None)
+) -> PublicBuildSession:
+    token_sha256 = session_json.get("session_token_sha256")
     if not isinstance(token_sha256, str) or not hmac.compare_digest(token_sha256, token_hash.hex()):
         raise TaskImageProjectionAuthorizationError("stored task-image build session changed")
-    public_binding["session_token"] = raw_session_token
-    model: type[TaskImageBuildSessionV1] | type[TaskImageBuildSessionV2]
+    model: type[TaskImageBuildSessionPublicBindingV1] | type[TaskImageBuildSessionPublicBindingV2]
     model = (
-        TaskImageBuildSessionV2
-        if public_binding.get("schema_version") == 2
-        else TaskImageBuildSessionV1
+        TaskImageBuildSessionPublicBindingV2
+        if session_json.get("schema_version") == 2
+        else TaskImageBuildSessionPublicBindingV1
     )
     try:
-        build_session = model.model_validate_json(json.dumps(public_binding))
+        build_session = model.model_validate_json(json.dumps(session_json))
     except ValidationError:
         raise TaskImageProjectionAuthorizationError(
             "stored task-image build session is invalid"
         ) from None
     effective_generation = (
-        build_session.generation if isinstance(build_session, TaskImageBuildSessionV2) else 1
+        build_session.generation
+        if isinstance(build_session, TaskImageBuildSessionPublicBindingV2)
+        else 1
     )
     if (
-        build_session.public_binding() != session_json
-        or canonical_public_binding_sha256(build_session) != session_sha256
+        build_session.model_dump(mode="json") != session_json
+        or canonical_authority_sha256(build_session) != session_sha256
         or build_session.grant_id != grant_id
         or effective_generation != generation
         or build_session.session_id != session_id
@@ -1036,12 +1033,11 @@ def _parse_stored_build_session(
     return build_session
 
 
-def _stored_build_session(
+def _stored_public_build_session(
     row: TaskImageBuildProjection,
     *,
     authority: GrantAuthority,
-    raw_session_token: str,
-) -> BuildSession:
+) -> PublicBuildSession:
     if (
         row.session_id is None
         or row.session_generation is None
@@ -1055,7 +1051,7 @@ def _stored_build_session(
         or row.bootstrap_expires_at is None
     ):
         raise TaskImageProjectionAuthorizationError("stored task-image build session is incomplete")
-    return _parse_stored_build_session(
+    return _parse_stored_public_build_session(
         grant_id=row.grant_id,
         generation=row.session_generation,
         session_id=row.session_id,
@@ -1065,9 +1061,43 @@ def _stored_build_session(
         issued_at=row.session_issued_at,
         expires_at=row.session_expires_at,
         authority=authority,
-        raw_session_token=raw_session_token,
         initial_not_before=(row.bootstrap_issued_at if row.session_generation == 1 else None),
         initial_not_after=(row.bootstrap_expires_at if row.session_generation == 1 else None),
+    )
+
+
+def _authenticated_build_session(
+    binding: PublicBuildSession,
+    *,
+    raw_session_token: str,
+) -> BuildSession:
+    if not hmac.compare_digest(
+        hashlib.sha256(raw_session_token.encode("utf-8")).hexdigest(),
+        binding.session_token_sha256,
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "task-image build session credential is not authorized"
+        )
+    payload = binding.model_dump(mode="json", exclude={"session_token_sha256"})
+    payload["session_token"] = raw_session_token
+    model = TaskImageBuildSessionV2 if binding.schema_version == 2 else TaskImageBuildSessionV1
+    try:
+        return model.model_validate_json(json.dumps(payload))
+    except ValidationError:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image build session is invalid"
+        ) from None
+
+
+def _stored_build_session(
+    row: TaskImageBuildProjection,
+    *,
+    authority: GrantAuthority,
+    raw_session_token: str,
+) -> BuildSession:
+    return _authenticated_build_session(
+        _stored_public_build_session(row, authority=authority),
+        raw_session_token=raw_session_token,
     )
 
 
@@ -1079,7 +1109,7 @@ def _stored_generation_session(
 ) -> BuildSession:
     if not isinstance(row.session_json, dict):
         raise TaskImageProjectionAuthorizationError("stored task-image build session is invalid")
-    return _parse_stored_build_session(
+    binding = _parse_stored_public_build_session(
         grant_id=row.grant_id,
         generation=row.generation,
         session_id=row.session_id,
@@ -1089,14 +1119,14 @@ def _stored_generation_session(
         issued_at=row.issued_at,
         expires_at=row.expires_at,
         authority=authority,
-        raw_session_token=raw_session_token,
     )
+    return _authenticated_build_session(binding, raw_session_token=raw_session_token)
 
 
 async def _require_session_attestation(
     session: AsyncSession,
     *,
-    build_session: BuildSession,
+    build_session: BuildSession | PublicBuildSession,
 ) -> None:
     stored = await session.scalar(
         select(TaskImageBuildContainmentAttestation).where(
@@ -1759,17 +1789,110 @@ async def authorize_task_image_build_session(
     session_id: UUID,
     session_generation: int,
     raw_session_token: str,
-    now: datetime,
+    now: datetime | None = None,
 ) -> TaskImageBuildSessionAuthorization:
-    """Validate one bearer against its live grant and current attestation."""
+    """Authenticate exact current-session possession, then return live DB facts.
+
+    Explicit ``now`` retains deterministic caller/test clock support. Without it,
+    expiry is sampled from UTC after all DB lock waits.
+    """
+
+    authorization, binding = await _validate_current_task_image_build_session(
+        session,
+        grant_id=grant_id,
+        clock=_utc_now if now is None else lambda: now,
+    )
+    if (
+        session_id != authorization.session_id
+        or session_generation != authorization.session_generation
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "task-image build session credential is not authorized"
+        )
+    _authenticated_build_session(binding, raw_session_token=raw_session_token)
+    return authorization
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def validate_current_task_image_build_session(
+    session: AsyncSession,
+    *,
+    grant_id: UUID,
+    clock: Callable[[], datetime] = _utc_now,
+) -> TaskImageBuildSessionAuthorization:
+    """Trusted DB-internal live authority validation, NOT caller authentication.
+
+    Follow the durable current pointer, including legitimate renewed successors.
+    Never retrieve a secret or accept a network caller through this operation.
+    The caller owns the transaction and any preceding publication state/key locks.
+    Locks remain grant -> projection -> current generation -> attestations until
+    the caller ends its transaction. Sample ``clock`` only after the final lock
+    wait so a queued worker cannot authorize expired authority using stale time.
+    """
+
+    authorization, _ = await _validate_current_task_image_build_session(
+        session,
+        grant_id=grant_id,
+        clock=clock,
+    )
+    return authorization
+
+
+async def _validate_current_task_image_build_session(
+    session: AsyncSession,
+    *,
+    grant_id: UUID,
+    clock: Callable[[], datetime],
+) -> tuple[TaskImageBuildSessionAuthorization, PublicBuildSession]:
+    # This path must read locked DB authority, never cached ORM snapshots or
+    # unflushed overrides. Preserve normal autoflush, but fail closed when the
+    # caller suppressed it. Expiration is scoped to authority rows; the ensuing
+    # locked reads reload them in grant -> projection -> generation order.
+    if session.autoflush:
+        await session.flush()
+    for cached in list(session.identity_map.values()):
+        if isinstance(
+            cached,
+            (
+                TaskImageBuildGrant,
+                TaskImageBuildProjection,
+                TaskImageBuildSessionGeneration,
+                TaskImageBuildContainmentAttestation,
+            ),
+        ):
+            state = cast(InstanceState[object], inspect(cached))
+            assert state.identity is not None  # identity_map contains persisted identities
+            if isinstance(cached, TaskImageBuildGrant):
+                cached_grant_id = state.identity[0]
+            else:
+                # A deferred/expired (or locally edited) grant_id is not a safe
+                # scope discriminator. Read only persisted ownership by the ORM
+                # identity, without loading or discarding any cached attributes.
+                # This scalar read takes no row lock; authority is still reloaded
+                # and validated under the lock order below.
+                cached_model = type(cached)
+                cached_grant_id = await session.scalar(
+                    select(cached_model.grant_id).where(cached_model.id == state.identity[0])
+                )
+            if cached_grant_id != grant_id:
+                continue
+            if session.is_modified(cached):
+                raise TaskImageProjectionAuthorizationError(
+                    "task-image current-session authority has unflushed changes"
+                )
+            session.expire(cached)
 
     grant = await _locked_grant(session, grant_id=grant_id)
-    authority = _grant_authority(grant, now=now)
+    # Parse timeless bindings first; all freshness checks run after the locks.
+    authority = _grant_authority(grant, now=grant.grant_expires_at, require_live=False)
     _require_released_grant(grant)
     row = await _locked_projection(session, grant_id=grant.id)
     if row is None or row.state != "exchanged":
         raise TaskImageProjectionAuthorizationError("task-image build session is unavailable")
-    current_generation = await _locked_current_session_generation(session, row=row)
+    await _locked_current_session_generation(session, row=row)
     await _require_stored_projection_chain(
         session,
         grant=grant,
@@ -1788,32 +1911,29 @@ async def authorize_task_image_build_session(
         raise TaskImageProjectionAuthorizationError(
             "task-image build session authority is incomplete"
         )
-    if (
-        session_id != row.session_id
-        or session_generation != row.session_generation
-        or current_generation.session_id != row.session_id
-        or current_generation.generation != row.session_generation
-    ):
-        raise TaskImageProjectionAuthorizationError(
-            "task-image build session credential is not authorized"
-        )
-    if now >= row.session_expires_at or now >= row.attestation_expires_at:
-        raise TaskImageProjectionExpiredError("task-image build session or attestation expired")
-    build_session = _stored_build_session(
+    build_session = _stored_public_build_session(
         row,
         authority=authority,
-        raw_session_token=raw_session_token,
     )
-    await _require_session_attestation(session, build_session=build_session)
     current = await _current_attestation(session, row=row)
+    # Lock/load the current attestation before any nonlocking session-attestation
+    # read can populate an ORM snapshot that would outlive the final lock wait.
+    await _require_session_attestation(session, build_session=build_session)
     if (
         current.generation != row.attestation_generation
         or canonical_authority_sha256(current) != row.attestation_sha256
         or current.expires_at != row.attestation_expires_at
+        or build_session.attestation_generation != current.generation
+        or build_session.attestation_sha256 != row.attestation_sha256
     ):
         raise TaskImageProjectionAuthorizationError(
             "task-image build session attestation binding changed"
         )
+    now = clock()
+    if now >= authority.expires_at:
+        raise TaskImageProjectionExpiredError("task-image build grant authority expired")
+    if now >= build_session.expires_at or now >= current.expires_at:
+        raise TaskImageProjectionExpiredError("task-image build session or attestation expired")
     return TaskImageBuildSessionAuthorization(
         grant_id=grant.id,
         session_id=build_session.session_id,
@@ -1839,7 +1959,7 @@ async def authorize_task_image_build_session(
         attestation_expires_at=row.attestation_expires_at,
         session_expires_at=build_session.expires_at,
         grant_expires_at=authority.expires_at,
-    )
+    ), build_session
 
 
 async def authorize_task_image_guard_session(
@@ -2031,4 +2151,5 @@ __all__ = [
     "renew_task_image_build_session",
     "request_task_image_projection",
     "revoke_task_image_projection",
+    "validate_current_task_image_build_session",
 ]

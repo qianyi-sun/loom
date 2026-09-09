@@ -375,7 +375,13 @@ The image provisions Node 22 CLI adapters (`claude`, `codex`, `gemini`,
 `kimi`, `opencode`, `qwen`) and Python runtimes for `aider`,
 `mini-swe-agent`, `openhands`, `openhands-sdk`, and `swe-agent`. `aider`
 and `mini-swe-agent` live in isolated virtual environments with PATH
-shims. In the all-agent sandbox image, OpenHands, the Loom-owned OpenHands SDK
+shims. The shared Aider installer rebuilds the digest-pinned upstream 0.86.2 wheel
+as `0.86.2+loom.2`, changing only distribution metadata and its wheel RECORD.
+It declares the reviewed LiteLLM 1.84.1, importlib-metadata 8.9.0 and GitPython
+3.1.59 pins; the latter fixes CVE-2026-78676. Application code remains unchanged.
+Both dynamic installation and the sandbox image use this same installer, with
+dependency consistency and import/CLI smoke checks after installation.
+In the all-agent sandbox image, OpenHands, the Loom-owned OpenHands SDK
 runner, and SWE-agent stay importable from the main Python 3.12 runtime. When
 OpenHands is installed dynamically on top of a benchmark task image, the
 adapter instead creates `/opt/loom-agents/openhands-sdk` with pinned `uv` and

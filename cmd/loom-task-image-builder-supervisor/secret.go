@@ -30,9 +30,10 @@ const (
 type SecretBuffer struct {
 	data   []byte
 	closed bool
+	mapped bool
 }
 
-func NewSecretBuffer(fd int, maximum int) (_ *SecretBuffer, err error) {
+func NewSecretBuffer(fd int, maximum int) (result *SecretBuffer, err error) {
 	if fd < 0 || maximum <= 0 {
 		if fd >= 0 {
 			syscall.Close(fd)
@@ -41,6 +42,8 @@ func NewSecretBuffer(fd int, maximum int) (_ *SecretBuffer, err error) {
 	}
 	defer func() {
 		if closeErr := syscall.Close(fd); closeErr != nil && err == nil {
+			result.Close()
+			result = nil
 			err = closeErr
 		}
 	}()
@@ -58,23 +61,30 @@ func NewSecretBuffer(fd int, maximum int) (_ *SecretBuffer, err error) {
 	if statValue.Size <= 0 || statValue.Size > int64(maximum) {
 		return nil, errors.New("secret payload invalid")
 	}
-	data := make([]byte, int(statValue.Size))
-	if err := syscall.Mlock(data); err != nil {
-		zeroBytes(data)
+	// Each owner needs disjoint pages: mlock/munlock are not reference-counted,
+	// and heap slices can share pages with other live credentials.
+	data, err := syscall.Mmap(-1, 0, int(statValue.Size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	if err != nil {
 		return nil, err
 	}
+	if err := syscall.Mlock(data); err != nil {
+		_ = syscall.Munmap(data)
+		return nil, err
+	}
+	buffer := &SecretBuffer{data: data, mapped: true}
+	defer func() {
+		if err != nil {
+			buffer.Close()
+		}
+	}()
 	n, err := syscall.Pread(fd, data, 0)
 	if err != nil {
-		zeroBytes(data)
-		_ = syscall.Munlock(data)
 		return nil, err
 	}
 	if n != len(data) {
-		zeroBytes(data)
-		_ = syscall.Munlock(data)
 		return nil, errors.New("secret payload changed")
 	}
-	return &SecretBuffer{data: data}, nil
+	return buffer, nil
 }
 
 func (b *SecretBuffer) Close() {
@@ -84,7 +94,13 @@ func (b *SecretBuffer) Close() {
 	b.closed = true
 	if len(b.data) != 0 {
 		zeroBytes(b.data)
-		_ = syscall.Munlock(b.data)
+		if b.mapped {
+			// Unmapping releases the lock atomically with the mapping. Never
+			// unlock a synthetic heap-backed buffer supplied by a test double.
+			_ = syscall.Munmap(b.data)
+			b.data = nil
+			b.mapped = false
+		}
 	}
 }
 

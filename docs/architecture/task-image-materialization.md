@@ -186,6 +186,22 @@ period before registry deletion and garbage collection. Content-addressed tags
 make deletion safe: a later reference recreates the same queue key, rebuilds
 the components, and records fresh immutable digest evidence before scheduling.
 
+Service-execution reservation, retry, and finalized-event projection reject
+terminal-to-nonterminal reopening using fresh locked Trial state; exact event
+replay does not reproject state. The unpublished `0135` migration also rejects
+terminal-to-nonterminal updates at the database row boundary, without cross-row
+lookups or locking. Terminal reruns require a new Trial and its image prerequisites.
+Rootless irreversible retirement still requires its own transactional reference
+proof, including new reference insertion and identity recreation; terminal-update
+monotonicity alone does not authorize deletion.
+
+The inactive rootless implementation also stores immutable per-attempt retirement
+evidence and rejects retired attempts at builder and publication admission. This
+is not yet a running collector: reference eligibility, execution-start fencing
+and offline registry maintenance must be composed before activation. See the
+[Phase 2 verification design](2026-09-05-task-image-builder-phase2d2-verification.md#failure-retention-and-compatibility)
+for the boundary between these guards and deletion authority.
+
 ## Rollout safety
 
 The schema migration backfills materializations and links for existing

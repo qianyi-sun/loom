@@ -274,6 +274,12 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		ranExecutable = executable
 		ranArgv = append([]string(nil), argv...)
 		ranCgroupFD = cgroupFD
+		if err := os.WriteFile(valueAfterArg(t, argv, "--ref-file"), []byte("solve_1-abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(valueAfterArg(t, argv, "--metadata-file"), baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		return nil
 	}
 	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
@@ -283,15 +289,15 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		if platform != "linux/amd64" {
 			t.Fatalf("platform = %q, want linux/amd64", platform)
 		}
-		return OCIOutput{Path: path, TopLevelDigest: "sha256:" + strings.Repeat("a", 64), FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
+		return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
 	}
 
-	output, err := executor.Build(context.Background(), component)
+	result, err := executor.Build(context.Background(), component)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if output.TopLevelDigest != "sha256:"+strings.Repeat("a", 64) {
-		t.Fatalf("TopLevelDigest = %q", output.TopLevelDigest)
+	if result.Output.TopLevelDigest != baseResolutionTestRoot {
+		t.Fatalf("TopLevelDigest = %q", result.Output.TopLevelDigest)
 	}
 	if ranExecutable.Path != fixture.config.Runtime.Buildctl.Path {
 		t.Fatalf("ran executable = %q, want buildctl", ranExecutable.Path)
@@ -308,6 +314,9 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		"--local", "dockerfile=" + filepath.Join(fixture.jobRoot, filepath.Dir(component.Dockerfile)),
 		"--opt", "filename=" + filepath.Base(component.Dockerfile),
 		"--opt", "platform=linux/amd64",
+		"--opt", "loom.capture-base-resolution=v1",
+		"--ref-file", valueAfterArg(t, ranArgv, "--ref-file"),
+		"--metadata-file", valueAfterArg(t, ranArgv, "--metadata-file"),
 		"--output", "type=oci,dest=" + filepath.Join(fixture.jobRoot, "oci", component.Name+".tar"),
 	}
 	if !reflect.DeepEqual(ranArgv, required) {
@@ -318,6 +327,395 @@ func TestExecutorBuildCallsPinnedBuildctlWithBuiltinDockerfileAndOCIOutputBelowJ
 		if strings.Contains(strings.Join(ranArgv, " "), fragment) {
 			t.Fatalf("buildctl argv contains forbidden %q: %#v", fragment, ranArgv)
 		}
+	}
+}
+
+// Break caught: a successful OCI export is accepted without same-build base-resolution capture.
+func TestExecutorBuildRejectsAbsentBaseResolutionCapture(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	component := BuildComponent{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components:   []BuildComponent{component},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4242), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+		return OCIOutput{
+			Path:           path,
+			TopLevelDigest: baseResolutionTestRoot,
+			FileSHA256:     strings.Repeat("b", 64),
+			Architecture:   "amd64",
+			OS:             "linux",
+		}, nil
+	}
+
+	if _, err := executor.Build(context.Background(), component); err == nil {
+		t.Fatal("Build() accepted absent ref and metadata capture")
+	}
+}
+
+// Break caught: capture flags or same-attempt bindings are omitted, or accepted evidence aliases OCIOutput.
+func TestExecutorBuildReturnsMatchingBaseResolutionEvidenceAndCleansCapture(t *testing.T) {
+	fixture := newExecutorFixture(t)
+	component := BuildComponent{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components:   []BuildComponent{component},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4242), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	var captureDir string
+	executorRunBuildctl = func(_ context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+		if !containsAdjacentArgs(argv, "--opt", "loom.capture-base-resolution=v1") {
+			t.Fatalf("buildctl argv missing capture opt-in: %#v", argv)
+		}
+		refPath := valueAfterArg(t, argv, "--ref-file")
+		metadataPath := valueAfterArg(t, argv, "--metadata-file")
+		if refPath == "" || metadataPath == "" || filepath.Dir(refPath) != filepath.Dir(metadataPath) {
+			t.Fatalf("buildctl capture paths invalid: ref=%q metadata=%q", refPath, metadataPath)
+		}
+		captureDir = filepath.Dir(refPath)
+		if info, err := os.Stat(captureDir); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("capture directory mode invalid: info=%v err=%v", info, err)
+		}
+		if err := os.WriteFile(refPath, []byte("solve_1-abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+		return OCIOutput{
+			Path:           path,
+			TopLevelDigest: baseResolutionTestRoot,
+			FileSHA256:     strings.Repeat("b", 64),
+			Architecture:   "amd64",
+			OS:             "linux",
+		}, nil
+	}
+
+	result, err := executor.Build(context.Background(), component)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if result.Output.TopLevelDigest != baseResolutionTestRoot {
+		t.Fatalf("Build() output = %#v", result.Output)
+	}
+	if result.BaseResolution.JSON() == "" {
+		t.Fatalf("Build() evidence = %#v", result.BaseResolution)
+	}
+	if _, err := os.Stat(captureDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("capture directory survived successful Build(): %v", err)
+	}
+}
+
+// Break caught: malformed, mismatched, unbounded, or non-regular capture is trusted after OCI validation.
+func TestExecutorBuildRejectsInvalidCaptureFilesAndRemovesOCIOutput(t *testing.T) {
+	for _, name := range []string{
+		"missing ref", "missing metadata", "wrong ref binding", "wrong platform binding", "wrong output binding",
+		"malformed metadata", "oversized ref", "oversized metadata", "non-private directory", "symlink ref", "symlink metadata", "fifo ref", "fifo metadata",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture, executor, component := newStartedCaptureExecutor(t)
+			var outputPath string
+			executorRunBuildctl = func(_ context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+				refPath := valueAfterArg(t, argv, "--ref-file")
+				metadataPath := valueAfterArg(t, argv, "--metadata-file")
+				ref := []byte("solve_1-abc")
+				metadata := baseResolutionFixture("linux/amd64", `[]`)
+				switch name {
+				case "missing ref":
+					ref = nil
+				case "missing metadata":
+					metadata = nil
+				case "wrong ref binding":
+					ref = []byte("solve_other")
+				case "wrong platform binding":
+					metadata = baseResolutionFixture("linux/arm64", `[]`)
+				case "wrong output binding":
+					metadata = []byte(strings.Replace(string(metadata), `"output_digest":"`+baseResolutionTestRoot, `"output_digest":"`+baseResolutionTestImage, 1))
+				case "malformed metadata":
+					metadata = []byte(`{"untrusted":"raw-metadata-sentinel"`)
+				case "oversized ref":
+					ref = []byte(strings.Repeat("a", 129))
+				case "oversized metadata":
+					metadata = []byte(strings.Repeat("x", maxBuildMetadataBytes+1))
+				}
+				if strings.HasPrefix(name, "symlink ") {
+					target := filepath.Join(fixture.root, "capture-target")
+					if err := os.WriteFile(target, []byte("solve_1-abc"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					leaf := refPath
+					if name == "symlink metadata" {
+						leaf = metadataPath
+					}
+					if err := os.Symlink(target, leaf); err != nil {
+						t.Fatal(err)
+					}
+				} else if strings.HasPrefix(name, "fifo ") {
+					leaf := refPath
+					if name == "fifo metadata" {
+						leaf = metadataPath
+					}
+					if err := syscall.Mkfifo(leaf, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if ref != nil && name != "symlink ref" && name != "fifo ref" {
+					if err := os.WriteFile(refPath, ref, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if metadata != nil && name != "symlink metadata" && name != "fifo metadata" {
+					if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if name == "non-private directory" {
+					if err := os.Chmod(filepath.Dir(refPath), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil
+			}
+			executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+				outputPath = path
+				if err := os.WriteFile(path, []byte("validated oci output"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
+			}
+
+			result, err := executor.Build(context.Background(), component)
+			if err == nil || result != (BuildResult{}) {
+				t.Fatalf("Build() result=%#v error=%v, want zero rejected result", result, err)
+			}
+			if strings.Contains(err.Error(), "raw-metadata-sentinel") {
+				t.Fatalf("Build() error leaked raw metadata: %v", err)
+			}
+			if _, statErr := os.Stat(outputPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("OCI output survived invalid capture: %v", statErr)
+			}
+			matches, globErr := filepath.Glob(filepath.Join(fixture.jobRoot, ".build-capture-*"))
+			if globErr != nil || len(matches) != 0 {
+				t.Fatalf("capture paths survived invalid evidence: matches=%v err=%v", matches, globErr)
+			}
+		})
+	}
+}
+
+// Break caught: retries reuse a stale capture path or leave evidence behind on any executor exit.
+func TestExecutorBuildUsesFreshCapturePathsAndCleansFailureAndCancellation(t *testing.T) {
+	fixture, executor, component := newStartedCaptureExecutor(t)
+	var captureDirs []string
+	buildError := error(nil)
+	executorRunBuildctl = func(ctx context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+		refPath := valueAfterArg(t, argv, "--ref-file")
+		metadataPath := valueAfterArg(t, argv, "--metadata-file")
+		captureDirs = append(captureDirs, filepath.Dir(refPath))
+		if err := os.WriteFile(refPath, []byte("solve_1-abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outputPath := strings.TrimPrefix(valueAfterArg(t, argv, "--output"), "type=oci,dest=")
+		if err := os.WriteFile(outputPath, []byte("partial oci"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if errors.Is(buildError, context.Canceled) {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(refPath), ".metadata.json.tmp"), []byte("interrupted atomic write"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return buildError
+	}
+	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+		return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := executor.Build(context.Background(), component); err != nil {
+			t.Fatalf("successful attempt %d: %v", attempt, err)
+		}
+	}
+	if len(captureDirs) != 2 || captureDirs[0] == captureDirs[1] {
+		t.Fatalf("capture directories were not fresh: %v", captureDirs)
+	}
+	for _, dir := range captureDirs {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("successful capture directory survived: %s: %v", dir, err)
+		}
+	}
+
+	for _, failure := range []error{errors.New("buildctl failed"), context.Canceled} {
+		buildError = failure
+		before := len(captureDirs)
+		result, err := executor.Build(context.Background(), component)
+		if !errors.Is(err, failure) || result != (BuildResult{}) {
+			t.Fatalf("failure %v returned result=%#v error=%v", failure, result, err)
+		}
+		dir := captureDirs[before]
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed capture directory survived: %s: %v", dir, err)
+		}
+		outputPath := filepath.Join(fixture.jobRoot, "oci", component.Name+".tar")
+		if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("partial OCI output survived failure %v: %v", failure, err)
+		}
+	}
+
+	buildError = nil
+	executorValidateOCIOutput = func(string, string) (OCIOutput, error) {
+		return OCIOutput{}, errors.New("OCI validation failed")
+	}
+	before := len(captureDirs)
+	result, err := executor.Build(context.Background(), component)
+	if err == nil || result != (BuildResult{}) {
+		t.Fatalf("OCI validation failure returned result=%#v error=%v", result, err)
+	}
+	if _, err := os.Stat(captureDirs[before]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("capture directory survived OCI validation failure: %v", err)
+	}
+}
+
+// Break caught: capture cleanup failure returns trusted evidence or leaves the OCI artifact usable.
+func TestExecutorBuildCleanupFailureReturnsZeroAndRemovesOCIOutput(t *testing.T) {
+	fixture, executor, component := newStartedCaptureExecutor(t)
+	var captureDir string
+	executorRunBuildctl = func(_ context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+		refPath := valueAfterArg(t, argv, "--ref-file")
+		metadataPath := valueAfterArg(t, argv, "--metadata-file")
+		captureDir = filepath.Dir(refPath)
+		if err := os.WriteFile(refPath, []byte("solve_1-abc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(fixture.jobRoot, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	executorValidateOCIOutput = func(path string, platform string) (OCIOutput, error) {
+		if err := os.WriteFile(path, []byte("validated oci output"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, FileSHA256: strings.Repeat("b", 64), Architecture: "amd64", OS: "linux"}, nil
+	}
+
+	result, err := executor.Build(context.Background(), component)
+	if chmodErr := os.Chmod(fixture.jobRoot, 0o755); chmodErr != nil {
+		t.Fatalf("restore job directory mode: %v", chmodErr)
+	}
+	if err == nil || result != (BuildResult{}) || !strings.Contains(err.Error(), "cleanup build capture") {
+		t.Fatalf("cleanup failure returned result=%#v error=%v", result, err)
+	}
+	outputPath := filepath.Join(fixture.jobRoot, "oci", component.Name+".tar")
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OCI output survived capture cleanup failure: %v", err)
+	}
+	if err := os.RemoveAll(captureDir); err != nil {
+		t.Fatalf("test cleanup failed: %v", err)
+	}
+}
+
+// Break caught: path-based cleanup loses a renamed pinned directory and returns success.
+func TestExecutorBuildRejectsRenamedCaptureAndCleansPinnedContents(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(fmt.Sprint(replacement), func(t *testing.T) {
+			fixture, executor, component := newStartedCaptureExecutor(t)
+			var original, moved string
+			outside := filepath.Join(fixture.root, "outside-capture")
+			if err := os.WriteFile(outside, []byte("preserve outside"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			executorRunBuildctl = func(_ context.Context, _ ExecutableMember, argv []string, _ []string, _ int) error {
+				refPath := valueAfterArg(t, argv, "--ref-file")
+				original = filepath.Dir(refPath)
+				if err := os.WriteFile(refPath, []byte("solve_1-abc"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(valueAfterArg(t, argv, "--metadata-file"), baseResolutionFixture("linux/amd64", `[]`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(original, "temporary"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(original, "temporary", ".metadata.tmp"), []byte("interrupted metadata"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(original, "outside-link")); err != nil {
+					t.Fatal(err)
+				}
+				moved = original + "-moved"
+				if err := os.Rename(original, moved); err != nil {
+					t.Fatal(err)
+				}
+				if replacement {
+					if err := os.Mkdir(original, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(original, "replacement"), []byte("preserve replacement"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil
+			}
+			executorValidateOCIOutput = func(path, platform string) (OCIOutput, error) {
+				if err := os.WriteFile(path, []byte("validated oci"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return OCIOutput{Path: path, TopLevelDigest: baseResolutionTestRoot, OS: "linux", Architecture: "amd64"}, nil
+			}
+			result, err := executor.Build(context.Background(), component)
+			if err == nil || result != (BuildResult{}) {
+				t.Fatalf("renamed capture returned usable result=%#v err=%v", result, err)
+			}
+			if _, err := os.Stat(filepath.Join(fixture.jobRoot, "oci", component.Name+".tar")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("OCI survived renamed capture: %v", err)
+			}
+			entries, err := os.ReadDir(moved)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("pinned contents survived rename: %v, %v", entries, err)
+			}
+			if got := string(mustReadFile(t, outside)); got != "preserve outside" {
+				t.Fatalf("cleanup followed external link: %q", got)
+			}
+			if replacement && string(mustReadFile(t, filepath.Join(original, "replacement"))) != "preserve replacement" {
+				t.Fatal("cleanup changed replacement directory")
+			}
+		})
 	}
 }
 
@@ -1092,10 +1490,22 @@ func TestNativeBuildFixtureExecutesRootlessBuildKitInExactCgroup(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("Build() error = %v", result.err)
 	}
-	if result.output.TopLevelDigest == "" || result.output.FileSHA256 == "" || result.output.Architecture != runtime.GOARCH {
+	if result.output.Output.TopLevelDigest == "" || result.output.Output.FileSHA256 == "" || result.output.Output.Architecture != runtime.GOARCH || result.output.BaseResolution.JSON() == "" {
 		t.Fatalf("unexpected OCI output: %#v", result.output)
 	}
-	assertOCIOutputContainsNativeRunProof(t, result.output.Path)
+	var evidence baseResolutionRecord
+	if err := json.Unmarshal([]byte(result.output.BaseResolution.JSON()), &evidence); err != nil {
+		t.Fatalf("base-resolution evidence JSON invalid: %v", err)
+	}
+	wantPlatform := "linux/" + runtime.GOARCH
+	if evidence.Schema != "loom.task-image-base-resolution/v1" ||
+		!baseResolutionSolveRef.MatchString(evidence.SolveRef) ||
+		evidence.Platform != wantPlatform ||
+		evidence.OutputDigest != result.output.Output.TopLevelDigest ||
+		evidence.ObservedBaseDigests == nil || len(evidence.ObservedBaseDigests) != 0 {
+		t.Fatalf("scratch base-resolution evidence binding invalid: %#v", evidence)
+	}
+	assertOCIOutputContainsNativeRunProof(t, result.output.Output.Path)
 	assertNoForbiddenHostSocketFDs(t, cgroupPath)
 
 	if err := executor.Close(ctx); err != nil {
@@ -1109,7 +1519,7 @@ func TestNativeBuildFixtureExecutesRootlessBuildKitInExactCgroup(t *testing.T) {
 }
 
 type nativeBuildResult struct {
-	output OCIOutput
+	output BuildResult
 	err    error
 }
 
@@ -1800,6 +2210,30 @@ func newExecutorFixture(t *testing.T) executorFixture {
 	}
 }
 
+func newStartedCaptureExecutor(t *testing.T) (executorFixture, *Executor, BuildComponent) {
+	t.Helper()
+	fixture := newExecutorFixture(t)
+	component := BuildComponent{Name: "component-a", ContextDir: "bundle/context", Dockerfile: "bundle/context/Dockerfile"}
+	executor, err := NewExecutor(fixture.config, fixture.capabilities, BuildPlan{
+		Architecture: "amd64",
+		Components:   []BuildComponent{component},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	restoreExecutorHooks(t)
+	executorVerifyHostIDMapHelpers = func() error { return nil }
+	stubBuildkitCgroupParent(t, fixture, "loom-task5-unit")
+	executorLaunchInCgroup = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) (*Process, error) {
+		return exactCgroupProcess(fixture, executable, 4242), nil
+	}
+	executorRunBuildctl = func(context.Context, ExecutableMember, []string, []string, int) error { return nil }
+	if err := executor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	return fixture, executor, component
+}
+
 func restoreExecutorHooks(t *testing.T) {
 	t.Helper()
 	previousHostHelpers := executorVerifyHostIDMapHelpers
@@ -1855,6 +2289,15 @@ func valueAfterArg(t *testing.T, argv []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+func containsAdjacentArgs(argv []string, first string, second string) bool {
+	for index := 0; index+1 < len(argv); index++ {
+		if argv[index] == first && argv[index+1] == second {
+			return true
+		}
+	}
+	return false
 }
 
 func commandExitStatus(t *testing.T, status int) error {

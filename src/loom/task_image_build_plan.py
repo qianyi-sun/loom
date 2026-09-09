@@ -6,7 +6,7 @@ import math
 import re
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol, Self
 from uuid import UUID
 
 from pydantic import (
@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -166,12 +167,12 @@ class TaskImageBuildComponentV1(BaseModel):
         return self
 
 
-class TaskImageBuildPlanV1(BaseModel):
+class _TaskImageBuildPlan(BaseModel):
     """Strict, immutable plan containing no transport URL or credential."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["loom.task-image-build-plan.v1"] = "loom.task-image-build-plan.v1"
+    schema_version: str
     grant_id: NonzeroUUID
     session_id: NonzeroUUID
     session_generation: Annotated[int, Field(gt=0)]
@@ -213,7 +214,7 @@ class TaskImageBuildPlanV1(BaseModel):
         return value.astimezone(UTC)
 
     @model_validator(mode="after")
-    def _bindings_are_exact(self) -> TaskImageBuildPlanV1:
+    def _bindings_are_exact(self) -> Self:
         if self.builder_id != f"rootless:{self.session_id.hex}":
             raise ValueError("build plan builder identity differs from its session")
         expected_platform = "linux/amd64" if self.cpu_arch == "x86_64" else "linux/arm64"
@@ -236,6 +237,53 @@ class TaskImageBuildPlanV1(BaseModel):
             if component.oci_output_path != f"oci/{index:04d}.tar":
                 raise ValueError("build plan OCI output names are not canonical")
         return self
+
+    @property
+    def content_manifest_digest(self) -> str:
+        """Legacy discriminator; not a serialized field in retained V1 receipts."""
+        return ""
+
+
+class TaskImageBuildPlanV1(_TaskImageBuildPlan):
+    """Historical frozen plan; its fields and serialized defaults never change."""
+
+    schema_version: Literal["loom.task-image-build-plan.v1"] = "loom.task-image-build-plan.v1"
+
+
+class TaskImageBuildPlanV2(_TaskImageBuildPlan):
+    """Registration-bound native input, not inferred from object-store contents."""
+
+    schema_version: Literal["loom.task-image-build-plan.v2"] = "loom.task-image-build-plan.v2"
+    bundle_content_manifest_sha256: Digest
+
+    @property
+    def content_manifest_digest(self) -> str:
+        return self.bundle_content_manifest_sha256
+
+    @model_validator(mode="after")
+    def _content_location_is_bound(self) -> Self:
+        if not self.bundle_prefix.endswith(f"/{self.bundle_content_manifest_sha256}/"):
+            raise ValueError("native bundle prefix must bind the registered content manifest")
+        return self
+
+
+TaskImageBuildPlan = Annotated[
+    TaskImageBuildPlanV1 | TaskImageBuildPlanV2, Field(discriminator="schema_version"),
+]
+_PLAN_ADAPTER: TypeAdapter[TaskImageBuildPlan] = TypeAdapter(TaskImageBuildPlan)
+
+
+def parse_task_image_build_plan(payload: str | bytes) -> TaskImageBuildPlan:
+    """Read an explicitly versioned receipt without adding fields or defaults.
+
+    Callers still verify the retained canonical payload/hash and live bindings.
+    A parsed V2 plan alone is not authority to issue a V1 bundle capability.
+    """
+    if not isinstance(payload, (str, bytes)) or len(payload) > MAX_TASK_IMAGE_BUILD_PLAN_BYTES:
+        raise ValueError("task-image build plan exceeds the authority response limit")
+    if isinstance(payload, str) and len(payload.encode("utf-8")) > MAX_TASK_IMAGE_BUILD_PLAN_BYTES:
+        raise ValueError("task-image build plan exceeds the authority response limit")
+    return _PLAN_ADAPTER.validate_json(payload)
 
 
 def _raw_environment(task_config: object) -> dict[str, Any]:
@@ -346,6 +394,11 @@ def derive_task_image_build_plan(
 
     if authorization.authority_version != 2 or authorization.builder_release_sha256 is None:
         raise ValueError("task-image build plan requires V2 release authority")
+    if "bundle_content_manifest_sha256" in row.task_source_provenance:
+        # Never drop stronger registration authority into a schema that cannot
+        # carry it. The manifest-bearing capability/Go reader is a separate
+        # integration boundary; production rootless admission remains disabled.
+        raise ValueError("content manifest requires a manifest-bearing native build plan")
     if row.cpu_arch not in {"x86_64", "arm64"} or row.cpu_arch != authorization.cpu_arch:
         raise ValueError("task-image materialization and session architecture disagree")
 
@@ -406,6 +459,9 @@ __all__ = [
     "MAX_TASK_IMAGE_BUILD_PLAN_BYTES",
     "MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS",
     "TaskImageBuildComponentV1",
+    "TaskImageBuildPlan",
     "TaskImageBuildPlanV1",
+    "TaskImageBuildPlanV2",
     "derive_task_image_build_plan",
+    "parse_task_image_build_plan",
 ]

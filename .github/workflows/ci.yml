@@ -912,6 +912,31 @@ jobs:
       - name: go test supervisor
         run: go test -race ./cmd/loom-task-image-builder-supervisor
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Sync locked workspace
+        run: uv sync --locked --all-packages --extra dev --python 3.11
+
+      - name: Build Go V2 handoff test binary
+        run: go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" ./cmd/loom-task-image-builder-supervisor
+
+      - name: Python-Go V2 handoff
+        env:
+          LOOM_GO_V2_TEST_BINARY: ${{ runner.temp }}/loom-task-image-builder-supervisor.test
+          LOOM_GO_V2_TEST_REQUIRED: "1"
+        run: uv run --no-sync pytest tests/integration/test_task_image_builder_guard_local_flow.py tests/integration/test_task_image_publication_full_flow.py
+
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at both
   # supported viewports with strict browser failure ledgers and axe.

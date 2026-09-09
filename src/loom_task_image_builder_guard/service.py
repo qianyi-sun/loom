@@ -28,6 +28,7 @@ from loom_task_image_builder_guard.authority import (
     ProjectionChallenge,
     ProjectionReceipt,
     PublicationCandidateAcknowledgement,
+    PublicationCandidateAcknowledgementV2,
     SealedAuthorityPayload,
 )
 from loom_task_image_builder_guard.bpf import (
@@ -50,15 +51,18 @@ from loom_task_image_builder_guard.ledger import GuardLedger, LedgerEntry
 from loom_task_image_builder_guard.models import GuardConfigValue
 from loom_task_image_builder_guard.protocol import (
     LOCAL_SCHEMA,
+    BaseResolutionEvidence,
     LocalRequest,
     PeerCredentials,
     create_sealed_memfd,
+    parse_base_resolution,
     parse_local_request,
     read_sealed_memfd,
     receive_authenticated_packet,
     require_ack,
     send_packet,
 )
+from loom_task_image_builder_guard.publication import PublicationStatus, parse_publication_status
 from loom_task_image_builder_guard.storage import JobStorage
 
 _BOOTSTRAP = re.compile(r"^loom_tibp_[A-Za-z0-9_-]{64,128}$")
@@ -267,6 +271,27 @@ class Authority(Protocol):
         materialization_id: UUID,
         request: dict[str, object],
     ) -> PublicationCandidateAcknowledgement: ...
+
+    def publication_candidate_v2(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationCandidateAcknowledgementV2: ...
+
+    def publication_submit(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus: ...
+
+    def publication_poll(
+        self,
+        grant_id: UUID,
+        materialization_id: UUID,
+        request: dict[str, object],
+    ) -> PublicationStatus: ...
 
     def release(
         self,
@@ -2322,6 +2347,9 @@ class GuardService:
                 "fail",
                 "registry-credential",
                 "publication-candidate",
+                "publication-candidate-v2",
+                "publication-submit",
+                "publication-poll",
             }:
                 if descriptor is None:
                     raise GuardError("local_session_descriptor_required")
@@ -3237,7 +3265,12 @@ class GuardService:
         authority_request = self._session_request(session)
         secret: SealedAuthorityPayload | None = None
         acknowledgement: LeaseAcknowledgement | None = None
-        candidate: PublicationCandidateAcknowledgement | None = None
+        publication_status: PublicationStatus | None = None
+        candidate: (
+            PublicationCandidateAcknowledgement
+            | PublicationCandidateAcknowledgementV2
+            | None
+        ) = None
         if request.operation == "claim":
             authority_request["claim_id"] = str(operation_id)
             secret = self.authority.claim(grant_id, authority_request)
@@ -3275,7 +3308,23 @@ class GuardService:
                     request.materialization_id,
                     authority_request,
                 )
-            elif request.operation == "publication-candidate":
+            elif request.operation in {
+                "publication-candidate",
+                "publication-candidate-v2",
+            }:
+                base_resolution: BaseResolutionEvidence | None = None
+                if request.operation == "publication-candidate-v2":
+                    try:
+                        if not isinstance(
+                            request.base_resolution,
+                            BaseResolutionEvidence,
+                        ):
+                            raise ValueError("invalid evidence")
+                        base_resolution = parse_base_resolution(
+                            request.base_resolution.as_dict()
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        raise GuardError("local_request_invalid") from None
                 if (
                     request.credential_id is None
                     or request.credential_generation is None
@@ -3285,6 +3334,13 @@ class GuardService:
                     or request.oci_file_sha256 is None
                     or request.oci_file_size is None
                     or request.platform is None
+                    or (
+                        base_resolution is not None
+                        and (
+                            base_resolution.platform != request.platform
+                            or base_resolution.output_digest != request.manifest_digest
+                        )
+                    )
                     or request.platform
                     != (
                         "linux/amd64"
@@ -3306,11 +3362,20 @@ class GuardService:
                         "platform": request.platform,
                     }
                 )
-                candidate = self.authority.publication_candidate(
-                    grant_id,
-                    request.materialization_id,
-                    authority_request,
-                )
+                if base_resolution is not None:
+                    authority_request["schema_version"] = 2
+                    authority_request["base_resolution"] = base_resolution.as_dict()
+                    candidate = self.authority.publication_candidate_v2(
+                        grant_id,
+                        request.materialization_id,
+                        authority_request,
+                    )
+                else:
+                    candidate = self.authority.publication_candidate(
+                        grant_id,
+                        request.materialization_id,
+                        authority_request,
+                    )
                 if (
                     candidate.operation_id != operation_id
                     or candidate.credential_id != request.credential_id
@@ -3328,6 +3393,18 @@ class GuardService:
                     or candidate.oci_file_sha256 != request.oci_file_sha256
                     or candidate.oci_file_size != request.oci_file_size
                     or candidate.platform != request.platform
+                    or isinstance(candidate, PublicationCandidateAcknowledgementV2)
+                    != (base_resolution is not None)
+                    or (
+                        base_resolution is not None
+                        and (
+                            not isinstance(
+                                candidate,
+                                PublicationCandidateAcknowledgementV2,
+                            )
+                            or candidate.base_resolution != base_resolution
+                        )
+                    )
                 ):
                     raise GuardError("authority_candidate_invalid")
             else:
@@ -3340,9 +3417,35 @@ class GuardService:
                     request.materialization_id,
                     authority_request,
                 )
+            elif request.operation in {"publication-submit", "publication-poll"}:
+                if request.operation == "publication-submit":
+                    publication_status = self.authority.publication_submit(
+                        grant_id,
+                        request.materialization_id,
+                        authority_request,
+                    )
+                else:
+                    publication_status = self.authority.publication_poll(
+                        grant_id,
+                        request.materialization_id,
+                        authority_request,
+                    )
+                # Adapters are a second boundary: never forward an unchecked
+                # mutable document or a forged status wrapper to the supervisor.
+                if type(publication_status) is not PublicationStatus:
+                    raise GuardError("authority_publication_invalid")
+                publication_status = parse_publication_status(
+                    publication_status.canonical_bytes,
+                    grant_id=grant_id,
+                    operation_id=operation_id,
+                    materialization_id=request.materialization_id,
+                    attempt_id=request.attempt_id,
+                    lease_epoch=request.lease_epoch,
+                )
             elif request.operation not in {
                 "registry-credential",
                 "publication-candidate",
+                "publication-candidate-v2",
             }:
                 method = cast(
                     Callable[
@@ -3376,6 +3479,8 @@ class GuardService:
         elif request.operation == "claim":
             response["operation_id"] = str(operation_id)
             response["available"] = False
+        elif publication_status is not None:
+            response["publication_status"] = publication_status.as_dict()
         elif candidate is not None:
             response.update(
                 {
@@ -3400,6 +3505,8 @@ class GuardService:
                     "authority_response_sha256": candidate.response_sha256,
                 }
             )
+            if isinstance(candidate, PublicationCandidateAcknowledgementV2):
+                response["base_resolution"] = candidate.base_resolution.as_dict()
         elif acknowledgement is not None:
             response.update(
                 {

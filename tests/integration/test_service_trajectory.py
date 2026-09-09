@@ -846,15 +846,27 @@ async def test_stream_wakes_on_listen_notify_mid_run(
 
     from loom.db.schema import Trial
 
-    app, raw, _team_id, trial_id = traj_setup
+    app, raw, team_id, completed_trial_id = traj_setup
 
-    # Flip the trial back to `running` so the stream stays open
-    # long enough to observe a mid-run insert.
+    # Use a fresh running trial: the shared fixture is already terminal and
+    # its evidence must not be reopened to simulate an active stream.
+    trial_id = uuid4()
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        task_id = s.execute(
+            select(Trial.task_id).where(Trial.id == completed_trial_id),
+        ).scalar_one()
         s.execute(
-            sa_update(Trial).where(Trial.id == trial_id).values(state="running"),
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_id,
+                team_id=team_id,
+                state="running",
+                config={},
+                requires_caps={},
+                result={},
+            ),
         )
         s.commit()
     sync_engine.dispose()

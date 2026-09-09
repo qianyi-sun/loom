@@ -34,6 +34,7 @@ from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom.models.task_checksum import task_checksum
+from loom.task_image_materialization import ensure_task_image_materializations
 
 logger = logging.getLogger(__name__)
 
@@ -167,16 +168,17 @@ async def _sync_local(
     dry_run: bool,
 ) -> None:
     entry_root = fixtures_root / entry.id
-    source_dir = (
-        entry_root / entry.source_subdir if entry.source_subdir else entry_root
-    )
+    source_dir = entry_root / entry.source_subdir if entry.source_subdir else entry_root
     if not source_dir.is_dir():
         logger.warning(
             "benchmarks_sync_skip kind=local id=%s reason=missing_source_dir path=%s",
-            entry.id, source_dir,
+            entry.id,
+            source_dir,
         )
         plan.add(
-            kind="local", id=entry.id, action="SKIP",
+            kind="local",
+            id=entry.id,
+            action="SKIP",
             reason=f"source dir missing: {source_dir}",
         )
         return
@@ -246,18 +248,16 @@ async def _sync_local_tasks(
 ) -> TaskCounts:
     """SELECT-first then UPSERT only when checksum differs.
 
-    Avoids O(tasks) writes on no-op re-syncs (e.g., the auto-sync
-    hook on `loom service up`). One commit at the end of the loop —
-    a 500-task benchmark sync used to issue 500 commits.
+    Unchanged Task rows are not rewritten, but Dockerfile prerequisites refresh
+    their references and recover retirement even on unchanged syncs. One commit
+    at the end of the loop avoids per-task commits. Dry-run writes neither.
     """
     inserted = updated = unchanged = 0
     did_write = False
     for task_toml in task_tomls:
         bundle_dir = task_toml.parent
         rel = bundle_dir.relative_to(source_dir)
-        task_id = (
-            entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
-        )
+        task_id = entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
         source = _fixture_source(entry, rel)
 
         try:
@@ -271,7 +271,7 @@ async def _sync_local_tasks(
             ) from exc
 
         checksum = task_checksum(bundle_dir)
-        existing = await _get_task(session, task_id)
+        existing = await _get_task(session, task_id, lock=not dry_run)
         if existing is None:
             inserted += 1
         elif (
@@ -282,7 +282,10 @@ async def _sync_local_tasks(
             updated += 1
         else:
             unchanged += 1
-            continue  # no write needed
+            if not dry_run and existing is not None:
+                images = await ensure_task_image_materializations(session, task_row=existing)
+                did_write = did_write or bool(images)
+            continue
 
         if not dry_run:
             desired = dict(
@@ -293,23 +296,32 @@ async def _sync_local_tasks(
                 license=entry.license_spdx,
                 benchmark_id=entry.id,
             )
-            await session.execute(
-                pg_insert(TaskRow).values(**desired).on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "checksum": checksum,
-                        "config": raw_cfg,
-                        "source": desired["source"],
-                        "license": entry.license_spdx,
-                        "benchmark_id": entry.id,
-                    },
-                ),
-            )
+            task_row = (
+                await session.execute(
+                    pg_insert(TaskRow)
+                    .values(**desired)
+                    .on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={
+                            "checksum": checksum,
+                            "config": raw_cfg,
+                            "source": desired["source"],
+                            "license": entry.license_spdx,
+                            "benchmark_id": entry.id,
+                        },
+                    )
+                    .returning(TaskRow)
+                    .execution_options(populate_existing=True),
+                )
+            ).scalar_one()
+            await ensure_task_image_materializations(session, task_row=task_row)
             did_write = True
     if did_write:
         await session.commit()
     return TaskCounts(
-        inserted=inserted, updated=updated, unchanged=unchanged,
+        inserted=inserted,
+        updated=updated,
+        unchanged=unchanged,
     )
 
 
@@ -420,10 +432,11 @@ async def _get_benchmark(
     return result.scalar_one_or_none()
 
 
-async def _get_task(session: AsyncSession, task_id: str) -> TaskRow | None:
-    result = await session.execute(
-        select(TaskRow).where(TaskRow.id == task_id),
-    )
+async def _get_task(session: AsyncSession, task_id: str, *, lock: bool = False) -> TaskRow | None:
+    query = select(TaskRow).where(TaskRow.id == task_id)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    result = await session.execute(query)
     return result.scalar_one_or_none()
 
 

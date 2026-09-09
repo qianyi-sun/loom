@@ -69,7 +69,7 @@ def test_aider_cli_manifest_has_only_the_secure_local_distribution() -> None:
     entries = _manifest_entries(PYTHON_CLI_REQUIREMENTS)
     aider_entries = {entry for entry in entries if entry.startswith("aider-chat==")}
 
-    assert aider_entries == {"aider-chat==0.86.2+loom.1"}
+    assert aider_entries == {"aider-chat==0.86.2+loom.2"}
     assert not any(entry.startswith("litellm==") for entry in entries)
 
 

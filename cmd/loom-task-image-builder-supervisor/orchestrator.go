@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +26,7 @@ type TaskImageGuard interface {
 	Bundle(context.Context, string, string, string, string, int, *SecretBuffer) (*SecretBuffer, error)
 	RegistryCredential(context.Context, RegistryCredentialRequest, *SecretBuffer) (*SecretBuffer, error)
 	PublicationCandidate(context.Context, PublicationCandidateRequest, *SecretBuffer) (*PublicationCandidateAcknowledgement, error)
+	PublicationCandidateV2(context.Context, PublicationCandidateV2Request, *SecretBuffer) (*PublicationCandidateV2Acknowledgement, error)
 	Start(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Heartbeat(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
 	Release(context.Context, string, string, string, string, int, *SecretBuffer) (*LeaseResponse, error)
@@ -34,7 +36,7 @@ type TaskImageGuard interface {
 
 type BuildExecutor interface {
 	Start(context.Context) error
-	Build(context.Context, BuildComponent) (OCIOutput, error)
+	Build(context.Context, BuildComponent) (BuildResult, error)
 	Close(context.Context) error
 }
 
@@ -70,19 +72,21 @@ func (t realTimer) C() <-chan time.Time { return t.timer.C }
 func (t realTimer) Stop() bool { return t.timer.Stop() }
 
 type ExecutorFactory func(Config, *AllocationCapabilities, BuildPlan) (BuildExecutor, error)
+type RegisteredExecutorFactory func(Config, *AllocationCapabilities, BuildPlan, int) (BuildExecutor, error)
 
 type Orchestrator struct {
-	GrantID       string
-	Config        Config
-	Guard         TaskImageGuard
-	Clock         Clock
-	NewExecutor   ExecutorFactory
-	Download      BundleDownloader
-	Handoff       PublicationHandoff
-	PostProject   func(context.Context, *AllocationCapabilities) error
-	IdleGrace     time.Duration
-	CleanupGrace  time.Duration
-	RecordOutcome func(BuildOutcome)
+	GrantID               string
+	Config                Config
+	Guard                 TaskImageGuard
+	Clock                 Clock
+	NewExecutor           ExecutorFactory
+	NewRegisteredExecutor RegisteredExecutorFactory
+	Download              BundleDownloader
+	Handoff               PublicationHandoff
+	PostProject           func(context.Context, *AllocationCapabilities) error
+	IdleGrace             time.Duration
+	CleanupGrace          time.Duration
+	RecordOutcome         func(BuildOutcome)
 }
 
 func (o *Orchestrator) Run(ctx context.Context) (err error) {
@@ -105,9 +109,18 @@ func (o *Orchestrator) Run(ctx context.Context) (err error) {
 		cleanup:      map[string]int{"descendant_processes": 0, "mounts": 0, "sockets": 0, "open_files": 0},
 	}
 	defer func() {
-		cleanupErr := state.cleanupAll()
-		if finishErr := state.finish(); finishErr != nil {
-			cleanupErr = errors.Join(cleanupErr, finishErr)
+		var cleanupErr error
+		if state.buildUnjoined {
+			// A live consumer still borrows allocation descriptors. Leave those
+			// capabilities to process exit and guarded allocation cleanup.
+			cleanupErr = errCleanupAmbiguous
+		} else {
+			cleanupErr = state.cleanupAll()
+		}
+		if !state.cleanupUnproven {
+			if finishErr := state.finish(); finishErr != nil {
+				cleanupErr = errors.Join(cleanupErr, finishErr)
+			}
 		}
 		state.closeSecrets()
 		if !state.outcomeRecorded {
@@ -215,6 +228,8 @@ func (o *Orchestrator) RecordIdleWait() {
 }
 
 type orchestratorState struct {
+	buildUnjoined   bool
+	cleanupUnproven bool
 	o               *Orchestrator
 	ctx             context.Context
 	clock           Clock
@@ -236,7 +251,10 @@ type orchestratorState struct {
 func (s *orchestratorState) claim(claimID string) (*SecretBuffer, bool, error) {
 	var claimSecret *SecretBuffer
 	var available bool
-	err := s.sessionManager.WithCurrent(func(current *SecretBuffer) error {
+	err := s.sessionManager.WithCurrentEnvelope(func(envelope *SessionEnvelope, current *SecretBuffer) error {
+		// Upload credential refresh may have replaced the cached claim session.
+		// Capture the exact envelope lent for this claim under the same lock.
+		s.session = envelope
 		var err error
 		claimSecret, available, err = s.o.Guard.Claim(s.ctx, s.o.GrantID, claimID, current)
 		return err
@@ -260,6 +278,98 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 	}
 	s.claimData = claim
 	s.built = nil
+	var registered *DownloadedRegisteredBundle
+	if claim.RegisteredBundle != nil {
+		if s.o.Config.Bundle == nil || s.o.NewRegisteredExecutor == nil {
+			s.record(BuildOutcomeTransientFailure, "registered_bundle_unavailable", claim.firstComponent())
+			return safeError("registered_bundle_unavailable")
+		}
+		registered, err = s.prepareRegisteredBundle()
+		if err != nil {
+			if errors.Is(err, errCleanupAmbiguous) {
+				s.cleanupUnproven = true
+			}
+			s.record(BuildOutcomeTransientFailure, "bundle_download_failed", claim.firstComponent())
+			return errors.Join(safeError("bundle_download_failed"), err)
+		}
+		defer func() {
+			if s.cleanupUnproven || s.buildUnjoined {
+				err = errors.Join(err, registered.retainForAllocationCleanup())
+			} else if cleanupErr := registered.Close(); cleanupErr != nil {
+				s.cleanupUnproven = true
+				err = errors.Join(err, cleanupErr)
+			}
+		}()
+	} else if err := s.prepareLegacyBundle(); err != nil {
+		return err
+	}
+
+	lease, err := s.startClaim()
+	if err != nil {
+		return err
+	}
+	var executor BuildExecutor
+	if registered != nil {
+		var inputFD int
+		inputFD, err = registered.DupDirectoryFD()
+		if err == nil {
+			executor, err = s.o.NewRegisteredExecutor(s.o.Config, s.caps, claim.Plan, inputFD)
+			_ = syscall.Close(inputFD)
+		}
+	} else {
+		executor, err = s.o.NewExecutor(s.o.Config, s.caps, claim.Plan)
+	}
+	if err != nil || executor == nil {
+		s.record(BuildOutcomeContainmentFailure, "executor_create_failed", claim.firstComponent())
+		return errors.Join(safeError("executor_create_failed"), s.failLease("containment"))
+	}
+	s.executor = executor
+	defer func() {
+		if cleanupErr := s.closeActiveExecutor(executor); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+	if err := executor.Start(s.ctx); err != nil {
+		s.record(BuildOutcomeContainmentFailure, "executor_start_failed", claim.firstComponent())
+		return errors.Join(safeError("executor_start_failed"), s.failLease("containment"))
+	}
+	if err := s.buildComponents(lease); err != nil {
+		return err
+	}
+
+	set := BuiltComponentSet{
+		GrantID: s.o.GrantID, MaterializationID: claim.MaterializationID,
+		AttemptID: claim.AttemptID, LeaseEpoch: claim.LeaseEpoch,
+		Components: append([]BuiltComponent(nil), s.built...),
+	}
+	receipt, err := s.acceptPublication(set)
+	if err != nil {
+		return s.handlePublicationError(err)
+	}
+	// Atomic publication completion already cleared this lease.
+	if receipt == nil {
+		if err := s.releaseLease(); err != nil {
+			s.record(BuildOutcomeLeaseLost, "release_failed", "")
+			return err
+		}
+	}
+	if err := s.closeActiveExecutor(executor); err != nil {
+		s.record(BuildOutcomeContainmentFailure, "cleanup_failed", "")
+		return err
+	}
+	if registered != nil {
+		if err := registered.Close(); err != nil {
+			s.cleanupUnproven = true
+			s.record(BuildOutcomeContainmentFailure, "cleanup_failed", "")
+			return err
+		}
+	}
+	s.recordBuilt()
+	return nil
+}
+
+func (s *orchestratorState) prepareLegacyBundle() error {
+	claim := s.claimData
 	bundleID, err := newUUID()
 	if err != nil {
 		s.record(BuildOutcomeTransientFailure, "uuid_failed", "")
@@ -279,73 +389,70 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 		s.record(BuildOutcomeDeterministicFailure, "bundle_download_failed", claim.firstComponent())
 		return safeError("bundle_download_failed")
 	}
-
-	startID, err := newUUID()
-	if err != nil {
-		s.record(BuildOutcomeTransientFailure, "uuid_failed", "")
-		return safeError("uuid_failed")
-	}
-	var lease *LeaseResponse
-	if err := s.sessionManager.WithCurrent(func(current *SecretBuffer) error {
-		var err error
-		lease, err = s.o.Guard.Start(s.ctx, s.o.GrantID, startID, claim.MaterializationID, claim.AttemptID, claim.LeaseEpoch, current)
-		return err
-	}); err != nil {
-		s.record(BuildOutcomeLeaseLost, "start_failed", claim.firstComponent())
-		return errors.Join(safeError("start_failed"), err)
-	}
-	if err := claim.validateLease(lease); err != nil {
-		s.record(BuildOutcomeLeaseLost, "start_invalid", claim.firstComponent())
-		return safeError("start_invalid")
-	}
-
-	executor, err := s.o.NewExecutor(s.o.Config, s.caps, claim.Plan)
-	if err != nil {
-		s.record(BuildOutcomeContainmentFailure, "executor_create_failed", claim.firstComponent())
-		return errors.Join(safeError("executor_create_failed"), s.failLease("containment"))
-	}
-	s.executor = executor
-	defer func() {
-		if cleanupErr := s.closeActiveExecutor(executor); cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
-		}
-	}()
-	if err := executor.Start(s.ctx); err != nil {
-		s.record(BuildOutcomeContainmentFailure, "executor_start_failed", claim.firstComponent())
-		return errors.Join(safeError("executor_start_failed"), s.failLease("containment"))
-	}
-	if err := s.buildComponents(lease); err != nil {
-		return err
-	}
-
-	set := BuiltComponentSet{
-		GrantID:           s.o.GrantID,
-		MaterializationID: claim.MaterializationID,
-		AttemptID:         claim.AttemptID,
-		LeaseEpoch:        claim.LeaseEpoch,
-		Components:        append([]BuiltComponent(nil), s.built...),
-	}
-	if err := s.acceptPublication(set); err != nil {
-		return s.handlePublicationError(err)
-	}
-	if err := s.releaseLease(); err != nil {
-		s.record(BuildOutcomeLeaseLost, "release_failed", "")
-		return err
-	}
-	s.recordBuilt()
 	return nil
 }
 
-func (s *orchestratorState) acceptPublication(set BuiltComponentSet) error {
+func (s *orchestratorState) startClaim() (*LeaseResponse, error) {
+	claim := s.claimData
+	startID, err := newUUID()
+	if err != nil {
+		s.record(BuildOutcomeTransientFailure, "uuid_failed", "")
+		return nil, safeError("uuid_failed")
+	}
+	var lease *LeaseResponse
+	started := s.clock.Now()
+	opCtx, stop := context.WithTimeout(s.ctx, publicationOperationTimeout)
+	defer stop()
+	if err := s.sessionManager.WithCurrentEnvelope(func(envelope *SessionEnvelope, current *SecretBuffer) error {
+		if envelope.GrantID != s.o.GrantID || !envelope.ExpiresAt.After(started) ||
+			claim.LeaseExpiresAtPtr == nil || !claim.LeaseExpiresAtPtr.After(started) {
+			return safeError("start_expired")
+		}
+		s.session = envelope
+		var err error
+		lease, err = s.o.Guard.Start(opCtx, s.o.GrantID, startID, claim.MaterializationID, claim.AttemptID, claim.LeaseEpoch, current)
+		if opCtx.Err() != nil || s.clock.Now().Before(started) || !envelope.ExpiresAt.After(s.clock.Now()) {
+			return safeError("start_expired")
+		}
+		return err
+	}); err != nil {
+		s.record(BuildOutcomeLeaseLost, "start_failed", claim.firstComponent())
+		return nil, errors.Join(safeError("start_failed"), err)
+	}
+	if err := claim.validateLease(lease); err != nil || lease.Operation != "start" || lease.OperationID != startID ||
+		lease.GrantID != s.o.GrantID || lease.State != "running" || !lease.LeaseExpiresAt.After(s.clock.Now()) {
+		s.record(BuildOutcomeLeaseLost, "start_invalid", claim.firstComponent())
+		return nil, safeError("start_invalid")
+	}
+	claim.LeaseExpiresAtPtr = lease.LeaseExpiresAt
+	return lease, nil
+}
+
+func (s *orchestratorState) acceptPublication(set BuiltComponentSet) (*publicationReceipt, error) {
 	if credentialed, ok := s.o.Handoff.(CredentialedPublicationHandoff); ok {
 		binding, err := publicationAttemptBinding(set, s.claimData.Plan, credentialed.PublicationRegistryExpectation())
 		if err != nil {
-			return err
+			return nil, err
 		}
 		source := NewPublicationCredentialSource(s.sessionManager, s.o.Guard, binding)
-		return credentialed.AcceptWithCredentials(s.ctx, set, source)
+		type publicationUploader interface {
+			UploadWithCredentials(context.Context, BuiltComponentSet, *PublicationCredentialSource) ([]PublicationCandidateV2Acknowledgement, error)
+		}
+		if uploader, ok := credentialed.(publicationUploader); ok {
+			guard, ok := s.o.Guard.(publicationLifecycleGuard)
+			if !ok || s.claimData.LeaseExpiresAtPtr == nil {
+				return nil, ErrPublicationVerificationUnavailable
+			}
+			controller := publicationLifecycle{clock: s.clock, session: s.sessionManager, guard: guard, set: set, builderID: binding.BuilderID,
+				leaseExpiresAt: *s.claimData.LeaseExpiresAtPtr, timeout: 2 * time.Hour,
+				upload: func(ctx context.Context) ([]PublicationCandidateV2Acknowledgement, error) {
+					return uploader.UploadWithCredentials(ctx, set, source)
+				}}
+			return controller.run(s.ctx)
+		}
+		return nil, credentialed.AcceptWithCredentials(s.ctx, set, source)
 	}
-	return s.o.Handoff.Accept(s.ctx, set)
+	return nil, s.o.Handoff.Accept(s.ctx, set)
 }
 
 func (s *orchestratorState) handlePublicationError(err error) error {
@@ -369,6 +476,7 @@ func (s *orchestratorState) closeExecutor(executor BuildExecutor) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), s.cleanupGrace)
 	defer cancel()
 	if err := executor.Close(cleanupCtx); err != nil {
+		s.cleanupUnproven = true
 		return errors.Join(errCleanupAmbiguous, safeError("cleanup_failed"))
 	}
 	return nil
@@ -385,27 +493,41 @@ func (s *orchestratorState) closeActiveExecutor(executor BuildExecutor) error {
 
 type buildResult struct {
 	component BuildComponent
-	output    OCIOutput
+	result    BuildResult
 	err       error
 }
 
 var errBuildTimedOut = errors.New("build timed out")
 
-func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
+func (s *orchestratorState) buildComponents(lease *LeaseResponse) (resultErr error) {
 	leaseTimer := s.clock.NewTimer(durationUntil(s.clock.Now(), heartbeatAt(s.clock.Now(), lease.LeaseExpiresAt)))
-	defer leaseTimer.Stop()
+	defer func() { leaseTimer.Stop() }()
 	renewTimer := s.clock.NewTimer(durationUntil(s.clock.Now(), renewalAt(s.clock.Now(), s.session.ExpiresAt)))
-	defer renewTimer.Stop()
+	defer func() { renewTimer.Stop() }()
 	buildDeadline := s.clock.Now().Add(s.claimData.Plan.BuildTimeout)
 	buildTimer := s.clock.NewTimer(s.claimData.Plan.BuildTimeout)
 	defer buildTimer.Stop()
 	for _, component := range s.claimData.Plan.Components {
 		buildCtx, cancelBuild := context.WithCancelCause(s.ctx)
 		result := make(chan buildResult, 1)
+		joined := make(chan struct{})
+		executor := s.executor
 		go func(component BuildComponent) {
-			output, err := s.executor.Build(buildCtx, component)
-			result <- buildResult{component: component, output: output, err: err}
+			defer close(joined)
+			built, err := executor.Build(buildCtx, component)
+			result <- buildResult{component: component, result: built, err: err}
 		}(component)
+		defer func() {
+			cancelBuild(nil)
+			timer := time.NewTimer(s.cleanupGrace)
+			defer timer.Stop()
+			select {
+			case <-joined:
+			case <-timer.C:
+				s.buildUnjoined, s.cleanupUnproven = true, true
+				resultErr = errors.Join(resultErr, errCleanupAmbiguous)
+			}
+		}()
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -455,7 +577,7 @@ func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
 					s.record(BuildOutcomeLeaseLost, "authority_fenced", got.component.Name)
 					return safeError("authority_fenced")
 				}
-				s.built = append(s.built, BuiltComponent{Name: got.component.Name, Output: got.output})
+				s.built = append(s.built, BuiltComponent{Name: got.component.Name, Output: got.result.Output, BaseResolution: got.result.BaseResolution})
 				goto nextComponent
 			}
 		}
@@ -494,7 +616,7 @@ func (s *orchestratorState) waitIdle() error {
 }
 
 func (s *orchestratorState) renewIfDue() error {
-	if !s.clock.Now().Before(renewalAt(s.clock.Now(), s.session.ExpiresAt)) {
+	if !s.clock.Now().Before(renewalAt(s.clock.Now(), s.sessionManager.ExpiresAt())) {
 		return s.renew()
 	}
 	return nil
@@ -603,7 +725,9 @@ func (s *orchestratorState) finish() error {
 }
 
 func (s *orchestratorState) closeSecrets() {
-	if s.session != nil && s.session.Secret != nil {
+	if s.sessionManager != nil {
+		s.sessionManager.Close()
+	} else if s.session != nil && s.session.Secret != nil {
 		s.session.Secret.Close()
 	}
 	if s.caps != nil && s.caps.Bootstrap != nil {
@@ -687,6 +811,7 @@ type buildClaim struct {
 	LeaseExpiresAt    time.Time
 	LeaseExpiresAtPtr *time.Time
 	Plan              BuildPlan
+	RegisteredBundle  *RegisteredBundlePlan
 }
 
 func (c buildClaim) firstComponent() string {
@@ -732,24 +857,25 @@ type claimWire struct {
 }
 
 type buildPlanWire struct {
-	SchemaVersion            string               `json:"schema_version"`
-	GrantID                  string               `json:"grant_id"`
-	SessionID                string               `json:"session_id"`
-	Generation               int                  `json:"session_generation"`
-	MaterializeID            string               `json:"materialization_id"`
-	BuilderID                string               `json:"builder_id"`
-	TaskID                   string               `json:"task_id"`
-	TaskChecksum             string               `json:"task_checksum"`
-	CPUArch                  string               `json:"cpu_arch"`
-	Platform                 string               `json:"platform"`
-	BundleBucket             string               `json:"bundle_bucket"`
-	BundlePrefix             string               `json:"bundle_prefix"`
-	BundleFileMetadataSHA256 string               `json:"bundle_file_metadata_sha256"`
-	BundleFileLimit          int                  `json:"bundle_file_limit"`
-	BundleByteLimit          int64                `json:"bundle_byte_limit"`
-	BuildTimeoutSeconds      float64              `json:"build_timeout_seconds"`
-	AuthorizationExpiresAt   string               `json:"authorization_expires_at"`
-	Components               []buildComponentWire `json:"components"`
+	SchemaVersion               string               `json:"schema_version"`
+	GrantID                     string               `json:"grant_id"`
+	SessionID                   string               `json:"session_id"`
+	Generation                  int                  `json:"session_generation"`
+	MaterializeID               string               `json:"materialization_id"`
+	BuilderID                   string               `json:"builder_id"`
+	TaskID                      string               `json:"task_id"`
+	TaskChecksum                string               `json:"task_checksum"`
+	CPUArch                     string               `json:"cpu_arch"`
+	Platform                    string               `json:"platform"`
+	BundleBucket                string               `json:"bundle_bucket"`
+	BundlePrefix                string               `json:"bundle_prefix"`
+	BundleFileMetadataSHA256    string               `json:"bundle_file_metadata_sha256"`
+	BundleContentManifestSHA256 string               `json:"bundle_content_manifest_sha256,omitempty"`
+	BundleFileLimit             int                  `json:"bundle_file_limit"`
+	BundleByteLimit             int64                `json:"bundle_byte_limit"`
+	BuildTimeoutSeconds         float64              `json:"build_timeout_seconds"`
+	AuthorizationExpiresAt      string               `json:"authorization_expires_at"`
+	Components                  []buildComponentWire `json:"components"`
 }
 
 type buildComponentWire struct {
@@ -775,6 +901,9 @@ func parseBuildClaim(secret *SecretBuffer, binding claimBinding) (*buildClaim, e
 	if err := expectJSONEOF(decoder); err != nil {
 		return nil, errors.New("claim JSON invalid")
 	}
+	if err := validateRegisteredClaimFields(secret.data, wire); err != nil {
+		return nil, err
+	}
 	if wire.SchemaVersion != "loom.task-image-materialization-claim.v1" ||
 		wire.ClaimID != binding.ClaimID ||
 		!isCanonicalNonZeroUUID(wire.MaterializationID) ||
@@ -799,6 +928,7 @@ func parseBuildClaim(secret *SecretBuffer, binding claimBinding) (*buildClaim, e
 		LeaseExpiresAt:    expires,
 		LeaseExpiresAtPtr: &expires,
 		Plan:              plan,
+		RegisteredBundle:  wire.Plan.registeredBundlePlan(),
 	}, nil
 }
 
@@ -808,7 +938,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 		return BuildPlan{}, err
 	}
 	expectedBuilderID := "rootless:" + strings.ReplaceAll(binding.SessionID, "-", "")
-	if w.SchemaVersion != "loom.task-image-build-plan.v1" ||
+	if (w.SchemaVersion != "loom.task-image-build-plan.v1" && w.SchemaVersion != "loom.task-image-build-plan.v2") ||
 		w.GrantID != binding.GrantID ||
 		w.SessionID != binding.SessionID ||
 		w.Generation != binding.SessionGeneration ||
@@ -831,7 +961,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 		return BuildPlan{}, errors.New("build plan invalid")
 	}
 	authExpires, err := time.Parse(time.RFC3339, w.AuthorizationExpiresAt)
-	if err != nil || authExpires.Before(binding.Now) || authExpires.After(binding.SessionExpiresAt) {
+	if err != nil || !authExpires.After(binding.Now) || authExpires.After(binding.SessionExpiresAt) {
 		return BuildPlan{}, errors.New("build plan authorization invalid")
 	}
 	components := make([]BuildComponent, 0, len(w.Components))

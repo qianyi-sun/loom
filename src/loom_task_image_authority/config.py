@@ -57,6 +57,10 @@ class TaskImageAuthoritySettings(BaseSettings):
     port: int = Field(default=8445, ge=1, le=65535)
     request_rate_limit_per_second: int = Field(default=64, ge=1, le=10_000)
     request_concurrency_limit: int = Field(default=32, ge=1, le=1024)
+    bundle_backend: Literal["disabled", "minio"] = "disabled"
+    bundle_region: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    bundle_credentials_file: Path | None = None
+    bundle_reader_ca_file: Path | None = None
     bundle_public_https_origin: str | None = Field(default=None, max_length=2048)
     bundle_expected_bucket: str | None = Field(
         default=None,
@@ -89,11 +93,44 @@ class TaskImageAuthoritySettings(BaseSettings):
         pattern=_REGISTRY_IDENTITY_PATTERN,
     )
     registry_signing_key_file: Path | None = None
+    registry_reader_ca_file: Path | None = None
+    registry_connect_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    registry_idle_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
+    registry_total_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
+    registry_maximum_response_header_bytes: int = Field(
+        default=32 * 1024,
+        ge=1,
+        le=64 * 1024,
+    )
+    registry_maximum_chunk_bytes: int = Field(
+        default=1024 * 1024,
+        ge=1,
+        le=1024 * 1024,
+    )
+    registry_maximum_manifest_bytes: int = Field(
+        default=4 * 1024**2,
+        ge=1,
+        le=4 * 1024**2,
+    )
+    registry_maximum_response_bytes: int = Field(
+        default=100 * 1024**3,
+        ge=1,
+        le=100 * 1024**3,
+    )
+    registry_read_concurrency_limit: int = Field(default=4, ge=1, le=32)
 
     @model_validator(mode="after")
     def _bundle_configuration_is_complete_and_safe(
         self,
     ) -> TaskImageAuthoritySettings:
+        native = (self.bundle_region, self.bundle_credentials_file, self.bundle_reader_ca_file)
+        if self.bundle_backend == "minio":
+            if any(value is None for value in (*native, self.bundle_public_https_origin, self.bundle_expected_bucket)):
+                raise ValueError("native bundle configuration must be complete")
+            assert self.bundle_public_https_origin is not None
+            _validate_https_origin(self.bundle_public_https_origin, label="native bundle origin")
+        elif any(value is not None for value in native):
+            raise ValueError("native bundle configuration requires the minio backend")
         if (self.bundle_public_https_origin is None) != (self.bundle_expected_bucket is None):
             raise ValueError("bundle capability configuration must be all present or absent")
         if self.bundle_public_https_origin is not None:
@@ -133,6 +170,10 @@ class TaskImageAuthoritySettings(BaseSettings):
             raise ValueError("registry credential configuration must be all present or absent")
         if self.registry_origin is not None:
             _validate_https_origin(self.registry_origin, label="registry origin")
+        if self.registry_reader_ca_file is not None and self.registry_origin is None:
+            raise ValueError(
+                "registry reader configuration requires fixed registry credentials"
+            )
         return self
 
 

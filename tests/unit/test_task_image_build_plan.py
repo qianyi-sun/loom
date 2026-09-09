@@ -93,6 +93,13 @@ def _row(**changes: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def test_native_v1_plan_cannot_erase_strong_manifest_authority() -> None:
+    row = _row()
+    row.task_source_provenance["bundle_content_manifest_sha256"] = "6" * 64
+    with pytest.raises(ValueError, match="manifest-bearing native build plan"):
+        derive_task_image_build_plan(row, _authorization())
+
+
 def test_derives_exact_frozen_native_plan_without_url_or_credentials() -> None:
     plan = derive_task_image_build_plan(_row(), _authorization())
 

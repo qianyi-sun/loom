@@ -634,7 +634,7 @@ def test_stage_receipt_conformance_rejects_gid_drift(
 
 @pytest.mark.parametrize(
     "surface",
-    ("activation", "current", "socket", "pins", "service", "socket-unit"),
+    ("activation", "current", "socket", "pins", "service", "socket-unit", "supervisor-config"),
 )
 def test_conformance_rejects_any_live_provider_surface(
     tmp_path: Path,
@@ -648,6 +648,7 @@ def test_conformance_rejects_any_live_provider_surface(
     installed, target_root, source = _staged(tmp_path)
     paths = {
         "activation": target_root / "etc/loom/task-image-builder/activation-v1.json",
+        "supervisor-config": target_root / "etc/loom-task-image-builder/supervisor-config.json",
         "current": target_root / "opt/loom-task-image-builder-provider/current",
         "socket": target_root / "run/loom-task-image-builder-provider/supervisor.sock",
         "pins": target_root / "sys/fs/bpf/loom-task-image-builder/grant",

@@ -107,6 +107,7 @@ from loom_worker.sandbox_singleton import (
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.step_gateway_client import StepTokenGatewayClient
+from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
 from loom_worker.task_image import TaskImageBuildError, resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.terminal_task_validator import attest_terminal_task_validator
@@ -1253,7 +1254,12 @@ async def _spawn_trial(
                 benchmark_cache=settings.benchmark_cache,
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
-            if task_image_materialization is not None:
+            image_cache_checksum = verified_task_image_cache_identity(
+                task_dir, task_checksum=task_checksum, source_provenance=provenance,
+            )
+            # A different cache identity means strong capture already verified
+            # the full files/checksum/modes. Legacy grants retain their old checks.
+            if task_image_materialization is not None and image_cache_checksum == task_checksum:
                 actual_checksum = sha256_of_dir(task_dir)
                 if actual_checksum != task_image_materialization.task_checksum:
                     raise TaskImageBuildError(
@@ -1295,7 +1301,7 @@ async def _spawn_trial(
             task_image = await resolve_task_image(
                 task_config=task_config,
                 task_dir=task_dir,
-                task_checksum=task_checksum,
+                task_checksum=image_cache_checksum,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 build_slot_provider=lambda: _daemon_build_slot(
                     cp_client,
@@ -1459,7 +1465,7 @@ async def _spawn_trial(
             return DockerTaskSidecarRuntime(
                 task_config=task_config,
                 task_dir=task_dir,
-                task_checksum=task_checksum,
+                task_checksum=image_cache_checksum,
                 trial_id=trial_id,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 container_cpus=settings.container_cpus,

@@ -6,15 +6,19 @@ import hashlib
 import hmac
 import json
 import math
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from uuid import UUID
 
 import rfc8785
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    TaskImageAttemptRetention,
     TaskImageBuildGrant,
     TaskImageBuildProjection,
     TaskImageBuildProjectionEvent,
@@ -24,12 +28,21 @@ from loom.db.schema import (
     TaskImageMaterializationOperationEvent,
 )
 from loom.security.secret_store import SecretStore
-from loom.task_image_build_plan import TaskImageBuildPlanV1, derive_task_image_build_plan
+from loom.task_image_build_plan import (
+    TaskImageBuildPlan,
+    TaskImageBuildPlanV1,
+    derive_task_image_build_plan,
+    parse_task_image_build_plan,
+)
 from loom_task_image_authority.bundle_capability import (
+    AsyncTaskImageBundleCapabilityProvider,
+    TaskImageBundleCapability,
     TaskImageBundleCapabilityError,
     TaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityV1,
+    parse_task_image_bundle_capability,
 )
+from loom_task_image_authority.retention import attempt_is_retired
 
 DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS = 300.0
 MAX_SESSION_MATERIALIZATION_LEASE_SECONDS = 15 * 60.0
@@ -128,23 +141,23 @@ def _lease_deadline(*, now: datetime, lease_seconds: float) -> datetime:
     return now + timedelta(seconds=lease_seconds)
 
 
-def _plan_snapshot(plan: TaskImageBuildPlanV1) -> tuple[dict[str, object], str]:
+def _plan_snapshot(plan: TaskImageBuildPlan) -> tuple[dict[str, object], str]:
     payload = plan.model_dump(mode="json", exclude_none=False)
     return payload, hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
 
 
-def _stored_claim_plan(
+def _stored_attempt_claim_plan(
     attempt: TaskImageMaterializationAttempt,
     *,
     authorization: TaskImageBuildSessionAuthorization,
     materialization_id: UUID,
-) -> TaskImageBuildPlanV1:
+) -> TaskImageBuildPlan:
     if attempt.claim_plan_json is None or attempt.claim_plan_sha256 is None:
         raise TaskImageSessionMaterializationAuthorizationError(
             "task-image claim receipt is unavailable"
         )
     try:
-        plan = TaskImageBuildPlanV1.model_validate_json(json.dumps(attempt.claim_plan_json))
+        plan = parse_task_image_build_plan(json.dumps(attempt.claim_plan_json, ensure_ascii=False, separators=(",", ":")))
         payload, digest = _plan_snapshot(plan)
     except (TypeError, ValueError):
         raise TaskImageSessionMaterializationAuthorizationError(
@@ -153,15 +166,54 @@ def _stored_claim_plan(
     if (
         digest != attempt.claim_plan_sha256
         or payload != attempt.claim_plan_json
+        or attempt.grant_id != authorization.grant_id
         or plan.grant_id != authorization.grant_id
-        or plan.session_id != authorization.session_id
-        or plan.session_generation != authorization.session_generation
+        or plan.session_id != attempt.session_id
+        or plan.session_generation != attempt.session_generation
+        or plan.builder_id != attempt.builder_id
+        or attempt.materialization_id != materialization_id
         or plan.materialization_id != materialization_id
+        or plan.cpu_arch != authorization.cpu_arch
     ):
         raise TaskImageSessionMaterializationAuthorizationError(
             "task-image claim receipt is unavailable"
         )
     return plan
+
+
+def _stored_claim_plan(
+    attempt: TaskImageMaterializationAttempt,
+    *,
+    authorization: TaskImageBuildSessionAuthorization,
+    materialization_id: UUID,
+) -> TaskImageBuildPlan:
+    plan = _stored_attempt_claim_plan(
+        attempt, authorization=authorization, materialization_id=materialization_id,
+    )
+    # Claim replay belongs to its original session, unlike continuing an attempt
+    # with a freshly authenticated successor under the same grant.
+    if (
+        plan.session_id != authorization.session_id
+        or plan.session_generation != authorization.session_generation
+    ):
+        raise TaskImageSessionMaterializationAuthorizationError(
+            "task-image claim receipt is unavailable"
+        )
+    return plan
+
+
+def _reject_pending_materialization_authority(session: AsyncSession) -> None:
+    # Check before any SELECT can autoflush a later retention/parent write.
+    # Refreshing locked rows must not silently discard caller-owned edits when
+    # autoflush is suppressed, either. Reads require committed/flushed authority.
+    models = (TaskImageAttemptRetention, TaskImageMaterialization, TaskImageMaterializationAttempt)
+    if any(
+        isinstance(row, models)
+        for row in (*session.new, *session.dirty, *session.deleted)
+    ):
+        raise TaskImageSessionMaterializationConflictError(
+            "task-image materialization authority has unflushed changes"
+        )
 
 
 async def lock_current_task_image_build_session_authority(
@@ -172,6 +224,7 @@ async def lock_current_task_image_build_session_authority(
 ) -> TaskImageBuildSessionGeneration:
     """Recheck and lock grant → projection → current generation in canonical order."""
 
+    _reject_pending_materialization_authority(session)
     if (
         authorization.authority_version != 2
         or authorization.builder_release_sha256 is None
@@ -263,31 +316,63 @@ async def _claim_replay(
     *,
     authorization: TaskImageBuildSessionAuthorization,
     claim_id: UUID,
-) -> tuple[TaskImageMaterialization, TaskImageBuildPlanV1] | None:
-    attempt = await session.scalar(
-        select(TaskImageMaterializationAttempt)
-        .where(TaskImageMaterializationAttempt.claim_id == claim_id)
-        .with_for_update()
-    )
-    if attempt is None:
+) -> tuple[TaskImageMaterialization, TaskImageBuildPlan] | None:
+    # Discover identity without taking the child lock. Normal lease operations
+    # and retirement acquire materialization -> attempt; child-first replay would
+    # deadlock with either parent owner. The observation is not authority and is
+    # reloaded and revalidated after acquiring both locks in that shared order.
+    observed = (
+        await session.execute(
+            select(
+                TaskImageMaterializationAttempt.id,
+                TaskImageMaterializationAttempt.materialization_id,
+                TaskImageMaterializationAttempt.grant_id,
+                TaskImageMaterializationAttempt.session_id,
+                TaskImageMaterializationAttempt.session_generation,
+            ).where(TaskImageMaterializationAttempt.claim_id == claim_id)
+        )
+    ).one_or_none()
+    if observed is None:
         return None
     if (
-        attempt.grant_id != authorization.grant_id
-        or attempt.session_id != authorization.session_id
-        or attempt.session_generation != authorization.session_generation
+        observed.grant_id != authorization.grant_id
+        or observed.session_id != authorization.session_id
+        or observed.session_generation != authorization.session_generation
     ):
         raise TaskImageSessionMaterializationConflictError(
             "task-image claim identity was already used"
         )
     row = await session.scalar(
         select(TaskImageMaterialization)
-        .where(TaskImageMaterialization.id == attempt.materialization_id)
+        .where(TaskImageMaterialization.id == observed.materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if row is None:
         raise TaskImageSessionMaterializationConflictError(
             "task-image claim replay materialization is unavailable"
         )
+    attempt = await session.scalar(
+        select(TaskImageMaterializationAttempt)
+        .where(
+            TaskImageMaterializationAttempt.id == observed.id,
+            TaskImageMaterializationAttempt.claim_id == claim_id,
+        )
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if (
+        attempt is None
+        or attempt.materialization_id != row.id
+        or attempt.grant_id != authorization.grant_id
+        or attempt.session_id != authorization.session_id
+        or attempt.session_generation != authorization.session_generation
+    ):
+        raise TaskImageSessionMaterializationConflictError(
+            "task-image claim replay identity changed"
+        )
+    if await attempt_is_retired(session, attempt_id=attempt.id):
+        raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     return row, _stored_claim_plan(
         attempt,
         authorization=authorization,
@@ -302,7 +387,7 @@ async def claim_session_materialization(
     claim_id: UUID,
     now: datetime,
     lease_seconds: float,
-) -> tuple[TaskImageMaterialization, TaskImageBuildPlanV1] | None:
+) -> tuple[TaskImageMaterialization, TaskImageBuildPlan] | None:
     """Claim one native materialization under the exact current build session."""
 
     now = _utc(now)
@@ -453,12 +538,17 @@ async def _operation_replay(
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if row is None:
         raise TaskImageSessionMaterializationConflictError(
             "task-image operation replay materialization is unavailable"
         )
+    if operation_type in ("start", "heartbeat") and await attempt_is_retired(
+        session, attempt_id=attempt_id
+    ):
+        raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     return row
 
 
@@ -471,10 +561,15 @@ async def lock_session_materialization_lease(
     lease_epoch: int,
     allowed_states: tuple[str, ...],
     now: datetime,
+    cleanup_only: bool = False,
 ) -> tuple[TaskImageMaterialization, TaskImageMaterializationAttempt]:
+    # Only trusted release/failure transitions opt out: they return no bundle,
+    # build plan, registry credential, candidate or publication authority.
+    _reject_pending_materialization_authority(session)
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if (
@@ -497,12 +592,15 @@ async def lock_session_materialization_lease(
             TaskImageMaterializationAttempt.grant_id == authorization.grant_id,
             TaskImageMaterializationAttempt.claim_id.is_not(None),
         )
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if attempt is None:
         raise TaskImageSessionMaterializationConflictError(
             "stale task-image session materialization attempt"
         )
+    if not cleanup_only and await attempt_is_retired(session, attempt_id=attempt.id):
+        raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     return row, attempt
 
 
@@ -627,6 +725,7 @@ async def _prepare_operation(
         lease_epoch=lease_epoch,
         allowed_states=allowed_states,
         now=now,
+        cleanup_only=operation_type in ("release", "containment_release", "deterministic_fail"),
     )
     return now, row, attempt
 
@@ -750,7 +849,32 @@ async def get_session_materialization_build_plan(
     return derive_task_image_build_plan(row, authorization)
 
 
-async def issue_session_materialization_bundle(
+@dataclass(frozen=True, slots=True)
+class TaskImageBundlePreparation:
+    plan: TaskImageBuildPlan
+    capability: TaskImageBundleCapability | None = field(repr=False)
+    checked_at: datetime
+    valid_until: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _LockedBundleState:
+    row: TaskImageMaterialization
+    attempt: TaskImageMaterializationAttempt
+    event: TaskImageMaterializationOperationEvent | None
+    plan: TaskImageBuildPlan
+    checked_at: datetime
+    valid_until: datetime
+
+
+def _bundle_time(clock: Callable[[], datetime], *, previous: datetime, valid_until: datetime) -> datetime:
+    current = _utc(clock())
+    if current < previous or current >= valid_until:
+        raise TaskImageBundleCapabilityError("task-image bundle authority expired or clock regressed")
+    return current
+
+
+async def _lock_bundle_state(
     session: AsyncSession,
     *,
     authorization: TaskImageBuildSessionAuthorization,
@@ -758,13 +882,9 @@ async def issue_session_materialization_bundle(
     attempt_id: UUID,
     lease_epoch: int,
     operation_id: UUID,
-    now: datetime,
-    provider: TaskImageBundleCapabilityProvider,
-    secret_store: SecretStore,
-) -> TaskImageBundleCapabilityV1:
-    """Issue or replay one encrypted, operation-bound bundle capability."""
-
-    now = _utc(now)
+    clock: Callable[[], datetime],
+) -> _LockedBundleState:
+    now = _utc(clock())
     _nonzero_id(operation_id, label="operation_id")
     _nonzero_id(materialization_id, label="materialization_id")
     _nonzero_id(attempt_id, label="attempt_id")
@@ -801,6 +921,30 @@ async def issue_session_materialization_bundle(
         allowed_states=("claimed", "running"),
         now=now,
     )
+    assert row.lease_expires_at is not None
+    valid_until = min(
+        authorization.grant_expires_at, authorization.attestation_expires_at,
+        authorization.session_expires_at, row.lease_expires_at,
+    )
+    checked_at = _bundle_time(clock, previous=now, valid_until=valid_until)
+    plan = derive_task_image_build_plan(row, authorization)
+    claimed = _stored_attempt_claim_plan(attempt, authorization=authorization, materialization_id=materialization_id)
+    # Original claim identity is validated against the attempt above. A renewed
+    # session changes live capability identity, not the frozen build inputs.
+    live_fields = {"authorization_expires_at", "session_id", "session_generation", "builder_id"}
+    if plan.model_dump(exclude=live_fields) != claimed.model_dump(exclude=live_fields):
+        raise TaskImageSessionMaterializationConflictError("task-image frozen bundle plan changed")
+    plan = plan.model_copy(update={"authorization_expires_at": valid_until})
+    return _LockedBundleState(row, attempt, event, plan, checked_at, valid_until)
+
+
+async def _bundle_preparation(
+    state: _LockedBundleState, *, provider: TaskImageBundleCapabilityProvider | AsyncTaskImageBundleCapabilityProvider,
+    secret_store: SecretStore, clock: Callable[[], datetime],
+) -> TaskImageBundlePreparation:
+    event = state.event
+    now = _bundle_time(clock, previous=state.checked_at, valid_until=state.valid_until)
+    capability = None
     if event is not None:
         if (
             event.secret_response_ref is None
@@ -818,25 +962,60 @@ async def issue_session_materialization_bundle(
                 event.secret_response_sha256,
             ):
                 raise ValueError("bundle capability digest changed")
-            capability = TaskImageBundleCapabilityV1.model_validate_json(payload)
+            capability = parse_task_image_bundle_capability(payload)
         except Exception:
             raise TaskImageBundleCapabilityError(
                 "task-image bundle capability replay is unavailable"
             ) from None
         if (
-            capability.grant_id != authorization.grant_id
-            or capability.session_id != authorization.session_id
-            or capability.session_generation != authorization.session_generation
-            or capability.materialization_id != materialization_id
-            or capability.expires_at != event.secret_response_expires_at
+            capability.expires_at != event.secret_response_expires_at
         ):
             raise TaskImageBundleCapabilityError(
                 "task-image bundle capability replay is unavailable"
             )
-        return capability
+        now = _bundle_time(clock, previous=now, valid_until=min(state.valid_until, capability.expires_at))
+        provider.validate(capability, state.plan, now=now)
+    now = _bundle_time(clock, previous=now, valid_until=state.valid_until)
+    return TaskImageBundlePreparation(state.plan, capability, now, state.valid_until)
 
-    plan = derive_task_image_build_plan(row, authorization)
-    capability = provider.issue(plan, now=now)
+
+async def prepare_session_materialization_bundle(
+    session: AsyncSession, *, authorization: TaskImageBuildSessionAuthorization,
+    materialization_id: UUID, attempt_id: UUID, lease_epoch: int, operation_id: UUID,
+    provider: TaskImageBundleCapabilityProvider | AsyncTaskImageBundleCapabilityProvider,
+    secret_store: SecretStore, clock: Callable[[], datetime],
+) -> TaskImageBundlePreparation:
+    """Prepare under locks; owner must release the transaction before storage I/O."""
+    state = await _lock_bundle_state(
+        session, authorization=authorization, materialization_id=materialization_id,
+        attempt_id=attempt_id, lease_epoch=lease_epoch, operation_id=operation_id, clock=clock,
+    )
+    return await _bundle_preparation(state, provider=provider, secret_store=secret_store, clock=clock)
+
+
+async def finalize_session_materialization_bundle(
+    session: AsyncSession, *, authorization: TaskImageBuildSessionAuthorization,
+    materialization_id: UUID, attempt_id: UUID, lease_epoch: int, operation_id: UUID,
+    prepared: TaskImageBundlePreparation, capability: TaskImageBundleCapability,
+    provider: TaskImageBundleCapabilityProvider | AsyncTaskImageBundleCapabilityProvider,
+    secret_store: SecretStore, clock: Callable[[], datetime],
+) -> TaskImageBundlePreparation:
+    """Fresh admission and an idempotent winner after unlocked bundle I/O."""
+    state = await _lock_bundle_state(
+        session, authorization=authorization, materialization_id=materialization_id,
+        attempt_id=attempt_id, lease_epoch=lease_epoch, operation_id=operation_id, clock=clock,
+    )
+    current = await _bundle_preparation(state, provider=provider, secret_store=secret_store, clock=clock)
+    if current.capability is not None:
+        return current
+    if (
+        prepared.plan.model_dump(exclude={"authorization_expires_at"})
+        != current.plan.model_dump(exclude={"authorization_expires_at"})
+        or capability.expires_at > prepared.plan.authorization_expires_at
+    ):
+        raise TaskImageSessionMaterializationConflictError("task-image frozen bundle plan changed")
+    now = _bundle_time(clock, previous=max(prepared.checked_at, current.checked_at), valid_until=min(current.valid_until, capability.expires_at))
+    provider.validate(capability, current.plan, now=now)
     payload = capability.model_dump_json()
     secret_ref = await secret_store.put(
         namespace="task-image-bundle-capability",
@@ -850,25 +1029,62 @@ async def issue_session_materialization_bundle(
         TaskImageMaterializationOperationEvent(
             operation_id=operation_id,
             operation_type="bundle",
-            materialization_attempt_id=attempt.id,
-            materialization_id=row.id,
-            attempt_number=attempt.attempt_number,
-            lease_epoch=attempt.lease_epoch,
-            builder_id=attempt.builder_id,
+            materialization_attempt_id=state.attempt.id,
+            materialization_id=state.row.id,
+            attempt_number=state.attempt.attempt_number,
+            lease_epoch=state.attempt.lease_epoch,
+            builder_id=state.attempt.builder_id,
             grant_id=authorization.grant_id,
             session_id=authorization.session_id,
             session_generation=authorization.session_generation,
-            result_state=row.state,
-            result_attempt_count=row.attempt_count,
-            result_lease_expires_at=row.lease_expires_at,
+            result_state=state.row.state,
+            result_attempt_count=state.row.attempt_count,
+            result_lease_expires_at=state.row.lease_expires_at,
             secret_response_ref=secret_ref,
             secret_response_sha256=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
             secret_response_expires_at=capability.expires_at,
             recorded_at=now,
         )
     )
-    await session.flush()
-    return capability
+    try:
+        await session.flush()
+    except IntegrityError as error:
+        cause = error.orig.__cause__ if error.orig is not None else None
+        constraint_name = getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+        if constraint_name is None:
+            constraint_name = getattr(cause, "constraint_name", None)
+        if (
+            getattr(error.orig, "sqlstate", None) == "23505"
+            and constraint_name == "task_image_materialization_operation_events_operation_uidx"
+        ):
+            raise TaskImageSessionMaterializationConflictError("task-image operation identity was already used") from None
+        raise
+    now = _bundle_time(clock, previous=now, valid_until=min(current.valid_until, capability.expires_at))
+    return TaskImageBundlePreparation(current.plan, capability, now, current.valid_until)
+
+
+async def issue_session_materialization_bundle(
+    session: AsyncSession, *, authorization: TaskImageBuildSessionAuthorization,
+    materialization_id: UUID, attempt_id: UUID, lease_epoch: int, operation_id: UUID,
+    now: datetime, provider: TaskImageBundleCapabilityProvider, secret_store: SecretStore,
+) -> TaskImageBundleCapabilityV1:
+    """Legacy synchronous injected-provider helper; HTTP uses unlocked phases."""
+    prepared = await prepare_session_materialization_bundle(
+        session, authorization=authorization, materialization_id=materialization_id,
+        attempt_id=attempt_id, lease_epoch=lease_epoch, operation_id=operation_id,
+        provider=provider, secret_store=secret_store, clock=lambda: now,
+    )
+    if prepared.capability is not None:
+        assert isinstance(prepared.capability, TaskImageBundleCapabilityV1)
+        return prepared.capability
+    finalized = await finalize_session_materialization_bundle(
+        session, authorization=authorization, materialization_id=materialization_id,
+        attempt_id=attempt_id, lease_epoch=lease_epoch, operation_id=operation_id,
+        prepared=prepared, capability=provider.issue(prepared.plan, now=now),
+        provider=provider, secret_store=secret_store, clock=lambda: now,
+    )
+    assert isinstance(finalized.capability, TaskImageBundleCapabilityV1)
+    return finalized.capability
 
 
 async def _release_operation(

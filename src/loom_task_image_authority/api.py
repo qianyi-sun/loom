@@ -8,7 +8,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID, uuid4
@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
 from loom.db.schema import (
     TaskImageMaterializationAttempt,
     TaskImageMaterializationOperationEvent,
+    TaskImagePublicationJob,
 )
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import LocalEncryptedSecretStore
@@ -39,10 +40,11 @@ from loom_task_image_authority.auth import (
 )
 from loom_task_image_authority.bundle_capability import (
     MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
+    AsyncTaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityError,
     TaskImageBundleCapabilityProvider,
-    TaskImageBundleCapabilityV1,
 )
+from loom_task_image_authority.bundle_runtime import configured_bundle_provider
 from loom_task_image_authority.config import (
     TaskImageAuthoritySettings,
     TaskImageSecretStoreKeyring,
@@ -62,6 +64,7 @@ from loom_task_image_authority.contracts import (
     TaskImageProjectionRequestV1,
     TaskImageProjectionRevocationV1,
     TaskImagePublicationCandidateRequestV1,
+    TaskImagePublicationCandidateRequestV2,
     TaskImageRegistryCredentialRequestV1,
     TaskImageRegistryCredentialV1,
     TaskImageSessionRenewalV1,
@@ -72,22 +75,40 @@ from loom_task_image_authority.http_contracts import (
     TaskImageMaterializationClaimResponseV1,
     TaskImageMaterializationOperationResponseV1,
     TaskImagePublicationCandidateResponseV1,
+    TaskImagePublicationCandidateResponseV2,
 )
 from loom_task_image_authority.materializations import (
     DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS,
+    TaskImageBundlePreparation,
     TaskImageSessionMaterializationAuthorizationError,
     TaskImageSessionMaterializationConflictError,
     claim_session_materialization,
     fail_session_materialization,
+    finalize_session_materialization_bundle,
     heartbeat_session_materialization,
-    issue_session_materialization_bundle,
+    prepare_session_materialization_bundle,
     release_containment_failed_session_materialization,
     release_session_materialization,
     start_session_materialization,
 )
+from loom_task_image_authority.publication_completion import replay_completed_publication
+from loom_task_image_authority.publication_jobs import (
+    PublicationJobAuthorizationError,
+    PublicationJobConflictError,
+)
+from loom_task_image_authority.publication_status import (
+    canonical_status_bytes,
+    project_publication_status,
+)
+from loom_task_image_authority.publication_store import (
+    lock_publication_input,
+    read_publication_job,
+    submit_publication_job,
+)
 from loom_task_image_authority.registry_credentials import (
     issue_session_registry_credential,
     record_session_publication_candidate,
+    record_session_publication_candidate_v2,
 )
 from loom_task_image_authority.registry_token import (
     DistributionRegistryTokenIssuer,
@@ -105,10 +126,12 @@ from loom_task_image_authority.store import (
     renew_task_image_build_session,
     request_task_image_projection,
     revoke_task_image_projection,
+    validate_current_task_image_build_session,
 )
 
 _ContractT = TypeVar("_ContractT", bound=BaseModel)
 _TransitionT = TypeVar("_TransitionT")
+_PUBLICATION_OPERATION_TIMEOUT_SECONDS = 5.0
 
 
 class RequestBodyLimitMiddleware:
@@ -216,7 +239,7 @@ class AuthorityTrafficLimitMiddleware:
         self._in_flight = 0
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+        if scope["type"] != "http" or not scope.get("path", "").startswith(("/v1/", "/v2/")):
             await self.app(scope, receive, send)
             return
 
@@ -296,6 +319,16 @@ class AuthorityMetricsMiddleware:
                 "revocation": "revocation",
             }.get(parts[3])
         if (
+            method == "POST"
+            and len(parts) == 6
+            and parts[:2] == ["v1", "projections"]
+            and parts[3] == "materializations"
+        ):
+            return {
+                "publication-submit": "publication_submit",
+                "publication-poll": "publication_poll",
+            }.get(parts[5])
+        if (
             method == "PUT"
             and len(parts) == 5
             and parts[:2] == ["v1", "projections"]
@@ -332,6 +365,14 @@ class AuthorityMetricsMiddleware:
                 "registry-credential": "registry_credential",
                 "publication-candidate": "publication_candidate",
             }.get(parts[5])
+        if (
+            method == "PUT"
+            and len(parts) == 6
+            and parts[:2] == ["v2", "projections"]
+            and parts[3] == "materializations"
+            and parts[5] == "publication-candidate"
+        ):
+            return "publication_candidate_v2"
         return None
 
     @staticmethod
@@ -382,13 +423,15 @@ def create_app(
     bootstrap_token_factory: Callable[[], str] | None = None,
     session_token_factory: Callable[[], str] | None = None,
     session_id_factory: Callable[[], UUID] | None = None,
-    bundle_capability_provider: TaskImageBundleCapabilityProvider | None = None,
+    bundle_capability_provider: TaskImageBundleCapabilityProvider | AsyncTaskImageBundleCapabilityProvider | None = None,
     registry_token_issuer: DistributionRegistryTokenIssuer | None = None,
     credential_id_factory: Callable[[], UUID] | None = None,
     candidate_id_factory: Callable[[], UUID] | None = None,
 ) -> FastAPI:
     """Create the independent projection service; it owns no Slurm client."""
 
+    if bundle_capability_provider is not None and settings.bundle_backend != "disabled":
+        raise ValueError("native and injected bundle providers cannot be combined")
     resolved_verifier = verifier or TaskImagePrincipalVerifier.from_file(settings.principals_file)
     resolved_now = now_factory or (lambda: datetime.now(UTC))
     resolved_challenge_nonce = challenge_nonce_factory or uuid4
@@ -405,33 +448,52 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        nonlocal resolved_bundle_capability_provider
+        resolved_bundle_capability_provider = bundle_capability_provider
         app.state.ready = False
         app.state.engine = None
         app.state.session_factory = None
         app.state.keyring = None
+        resources = AsyncExitStack()
+
+        async def close_owned_resources() -> None:
+            try:
+                await resources.aclose()
+            finally:
+                resolved_engine = cast(AsyncEngine | None, app.state.engine)
+                if resolved_engine is not None:
+                    await resolved_engine.dispose()
+                    app.state.engine = None
+
         try:
-            database_url = read_owner_only_secret(settings.db_url_file)
-            keyring = load_secret_store_keyring(settings.secret_store_keyring_file)
-            engine = create_async_engine(database_url, isolation_level="SERIALIZABLE")
-            app.state.engine = engine
-            await assert_schema_at_head(
-                engine,
-                db_url_env_var="LOOM_TASK_IMAGE_AUTHORITY_DB_URL",
-            )
-            app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
-            app.state.keyring = keyring
-            app.state.ready = True
-            metrics.ready.set(1)
-        except Exception:
-            metrics.ready.set(0)
-        try:
+            try:
+                database_url = read_owner_only_secret(settings.db_url_file)
+                keyring = load_secret_store_keyring(settings.secret_store_keyring_file)
+                if bundle_capability_provider is None:
+                    resolved_bundle_capability_provider = await resources.enter_async_context(
+                        configured_bundle_provider(settings, clock=resolved_now),
+                    )
+                engine = create_async_engine(database_url, isolation_level="SERIALIZABLE")
+                app.state.engine = engine
+                await assert_schema_at_head(
+                    engine,
+                    db_url_env_var="LOOM_TASK_IMAGE_AUTHORITY_DB_URL",
+                )
+                app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+                app.state.keyring = keyring
+                app.state.ready = True
+                metrics.ready.set(1)
+            except Exception:
+                app.state.ready = False
+                metrics.ready.set(0)
+                resolved_bundle_capability_provider = bundle_capability_provider
+                await close_owned_resources()
             yield
         finally:
             app.state.ready = False
             metrics.ready.set(0)
-            resolved_engine = cast(AsyncEngine | None, app.state.engine)
-            if resolved_engine is not None:
-                await resolved_engine.dispose()
+            resolved_bundle_capability_provider = bundle_capability_provider
+            await close_owned_resources()
 
     app = FastAPI(
         title="Loom Task-Image Authority",
@@ -535,12 +597,16 @@ def create_app(
     failure_body = contract_body(TaskImageMaterializationFailureRequestV1)
     registry_credential_body = contract_body(TaskImageRegistryCredentialRequestV1)
     publication_candidate_body = contract_body(TaskImagePublicationCandidateRequestV1)
+    publication_candidate_v2_body = contract_body(TaskImagePublicationCandidateRequestV2)
 
     async def transition(
         operation: Callable[
             [AsyncSession, LocalEncryptedSecretStore],
             Awaitable[_TransitionT],
         ],
+        *,
+        read_committed: bool = False,
+        check_result: Callable[[_TransitionT], None] | None = None,
     ) -> _TransitionT:
         if app.state.session_factory is None or app.state.keyring is None:
             raise HTTPException(status_code=503, detail="task-image authority not ready")
@@ -554,8 +620,17 @@ def create_app(
                 fallback_keys=dict(keyring.fallback_keys),
             )
             try:
+                if read_committed:
+                    # Build admission needs a fresh post-parent-lock retirement
+                    # snapshot. Own this connection's mode before its first query;
+                    # control and cleanup-only routes retain SERIALIZABLE.
+                    await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
                 result = await operation(session, secret_store)
+                if check_result is not None:
+                    check_result(result)
                 await session.commit()
+                if check_result is not None:
+                    check_result(result)
             except TaskImageProjectionEquivocationError:
                 try:
                     await session.commit()
@@ -575,7 +650,7 @@ def create_app(
                     status_code=409,
                     detail="task-image authority conflict",
                 ) from None
-            except TaskImageSessionMaterializationConflictError:
+            except (TaskImageSessionMaterializationConflictError, PublicationJobConflictError):
                 await session.rollback()
                 raise HTTPException(
                     status_code=409,
@@ -587,7 +662,10 @@ def create_app(
                     status_code=403,
                     detail="task-image authority rejected",
                 ) from None
-            except TaskImageSessionMaterializationAuthorizationError:
+            except (
+                TaskImageSessionMaterializationAuthorizationError,
+                PublicationJobAuthorizationError,
+            ):
                 await session.rollback()
                 raise HTTPException(
                     status_code=403,
@@ -752,6 +830,131 @@ def create_app(
             now=now,
         )
 
+    async def publication_operation(
+        *,
+        guard: TaskImageGuardPrincipalV1,
+        body: TaskImageMaterializationOperationRequestV1,
+        submit: bool,
+    ) -> Response:
+        async def publication_transition(
+            session: AsyncSession, secret_store: LocalEncryptedSecretStore
+        ) -> bytes:
+            del secret_store
+            authenticated = await authorize_materialization_request(
+                session, guard=guard, body=body, now=resolved_now()
+            )
+            # This internal validator refreshes time after lock waits. It never
+            # replaces the preceding principal + current bearer authentication.
+            live = await validate_current_task_image_build_session(
+                session, grant_id=body.grant_id, clock=resolved_now
+            )
+            if (
+                live.authority_version != 2
+                or live.purpose != "production"
+                or (live.grant_id, live.session_id, live.session_generation)
+                != (
+                    authenticated.grant_id,
+                    authenticated.session_id,
+                    authenticated.session_generation,
+                )
+            ):
+                raise PublicationJobAuthorizationError("publication session unavailable")
+            if resolved_registry_token_issuer is None:
+                raise RuntimeError("publication registry unavailable")
+            origin = resolved_registry_token_issuer.registry_origin
+            # This routing observation intentionally takes NO job lock. Active
+            # input takes materialization/candidate locks before the job lock.
+            # Completion cannot race our held grant lock; worker-only changes
+            # are reread under the final job lock below.
+            existing_state = await session.scalar(
+                select(TaskImagePublicationJob.state).where(
+                    TaskImagePublicationJob.operation_id == body.operation_id
+                )
+            )
+            if existing_state is None:
+                if not submit:
+                    raise PublicationJobConflictError("publication operation unavailable")
+                job = await submit_publication_job(
+                    session,
+                    authorization=live,
+                    operation_id=body.operation_id,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    registry_origin=origin,
+                    clock=resolved_now,
+                )
+            else:
+                if existing_state not in {"completed", "failed"}:
+                    await lock_publication_input(
+                        session,
+                        authorization=live,
+                        grant_id=body.grant_id,
+                        operation_id=body.operation_id,
+                        materialization_id=body.materialization_id,
+                        attempt_id=body.attempt_id,
+                        lease_epoch=body.lease_epoch,
+                        registry_origin=origin,
+                        clock=resolved_now,
+                    )
+                job = await read_publication_job(session, operation_id=body.operation_id)
+            snapshot = job.snapshot
+            if (
+                job.operation_id != str(body.operation_id)
+                or snapshot.grant_id != str(body.grant_id)
+                or snapshot.materialization_id != str(body.materialization_id)
+                or snapshot.attempt_id != str(body.attempt_id)
+                or snapshot.lease_epoch != body.lease_epoch
+                or snapshot.registry_origin != origin
+            ):
+                raise PublicationJobConflictError("publication operation binding changed")
+            # Historical verification takes no epoch/key locks and does not
+            # require the materialization lease that atomic completion cleared.
+            receipt = (
+                await replay_completed_publication(session, operation_id=body.operation_id)
+                if job.state == "completed"
+                else None
+            )
+            payload = canonical_status_bytes(project_publication_status(job, receipt=receipt))
+            # All mutable authority remains locked; only wall-clock expiry can
+            # change while we read bounded historical evidence and serialize it.
+            if resolved_now() >= min(
+                live.grant_expires_at, live.session_expires_at, live.attestation_expires_at
+            ):
+                raise PublicationJobAuthorizationError("publication session expired")
+            return payload
+
+        try:
+            async with asyncio.timeout(_PUBLICATION_OPERATION_TIMEOUT_SECONDS):
+                payload = await transition(publication_transition, read_committed=True)
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503, detail="task-image authority unavailable"
+            ) from None
+        return Response(content=payload, media_type="application/json")
+
+    @app.post("/v1/projections/{grant_id}/materializations/{materialization_id}/publication-submit")
+    async def publication_submit(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        if grant_id != body.grant_id or materialization_id != body.materialization_id:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+        return await publication_operation(guard=guard, body=body, submit=True)
+
+    @app.post("/v1/projections/{grant_id}/materializations/{materialization_id}/publication-poll")
+    async def publication_poll(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        if grant_id != body.grant_id or materialization_id != body.materialization_id:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+        return await publication_operation(guard=guard, body=body, submit=False)
+
     @app.post("/v1/projections/{grant_id}/materializations/claim")
     async def claim_materialization(
         grant_id: UUID,
@@ -811,7 +1014,7 @@ def create_app(
                 raise ValueError("task-image claim receipt exceeds response limit")
             return response
 
-        result = await transition(claim_transition)
+        result = await transition(claim_transition, read_committed=True)
         if result is None:
             return Response(status_code=204)
         return bounded_response(result)
@@ -914,7 +1117,9 @@ def create_app(
                 lease_expires_at=event.result_lease_expires_at,
             )
 
-        return await transition(operation_transition)
+        return await transition(
+            operation_transition, read_committed=operation in ("start", "heartbeat")
+        )
 
     def require_operation_path(
         *,
@@ -1023,39 +1228,83 @@ def create_app(
                 status_code=503,
                 detail="task-image authority unavailable",
             )
-        request_now = resolved_now()
+        provider = resolved_bundle_capability_provider
+        observed_at = resolved_now()
 
-        async def bundle_transition(
+        def bundle_clock() -> datetime:
+            nonlocal observed_at
+            current = resolved_now()
+            if current.utcoffset() is None or current < observed_at:
+                raise TaskImageBundleCapabilityError("task-image bundle clock is invalid")
+            observed_at = current
+            return current
+
+        def check_bundle(result: TaskImageBundlePreparation) -> None:
+            now = bundle_clock()
+            if (
+                now < result.checked_at or now >= result.valid_until
+                or (result.capability is not None and now >= result.capability.expires_at)
+            ):
+                raise TaskImageBundleCapabilityError("task-image bundle authorization expired")
+
+        async def prepare_bundle(
             session: AsyncSession,
             secret_store: LocalEncryptedSecretStore,
-        ) -> TaskImageBundleCapabilityV1:
+        ) -> TaskImageBundlePreparation:
             authorization = await authorize_materialization_request(
                 session,
                 guard=guard,
                 body=body,
-                now=request_now,
+                now=bundle_clock(),
             )
-            return await issue_session_materialization_bundle(
+            return await prepare_session_materialization_bundle(
                 session,
                 authorization=authorization,
                 materialization_id=body.materialization_id,
                 attempt_id=body.attempt_id,
                 lease_epoch=body.lease_epoch,
                 operation_id=body.operation_id,
-                now=request_now,
-                provider=resolved_bundle_capability_provider,
+                clock=bundle_clock,
+                provider=provider,
                 secret_store=secret_store,
             )
 
-        result = await transition(bundle_transition)
-        return bounded_response(
-            result,
-            maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
-        )
+        prepared = await transition(prepare_bundle, read_committed=True, check_result=check_bundle)
+        try:
+            if prepared.capability is None:
+                # No AsyncSession, secret store or authority lock survives the
+                # preparation transition. Native storage I/O is cancellable here.
+                if isinstance(provider, AsyncTaskImageBundleCapabilityProvider):
+                    capability = await provider.issue(prepared.plan, now=bundle_clock())
+                else:
+                    capability = provider.issue(prepared.plan, now=bundle_clock())
 
-    @app.put(
-        "/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential"
-    )
+                async def finalize_bundle(
+                    session: AsyncSession, secret_store: LocalEncryptedSecretStore,
+                ) -> TaskImageBundlePreparation:
+                    authorization = await authorize_materialization_request(
+                        session, guard=guard, body=body, now=bundle_clock(),
+                    )
+                    return await finalize_session_materialization_bundle(
+                        session, authorization=authorization, materialization_id=body.materialization_id,
+                        attempt_id=body.attempt_id, lease_epoch=body.lease_epoch, operation_id=body.operation_id,
+                        prepared=prepared, capability=capability, provider=provider,
+                        secret_store=secret_store, clock=bundle_clock,
+                    )
+
+                result = await transition(finalize_bundle, read_committed=True, check_result=check_bundle)
+            else:
+                result = prepared
+            assert result.capability is not None
+            response = bounded_response(result.capability, maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES)
+            check_bundle(result)
+            return response
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=503, detail="task-image authority unavailable") from None
+
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential")
     async def registry_credential(
         grant_id: UUID,
         materialization_id: UUID,
@@ -1094,7 +1343,7 @@ def create_app(
                 credential_id_factory=resolved_credential_id,
             )
 
-        return bounded_response(await transition(credential_transition))
+        return bounded_response(await transition(credential_transition, read_committed=True))
 
     @app.put(
         "/v1/projections/{grant_id}/materializations/{materialization_id}/publication-candidate"
@@ -1103,9 +1352,7 @@ def create_app(
         grant_id: UUID,
         materialization_id: UUID,
         guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
-        body: TaskImagePublicationCandidateRequestV1 = Depends(
-            publication_candidate_body
-        ),
+        body: TaskImagePublicationCandidateRequestV1 = Depends(publication_candidate_body),
     ) -> Response:
         require_operation_path(
             grant_id=grant_id,
@@ -1133,7 +1380,43 @@ def create_app(
                 candidate_id_factory=resolved_candidate_id,
             )
 
-        return bounded_response(await transition(candidate_transition))
+        return bounded_response(await transition(candidate_transition, read_committed=True))
+
+    @app.put(
+        "/v2/projections/{grant_id}/materializations/{materialization_id}/publication-candidate"
+    )
+    async def publication_candidate_v2(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImagePublicationCandidateRequestV2 = Depends(publication_candidate_v2_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+
+        async def candidate_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImagePublicationCandidateResponseV2:
+            del secret_store
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=resolved_now(),
+            )
+            return await record_session_publication_candidate_v2(
+                session,
+                authorization=authorization,
+                request=body,
+                now=resolved_now(),
+                candidate_id_factory=resolved_candidate_id,
+            )
+
+        return bounded_response(await transition(candidate_transition, read_committed=True))
 
     @app.put("/v1/projections/{grant_id}/revocation", status_code=204)
     async def revocation(

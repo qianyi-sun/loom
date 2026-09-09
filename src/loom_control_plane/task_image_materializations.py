@@ -6,13 +6,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
-    Task,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
     TaskImagePublicationEvidence,
@@ -21,6 +20,7 @@ from loom.db.schema import (
 )
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    current_task_image_reference,
     required_task_image_components,
     validate_task_image_registry_images,
 )
@@ -111,6 +111,8 @@ async def _record_attempt_publication_evidence(
     )
     if attempt is None:
         raise TaskImageLeaseConflictError("task image publication attempt does not exist")
+    if attempt.grant_id is not None:
+        raise TaskImageCompletionError("rootless attempts cannot publish legacy cleanup evidence")
     for component, registry_image in registry_images.items():
         await session.execute(
             pg_insert(TaskImagePublicationEvidence)
@@ -203,13 +205,7 @@ async def record_task_image_publication(
 
 
 def _durable_reference_exists(row: Any) -> ColumnElement[bool]:
-    current_task = exists().where(
-        Task.id == row.task_id,
-        or_(
-            Task.checksum == row.task_checksum,
-            Task.checksum == func.concat("sha256:", row.task_checksum),
-        ),
-    )
+    current_task = exists().where(current_task_image_reference(row))
     live_trial = exists().where(
         TrialTaskImageMaterialization.materialization_id == row.id,
         Trial.id == TrialTaskImageMaterialization.trial_id,
@@ -395,6 +391,20 @@ async def complete_task_image_materialization(
         allowed_states=("running",),
         now=now,
     )
+    # The current immutable attempt, not a caller-controlled builder-name
+    # prefix or a failure-budget counter, determines publication authority.
+    # Keep materialization -> attempt ordering; this path never waits for the
+    # earlier publication epoch/key/grant locks used by verified completion.
+    current_attempt = await session.scalar(
+        select(TaskImageMaterializationAttempt)
+        .where(
+            TaskImageMaterializationAttempt.materialization_id == row.id,
+            TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+        )
+        .with_for_update()
+    )
+    if current_attempt is not None and current_attempt.grant_id is not None:
+        raise TaskImageCompletionError("rootless attempts require verified publication")
     try:
         registry_images = validate_task_image_registry_images(
             registry_images,
@@ -513,6 +523,7 @@ async def retry_task_image_materialization(
     row.ready_at = None
     row.finished_at = None
     row.registry_images = {}
+    row.ready_publication_operation_id = None
     row.last_referenced_at = now
     row.unreferenced_at = None
     row.updated_at = now
@@ -527,14 +538,22 @@ async def claim_task_image_registry_gc(
     grace_hours: int,
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
 ) -> TaskImageMaterialization | None:
-    """Fence one grace-expired registry image set for external deletion."""
+    """Fence one legacy image set; rootless current maps have separate retention."""
     if grace_hours < 0:
         raise ValueError("grace_hours must be non-negative")
+    # The locked refresh must not discard or implicitly flush caller-owned edits.
+    if any(
+        isinstance(row, TaskImageMaterialization)
+        for row in (*session.new, *session.dirty, *session.deleted)
+    ):
+        raise ValueError("task image GC has pending materialization writes")
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=grace_hours)
+    legacy_owned = TaskImageMaterialization.ready_publication_operation_id.is_(None)
     await session.execute(
         update(TaskImageMaterialization)
         .where(
+            legacy_owned,
             TaskImageMaterialization.state.in_(("ready", "failed")),
             _registry_publication_exists(TaskImageMaterialization),
             _durable_reference_exists(TaskImageMaterialization),
@@ -548,6 +567,7 @@ async def claim_task_image_registry_gc(
     await session.execute(
         update(TaskImageMaterialization)
         .where(
+            legacy_owned,
             TaskImageMaterialization.state.in_(("ready", "failed")),
             _registry_publication_exists(TaskImageMaterialization),
             TaskImageMaterialization.unreferenced_at.is_(None),
@@ -558,6 +578,7 @@ async def claim_task_image_registry_gc(
     await session.execute(
         update(TaskImageMaterialization)
         .where(
+            legacy_owned,
             TaskImageMaterialization.state == "retiring",
             TaskImageMaterialization.lease_expires_at <= now,
             _durable_reference_exists(TaskImageMaterialization),
@@ -581,6 +602,7 @@ async def claim_task_image_registry_gc(
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(
+            legacy_owned,
             or_(
                 and_(
                     TaskImageMaterialization.state.in_(("ready", "failed")),
@@ -600,6 +622,7 @@ async def claim_task_image_registry_gc(
         )
         .limit(1)
         .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
     )
     if row is None:
         return None

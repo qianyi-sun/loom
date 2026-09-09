@@ -25,7 +25,10 @@ from loom_task_image_builder_guard import authority as authority_module
 from loom_task_image_builder_guard.authority import AuthorityClient
 from loom_task_image_builder_guard.errors import GuardError
 from loom_task_image_builder_guard.models import AuthorityConfig
-from loom_task_image_builder_guard.protocol import read_sealed_memfd
+from loom_task_image_builder_guard.protocol import (
+    BaseResolutionEvidence,
+    read_sealed_memfd,
+)
 
 NOW = datetime(2026, 9, 2, 16, 0, tzinfo=UTC)
 GRANT = UUID("11111111-1111-1111-1111-111111111111")
@@ -318,9 +321,134 @@ def _authority(tmp_path: Path) -> Iterator[tuple[_Server, AuthorityConfig]]:
 
 
 def _json_response(value: object) -> tuple[int, bytes, dict[str, str]]:
-    return 200, json.dumps(value, separators=(",", ":")).encode("ascii"), {
+    return (
+        200, json.dumps(value, separators=(",", ":")).encode("ascii"), {
         "Content-Type": "application/json"
+    },
+    )
+
+
+def _publication_request() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "grant_id": str(GRANT),
+        "session_id": str(SESSION),
+        "session_generation": 1,
+        "session_token": SESSION_TOKEN,
+        "operation_id": str(OPERATION),
+        "materialization_id": str(MATERIALIZATION),
+        "attempt_id": str(ATTEMPT),
+        "lease_epoch": 3,
     }
+
+
+def _publication_status_bytes() -> bytes:
+    return json.dumps(
+        {
+            "schema": "loom.task-image-publication-status/v1",
+            "grant_id": str(GRANT),
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "state": "queued",
+            "snapshot_sha256": DIGEST_A,
+            "candidate_set_sha256": DIGEST_B,
+            "component_count": 128,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+@pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
+def test_publication_fixed_post_uses_current_credentials_and_bounded_status(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(config, trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        route = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/{operation}"
+        payload = _publication_status_bytes()
+        server.responses[route] = (200, payload, {"Content-Type": "application/json"})
+        method = getattr(client, operation.replace("-", "_"))
+        status = method(GRANT, MATERIALIZATION, _publication_request())
+        assert status.canonical_bytes == payload
+        assert server.methods == ["POST"]
+        path, headers, body, tls = server.requests[0]
+        assert path == route and tls == "TLSv1.3"
+        assert headers["authorization"] == f"Bearer {BEARER}"
+        assert json.loads(body) == _publication_request()
+
+
+@pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
+@pytest.mark.parametrize(
+    ("status", "payload", "code"),
+    [
+        (200, b" " * 4097, "authority_response_too_large"),
+        (200, _publication_status_bytes() + b"\n", "authority_publication_invalid"),
+        (
+            200,
+            _publication_status_bytes().replace(str(ATTEMPT).encode(), str(SESSION).encode()),
+            "authority_publication_invalid",
+        ),
+        (503, b"sentinel-private-server-error", "authority_http_failed"),
+        (401, b"sentinel-private-auth-error", "authority_http_failed"),
+    ],
+)
+def test_publication_http_rejection_is_bounded_and_redacted(
+    tmp_path: Path,
+    operation: str,
+    status: int,
+    payload: bytes,
+    code: str,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            replace(config, max_response_bytes=65536),
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+        )
+        route = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/{operation}"
+        server.responses[route] = (status, payload, {"Content-Type": "application/json"})
+        with pytest.raises(GuardError, match=code) as caught:
+            getattr(client, operation.replace("-", "_"))(
+                GRANT, MATERIALIZATION, _publication_request()
+            )
+        assert "sentinel" not in str(caught.value)
+
+
+@pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
+def test_publication_rejects_extra_request_authority_before_http(
+    tmp_path: Path, operation: str
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(config, trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        with pytest.raises(GuardError, match="authority_publication_invalid"):
+            getattr(client, operation.replace("-", "_"))(
+                GRANT,
+                MATERIALIZATION,
+                _publication_request() | {"repository": "private"},
+            )
+        assert not server.requests
+
+
+@pytest.mark.parametrize("operation", ["publication-submit", "publication-poll"])
+def test_publication_http_absolute_deadline_interrupts_drip_headers(
+    tmp_path: Path, operation: str
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            replace(config, timeout_seconds=0.2), trusted_uid=os.geteuid(), trusted_gid=os.getegid()
+        )
+        route = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/{operation}"
+        server.drip_paths.add(route)
+        started = time.monotonic()
+        with pytest.raises(GuardError, match="authority_deadline_exceeded"):
+            getattr(client, operation.replace("-", "_"))(
+                GRANT, MATERIALIZATION, _publication_request()
+            )
+        assert time.monotonic() - started < 1.5
 
 
 def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
@@ -479,7 +607,9 @@ def test_fixed_session_and_materialization_routes_keep_capabilities_sealed(
             },
             separators=(",", ":"),
         ).encode("ascii")
-        bundle_payload = b'{"presigned_url":"https://object.invalid/private?signature=SECRET"}'
+        bundle_payload = (
+            b'{"presigned_url":"https://object.invalid/private?signature=SECRET"}'
+        )
         operation_response = {
             "schema_version": "loom.task-image-materialization-operation.v1",
             "operation": "start",
@@ -558,7 +688,8 @@ def test_fixed_session_and_materialization_routes_keep_capabilities_sealed(
             assert "Dockerfile" not in repr(claimed)
             assert "signature" not in repr(bundled)
             assert (started.operation, heartbeat.operation) == ("start", "heartbeat")
-            assert (released.state, failed.operation) == ("queued", "containment_release")
+            assert (released.state, failed.operation) == ("queued", "containment_release",
+            )
         finally:
             claimed.close()
             bundled.close()
@@ -730,9 +861,11 @@ def test_registry_credential_stays_opaque_and_candidate_acknowledgement_is_stric
         assert acknowledgement.oci_file_size == 4096
         assert acknowledgement.platform == "linux/arm64"
         assert acknowledgement.recorded_at == NOW + timedelta(seconds=6)
-        assert acknowledgement.response_sha256 == hashlib.sha256(
+        assert (
+            acknowledgement.response_sha256 == hashlib.sha256(
             candidate_payload
         ).hexdigest()
+        )
         assert [item[0] for item in server.requests] == [
             f"{base}/registry-credential",
             f"{base}/publication-candidate",
@@ -808,10 +941,7 @@ def test_publication_candidate_rejects_changed_authority_binding(
             response["credential_id"] = str(REQUEST)
         else:
             response["bearer_token"] = "must-not-be-accepted"
-        route = (
-            f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/"
-            "publication-candidate"
-        )
+        route = f"/v1/projections/{GRANT}/materializations/{MATERIALIZATION}/publication-candidate"
         server.responses[route] = _json_response(response)
 
         with pytest.raises(GuardError) as caught:
@@ -822,13 +952,258 @@ def test_publication_candidate_rejects_changed_authority_binding(
         assert "must-not-be-accepted" not in str(caught.value)
 
 
+def test_publication_candidate_v2_uses_explicit_route_and_owns_exact_evidence(
+    tmp_path: Path,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config, trusted_uid=os.geteuid(), trusted_gid=os.getegid()
+        )
+        evidence = {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "solve_1-arm64",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + DIGEST_A,
+            "observed_base_digests": ["sha256:" + DIGEST_B],
+        }
+        request = {
+            "schema_version": 2,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "component": "task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+            "base_resolution": evidence,
+        }
+        response = {
+            "schema_version": "loom.task-image-publication-candidate.v2",
+            "candidate_id": str(CANDIDATE),
+            "operation_id": str(OPERATION),
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "attempt_number": 2,
+            "lease_epoch": 3,
+            "builder_id": "rootless:" + "a" * 32,
+            "component": "task",
+            "repository": f"loom-task-image-attempts/arm64/{ATTEMPT}/task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+            "recorded_at": _timestamp(NOW),
+            "base_resolution": evidence,
+        }
+        route = f"/v2/projections/{GRANT}/materializations/{MATERIALIZATION}/publication-candidate"
+        server.responses[route] = _json_response(response)
+
+        acknowledgement = client.publication_candidate_v2(
+            GRANT, MATERIALIZATION, request
+        )
+        evidence["observed_base_digests"].append("sha256:" + DIGEST_C)  # type: ignore[union-attr]
+
+        assert acknowledgement.base_resolution == BaseResolutionEvidence(
+            "solve_1-arm64",
+            "linux/arm64",
+            "sha256:" + DIGEST_A,
+            ("sha256:" + DIGEST_B,),
+        )
+        assert server.requests[0][0] == route
+
+
+@pytest.mark.parametrize(
+    ("method", "request_version", "response_version"),
+    (
+        ("publication_candidate", 1, "loom.task-image-publication-candidate.v2"),
+        ("publication_candidate_v2", 2, "loom.task-image-publication-candidate.v1"),
+    ),
+)
+def test_publication_candidate_routes_reject_cross_version_responses(
+    tmp_path: Path,
+    method: str,
+    request_version: int,
+    response_version: str,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config, trusted_uid=os.geteuid(), trusted_gid=os.getegid()
+        )
+        evidence = {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "solve1",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + DIGEST_A,
+            "observed_base_digests": [],
+        }
+        request = {
+            "schema_version": request_version,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "component": "task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+        }
+        if request_version == 2:
+            request["base_resolution"] = evidence
+        response = {
+            "schema_version": response_version,
+            "candidate_id": str(CANDIDATE),
+            "operation_id": str(OPERATION),
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "attempt_number": 2,
+            "lease_epoch": 3,
+            "builder_id": "rootless:" + "a" * 32,
+            "component": "task",
+            "repository": "r",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+            "recorded_at": _timestamp(NOW),
+        }
+        if response_version.endswith(".v2"):
+            response["base_resolution"] = evidence
+        route = f"/v{request_version}/projections/{GRANT}/materializations/{MATERIALIZATION}/publication-candidate"
+        server.responses[route] = _json_response(response)
+
+        with pytest.raises(GuardError, match="authority_candidate_invalid"):
+            getattr(client, method)(GRANT, MATERIALIZATION, request)
+
+
+@pytest.mark.parametrize(
+    "mutation", ("null", "unknown", "root", "platform", "ref", "observations")
+)
+def test_publication_candidate_v2_sanitizes_bad_or_substituted_evidence(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config, trusted_uid=os.geteuid(), trusted_gid=os.getegid()
+        )
+        evidence: dict[str, object] = {
+            "schema": "loom.task-image-base-resolution/v1",
+            "solve_ref": "PRIVATE_BAD_REF",
+            "platform": "linux/arm64",
+            "output_digest": "sha256:" + DIGEST_A,
+            "observed_base_digests": ["sha256:" + DIGEST_B],
+        }
+        request = {
+            "schema_version": 2,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+            "operation_id": str(OPERATION),
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "lease_epoch": 3,
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "component": "task",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+            "base_resolution": evidence,
+        }
+        response_evidence = json.loads(json.dumps(evidence))
+        response = {
+            "schema_version": "loom.task-image-publication-candidate.v2",
+            "candidate_id": str(CANDIDATE),
+            "operation_id": str(OPERATION),
+            "credential_id": str(CREDENTIAL),
+            "credential_generation": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "materialization_id": str(MATERIALIZATION),
+            "attempt_id": str(ATTEMPT),
+            "attempt_number": 2,
+            "lease_epoch": 3,
+            "builder_id": "rootless:" + "a" * 32,
+            "component": "task",
+            "repository": "r",
+            "manifest_digest": "sha256:" + DIGEST_A,
+            "manifest_size": 512,
+            "oci_file_sha256": DIGEST_B,
+            "oci_file_size": 4096,
+            "platform": "linux/arm64",
+            "recorded_at": _timestamp(NOW),
+            "base_resolution": response_evidence,
+        }
+        if mutation == "null":
+            evidence["solve_ref"] = None
+        elif mutation == "unknown":
+            evidence["private_raw_evidence"] = "DO_NOT_LOG"
+        elif mutation == "root":
+            response_evidence["output_digest"] = "sha256:" + DIGEST_C
+        elif mutation == "platform":
+            response_evidence["platform"] = "linux/amd64"
+        elif mutation == "ref":
+            response_evidence["solve_ref"] = "substituted"
+        else:
+            response_evidence["observed_base_digests"] = ["sha256:" + DIGEST_C]
+        route = f"/v2/projections/{GRANT}/materializations/{MATERIALIZATION}/publication-candidate"
+        server.responses[route] = _json_response(response)
+
+        with pytest.raises(GuardError) as caught:
+            client.publication_candidate_v2(GRANT, MATERIALIZATION, request)
+
+        assert caught.value.code == "authority_candidate_invalid"
+        assert SESSION_TOKEN not in str(caught.value)
+        assert "DO_NOT_LOG" not in str(caught.value)
+        assert "PRIVATE_BAD_REF" not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     ("response", "expected_code"),
     [
-        ((307, b"", {"Location": "https://example.invalid/stolen"}), "authority_http_failed"),
-        ((200, b"{}", {"Transfer-Encoding": "chunked", "Content-Type": "application/json"}), "authority_response_invalid"),
-        ((200, b'{"schema_version":1,"schema_version":1}', {"Content-Type": "application/json"}), "authority_response_invalid"),
-        ((200, b"x" * 4097, {"Content-Type": "application/json"}), "authority_response_too_large"),
+        ((307, b"", {"Location": "https://example.invalid/stolen"}), "authority_http_failed",
+        ),
+        ((200, b"{}", {"Transfer-Encoding": "chunked", "Content-Type": "application/json"},
+            ), "authority_response_invalid",
+        ),
+        ((200, b'{"schema_version":1,"schema_version":1}', {"Content-Type": "application/json"},
+            ), "authority_response_invalid",
+        ),
+        ((200, b"x" * 4097, {"Content-Type": "application/json"}), "authority_response_too_large",
+        ),
         (
             (
                 200,

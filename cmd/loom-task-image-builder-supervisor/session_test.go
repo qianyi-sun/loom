@@ -54,7 +54,7 @@ func TestSessionManagerRenewAtomicallySwapsAndDestroysSupersededToken(t *testing
 	}
 	manager := NewSessionManager("11111111-1111-4111-8111-111111111111", current, client)
 
-	oldBytes := current.Secret.data
+	oldSecret := current.Secret
 	renewed, err := manager.Renew(context.Background())
 	if err != nil {
 		t.Fatalf("Renew() error = %v", err)
@@ -65,11 +65,10 @@ func TestSessionManagerRenewAtomicallySwapsAndDestroysSupersededToken(t *testing
 	if manager.Generation() != 2 {
 		t.Fatalf("Generation() = %d, want 2", manager.Generation())
 	}
-	for index, value := range oldBytes {
-		if value != 0 {
-			t.Fatalf("old session byte %d = %d, want zero", index, value)
-		}
+	if !oldSecret.closed || oldSecret.data != nil {
+		t.Fatal("old session mapping retained")
 	}
+	manager.Close()
 }
 
 func TestSessionManagerRenewRejectsInvalidNextGenerationWithoutReplacingCurrent(t *testing.T) {
