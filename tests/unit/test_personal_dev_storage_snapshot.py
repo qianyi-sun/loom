@@ -78,7 +78,7 @@ def test_inventory_rejects_incomplete_scan_or_cross_binding_and_budget(change):
         module.StorageObjectInventoryV1(**values)
 
 
-@pytest.mark.parametrize("change", ("digest", "noncanonical", "oversize"))
+@pytest.mark.parametrize("change", ("digest", "noncanonical", "oversize", "version"))
 def test_snapshot_parser_requires_bounded_canonical_digest(change):
     module = import_module("loom.personal_dev_storage_snapshot")
     inventory = _inventory()
@@ -88,7 +88,32 @@ def test_snapshot_parser_requires_bounded_canonical_digest(change):
         digest = "b" * 64
     elif change == "noncanonical":
         payload += b"\n"
+    elif change == "version":
+        payload = payload.replace(b"captured-version", b"replaced-version")
     else:
         payload = b" " * (8 * 1024 * 1024 + 1)
     with pytest.raises(ValueError):
         module.parse_storage_object_snapshot(payload, expected_sha256=digest)
+
+
+@pytest.mark.parametrize("response", (
+    {"IsTruncated": "false"}, {"IsTruncated": True},
+    {"IsTruncated": True, "NextContinuationToken": "repeated"},
+    {"IsTruncated": False, "Contents": {}},
+    {"IsTruncated": False, "Contents": [{"Key": "item", "ETag": '"etag"', "Size": True}]},
+))
+def test_inventory_rejects_malformed_or_cyclic_listing(response):
+    module = import_module("loom.personal_dev_storage_snapshot")
+    calls = []
+
+    class Client:
+        def list_objects_v2(self, **kwargs):
+            calls.append(kwargs)
+            assert len(calls) <= 2
+            return response
+
+    with pytest.raises(module.StorageObjectCaptureError):
+        module.S3RetainedObjectSnapshot(Client(), snapshot_bucket="loom-transfer-fixture").inventory(
+            _recipe(), capture_id=UUID(int=800),
+        )
+    assert len(calls) <= 2
