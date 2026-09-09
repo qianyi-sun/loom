@@ -488,6 +488,8 @@ async def test_operation_replay_survives_a_later_materialization_lease_epoch(
             now=NOW + timedelta(seconds=12),
         )
         row.next_attempt_at = NOW + timedelta(seconds=13)
+        # Explicit fixture setup: admission does not flush caller-owned edits.
+        await session.flush()
         second_claim = await claim_session_materialization(
             session,
             authorization=authorization,
