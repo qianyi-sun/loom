@@ -47,6 +47,17 @@ ACTUATOR_TABLES = (
     "execution_price_snapshots",
     "execution_target_price_bindings",
 )
+# PostgreSQL row locks require UPDATE on at least one column. Capacity settings
+# remain read-only; admission/budget terminal triggers write only their counters.
+ACTUATOR_POLICY_UPDATES = {
+    "execution_capacity_policies": ("updated_at",),
+    "execution_admission_policies": ("active_count", "counter_updated_at"),
+    "execution_budget_policies": (
+        "daily_reserved_microusd",
+        "monthly_reserved_microusd",
+        "updated_at",
+    ),
+}
 GATEWAY_TABLES = (
     *ACTUATOR_TABLES,
     "tokens",
@@ -206,6 +217,19 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                     if role == "loom_gateway":
                         cursor.execute(
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
+                        )
+                    if role == "loom_actuator":
+                        for table, columns in ACTUATOR_POLICY_UPDATES.items():
+                            cursor.execute(
+                                sql.SQL("GRANT UPDATE ({}) ON {} TO loom_actuator").format(
+                                    sql.SQL(", ").join(map(sql.Identifier, columns)),
+                                    sql.Identifier(table),
+                                )
+                            )
+                        # Trial terminal projection invokes the existing quota
+                        # trigger; quota settings and identity are not writable.
+                        cursor.execute(
+                            "GRANT SELECT (team_id, in_flight_count), UPDATE (in_flight_count) ON team_quotas TO loom_actuator"
                         )
                     cursor.execute(
                         sql.SQL("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {}").format(

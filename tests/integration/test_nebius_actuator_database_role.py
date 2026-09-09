@@ -1,0 +1,173 @@
+"""Exercise the real actuator command/trigger path with its bootstrap DB role."""
+
+from datetime import UTC, datetime, timedelta
+
+import psycopg
+import pytest
+from sqlalchemy import select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from loom import nebius_platform_bootstrap as bootstrap
+from loom.db.schema import (
+    ExecutionAdmissionPolicy,
+    ExecutionAdmissionReservation,
+    ExecutionBudgetPolicy,
+    ExecutionCostReservation,
+    ExecutionProvisioningAuthorization,
+    ServiceExecutionLease,
+    TeamQuota,
+    Trial,
+)
+from loom_control_plane.execution_admission import upsert_execution_admission_policy
+from loom_control_plane.service_execution import enqueue_execution_transition
+from loom_execution_actuator.controller import ExecutionActuator
+from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
+from tests.integration.test_service_execution_leases import (
+    _FakeKubernetesJobApi,
+    _reserve,
+    _seed_ready_trial,
+)
+
+
+async def test_restricted_actuator_creates_reconciles_and_releases_without_policy_authority(
+    platform_database: str,  # noqa: F811 -- imported shared pytest fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: platform_database)
+    monkeypatch.setenv("LOOM_DB_URL", platform_database)
+    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", "restricted-role-password-" + "a" * 32)
+    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+    url = make_url(platform_database).set(drivername="postgresql+psycopg")
+    admin_engine = create_async_engine(url)
+    actuator_engine = create_async_engine(
+        url.set(username="loom_actuator", password="restricted-role-password-" + "a" * 32)
+    )
+    admins = async_sessionmaker(admin_engine, expire_on_commit=False)
+    restricted = async_sessionmaker(actuator_engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    kubernetes = _FakeKubernetesJobApi()
+    try:
+        # Setup uses the owner; all actuator commands and reconciliation below
+        # connect as the real restricted login, including invoker-rights triggers.
+        async with admins() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            session.add(TeamQuota(team_id=trial.team_id))
+            await upsert_execution_admission_policy(
+                session,
+                scope_kind="pool",
+                scope_key="nebius-cpu",
+                max_concurrent=4,
+                enabled=True,
+                reason="restricted-role test",
+                now=now,
+            )
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        async with restricted() as session:
+            assert (
+                await session.execute(text("SELECT current_user"))
+            ).scalar_one() == "loom_actuator"
+        actuator = ExecutionActuator(
+            sessions=restricted,
+            kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+                runtime_class_name="loom-sandbox",
+            ),
+            controller_id="restricted-actuator",
+        )
+        assert await actuator.run_commands_once(now=now) == 1
+        assert kubernetes.create_count == 1
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 0
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=1)) == 0
+        async with admins() as session:
+            authorization = (
+                await session.execute(
+                    select(ExecutionProvisioningAuthorization).where(
+                        ExecutionProvisioningAuthorization.lease_id == lease.id
+                    )
+                )
+            ).scalar_one()
+            assert authorization.state == "pending"
+            policy = (await session.execute(select(ExecutionAdmissionPolicy))).scalar_one()
+            assert policy.active_count == 1
+            budgets = (await session.execute(select(ExecutionBudgetPolicy))).scalars().all()
+            assert len(budgets) == 2 and all(row.daily_reserved_microusd > 0 for row in budgets)
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="cancel",
+                now=now + timedelta(seconds=2),
+            )
+            await session.commit()
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=2)) == 1
+        assert kubernetes.delete_count == 1
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=3)) == 1
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=4)) == 0
+        async with admins() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None and persisted.observed_state == "deleted"
+            assert persisted.cleanup_state == "complete"
+            assert (
+                await session.execute(select(ExecutionAdmissionPolicy.active_count))
+            ).scalar_one() == 0
+            assert (
+                await session.execute(select(ExecutionAdmissionReservation.state))
+            ).scalar_one() == "released"
+            assert (
+                await session.execute(select(ExecutionCostReservation.state))
+            ).scalar_one() == "released"
+            budgets = (await session.execute(select(ExecutionBudgetPolicy))).scalars().all()
+            assert all(
+                row.daily_reserved_microusd == row.monthly_reserved_microusd == 0 for row in budgets
+            )
+        # Row locks and trigger counters do not grant authority to rewrite
+        # policy settings, identities, prices, observations or credentials.
+        restricted_url = url.set(
+            drivername="postgresql",
+            username="loom_actuator",
+            password="restricted-role-password-" + "a" * 32,
+        )
+        with psycopg.connect(restricted_url.render_as_string(hide_password=False)) as connection:
+            # This is the same claimed -> terminal projection performed by
+            # finalize_committed_service_execution, including its quota trigger.
+            assert connection.execute(
+                "SELECT in_flight_count FROM team_quotas WHERE team_id=%s", (trial.team_id,)
+            ).fetchone() == (1,)
+            connection.execute("UPDATE trials SET state='failed' WHERE id=%s", (trial_id,))
+            assert connection.execute(
+                "SELECT in_flight_count FROM team_quotas WHERE team_id=%s", (trial.team_id,)
+            ).fetchone() == (0,)
+            connection.commit()
+            for statement in (
+                "UPDATE execution_capacity_policies SET max_nodes=21",
+                "UPDATE execution_capacity_policies SET enabled=false",
+                "UPDATE execution_admission_policies SET max_concurrent=99",
+                "UPDATE execution_admission_policies SET scope_key='other-pool'",
+                "UPDATE execution_budget_policies SET daily_limit_microusd=1",
+                "UPDATE execution_budget_policies SET emergency_stop=false",
+                "UPDATE execution_target_price_bindings SET enabled=false",
+                "UPDATE execution_price_snapshots SET base_microusd_per_hour=0",
+                "UPDATE execution_capacity_observations SET provider_quota_nodes=999",
+                "DELETE FROM execution_capacity_policies",
+                "DELETE FROM tokens",
+                "DELETE FROM users",
+                "UPDATE team_quotas SET max_attempts_ceiling=99",
+                "UPDATE team_quotas SET team_id='11111111-1111-1111-1111-111111111111'",
+                "CREATE ROLE actuator_escape",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute(statement)
+                connection.rollback()
+    finally:
+        await actuator_engine.dispose()
+        await admin_engine.dispose()
