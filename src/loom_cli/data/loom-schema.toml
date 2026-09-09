@@ -296,7 +296,25 @@ description = "Independent SHA-256 binding for the reviewed personal-development
 used_by     = ["loom-service"]
 python_type = "str"
 default     = "shadow"
-description = "Explicit personal-development runtime mode: shadow, acceptance, or operational."
+description = "Explicit personal-development runtime mode: shadow, acceptance, operational, or separately bound membership-v1."
+
+[service_config.personal_dev_membership_binding_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+description = "Canonical active-membership acceptance binding, including complete V3 preparation; never a legacy zero-capacity certificate."
+
+[service_config.personal_dev_membership_plan_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Independent digest of the reviewed active-membership acceptance plan."
+
+[service_config.personal_dev_membership_observer_principal_id]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Exact current unbound capacity:read observer, distinct from the immutable membership delegate."
 
 [service_config.personal_dev_operational_binding_json]
 used_by     = ["loom-service"]
@@ -715,6 +733,27 @@ used_by     = ["loom-service"]
 python_type = "Path"
 default     = "/var/run/loom-personal-dev-capacity/ca.pem"
 description = "Owner-only CA copied only into trusted reporter-agent Secrets, never candidate workloads."
+
+[service_config.personal_dev_capacity_observer_bearer_token_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/observer-token"
+description = "Independent current read-only observer credential; never copied into personal namespaces or used for membership mutation."
+
+[service_config.personal_dev_capacity_observer_ca_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/observer-ca.pem"
+
+[service_config.personal_dev_capacity_observer_certificate_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/observer-certificate.pem"
+
+[service_config.personal_dev_capacity_observer_private_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/observer-private-key.pem"
 
 [service_config.personal_dev_capacity_certificate_file]
 used_by     = ["loom-service"]
