@@ -544,6 +544,12 @@ their normal identity, session and lease checks; skipping the artifact-retiremen
 check does not grant build inputs or publication authority. Historical completion
 receipt replay remains read-only and cannot restore readiness.
 
+These scalar retirement-freshness tests establish the READ COMMITTED store
+contract. Non-credential HTTP routes still use SERIALIZABLE; their snapshot
+interaction with retirement remains a composition gate before collector/runtime
+activation. Locking an unchanged parent alone does not establish that a separate
+marker lookup observes a concurrent commit under an older transaction snapshot.
+
 `observe_or_retire_attempt` now owns one bounded, READ COMMITTED transaction per
 attempt. Credential inventory and publication metadata are prepared in separate
 read-only transactions; their connections close before bulk schema/canonical
