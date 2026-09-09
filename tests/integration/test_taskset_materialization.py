@@ -2534,9 +2534,11 @@ async def test_deployment_fence_canary_preparation_cannot_select_a_noninitial_us
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("handoff_pause_sec", (0, 1.1))
 async def test_materialization_cooperative_two_owner_canary_records_safe_evidence(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
+    handoff_pause_sec: float,
 ) -> None:
     """Exercise the staging-canary handoff without a kill, GC, or external state."""
     app, tokens, teams = materialization_setup
@@ -2608,6 +2610,9 @@ async def test_materialization_cooperative_two_owner_canary_records_safe_evidenc
 
     owner_a_task = asyncio.create_task(stage_then_resume_as_a())
     await asyncio.wait_for(a_staged.wait(), timeout=1)
+    # A deliberate slow owner-B handoff must not become a false lease failure:
+    # lease expiry uses CanaryClock, not the machine's execution speed.
+    await asyncio.sleep(handoff_pause_sec)
 
     # Advance only the test clock. Reclaim itself is the production CAS path;
     # no row is directly edited and no driver, pod, or object is killed.
