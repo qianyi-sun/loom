@@ -345,6 +345,10 @@ class PublicationWorker:
                 )
         async with asyncio.timeout(self._limits.database_timeout_seconds):
             async with self._sessions.begin() as session:
+                # Completion admits live artifacts under the shared parent fence.
+                # Own its fresh retirement snapshot before any application query,
+                # independently of the supplied factory's default isolation.
+                await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
                 return await complete_publication_job(
                     session,
                     job=job,

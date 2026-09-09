@@ -259,7 +259,8 @@ async def lock_publication_input(
 ) -> LockedPublicationInput:
     """Lock the live current chain and derive its immutable publication input.
 
-    The caller owns commit/rollback. No network authentication occurs here.
+    The caller owns a READ COMMITTED transaction and commit/rollback.
+    No network authentication occurs here.
     Optional authorization binds an independently authenticated caller to the
     current generation. Omitting it is for trusted completion, not HTTP callers.
     Grant -> projection/current session/attestation -> materialization -> attempt

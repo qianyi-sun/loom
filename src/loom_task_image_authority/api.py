@@ -596,9 +596,9 @@ def create_app(
             )
             try:
                 if read_committed:
-                    # Credential insertion needs a fresh post-attempt-lock
-                    # retirement snapshot. Override only this owned connection,
-                    # before its first query; other routes retain SERIALIZABLE.
+                    # Build admission needs a fresh post-parent-lock retirement
+                    # snapshot. Own this connection's mode before its first query;
+                    # control and cleanup-only routes retain SERIALIZABLE.
                     await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
                 result = await operation(session, secret_store)
                 await session.commit()
@@ -897,7 +897,7 @@ def create_app(
 
         try:
             async with asyncio.timeout(_PUBLICATION_OPERATION_TIMEOUT_SECONDS):
-                payload = await transition(publication_transition)
+                payload = await transition(publication_transition, read_committed=True)
         except TimeoutError:
             raise HTTPException(
                 status_code=503, detail="task-image authority unavailable"
@@ -985,7 +985,7 @@ def create_app(
                 raise ValueError("task-image claim receipt exceeds response limit")
             return response
 
-        result = await transition(claim_transition)
+        result = await transition(claim_transition, read_committed=True)
         if result is None:
             return Response(status_code=204)
         return bounded_response(result)
@@ -1088,7 +1088,9 @@ def create_app(
                 lease_expires_at=event.result_lease_expires_at,
             )
 
-        return await transition(operation_transition)
+        return await transition(
+            operation_transition, read_committed=operation in ("start", "heartbeat")
+        )
 
     def require_operation_path(
         *,
@@ -1221,7 +1223,7 @@ def create_app(
                 secret_store=secret_store,
             )
 
-        result = await transition(bundle_transition)
+        result = await transition(bundle_transition, read_committed=True)
         return bounded_response(
             result,
             maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
@@ -1303,7 +1305,7 @@ def create_app(
                 candidate_id_factory=resolved_candidate_id,
             )
 
-        return bounded_response(await transition(candidate_transition))
+        return bounded_response(await transition(candidate_transition, read_committed=True))
 
     @app.put(
         "/v2/projections/{grant_id}/materializations/{materialization_id}/publication-candidate"
@@ -1339,7 +1341,7 @@ def create_app(
                 candidate_id_factory=resolved_candidate_id,
             )
 
-        return bounded_response(await transition(candidate_transition))
+        return bounded_response(await transition(candidate_transition, read_committed=True))
 
     @app.put("/v1/projections/{grant_id}/revocation", status_code=204)
     async def revocation(

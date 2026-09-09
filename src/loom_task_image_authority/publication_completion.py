@@ -239,7 +239,7 @@ async def complete_publication_job(
     distribution: DistributedKeysetSnapshot,
     clock: Clock,
 ) -> PublicationReceipt:
-    """Caller-owned atomic transaction. On any exception caller MUST roll back.
+    """Caller-owned READ COMMITTED transaction; any exception requires rollback.
 
     State -> sorted keys -> full live input locks -> job -> envelope inserts.
     All graph/signing work must already have finished outside this transaction.
