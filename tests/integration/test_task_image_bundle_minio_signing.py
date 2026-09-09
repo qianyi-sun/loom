@@ -1,5 +1,6 @@
 """Actual S3 signature verification by pinned disposable MinIO over verified TLS."""
 
+import asyncio
 import ipaddress
 import os
 import ssl
@@ -88,7 +89,7 @@ def minio_tls(tmp_path_factory):
                 admin.create_bucket(Bucket=bucket)
                 for key in (*KEYS, FORM_PREFIX_KEY):
                     admin.put_object(Bucket=bucket, Key=key, Body=PAYLOAD)
-            yield origin, credentials, client, admin
+            yield origin, credentials, client, admin, cert_file
     finally:
         if admin is not None:
             admin.close()
@@ -194,3 +195,36 @@ def test_actual_minio_rejects_changed_signed_listing_parameters(minio_tls, param
     query[parameter] = value
     changed = urlunsplit(parsed._replace(query=urlencode(query)))
     assert minio_tls[2].get(changed).status_code == 403
+
+
+@pytest.mark.parametrize("prefix,expected_keys", [("revision/", KEYS), ("revision space+/", (FORM_PREFIX_KEY,))])
+async def test_actual_minio_async_transport_lists_exact_signed_pages(minio_tls, prefix, expected_keys):
+    from loom_task_image_authority.bundle_s3_listing import parse_list_objects_v2
+    from loom_task_image_authority.bundle_s3_transport import HTTPSBundleListingReader
+
+    token = None
+    objects = []
+    # One shared deadline across pages; production inventory/authorization owner
+    # is still a separate integration boundary from this actual transport test.
+    deadline = asyncio.get_running_loop().time() + 10.0
+    expires_at = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)
+    async with HTTPSBundleListingReader(origin=minio_tls[0], bucket="loom-bundles", ca_file=minio_tls[4]) as reader:
+        for _ in range(3):
+            url = presign_bundle_list(
+                public_origin=minio_tls[0], bucket="loom-bundles", prefix=prefix,
+                maximum_keys=2, continuation_token=token, region="us-east-1",
+                credentials=minio_tls[1], expires_at=expires_at,
+            )
+            payload = await reader.fetch(url, deadline=deadline)
+            page = parse_list_objects_v2(
+                payload, expected_bucket="loom-bundles", prefix=prefix,
+                maximum_keys=2, continuation_token=token, url_encoding="form",
+            )
+            objects.extend(page.objects)
+            token = page.next_token
+            if token is None:
+                break
+    assert token is None
+    assert len(objects) == len(expected_keys)
+    assert {obj.key for obj in objects} == set(expected_keys)
+    assert {obj.size_bytes for obj in objects} == {len(PAYLOAD)}
