@@ -76,3 +76,74 @@ def test_sql_build_identity_upgrade_preserves_existing_extension_location(empty_
                 transaction.rollback()
     finally:
         engine.dispose()
+
+
+async def test_sql_build_identity_cannot_be_redirected_through_search_path(capacity_session):
+    await capacity_session.execute(text("CREATE TEMP TABLE build_identity_path_probe (value integer)"))
+    await capacity_session.execute(text(
+        "CREATE FUNCTION pg_temp.uuid_generate_v5(uuid,text) RETURNS uuid LANGUAGE sql AS "
+        "$$ SELECT '00000000-0000-0000-0000-000000000999'::uuid $$"
+    ))
+    await capacity_session.execute(text("SET LOCAL search_path=pg_temp,public"))
+    actual = await capacity_session.scalar(text(
+        "SELECT public.capacity_personal_build_subject_id(CAST(:namespace AS uuid),CAST(:owner AS uuid))"
+    ), {"namespace": UUID(int=1), "owner": UUID(int=2)})
+    assert actual == personal_build_subject_id(UUID(int=1), UUID(int=2))
+
+
+def test_sql_build_identity_upgrade_preserves_conflicting_foreign_schema(empty_capacity_postgres_url):
+    engine = create_engine(empty_capacity_postgres_url)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                config = _config(connection)
+                command.upgrade(config, "capacity_0017")
+                connection.execute(text("CREATE SCHEMA capacity_build_extensions"))
+                connection.execute(text("CREATE TABLE capacity_build_extensions.foreign_marker (value integer)"))
+                connection.execute(text("INSERT INTO capacity_build_extensions.foreign_marker VALUES (7)"))
+                with pytest.raises(RuntimeError, match="already exists"):
+                    with connection.begin_nested():
+                        command.upgrade(config, "head")
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0017"
+                assert connection.scalar(text("SELECT value FROM capacity_build_extensions.foreign_marker")) == 7
+                assert connection.scalar(text("SELECT to_regprocedure('public.capacity_personal_build_subject_id(uuid,uuid)')")) is None
+                assert connection.scalar(text("SELECT count(*) FROM pg_extension WHERE extname='uuid-ossp'")) == 0
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+async def test_typed_sql_fixture_uses_installed_epoch_transitions(capacity_session):
+    from tests.capacity_build_membership_fixtures import build_request, typed_sql_execution
+    from loom_capacity_manager.typed_membership_commands import derive_build_member
+    _store, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    assert execution.execution_state == "active"
+    assert derive_build_member(build_request(preparation, execution), preparation, fleet).purpose == "personal-build-worker"
+
+
+async def test_sql_accepts_two_owner_build_events_in_one_shared_revision_sequence(capacity_session):
+    from tests.capacity_build_membership_fixtures import build_request, staged_build_event, typed_sql_execution
+    from loom_capacity_manager.typed_membership_events import validate_typed_membership_event_prefix
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    first = await staged_build_event(capacity_session, management, preparation, fleet, build_request(preparation, execution))
+    capacity_session.add(first)
+    await capacity_session.flush()
+    second = await staged_build_event(capacity_session, management, preparation, fleet,
+        build_request(preparation, execution, owner=88011, revision=1), previous_head=first.head_sha256)
+    capacity_session.add(second)
+    await capacity_session.flush()
+    assert len(validate_typed_membership_event_prefix((first, second), preparation, fleet, execution_epoch=42)) == 2
+
+
+@pytest.mark.parametrize("field,changed", (("actor", "foreign-manager"), ("owner_id", UUID(int=999)), ("writer_epoch", 999), ("head_sha256", "f" * 64), ("request_digest", "f" * 64), ("previous_sha256", "f" * 64)))
+async def test_sql_rejects_changed_typed_event_authority(capacity_session, field, changed):
+    from tests.capacity_build_membership_fixtures import build_request, staged_build_event, typed_sql_execution
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    row = await staged_build_event(capacity_session, management, preparation, fleet, build_request(preparation, execution))
+    setattr(row, field, changed)
+    with pytest.raises(DBAPIError):
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()
