@@ -1,5 +1,7 @@
 """Active runtime builds independent credentials and closes partial construction."""
 
+import hashlib
+import json
 from datetime import timedelta
 from importlib import import_module
 from types import SimpleNamespace
@@ -56,9 +58,22 @@ async def test_active_runtime_rejects_invalid_binding_before_credentials(tmp_pat
 
 
 @pytest.mark.parametrize("fail_observer", (False, True))
-async def test_active_runtime_pins_installer_and_owns_partial_clients(tmp_path, monkeypatch, fail_observer):
+@pytest.mark.parametrize("with_successors", (False, True))
+async def test_active_runtime_pins_installer_and_owns_partial_clients(tmp_path, monkeypatch, fail_observer, with_successors):
     module = import_module("loom_service.personal_dev_membership")
     settings = _configured(tmp_path)
+    if with_successors:
+        from tests.unit.test_personal_dev_membership_successor_plan import _plan, _wire
+
+        binding, document = _plan()
+        payload = _wire(document)
+        path = tmp_path / "reviewed-successors.json"
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        settings.personal_dev_membership_binding_json = _wire(binding.authority.model_dump(mode="json")).decode()
+        settings.personal_dev_membership_plan_sha256 = binding.authority.plan_sha256
+        settings.personal_dev_membership_successor_plan_file = str(path)
+        settings.personal_dev_membership_successor_plan_sha256 = hashlib.sha256(payload).hexdigest()
     events, clients = [], []
     installer, kubectl = object(), object()
     connection = PersonalDevCapacityManagerConnection(
@@ -105,10 +120,11 @@ async def test_active_runtime_pins_installer_and_owns_partial_clients(tmp_path, 
         assert runtime.membership.client is clients[0]
         assert runtime.membership.observer is clients[1]
         assert runtime.membership.admission is not None
+        assert len(runtime.membership.successor_bindings or {}) == (2 if with_successors else 0)
         assert runtime.owned_membership_clients == tuple(clients)
         assert runtime.acceptance_interlock is runtime.operational_interlock is None
         assert runtime.status_reader.projector is projector
-        assert events == [admission_values()["execution"]]
+        assert events == [json.loads(settings.personal_dev_membership_binding_json)["execution"]]
 
 
 async def test_observer_latency_cannot_extend_active_acceptance_window(monkeypatch):
