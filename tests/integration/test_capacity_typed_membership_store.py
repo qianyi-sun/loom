@@ -16,7 +16,11 @@ from loom_capacity_manager.models import (
     CapacitySubject,
     CapacityWorkerProfile,
 )
-from loom_capacity_manager.store import ConfigurationConflictError, ExecutionConflictError, IdempotencyConflictError
+from loom_capacity_manager.store import (
+    ConfigurationConflictError,
+    ExecutionConflictError,
+    IdempotencyConflictError,
+)
 from tests.capacity_build_membership_fixtures import build_request, typed_sql_execution
 
 
@@ -135,3 +139,145 @@ async def test_typed_store_preserves_enclosing_transaction_rollback(capacity_ses
             raise RuntimeError("abort owner operation")
     for model in (CapacityPersonalMembershipEvent, CapacitySubject, CapacityCandidate, CapacityDeploymentGeneration, CapacityWorkerProfile, CapacityDemandReporter):
         assert await _count(capacity_session, model, request.command.acknowledgement.subject_id) == 0
+
+
+@pytest.mark.parametrize("same_owner", (False, True))
+async def test_typed_store_concurrent_requests_retry_without_duplicate_or_partial_builds(isolated_capacity_postgres_url, same_owner):
+    import asyncio
+
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_capacity_manager.store import CapacityStoreError
+
+    engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session, session.begin():
+            _management, preparation, _fleet, execution = await typed_sql_execution(session)
+        requests = (build_request(preparation, execution), build_request(preparation, execution, owner=88010 if same_owner else 88011))
+        barrier = asyncio.Barrier(2)
+
+        async def submit(index):
+            try:
+                async with sessions() as session, session.begin():
+                    # Establish both SERIALIZABLE snapshots before either writer
+                    # locks authority; no timing sleeps or mock lock behavior.
+                    await session.scalar(select(func.count()).select_from(CapacityPersonalMembershipEvent))
+                    await barrier.wait()
+                    return await _apply(session, requests[index], key=92000 if same_owner else 92000 + index)
+            except (CapacityStoreError, DBAPIError) as exc:
+                return exc
+
+        async with asyncio.timeout(30):
+            outcomes = await asyncio.gather(submit(0), submit(1))
+        assert sum(not isinstance(value, Exception) for value in outcomes) == 1
+        failed_index = next(index for index, value in enumerate(outcomes) if isinstance(value, Exception))
+        failed = outcomes[failed_index]
+        if isinstance(failed, DBAPIError):
+            assert failed.orig.sqlstate == "40001"
+        else:
+            assert isinstance(failed, CapacityStoreError) and "must be retried" in str(failed)
+        async with sessions() as session:
+            assert await session.scalar(select(func.count()).select_from(CapacityPersonalMembershipEvent)) == 1
+        if same_owner:
+            async with sessions() as session:
+                retried = await _apply(session, requests[failed_index])
+            assert retried.replayed and retried.revision == 1
+        else:
+            async with sessions() as session:
+                with pytest.raises(PersonalMembershipRevisionConflictError):
+                    await _apply(session, requests[failed_index], key=92000 + failed_index)
+            async with sessions() as session:
+                retried = await _apply(session, requests[failed_index].model_copy(update={"expected_revision": 1}), key=92000 + failed_index)
+            assert not retried.replayed and retried.revision == 2
+        async with sessions() as session:
+            expected = 1 if same_owner else 2
+            assert await session.scalar(select(func.count()).select_from(CapacityPersonalMembershipEvent)) == expected
+            subject_ids = [request.command.acknowledgement.subject_id for request in requests]
+            for model, multiplier in ((CapacityCandidate, 1), (CapacityDeploymentGeneration, 1), (CapacityWorkerProfile, 2), (CapacityDemandReporter, 1)):
+                assert await session.scalar(select(func.count()).select_from(model).where(model.subject_id.in_(subject_ids))) == expected * multiplier
+    finally:
+        await engine.dispose()
+
+
+async def test_typed_store_rolls_back_generation_writes_after_sql_event_rejection(capacity_session):
+    from sqlalchemy.exc import DBAPIError
+
+    from loom_capacity_manager.contracts import canonical_digest
+    from loom_capacity_manager.models import CapacityConfigGeneration
+    from loom_capacity_manager.typed_membership_commands import derive_build_member
+
+    _management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    request = build_request(preparation, execution)
+    subject = derive_build_member(request, preparation, fleet).configuration
+    capacity_session.add(CapacityConfigGeneration(scope="subject", subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation, scope_generation=subject.configuration_generation,
+        digest=canonical_digest(subject), payload=subject.model_dump(mode="json"), state="proposed",
+        actor="existing-proposal", idempotency_key=UUID(int=93000)))
+    await capacity_session.flush()
+    with pytest.raises(DBAPIError, match="identity or membership bound changed"):
+        await _apply(capacity_session, request)
+    for model in (CapacityPersonalMembershipEvent, CapacitySubject, CapacityCandidate, CapacityDeploymentGeneration, CapacityWorkerProfile, CapacityDemandReporter):
+        assert await _count(capacity_session, model, subject.subject_id) == 0
+    assert await _count(capacity_session, CapacityConfigGeneration, subject.subject_id) == 1
+
+
+@pytest.mark.parametrize("model,field,changed", (
+    (CapacityCandidate, "artifact_payload", {}),
+    (CapacityDeploymentGeneration, "readiness_state", "ready"),
+    (CapacityDemandReporter, "token_sha256", "f" * 64),
+    (CapacityWorkerProfile, "shape_catalog", []),
+))
+async def test_typed_store_replay_refreshes_retained_orm_objects(isolated_capacity_postgres_url, model, field, changed):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as reader:
+            async with reader.begin():
+                _management, preparation, _fleet, execution = await typed_sql_execution(reader)
+                request = build_request(preparation, execution)
+                await _apply(reader, request)
+                retained = (await reader.scalars(select(model).where(model.subject_id == request.command.acknowledgement.subject_id))).first()
+                retained_id = retained.id
+            async with sessions() as writer, writer.begin():
+                row = await writer.get(model, retained_id)
+                setattr(row, field, changed)
+            assert getattr(retained, field) != changed
+            with pytest.raises(ConfigurationConflictError):
+                await _apply(reader, request)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("corrupt", ("candidate-version", "shape-boolean", "account-number"))
+async def test_typed_store_replay_rejects_retained_json_type_aliases(capacity_session, corrupt):
+    from copy import deepcopy
+
+    _management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    request = build_request(preparation, execution)
+    result = await _apply(capacity_session, request)
+    if corrupt == "account-number":
+        row = (await capacity_session.scalars(select(CapacityAccountPolicy).where(CapacityAccountPolicy.account_id == result.member.configuration.account_id))).one()
+        payload = deepcopy(row.payload)
+        payload["max_slots"] = float(payload["max_slots"])
+        row.payload = payload
+    elif corrupt == "candidate-version":
+        row = (await capacity_session.scalars(select(CapacityCandidate).where(CapacityCandidate.subject_id == result.member.configuration.subject_id))).one()
+        payload = deepcopy(row.artifact_payload)
+        payload["runtime_candidate"]["schema_version"] = 2.0
+        row.artifact_payload = payload
+    else:
+        row = (await capacity_session.scalars(select(CapacityWorkerProfile).where(CapacityWorkerProfile.subject_id == result.member.configuration.subject_id))).first()
+        payload = deepcopy(row.shape_catalog)
+        payload[0]["concurrency_slots"] = True
+        row.shape_catalog = payload
+    # Force the semantically-equal JSON assignment to persist: SQLAlchemy's dirty
+    # checker also uses Python equality and otherwise silently drops this change.
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(row, "payload" if corrupt == "account-number" else "artifact_payload" if corrupt == "candidate-version" else "shape_catalog")
+    await capacity_session.flush()
+    with pytest.raises(ConfigurationConflictError):
+        await _apply(capacity_session, request)
