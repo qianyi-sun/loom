@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,56 +15,149 @@ import (
 // A scheduler-paused token write may outlive an early HTTP response. Closing
 // network I/O wakes the writer, but only a join proves its borrowed bytes dead.
 type earlyRegistryResponseConn struct {
-	token []byte
+	token                     []byte
 	borrowed, release, closed chan struct{}
-	once sync.Once
-	reader *bytes.Reader
+	once                      sync.Once
+	reader                    *bytes.Reader
 }
-func (c *earlyRegistryResponseConn) Read(p []byte)(int,error) { <-c.borrowed; return c.reader.Read(p) }
-func (c *earlyRegistryResponseConn) Write(p []byte)(int,error) {
-	if len(p)>0 && &p[0]==&c.token[0] { close(c.borrowed); <-c.release; return 0,net.ErrClosed }
-	return len(p),nil
+
+func (c *earlyRegistryResponseConn) Read(p []byte) (int, error) {
+	<-c.borrowed
+	return c.reader.Read(p)
 }
-func (c *earlyRegistryResponseConn) Close()error { c.once.Do(func(){close(c.closed)}); return nil }
-func (c *earlyRegistryResponseConn) LocalAddr()net.Addr{return nil}
-func (c *earlyRegistryResponseConn) RemoteAddr()net.Addr{return nil}
-func (c *earlyRegistryResponseConn) SetDeadline(time.Time)error{return nil}
-func (c *earlyRegistryResponseConn) SetReadDeadline(time.Time)error{return nil}
-func (c *earlyRegistryResponseConn) SetWriteDeadline(time.Time)error{return nil}
+func (c *earlyRegistryResponseConn) Write(p []byte) (int, error) {
+	if len(p) > 0 && &p[0] == &c.token[0] {
+		close(c.borrowed)
+		<-c.release
+		return 0, net.ErrClosed
+	}
+	return len(p), nil
+}
+func (c *earlyRegistryResponseConn) Close() error                     { c.once.Do(func() { close(c.closed) }); return nil }
+func (c *earlyRegistryResponseConn) LocalAddr() net.Addr              { return nil }
+func (c *earlyRegistryResponseConn) RemoteAddr() net.Addr             { return nil }
+func (c *earlyRegistryResponseConn) SetDeadline(time.Time) error      { return nil }
+func (c *earlyRegistryResponseConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *earlyRegistryResponseConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestRegistryRequestJoinsEarlyResponseTokenWriter(t *testing.T) {
-	token:=[]byte("review.private.signature")
-	conn:=&earlyRegistryResponseConn{token:token,borrowed:make(chan struct{}),release:make(chan struct{}),closed:make(chan struct{}),
-		reader:bytes.NewReader([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))}
-	transport:=&http.Transport{DisableKeepAlives:true,DialContext:func(ctx context.Context,_,_ string)(net.Conn,error){
-		return registryScopeFromContext(ctx).dial(func(context.Context)(net.Conn,error){return conn,nil})
+	token := []byte("review.private.signature")
+	conn := &earlyRegistryResponseConn{token: token, borrowed: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{}),
+		reader: bytes.NewReader([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))}
+	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return registryScopeFromContext(ctx).dial(func(context.Context) (net.Conn, error) { return conn, nil })
 	}}
 	defer transport.CloseIdleConnections()
-	origin,_:=url.Parse("http://example.test")
-	credential := &RegistryCredential{BearerToken:token,ExpiresAt:time.Now().Add(time.Minute)}
-	s:=registryUploadSession{policy:RegistryUploadPolicy{origin:origin},credential:credential,client:&http.Client{Transport:transport}}
-	done:=make(chan error,1)
-	go func(){_,err:=s.request(context.Background(),"PUT",origin,nil,"","");done<-err}()
-	select { case <-conn.closed: case <-time.After(time.Second): close(conn.release);t.Fatal("early response did not close network") }
+	origin, _ := url.Parse("http://example.test")
+	credential := &RegistryCredential{BearerToken: token, ExpiresAt: time.Now().Add(time.Minute)}
+	s := registryUploadSession{policy: RegistryUploadPolicy{origin: *origin}, credential: credential, client: &http.Client{Transport: transport}}
+	done := make(chan error, 1)
+	go func() { _, err := s.request(context.Background(), "PUT", origin, nil, "", ""); done <- err }()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		close(conn.release)
+		t.Fatal("early response did not close network")
+	}
 	// Network close is observed; deliberately keep its writer scheduled out.
-	select { case <-done: close(conn.release); t.Fatal("request returned with borrowed credential writer live"); case <-time.After(20*time.Millisecond): }
+	select {
+	case <-done:
+		close(conn.release)
+		t.Fatal("request returned with borrowed credential writer live")
+	case <-time.After(20 * time.Millisecond):
+	}
 	close(conn.release)
-	select { case <-done: case <-time.After(time.Second):t.Fatal("request did not join writer") }
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("request did not join writer")
+	}
 }
 
 func TestRegistryRequestClosesAndJoinsDetachedDial(t *testing.T) {
-	scope:=newRegistryRequestScope(context.Background(),[]byte("private.signature"))
-	started,release:=make(chan struct{}),make(chan struct{})
-	dialed:=make(chan error,1)
-	go func(){_,err:=scope.dial(func(ctx context.Context)(net.Conn,error){close(started);<-ctx.Done();<-release;return nil,ctx.Err()});dialed<-err}()
+	scope := newRegistryRequestScope(context.Background(), []byte("private.signature"))
+	started, release := make(chan struct{}), make(chan struct{})
+	dialed := make(chan error, 1)
+	go func() {
+		_, err := scope.dial(func(ctx context.Context) (net.Conn, error) {
+			close(started)
+			<-ctx.Done()
+			<-release
+			return nil, ctx.Err()
+		})
+		dialed <- err
+	}()
 	<-started
-	closed:=make(chan struct{})
-	go func(){scope.Close();close(closed)}()
+	closed := make(chan struct{})
+	go func() { scope.Close(); close(closed) }()
 	<-scope.ctx.Done()
-	if _,err:=scope.dial(func(context.Context)(net.Conn,error){t.Error("late detached dial admitted");return nil,nil});err==nil {t.Error("closed scope dial accepted")}
-	select {case <-closed:close(release);t.Fatal("scope did not join dial");case <-time.After(20*time.Millisecond):}
+	if _, err := scope.dial(func(context.Context) (net.Conn, error) { t.Error("late detached dial admitted"); return nil, nil }); err == nil {
+		t.Error("closed scope dial accepted")
+	}
+	select {
+	case <-closed:
+		close(release)
+		t.Fatal("scope did not join dial")
+	case <-time.After(20 * time.Millisecond):
+	}
 	close(release)
 	<-dialed
 	<-closed
-	if scope.token!=nil {t.Fatal("closed request retained token borrow")}
+	if scope.token != nil {
+		t.Fatal("closed request retained token borrow")
+	}
+}
+
+func TestRegistryRequestRejectsConnectionRacingCancellation(t *testing.T) {
+	scope := newRegistryRequestScope(context.Background(), []byte("private.signature"))
+	started, release := make(chan struct{}), make(chan struct{})
+	conn, peer := net.Pipe()
+	defer peer.Close()
+	dialed := make(chan error, 1)
+	go func() {
+		_, err := scope.dial(func(context.Context) (net.Conn, error) { close(started); <-release; return conn, nil })
+		dialed <- err
+	}()
+	<-started
+	closed := make(chan struct{})
+	go func() { scope.Close(); close(closed) }()
+	<-scope.ctx.Done()
+	close(release)
+	if err := <-dialed; err == nil {
+		t.Fatal("connection accepted after cancellation")
+	}
+	<-closed
+	if _, err := peer.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("late connection not closed: %v", err)
+	}
+}
+
+type gatedRegistryBody struct{ entered, release chan struct{} }
+
+func (r gatedRegistryBody) Read(p []byte) (int, error) {
+	close(r.entered)
+	<-r.release
+	return copy(p, []byte("chunk")), nil
+}
+
+func TestRegistryRequestBodyCloseJoinsReaderAndFencesChunkReuse(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	body := &registryRequestBody{reader: gatedRegistryBody{entered, release}}
+	read := make(chan struct{})
+	go func() { _, _ = body.Read(make([]byte, 8)); close(read) }()
+	<-entered
+	closed := make(chan struct{})
+	go func() { _ = body.Close(); close(closed) }()
+	select {
+	case <-closed:
+		close(release)
+		t.Fatal("body close did not join reader")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-read
+	<-closed
+	if _, err := body.Read(make([]byte, 8)); err != io.EOF {
+		t.Fatal("closed body retained chunk reader")
+	}
 }

@@ -593,7 +593,15 @@ use distinct private anonymous mappings, locked before credential reads, then
 zeroed and unmapped on close. Heap slices can share pages and Linux memory locks
 are not reference-counted: closing the old owner previously unlocked a live
 snapshot's page. Regression coverage checks disjoint pages and surviving locks.
-Borrowed token slices are invalid after the owning credential closes. The captured session
+Borrowed token slices are invalid after the owning credential closes. Registry
+HTTP requests therefore own an explicit dial/connection scope: cancellation fences
+late detached dials, joins admitted dialers, closes sockets and joins token writers
+before credential rotation. Response-body closure alone is insufficient because
+HTTP can return an early response while a writer still borrows the token. Connection
+close serializes header cleanup with writing, and synchronized request-body closure
+joins readers before upload chunks can be reused. Tests reproduce the early-response
+case with real Go HTTP transport and controlled I/O scheduling, plus late-dial and
+body-read cleanup races. The captured session
 binds issuance only and never rewrites original claim provenance. Generation drift
 during issuance gets at most three fresh-operation attempts; unchanged-generation
 errors do not retry. Real TLS tests cover successor success, the attempt ceiling,

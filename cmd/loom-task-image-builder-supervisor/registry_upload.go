@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -152,27 +153,25 @@ func (u *OCIRegistryUploader) Upload(ctx context.Context, output OCIOutput, sour
 	// automatic transport replay survive a request.
 	transport.DisableKeepAlives = true
 	transport.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		ctx, cancel := context.WithTimeout(ctx, registryRequestTimeout)
-		defer cancel()
-		conn, err := (&net.Dialer{Timeout: registryRequestTimeout}).DialContext(ctx, network, address)
-		if err != nil {
-			return nil, err
-		}
-		secured := tls.Client(conn, transport.TLSClientConfig)
-		if err := secured.HandshakeContext(ctx); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		if secured.ConnectionState().Version != tls.VersionTLS13 {
-			secured.Close()
-			return nil, errRegistryWireHeaders
-		}
-		wire := &registryWireConn{Conn: secured, reader: bufio.NewReaderSize(secured, registryResponseBytes+1)}
-		if s.credential == nil || len(s.credential.BearerToken) == 0 {
-			wire.Close()
-			return nil, errRegistryTransport
-		}
-		return newRegistryAuthorizationConn(wire, s.credential.BearerToken), nil
+		return registryScopeFromContext(ctx).dial(func(ctx context.Context) (net.Conn, error) {
+			ctx, cancel := context.WithTimeout(ctx, registryRequestTimeout)
+			defer cancel()
+			conn, err := (&net.Dialer{Timeout: registryRequestTimeout}).DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			secured := tls.Client(conn, transport.TLSClientConfig)
+			if err := secured.HandshakeContext(ctx); err != nil {
+				conn.Close()
+				return nil, err
+			}
+			if secured.ConnectionState().Version != tls.VersionTLS13 {
+				secured.Close()
+				return nil, errRegistryWireHeaders
+			}
+			wire := &registryWireConn{Conn: secured, reader: bufio.NewReaderSize(secured, registryResponseBytes+1)}
+			return wire, nil
+		})
 	}
 	defer transport.CloseIdleConnections()
 	s.client = &http.Client{Transport: transport, Timeout: registryRequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -273,10 +272,14 @@ var errRegistryAuthorizationWrite = errors.New("registry upload request write fa
 
 type registryAuthorizationConn struct {
 	net.Conn
-	token    []byte
-	header   []byte
-	complete bool
-	failed   bool
+	writeMu   sync.Mutex
+	closed    bool
+	closeOnce sync.Once
+	closeErr  error
+	token     []byte
+	header    []byte
+	complete  bool
+	failed    bool
 }
 
 func newRegistryAuthorizationConn(conn net.Conn, token []byte) *registryAuthorizationConn {
@@ -284,6 +287,11 @@ func newRegistryAuthorizationConn(conn net.Conn, token []byte) *registryAuthoriz
 }
 
 func (c *registryAuthorizationConn) Write(p []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.closed {
+		return 0, errRegistryAuthorizationWrite
+	}
 	if c.complete {
 		return c.writeAll(p)
 	}
@@ -317,8 +325,14 @@ func (c *registryAuthorizationConn) Write(p []byte) (int, error) {
 }
 
 func (c *registryAuthorizationConn) Close() error {
+	// Wake network I/O before joining its writer; joining while the socket is
+	// open can deadlock on a stalled peer. Serialize header/token cleanup too.
+	c.closeOnce.Do(func() { c.closeErr = c.Conn.Close() })
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.closed = true
 	c.cleanup()
-	return c.Conn.Close()
+	return c.closeErr
 }
 
 func (c *registryAuthorizationConn) flushHeader() error {
@@ -387,8 +401,9 @@ func (c *registryAuthorizationConn) cleanup() {
 	c.token = nil
 }
 
-// request owns each response body, discards at most budget+1 bytes, and removes
-// the temporary placeholder header before returning. No net/http error is
+// request owns each response body, discards at most budget+1 bytes, and joins
+// credential/input borrowers before returning. Headers contain only an inert
+// placeholder and remain immutable for detached HTTP bookkeeping. No net/http error is
 // exposed: those errors may include attacker-controlled URLs or response text.
 func (s *registryUploadSession) request(ctx context.Context, method string, target *url.URL, body []byte, mediaType, contentRange string) (*http.Response, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, registryRequestTimeout)
@@ -399,9 +414,17 @@ func (s *registryUploadSession) request(ctx context.Context, method string, targ
 	if target == nil || target.Scheme != s.policy.origin.Scheme || target.Host != s.policy.origin.Host || target.User != nil || target.Fragment != "" || registryURLContainsToken(target, s.credential.BearerToken) {
 		return nil, errors.New("registry upload request URL invalid")
 	}
+	scope := newRegistryRequestScope(requestCtx, s.credential.BearerToken)
+	requestCtx = context.WithValue(requestCtx, registryRequestScopeKey{}, scope)
 	req, err := http.NewRequestWithContext(requestCtx, method, target.String(), bytes.NewReader(body))
+	defer scope.Close()
 	if err != nil {
 		return nil, errors.New("registry upload request invalid")
+	}
+	if len(body) > 0 {
+		ownedBody := &registryRequestBody{reader: bytes.NewReader(body)}
+		req.Body = ownedBody
+		defer ownedBody.Close()
 	}
 	// Disable replay of request bodies, including net/http's optional retries.
 	req.GetBody = nil
@@ -412,7 +435,6 @@ func (s *registryUploadSession) request(ctx context.Context, method string, targ
 		req.Header.Set("Content-Range", contentRange)
 	}
 	req.Header.Set("Authorization", registryAuthorizationPlaceholder)
-	defer req.Header.Del("Authorization")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
