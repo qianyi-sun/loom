@@ -15,7 +15,11 @@ from loom.db.schema import (
 from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
 )
-from tests.integration.test_task_image_registry_credentials import _claimed_attempt, _issue_first
+from tests.integration.test_task_image_registry_credentials import (
+    NOW,
+    _claimed_attempt,
+    _issue_first,
+)
 from tests.integration.test_task_image_registry_credentials import (
     registry_issuer as registry_issuer,
 )
@@ -113,6 +117,51 @@ async def test_preparation_ignores_unflushed_caller_state_and_busy_catalog(
     async with factory() as session:
         await _lock(session, prepared)
         await module.revalidate_retirement_inventory(session, prepared=prepared)
+
+
+@pytest.mark.parametrize("isolation_level", ["REPEATABLE READ", "AUTOCOMMIT"])
+async def test_preparation_owns_read_committed_read_only_transaction(
+    registry_authority_session, registry_issuer, isolation_level
+):
+    module = snapshot_module()
+    factory = registry_authority_session
+    _, attempt, _ = await _setup(factory, registry_issuer)
+    engine = factory.kw["bind"].execution_options(isolation_level=isolation_level)
+    observed = []
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        if "pg_catalog.pg_trigger" in statement:
+            observed.append(tuple(connection.exec_driver_sql(
+                "SELECT current_setting('transaction_isolation'), "
+                "current_setting('transaction_read_only')"
+            ).one()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        await module.prepare_attempt_retirement_inventory(
+            engine, attempt_id=attempt.id, registry_origin=ORIGIN,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+    assert observed == [("read committed", "on")]
+
+
+async def test_locked_recheck_refuses_pending_retirement_without_flushing(
+    registry_authority_session, registry_issuer
+):
+    module = snapshot_module()
+    factory = registry_authority_session
+    _, attempt, _ = await _setup(factory, registry_issuer)
+    prepared = await module.prepare_attempt_retirement_inventory(
+        factory.kw["bind"], attempt_id=attempt.id, registry_origin=ORIGIN,
+    )
+    async with factory() as session:
+        await _lock(session, prepared)
+        marker = TaskImageAttemptRetention(attempt_id=attempt.id, observed_at=NOW)
+        session.add(marker)
+        with pytest.raises(module.RetirementInventoryUnavailableError, match="unflushed"):
+            await module.revalidate_retirement_inventory(session, prepared=prepared)
+        assert marker in session.new
 
 
 async def test_locked_recheck_rejects_credential_appended_after_preparation(
