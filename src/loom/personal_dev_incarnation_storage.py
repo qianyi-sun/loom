@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from loom.personal_dev_environment import PersonalDevReconciliationClaim
 
 _MAX_BINDING_BYTES = 16 * 1024
+STORAGE_BINDING_ANNOTATION = "loom.dev/storage-binding"
+STORAGE_BINDING_SHA_ANNOTATION = "loom.dev/storage-binding-sha256"
 
 
 class PersonalDevStorageBindingV1(StrictV1Model):
@@ -101,6 +103,16 @@ def validate_personal_dev_storage_identity(identity: DevInstanceIdentity) -> Dev
     if identity != expected:
         raise ValueError("personal storage identity contains a noncanonical resource override")
     return expected
+
+
+def personal_dev_storage_annotations(identity: DevInstanceIdentity) -> dict[str, str]:
+    identity = validate_personal_dev_storage_identity(identity)
+    if identity.storage_binding is None:
+        return {}
+    return {
+        STORAGE_BINDING_ANNOTATION: canonical_bytes(identity.storage_binding).decode(),
+        STORAGE_BINDING_SHA_ANNOTATION: canonical_digest(identity.storage_binding),
+    }
 
 
 def resolve_personal_dev_storage_identity(claim: PersonalDevReconciliationClaim) -> DevInstanceIdentity:

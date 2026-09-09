@@ -37,14 +37,19 @@ from loom.personal_dev_capacity_identity import (
     capacity_runtime_database_password,
     capacity_runtime_database_url,
 )
-from loom.personal_dev_incarnation_storage import validate_personal_dev_storage_identity
+from loom.personal_dev_incarnation_storage import (
+    STORAGE_BINDING_ANNOTATION,
+    STORAGE_BINDING_SHA_ANNOTATION,
+    personal_dev_storage_annotations,
+    validate_personal_dev_storage_identity,
+)
 from loom.personal_dev_reconciler import PersonalDevReadinessObservation
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 
 _STORAGE_JSON = "storage-binding.json"
 _STORAGE_SHA = "storage-binding.sha256"
-_STORAGE_ANNOTATION = "loom.dev/storage-binding"
-_STORAGE_SHA_ANNOTATION = "loom.dev/storage-binding-sha256"
+_STORAGE_ANNOTATION = STORAGE_BINDING_ANNOTATION
+_STORAGE_SHA_ANNOTATION = STORAGE_BINDING_SHA_ANNOTATION
 
 
 class DevInstanceRuntimeError(RuntimeError):
@@ -247,7 +252,7 @@ class KubectlClient:
             timeout_seconds=30,
         )
         try:
-            raw = json.loads(result.stdout)
+            raw = json.loads(result.stdout or "{}")
             if raw == {}:
                 return None
             data = raw["data"]
@@ -272,7 +277,7 @@ class KubectlClient:
             timeout_seconds=30,
         )
         try:
-            value = json.loads(result.stdout)
+            value = json.loads(result.stdout or "{}")
             if value == {}:
                 return False
             metadata = value["metadata"]
@@ -296,6 +301,53 @@ class KubectlClient:
             return value
         except (KeyError, TypeError, ValueError):
             raise DevInstanceRuntimeError("cluster namespace response was invalid") from None
+
+    async def read_storage_namespace(
+        self, identity: DevInstanceIdentity, *, allow_terminating: bool = False,
+    ) -> dict[str, Any] | None:
+        expected = personal_dev_storage_annotations(identity)
+        namespace = await self.read_namespace_optional(identity.namespace)
+        if namespace is not None and expected:
+            metadata = namespace["metadata"]
+            annotations = metadata.get("annotations", {})
+            if (
+                not isinstance(annotations, dict)
+                or any(annotations.get(key) != value for key, value in expected.items())
+                or not isinstance(metadata.get("uid"), str) or not metadata["uid"]
+                or (not allow_terminating and metadata.get("deletionTimestamp") is not None)
+            ):
+                raise DevInstanceRuntimeError("instance namespace storage binding is invalid")
+        return namespace
+
+    async def delete_storage_namespace(self, identity: DevInstanceIdentity) -> None:
+        identity = validate_personal_dev_storage_identity(identity)
+        if identity.storage_binding is None:
+            await self.delete_namespace(identity.namespace)
+            return
+        namespace = await self.read_storage_namespace(identity, allow_terminating=True)
+        if namespace is None:
+            return
+        uid = namespace["metadata"]["uid"]
+        try:
+            await self.runner.run(
+                self._argv("delete", f"--raw=/api/v1/namespaces/{identity.namespace}", "-f", "-"),
+                stdin=json.dumps({"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": uid}}),
+                timeout_seconds=30,
+            )
+        except DevInstanceRuntimeError:
+            current = await self.read_namespace_optional(identity.namespace)
+            if current is None or current["metadata"].get("uid") != uid:
+                return
+            raise
+        try:
+            async with asyncio.timeout(300):
+                while True:
+                    current = await self.read_namespace_optional(identity.namespace)
+                    if current is None or current["metadata"].get("uid") != uid:
+                        return
+                    await asyncio.sleep(1)
+        except TimeoutError:
+            raise DevInstanceRuntimeError("instance namespace deletion timed out") from None
 
     async def read_resource_json(
         self,
@@ -757,20 +809,7 @@ class KubectlSecretVault:
         }
 
     async def _bound_namespace(self, identity: DevInstanceIdentity) -> dict[str, Any] | None:
-        namespace = await self.kubectl.read_namespace_optional(identity.namespace)
-        if namespace is not None:
-            expected = self._storage_data(identity)
-            metadata = namespace.get("metadata", {})
-            annotations = metadata.get("annotations", {})
-            if (
-                not isinstance(annotations, dict)
-                or annotations.get(_STORAGE_ANNOTATION) != expected[_STORAGE_JSON]
-                or annotations.get(_STORAGE_SHA_ANNOTATION) != expected[_STORAGE_SHA]
-                or not metadata.get("uid")
-                or metadata.get("deletionTimestamp") is not None
-            ):
-                raise DevInstanceRuntimeError("instance namespace storage binding is invalid")
-        return namespace
+        return await self.kubectl.read_storage_namespace(identity)
 
     def _assert_storage_data(self, identity: DevInstanceIdentity, data: dict[str, bytes]) -> None:
         if identity.storage_binding is None and ({_STORAGE_JSON, _STORAGE_SHA} & data.keys()):

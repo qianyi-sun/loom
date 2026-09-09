@@ -14,6 +14,7 @@ import yaml  # type: ignore[import-untyped]
 from loom.dev_instance import DevInstanceIdentity
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
 from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
+from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
 
 _MANAGED_LABELS = {
     "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
@@ -674,7 +675,7 @@ def dev_instance_manifest_documents(
         _literal_env("LOOM_SVC_ADMIN_SECRET_FILE", "/var/run/loom/admin/secrets.toml"),
         *common,
     ]
-    namespace = {
+    namespace: dict[str, Any] = {
         "apiVersion": "v1",
         "kind": "Namespace",
         "metadata": {
@@ -687,6 +688,9 @@ def dev_instance_manifest_documents(
             },
         },
     }
+    storage_annotations = personal_dev_storage_annotations(identity)
+    if storage_annotations:
+        namespace["metadata"]["annotations"] = storage_annotations
     migration = {
         "apiVersion": "batch/v1",
         "kind": "Job",
