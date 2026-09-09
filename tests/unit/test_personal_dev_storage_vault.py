@@ -18,6 +18,7 @@ from loom.dev_instance_runtime import (
     instance_database_url,
 )
 from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
+from loom.personal_dev_incarnation_storage import personal_dev_secret_name
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
@@ -94,13 +95,13 @@ async def test_bound_vault_writes_one_canonical_binding_on_all_secrets_and_names
     await vault.store(identity, _PASSWORD)
     expected = canonical_bytes(identity.storage_binding)
     digest = canonical_digest(identity.storage_binding)
-    assert set(cluster.secrets) == {"loom-secrets", "loom-admin-secret", PROTECTED_WORKER_RUNTIME_SECRET_NAME}
+    assert set(cluster.secrets) == {personal_dev_secret_name(identity, name) for name in ("loom-secrets", "loom-admin-secret", PROTECTED_WORKER_RUNTIME_SECRET_NAME)}
     for data in cluster.secrets.values():
         assert data[_JSON] == expected
         assert data[_SHA] == digest.encode()
     assert cluster.namespace["metadata"]["annotations"][_ANN_JSON] == expected.decode()
     assert cluster.namespace["metadata"]["annotations"][_ANN_SHA] == digest
-    assert cluster.secrets["loom-secrets"]["minio-access-key"].decode() == identity.storage_binding.object_store_identity[0]
+    assert cluster.secrets[personal_dev_secret_name(identity, "loom-secrets")]["minio-access-key"].decode() == identity.storage_binding.object_store_identity[0]
     assert KubectlMinioTenantProvisioner._names(identity) == identity.storage_binding.object_store_identity
     fresh = _vault(cluster)
     assert await fresh.database_password(identity) == _PASSWORD
@@ -115,7 +116,7 @@ async def test_bound_vault_checks_all_secret_bindings_even_after_cache_fill(meth
     identity = _bound_claim().operation.storage_binding.identity
     vault = _vault(cluster)
     await vault.store(identity, _PASSWORD)
-    cluster.secrets[secret_name][_SHA] = b"0" * 64
+    cluster.secrets[personal_dev_secret_name(identity, secret_name)][_SHA] = b"0" * 64
     before = list(cluster.writes)
     with pytest.raises(DevInstanceRuntimeError):
         await getattr(vault, method)(identity, *([_PASSWORD] if method == "store" else []))
@@ -133,7 +134,7 @@ async def test_bound_vault_rejects_wrong_physical_credential_targets_before_sql(
     identity = _bound_claim().operation.storage_binding.identity
     vault = _vault(cluster)
     await vault.store(identity, _PASSWORD)
-    cluster.secrets["loom-secrets"][key] = value.encode()
+    cluster.secrets[personal_dev_secret_name(identity, "loom-secrets")][key] = value.encode()
     with pytest.raises(DevInstanceRuntimeError):
         await vault.database_password(identity)
 
@@ -194,10 +195,13 @@ async def test_new_incarnation_gets_disjoint_cache_values_after_old_namespace_is
 
 
 @pytest.mark.parametrize("method", ("database_password", "admin_token", "object_credentials", "store"))
-async def test_legacy_vault_cannot_reinterpret_bound_secrets(method):
+@pytest.mark.parametrize("marker", (None, "loom.dev/storage-binding", "loom.dev/storage-binding-sha256", "loom.dev/storage-incarnation"))
+async def test_legacy_vault_cannot_reinterpret_bound_secrets(method, marker):
     cluster = _Cluster()
     identity = _bound_claim().operation.storage_binding.identity
     await _vault(cluster).store(identity, _PASSWORD)
+    if marker is not None:
+        cluster.namespace["metadata"]["annotations"] = {marker: cluster.namespace["metadata"]["annotations"][marker]}
     with pytest.raises(DevInstanceRuntimeError):
         await getattr(_vault(cluster), method)(derive_identity(identity.name), *([_PASSWORD] if method == "store" else []))
 
@@ -241,7 +245,7 @@ async def test_partial_bound_secret_write_recovers_without_rotating_persisted_ma
             if stdin and not self.interrupted:
                 documents = list(yaml.safe_load_all(stdin))
                 for index, document in enumerate(documents):
-                    if document["metadata"]["name"] == fail_after:
+                    if "replace" in argv and document["metadata"]["name"] == personal_dev_secret_name(identity, fail_after):
                         self.interrupted = True
                         await super().run(argv, stdin=yaml.safe_dump_all(documents[:index + 1]),
                                           timeout_seconds=timeout_seconds)
@@ -265,20 +269,20 @@ async def test_partial_recovery_with_mismatched_password_has_no_side_effects():
     cluster = _Cluster()
     identity = _bound_claim().operation.storage_binding.identity
     await _vault(cluster).store(identity, _PASSWORD)
-    del cluster.secrets["loom-admin-secret"]
+    del cluster.secrets[personal_dev_secret_name(identity, "loom-admin-secret")]
     before = list(cluster.writes)
     with pytest.raises(ValueError, match="password binding changed"):
         await _vault(cluster).store(identity, "c" * 32)
     assert cluster.writes == before
-    assert "loom-admin-secret" not in cluster.secrets
+    assert personal_dev_secret_name(identity, "loom-admin-secret") not in cluster.secrets
 
 
 async def test_partial_recovery_rejects_malformed_main_credentials_before_mutation():
     cluster = _Cluster()
     identity = _bound_claim().operation.storage_binding.identity
     await _vault(cluster).store(identity, _PASSWORD)
-    del cluster.secrets["loom-admin-secret"]
-    cluster.secrets["loom-secrets"]["minio-secret-key"] = b"\xff"
+    del cluster.secrets[personal_dev_secret_name(identity, "loom-admin-secret")]
+    cluster.secrets[personal_dev_secret_name(identity, "loom-secrets")]["minio-secret-key"] = b"\xff"
     before = list(cluster.writes)
     with pytest.raises(DevInstanceRuntimeError):
         await _vault(cluster).store(identity, _PASSWORD)
