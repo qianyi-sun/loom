@@ -7,6 +7,8 @@ from uuid import uuid4
 import pytest
 
 from loom.dev_instance import derive_identity
+from loom.dev_instance_manifest import dev_instance_manifest_documents
+from tests.unit.test_dev_instance_manifest import _config, _immutable_config
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 _PURPOSES = (
@@ -49,3 +51,37 @@ def test_secret_names_reject_unknown_purposes(purpose):
     resolve = import_module("loom.personal_dev_incarnation_storage").personal_dev_secret_name
     with pytest.raises(ValueError):
         resolve(_bound_claim().operation.storage_binding.identity, purpose)
+
+
+@pytest.mark.parametrize("protected", (False, True))
+def test_bound_manifest_mounts_only_its_own_incarnation_credentials(protected):
+    identity = _bound_claim().operation.storage_binding.identity
+    config = _immutable_config() if protected else _config()
+    if protected:
+        config = replace(config, lifecycle_binding=replace(
+            config.lifecycle_binding,
+            subject_id=identity.storage_binding.subject_id,
+            subject_incarnation=identity.storage_incarnation,
+        ))
+    documents = dev_instance_manifest_documents(identity, config)
+    references = set()
+    for document in documents:
+        if document["kind"] not in ("Deployment", "Job"):
+            continue
+        pod = document["spec"]["template"]["spec"]
+        for volume in pod.get("volumes", []):
+            if "secret" in volume:
+                references.add(volume["secret"]["secretName"])
+                assert len(volume["name"]) <= 63
+        for container in (*pod.get("containers", []), *pod.get("initContainers", [])):
+            for variable in container.get("env", []):
+                reference = variable.get("valueFrom", {}).get("secretKeyRef")
+                if reference:
+                    references.add(reference["name"])
+    assert references == {
+        f"{name}-{identity.storage_incarnation.hex}"
+        for name in (
+            "loom-secrets", "loom-admin-secret",
+            *(("loom-protected-worker-runtime",) if protected else ()),
+        )
+    }
