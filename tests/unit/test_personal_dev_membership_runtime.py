@@ -359,3 +359,96 @@ async def test_retirement_preserves_credentials_and_stable_installation(installe
     assert (
         await installer.observe_membership_retirement(claim, checkpoint, observed_at=_NOW)
     ) == observation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret_generation,deployment_generation", ((1, 1), (2, 2), (2, 1), (1, 2)))
+@pytest.mark.parametrize("credential_operation", ("retained", "foreign"))
+async def test_successor_retirement_resumes_exact_retained_kubernetes_generations(
+    installer, secret_generation, deployment_generation, credential_operation,
+):
+    from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
+    from loom_capacity_manager.executable_contracts import canonical_executable_digest
+
+    claim, binding = _successor_retirement_claim()
+    operation = claim.operation
+    retained_fields = (
+        "capacity_reporter_incarnation", "capacity_reporter_token_sha256", "protected_admission_sha256",
+        "capacity_agent_installation_sha256", "capacity_supported_pool_ids", "capacity_supported_architectures",
+    )
+    lineage_fields = (
+        "membership_predecessor_operation_id", "membership_accepted_operation_id",
+        "membership_predecessor_envelope_sha256", "membership_successor_binding",
+        "membership_successor_binding_sha256", "membership_continuation_kind",
+    )
+    initial_operation = replace(
+        operation, id=binding.accepted_operation_id, kind="create", operation_epoch=1,
+        expected_operation_epoch=0, **dict.fromkeys((*retained_fields, *lineage_fields)),
+    )
+    initial = replace(claim, operation=initial_operation)
+    installation = await installer.converge(initial)
+    snapshots = {1: (deepcopy(installer._kubectl.secrets), deepcopy(installer._kubectl.resources))}
+    installed_values = {
+        "capacity_reporter_incarnation": installation.reporter_incarnation,
+        "capacity_reporter_token_sha256": installation.reporter_token_sha256,
+        "protected_admission_sha256": installation.protected_admission_sha256,
+        "capacity_agent_installation_sha256": installation.capacity_agent_installation_sha256,
+        "capacity_supported_pool_ids": installation.supported_pool_ids,
+        "capacity_supported_architectures": installation.supported_architectures,
+    }
+    prior = replace(operation, id=binding.predecessor_operation_id, operation_epoch=2,
+                    expected_operation_epoch=1, **installed_values, **dict.fromkeys(lineage_fields))
+    prior_claim = replace(claim, operation=prior,
+                          attempt=replace(claim.attempt, operation_id=prior.id, operation_epoch=2))
+    checkpoint = membership_envelope_values()["expected_checkpoint"]
+    await installer.observe_membership_retirement(prior_claim, checkpoint, observed_at=_NOW)
+    snapshots[2] = (deepcopy(installer._kubectl.secrets), deepcopy(installer._kubectl.resources))
+
+    # Independently reviewed adoption must identify the actual retained installation.
+    member = binding.adopted_member
+    member = member.model_copy(update={
+        "configuration": member.configuration.model_copy(update={"demand_reporter_incarnation": installation.reporter_incarnation}),
+        "acknowledgement": member.acknowledgement.model_copy(update={
+            "reporter_incarnation": installation.reporter_incarnation,
+            "protected_admission_sha256": installation.protected_admission_sha256,
+        }),
+    })
+    preparation = binding.authority.preparation.model_copy(update={"subject_acknowledgements": (member.acknowledgement,)})
+    execution = binding.authority.execution.model_copy(update={"execution_manifest_sha256": canonical_executable_digest(preparation)})
+    authority = binding.authority.model_copy(update={"preparation": preparation, "execution": execution})
+    configuration = binding.current_configuration.model_copy(update={
+        "subjects": (binding.current_configuration.subjects[0].model_copy(update={"digest": canonical_digest(member.configuration)}),),
+    })
+    binding = PersonalDevMembershipSuccessorBindingV1.model_validate_json(binding.model_copy(update={
+        "authority": authority, "current_configuration": configuration, "adopted_member": member,
+    }).model_dump_json())
+    operation = replace(operation, **installed_values, membership_successor_binding=binding,
+                        membership_successor_binding_sha256=canonical_digest(binding))
+    claim = replace(claim, operation=operation,
+                    attempt=replace(claim.attempt, operation_id=operation.id, operation_epoch=3))
+    installer._membership_execution = execution
+    checkpoint = checkpoint.model_copy(update={"execution": execution, "namespace_id": authority.namespace_id})
+    installer._kubectl.secrets = deepcopy(snapshots[secret_generation][0])
+    installer._kubectl.resources = deepcopy(snapshots[deployment_generation][1])
+    installer._database.observations.clear()
+    if credential_operation == "foreign":
+        from loom.personal_dev_capacity_runtime import _CREDENTIALS_SECRET_NAME, _SECRET_NAME
+
+        foreign = str(uuid4()).encode("ascii")
+        for name in (_CREDENTIALS_SECRET_NAME, _SECRET_NAME):
+            installer._kubectl.secrets[name]["operation-id"] = foreign
+        applies = installer._kubectl.applies
+        with pytest.raises(ValueError, match="retained credential operation"):
+            await installer.observe_membership_retirement(claim, checkpoint, observed_at=_NOW)
+        assert not installer._database.observations
+        assert installer._kubectl.applies == applies
+        return
+    observed = await installer.observe_membership_retirement(claim, checkpoint, observed_at=_NOW)
+    assert observed.acknowledgement.configuration_generation == 3
+    assert installer._database.observations[0]["retirement_from_generation"] == (1, 2)
+    assert installer._database.convergences == 1
+    # An interrupted target apply can leave the target Secret beside either retained Deployment.
+    for generation in (1, 2, 3):
+        if generation < 3:
+            installer._kubectl.resources = deepcopy(snapshots[generation][1])
+        assert await installer.observe_membership_retirement(claim, checkpoint, observed_at=_NOW) == observed
