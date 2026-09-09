@@ -403,6 +403,34 @@ async def test_prepared_same_operation_seed_writer_preserves_completed_winner(
     await installer._persist_credentials(claim, identity, retained)
 
 
+async def test_immutable_secret_retry_accepts_only_identical_persisted_bytes(
+    disposable_storage_kubectl,  # noqa: F811
+):
+    from loom.personal_dev_storage_secret_write import write_storage_secret
+
+    kubectl = disposable_storage_kubectl
+    identity = _bound_claim().operation.storage_binding.identity
+    await KubectlSecretVault(
+        kubectl, "postgresql://admin:fixture@database.example/postgres",
+        protected_worker_runtime=True,
+    ).store(identity, "b" * 32)
+    document = {
+        "apiVersion": "v1", "kind": "Secret", "type": "Opaque", "immutable": True,
+        "metadata": {"name": "immutable-write-probe", "namespace": identity.namespace},
+        "stringData": {"password": "retained"},
+    }
+    await write_storage_secret(kubectl, identity, document, create_only=True)
+    await write_storage_secret(kubectl, identity, document, create_only=True)
+    with pytest.raises(DevInstanceRuntimeError):
+        await write_storage_secret(
+            kubectl, identity, {**document, "stringData": {"password": "different"}},
+            create_only=True,
+        )
+    assert await kubectl.read_secret(identity.namespace, "immutable-write-probe") == {
+        "password": b"retained"
+    }
+
+
 @pytest.mark.parametrize(
     "populated,race", ((False, None), (True, None), (False, "fill"), (False, "replace"))
 )
