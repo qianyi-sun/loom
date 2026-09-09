@@ -9,10 +9,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -304,6 +307,18 @@ def inspect_oci_archive(
         return str(descriptor["digest"]), binary_digest
 
 
+@contextmanager
+def oci_scan_layout(archive: Path, layout: Path) -> Iterator[Path]:
+    """Expose the built OCI archive as Trivy's supported image-layout input."""
+    layout.mkdir()
+    try:
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(layout, filter="data")
+        yield layout
+    finally:
+        shutil.rmtree(layout)
+
+
 def build(args: argparse.Namespace) -> None:
     """Only the protected integration workflow may build/publish this candidate."""
     global _diagnostic_dir
@@ -376,46 +391,49 @@ def build(args: argparse.Namespace) -> None:
             scanned_digest, runtime_digest = inspect_oci_archive(
                 archive, candidate=candidate, runtime=component == "execution_runtime"
             )
-            _run(
-                str(scanner),
-                "--config",
-                str(policy),
-                "image",
-                "--input",
-                str(archive),
-                "--format",
-                "json",
-                "--output",
-                str(policy_report),
-                "--ignorefile",
-                str(exceptions),
-                "--show-suppressed",
-            )
-            validate_trivy_release_report(owner["image"], "amd64", policy_report, exceptions)
-            _run(
-                str(scanner),
-                "image",
-                "--input",
-                str(archive),
-                "--scanners",
-                "vuln",
-                "--format",
-                "json",
-                "--output",
-                str(report),
-                "--ignorefile",
-                str(exceptions),
-            )
-            _run(
-                str(scanner),
-                "image",
-                "--input",
-                str(archive),
-                "--format",
-                "cyclonedx",
-                "--output",
-                str(sbom),
-            )
+            with oci_scan_layout(
+                archive, Path(f"/tmp/{owner['image']}-amd64.release.oci")
+            ) as layout:
+                _run(
+                    str(scanner),
+                    "--config",
+                    str(policy),
+                    "image",
+                    "--input",
+                    str(layout),
+                    "--format",
+                    "json",
+                    "--output",
+                    str(policy_report),
+                    "--ignorefile",
+                    str(exceptions),
+                    "--show-suppressed",
+                )
+                validate_trivy_release_report(owner["image"], "amd64", policy_report, exceptions)
+                _run(
+                    str(scanner),
+                    "image",
+                    "--input",
+                    str(layout),
+                    "--scanners",
+                    "vuln",
+                    "--format",
+                    "json",
+                    "--output",
+                    str(report),
+                    "--ignorefile",
+                    str(exceptions),
+                )
+                _run(
+                    str(scanner),
+                    "image",
+                    "--input",
+                    str(layout),
+                    "--format",
+                    "cyclonedx",
+                    "--output",
+                    str(sbom),
+                )
             if component == "execution_runtime":
                 document["runtime_binary_sha256"] = runtime_digest
             refresh_registry_auth(

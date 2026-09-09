@@ -195,6 +195,7 @@ def _validate_artifact_identity(
     expected_artifacts = {
         f"/tmp/{component}-{architecture}.docker.tar",
         f"/tmp/{component}-{architecture}.release.docker.tar",
+        f"/tmp/{component}-{architecture}.release.oci",
     }
     if artifact_name not in expected_artifacts:
         raise TrivyReportError("report artifact is inconsistent")

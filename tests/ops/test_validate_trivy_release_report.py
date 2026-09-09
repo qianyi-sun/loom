@@ -354,6 +354,14 @@ def test_validator_accepts_trusted_release_archive_identity(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
 
 
+def test_validator_accepts_release_oci_layout_identity(tmp_path: Path) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    payload = _report("service", ignore_file)
+    payload["ArtifactName"] = "/tmp/service-amd64.release.oci"
+    result = _run_validator(tmp_path, payload, component="service")
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "artifact_name",
     (
@@ -362,6 +370,8 @@ def test_validator_accepts_trusted_release_archive_identity(tmp_path: Path) -> N
         "/tmp/service-arm64.docker.tar",
         "/tmp/service-amd64.tar",
         "/tmp/service-amd64.docker.tar/extra",
+        "/tmp/worker-amd64.release.oci",
+        "/tmp/service-arm64.release.oci",
     ),
 )
 def test_validator_rejects_an_invalid_archive_identity(
