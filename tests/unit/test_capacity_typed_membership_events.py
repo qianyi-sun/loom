@@ -1,6 +1,7 @@
 """Persisted typed events preserve one exact shared immutable history."""
 
 import copy
+import json
 from importlib import import_module
 from uuid import UUID
 
@@ -128,3 +129,102 @@ def test_legacy_application_event_hash_preimage_is_unchanged():
         previous_sha256="0" * 64, request_digest=canonical_digest(legacy),
         request_payload=legacy.model_dump(mode="json"), member=value.membership.members[0], revision=1,
     ) == "e089567425f306b26e1853ae7f7780fbec7fdc83c007316edfdf585f9f15f8bf"
+
+
+def _next_build_row(first, *, operation="capacity", reincarnation=None, **changes):
+    from loom_capacity_manager.typed_membership_commands import derive_build_member, parse_typed_membership_mutation
+    value, _request, _result, row = event_row(revision=first.revision + 1, previous=first.head_sha256,
+        operation_id=UUID(int=780 + first.revision), key=UUID(int=790 + first.revision))
+    request = parse_typed_membership_mutation(json.dumps(first.request_payload))
+    projection = request.command.projection.model_copy(update={
+        "operation_kind": operation, "operation_id": row.operation_id,
+        "operation_epoch": first.configuration_generation + 1, "configuration_generation": first.configuration_generation + 1,
+        **changes,
+    })
+    ack = request.command.acknowledgement.model_copy(update={
+        "configuration_generation": projection.configuration_generation,
+        "deployment_generation": projection.deployment_generation,
+        "subject_incarnation": projection.subject_incarnation,
+        "reporter_incarnation": projection.demand_reporter_incarnation,
+    })
+    request = request.model_copy(update={"expected_revision": first.revision, "command": request.command.model_copy(update={"projection": projection, "acknowledgement": ack})})
+    member = derive_build_member(request, value.preparation, value.fleet, reincarnation=reincarnation)
+    row.configuration_generation = projection.configuration_generation
+    row.deployment_generation = projection.deployment_generation
+    row.reporter_incarnation = projection.demand_reporter_incarnation
+    row.subject_incarnation = projection.subject_incarnation
+    row.request_payload = request.model_dump(mode="json")
+    row.request_digest = canonical_digest(request)
+    row.head_sha256 = canonical_membership_event_head(actor=row.actor, execution_epoch=row.execution_epoch,
+        idempotency_key=row.idempotency_key, operation_id=row.operation_id, previous_sha256=row.previous_sha256,
+        request_digest=row.request_digest, request_payload=row.request_payload, member=member, revision=row.revision)
+    row.result_payload.update(member=member.model_dump(mode="json"), head_sha256=row.head_sha256)
+    return row
+
+
+@pytest.mark.parametrize("operation", ("capacity", "destroy"))
+def test_build_capacity_and_destroy_keep_the_original_service_evidence(operation):
+    value, _request, _result, first = event_row()
+    second = _next_build_row(first, operation=operation)
+    results = _events().validate_typed_membership_event_prefix((first, second), value.preparation, value.fleet, execution_epoch=42)
+    assert results[-1].member.configuration.lifecycle_state == ("disabled" if operation == "destroy" else "active")
+
+
+@pytest.mark.parametrize("operation,changes", (
+    ("capacity", {"demand_reporter_token_sha256": "a" * 64}),
+    ("destroy", {"demand_reporter_token_sha256": "a" * 64}),
+    ("capacity", {"deployment_generation": 2}),
+    ("destroy", {"candidate_generation": 2}),
+    ("capacity", {"demand_reporter_incarnation": UUID(int=999)}),
+    ("update", {}),
+    ("update", {"deployment_generation": 2}),
+    ("update", {"deployment_generation": 2, "demand_reporter_incarnation": UUID(int=999)}),
+    ("create", {}),
+))
+def test_build_history_rejects_lifecycle_and_credential_substitution(operation, changes):
+    value, _request, _result, first = event_row()
+    second = _next_build_row(first, operation=operation, **changes)
+    with pytest.raises(ValueError):
+        _events().validate_typed_membership_event_prefix((first, second), value.preparation, value.fleet, execution_epoch=42)
+
+
+def test_build_service_update_can_rotate_deployment_without_changing_runtime():
+    value, _request, _result, first = event_row()
+    second = _next_build_row(first, operation="update", deployment_generation=2,
+        demand_reporter_incarnation=UUID(int=999), demand_reporter_token_sha256="a" * 64)
+    results = _events().validate_typed_membership_event_prefix((first, second), value.preparation, value.fleet, execution_epoch=42)
+    assert results[0].member.acknowledgement.candidate == results[1].member.acknowledgement.candidate
+
+
+@pytest.mark.parametrize("operation", ("capacity", "update", "create"))
+def test_disabled_build_requires_fresh_authenticated_recreation(operation):
+    value, _request, _result, first = event_row()
+    second = _next_build_row(first, operation="destroy")
+    third = _next_build_row(second, operation=operation)
+    with pytest.raises(ValueError):
+        _events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)
+
+
+@pytest.mark.parametrize("wrong_head", (False, True))
+def test_build_recreation_structure_binds_its_own_predecessor_event(wrong_head):
+    from loom_capacity_manager.contracts import ConfigurationGenerationRefV1, SubjectConfigurationV1
+    from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
+    value, _request, first_result, first = event_row()
+    second = _next_build_row(first, operation="destroy")
+    predecessor = SubjectConfigurationV1.model_validate_json(json.dumps(second.result_payload["member"]["configuration"]))
+    origin = first_result.member.configuration
+    evidence = PersonalReincarnationEvidenceV1(namespace_id=first.namespace_id,
+        execution_manifest_sha256=first.execution_manifest_sha256,
+        origin=ConfigurationGenerationRefV1(scope="subject", subject_id=origin.subject_id,
+            subject_incarnation=origin.subject_incarnation, generation=origin.configuration_generation, digest=canonical_digest(origin)),
+        predecessor=predecessor, predecessor_revision=second.revision,
+        predecessor_head_sha256="e" * 64 if wrong_head else second.head_sha256,
+        admission_revision=3, successor_incarnation=UUID(int=995), release_set_sha256="f" * 64)
+    third = _next_build_row(second, operation="create", subject_incarnation=UUID(int=995),
+        demand_reporter_incarnation=UUID(int=996), demand_reporter_token_sha256="a" * 64, reincarnation=evidence)
+    if wrong_head:
+        with pytest.raises(ValueError):
+            _events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)
+    else:
+        # This only proves event structure. Actual release facts remain a mandatory store check.
+        assert len(_events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)) == 3
