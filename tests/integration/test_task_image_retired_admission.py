@@ -59,14 +59,14 @@ async def _mark_retired(session, attempt_id):
         credentials=credentials,
         registry_origin="https://registry.example:5443",
     )
-    marker = TaskImageAttemptRetention(
-        attempt_id=attempt.id,
-        observed_at=NOW + timedelta(days=2),
-        unreferenced_since=NOW + timedelta(days=1),
-        retired_at=NOW + timedelta(days=2),
-        canonical_inventory=inventory.canonical_bytes,
-        inventory_sha256=hashlib.sha256(inventory.canonical_bytes).hexdigest(),
-    )
+    marker = await session.get(TaskImageAttemptRetention, attempt.id)
+    if marker is None:
+        marker = TaskImageAttemptRetention(attempt_id=attempt.id)
+    marker.observed_at = NOW + timedelta(days=2)
+    marker.unreferenced_since = NOW + timedelta(days=1)
+    marker.retired_at = NOW + timedelta(days=2)
+    marker.canonical_inventory = inventory.canonical_bytes
+    marker.inventory_sha256 = hashlib.sha256(inventory.canonical_bytes).hexdigest()
     session.add(marker)
     await session.commit()
 
@@ -220,3 +220,25 @@ async def test_retired_attempt_preserves_cleanup_only_release(registry_authority
         await _mark_retired(session, attempt.id)
         released = await release_session_materialization(session, **options)
         assert released.state == "queued" and released.claimed_by is None
+
+
+async def test_retirement_fence_ignores_cached_unretired_observation(registry_authority_session):
+    async with registry_authority_session() as reader:
+        auth, _, _, _, _, row, attempt = await _claimed_attempt(reader)
+        cached = TaskImageAttemptRetention(attempt_id=attempt.id, observed_at=NOW)
+        reader.add(cached)
+        await reader.commit()
+        async with registry_authority_session() as writer:
+            await _mark_retired(writer, attempt.id)
+        assert cached.retired_at is None
+        with pytest.raises(
+            TaskImageSessionMaterializationConflictError, match="permanently retired"
+        ):
+            await get_session_materialization_build_plan(
+                reader,
+                authorization=auth,
+                materialization_id=row.id,
+                attempt_id=attempt.id,
+                lease_epoch=attempt.lease_epoch,
+                now=NOW + timedelta(seconds=12),
+            )

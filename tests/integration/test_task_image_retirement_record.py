@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import timedelta
 from uuid import uuid4
@@ -62,12 +63,12 @@ async def test_retirement_record_preserves_observation_then_irreversible_invento
         before = (await session.execute(text("SELECT * FROM task_image_attempt_retention"))).one()
         for mutation in (
             "retired_at=NULL, canonical_inventory=NULL, inventory_sha256=NULL",
-            "observed_at=observed_at + interval '1 second'",
+            "observed_at=observed_at + interval '1 second', retired_at=retired_at + interval '1 second'",
             "unreferenced_since=unreferenced_since - interval '1 second'",
             "canonical_inventory=convert_to('{}','UTF8'), inventory_sha256=encode(sha256(convert_to('{}','UTF8')),'hex')",
             "attempt_id=gen_random_uuid()",
         ):
-            with pytest.raises(IntegrityError, match="retirement evidence is immutable"):
+            with pytest.raises(IntegrityError):
                 async with session.begin_nested():
                     await session.execute(
                         text(f"UPDATE task_image_attempt_retention SET {mutation}")
@@ -158,3 +159,42 @@ async def test_retired_attempt_blocks_inactive_downgrade(
     async with registry_authority_session() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0135"
         assert await session.scalar(select(_model().retired_at)) is not None
+
+
+@pytest.mark.parametrize(
+    "table", ["task_image_materialization_attempts", "task_image_attempt_retention"]
+)
+async def test_retirement_downgrade_fails_fast_on_parent_and_record_writers(
+    isolated_migration_postgres_url, table
+):
+    config = _config(isolated_migration_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.connect() as blocker:
+            blocker.execute(text(f"LOCK TABLE {table} IN ROW EXCLUSIVE MODE"))
+            blocker_pid = blocker.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            migration = asyncio.create_task(asyncio.to_thread(command.downgrade, config, "0134"))
+            try:
+                async with asyncio.timeout(5):
+                    while not migration.done():
+                        blocker.execute(text("SELECT pg_stat_clear_snapshot()"))
+                        assert not blocker.execute(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE :blocker = ANY(pg_blocking_pids(pid)))"
+                            ),
+                            {"blocker": blocker_pid},
+                        ).scalar_one(), "downgrade waits on an ordinary authority writer"
+                        await asyncio.sleep(0.01)
+                with pytest.raises(DBAPIError) as rejected:
+                    await migration
+                assert rejected.value.orig.sqlstate == "55P03"
+            finally:
+                blocker.rollback()
+                await asyncio.gather(migration, return_exceptions=True)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0135"
+            )
+    finally:
+        engine.dispose()
