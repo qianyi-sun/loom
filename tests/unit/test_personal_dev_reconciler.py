@@ -663,6 +663,8 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
     class _Sql:
         async def apply_role_and_database(self, _identity, **_kwargs):
             assert _identity == identity
+            if bound_storage:
+                assert "secrets" in events, "bound credentials must win before role mutation"
             assert f'CREATE DATABASE "{identity.database}"' in _kwargs["create_database_sql"]
             events.append("database")
 
@@ -734,9 +736,10 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
     assert observation == _observation()
     assert events == [
         "namespace-authority",
+        *(["secrets"] if bound_storage else []),
         "database",
         "buckets",
-        "secrets",
+        *([] if bound_storage else ["secrets"]),
         "tenant",
         "generation",
     ]
