@@ -6,7 +6,10 @@ from uuid import UUID
 import pytest
 
 from loom_capacity_manager.contracts import canonical_digest
-from loom_capacity_manager.executable_contracts import CandidateBindingV2, canonical_executable_digest
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.store import _derive_development_subject
@@ -60,6 +63,7 @@ def application_row(previous=None, *, operation="create", managed=False, **chang
     row.subject_id, row.subject_incarnation, row.owner_id = projection.subject_id, projection.subject_incarnation, projection.owner_id
     row.configuration_generation, row.deployment_generation = projection.configuration_generation, projection.deployment_generation
     row.reporter_incarnation = projection.demand_reporter_incarnation
+    row.operation_id = projection.operation_id
     row.request_payload, row.request_digest = request.model_dump(mode="json"), canonical_digest(request)
     row.head_sha256 = canonical_membership_event_head(actor=row.actor, execution_epoch=row.execution_epoch,
         idempotency_key=row.idempotency_key, operation_id=row.operation_id, previous_sha256=row.previous_sha256,
@@ -121,6 +125,23 @@ def test_typed_fresh_application_cannot_reuse_pinned_base_token():
     token = value.preparation.managed_application_origins[0].base_projection.demand_reporter_token_sha256
     value, row = application_row(demand_reporter_token_sha256=token)
     with pytest.raises(ValueError):
+        validate(value, row)
+
+
+@pytest.mark.parametrize("managed", (False, True))
+def test_typed_event_cannot_reuse_a_managed_installation_operation(managed):
+    value, _ = application_row()
+    operation_id = value.preparation.managed_application_origins[0].installation_projection.operation_id
+    value, row = application_row(operation="capacity" if managed else "create", managed=managed, operation_id=operation_id)
+    with pytest.raises(ValueError, match="prefix or replay identity"):
+        validate(value, row)
+
+
+def test_typed_fresh_application_cannot_take_an_unmodified_managed_base_name():
+    value, _ = application_row()
+    name = value.preparation.managed_application_origins[0].base_projection.environment_name
+    value, row = application_row(environment_name=name)
+    with pytest.raises(ValueError, match="name was already retained"):
         validate(value, row)
 
 

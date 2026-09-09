@@ -708,6 +708,12 @@ Persisted typed-history reads now verify these roots and installation records
 even at revision zero, without consulting mutable shadow projection rows for
 origin authority. Current materialization reuses the immutable base reader;
 base overlays remain rejected until lifecycle and SQL adoption are connected.
+The pure typed event validator now checks an adopted application's first
+update/capacity/destroy against that pinned base, without inventing a create
+event. It preserves identity and non-deployment service evidence, requires update
+to advance deployment and rotate reporting, and reserves base names, tokens and
+installation operation IDs. Durable mutation remains closed pending its SQL and
+current-reporter checks; passing this validator alone grants no adoption.
 
 The retained application reader exposes installation-only validation separately
 from reporter validation. Historical installation reads still verify exact
