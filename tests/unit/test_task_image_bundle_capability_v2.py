@@ -1,8 +1,10 @@
 """Registered data descriptors survive issuance and CPU-only replay unchanged."""
 
 import asyncio
+import hashlib
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,6 +13,7 @@ from loom.task_image_build_plan import TaskImageBuildPlanV2
 from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_task_image_authority import bundle_capability as module
+from loom_task_image_authority.materializations import _bundle_preparation
 from tests.unit.test_task_image_bundle_async_capability import Backend, _provider
 from tests.unit.test_task_image_bundle_capability import NOW, _plan
 
@@ -168,3 +171,50 @@ async def test_parser_requires_explicit_version_and_enforces_utf8_limit(register
     for raw_payload in (b" " * (module.MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES + 1), "é" * (module.MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES // 2 + 1)):
         with pytest.raises(ValueError):
             module.parse_task_image_bundle_capability(raw_payload)
+
+
+@pytest.mark.parametrize("change", ["none", "successor", "digest", "expired", "legacy_provider"])
+async def test_encrypted_replay_reader_preserves_v2_and_revalidates_current_session(registered, change):
+    manifest, plan = registered
+    backend = VerifiedBackend(manifest)
+    provider = _provider(backend)
+    capability = await provider.issue(plan, now=NOW)
+    payload = capability.model_dump_json()
+    event = SimpleNamespace(
+        secret_response_ref="loom://task-image-bundle-capability/fixture",
+        secret_response_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+        secret_response_expires_at=capability.expires_at,
+    )
+
+    class Secrets:
+        async def get(self, ref):
+            assert ref == event.secret_response_ref
+            return payload
+
+    if change == "successor":
+        successor_id = uuid4()
+        plan = TaskImageBuildPlanV2.model_validate(dict(
+            plan.model_dump(), session_id=successor_id,
+            session_generation=plan.session_generation + 1, builder_id=f"rootless:{successor_id.hex}",
+        ))
+    elif change == "digest":
+        event.secret_response_sha256 = "6" * 64
+    elif change == "expired":
+        event.secret_response_expires_at = NOW
+    elif change == "legacy_provider":
+        from tests.unit.test_task_image_bundle_capability import _FakeBundleBackend
+        from tests.unit.test_task_image_bundle_capability import _provider as legacy_provider
+
+        provider = legacy_provider(_FakeBundleBackend(()))
+    # Only the encrypted-reader boundary is isolated. This test does not bypass
+    # production claim admission or claim evidence for V2 database derivation.
+    state = SimpleNamespace(event=event, plan=plan, checked_at=NOW, valid_until=plan.authorization_expires_at)
+    request = _bundle_preparation(state, provider=provider, secret_store=Secrets(), clock=lambda: NOW)
+    if change == "none":
+        prepared = await request
+        assert prepared.plan == plan and prepared.capability == capability
+        assert prepared.capability.schema_version == "loom.task-image-bundle-capability.v2"
+    else:
+        with pytest.raises(module.TaskImageBundleCapabilityError):
+            await request
+    assert len(backend.verified) == 1 and len(backend.signing) == 2

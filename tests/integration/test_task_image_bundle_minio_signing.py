@@ -363,13 +363,18 @@ async def test_actual_minio_verifies_exact_registered_manifest(minio_tls, tmp_pa
 
 @pytest.mark.parametrize("change", ["none", "missing_data", "extra_data", "sidecar_size"])
 async def test_verified_upload_and_real_minio_inventory_match_registered_manifest(minio_tls, tmp_path, change):
+    import hashlib
+
+    from loom.task_image_build_plan import TaskImageBuildPlanV2
     from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
     from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
     from loom_benchmark_tool.upload import upload_task_dir
+    from loom_task_image_authority.bundle_capability import AsyncTaskImageBundleCapabilityProvider
     from loom_task_image_authority.bundle_s3_backend import (
         MinioTaskImageBundleBackend,
         S3InventoryLimits,
     )
+    from tests.unit.test_task_image_bundle_capability import _plan
 
     (tmp_path / "Dockerfile").write_bytes(f"FROM scratch\n# {change}\n".encode())
     script = tmp_path / "run +%😀.sh"
@@ -406,3 +411,30 @@ async def test_verified_upload_and_real_minio_inventory_match_registered_manifes
         else:
             with pytest.raises(RuntimeError):
                 await request
+        now = datetime.now(UTC)
+        plan = TaskImageBuildPlanV2.model_validate(dict(
+            _plan().model_dump(), schema_version="loom.task-image-build-plan.v2",
+            bundle_prefix=prefix, bundle_content_manifest_sha256=manifest.digest,
+            task_checksum=manifest.task_checksum, bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256,
+            authorization_expires_at=now + timedelta(seconds=60),
+        ))
+        provider = AsyncTaskImageBundleCapabilityProvider(
+            backend=backend, public_https_origin=minio_tls[0], expected_bucket="loom-bundles",
+            maximum_objects=2, maximum_bytes=sum(item.size_bytes for item in manifest.files),
+            url_expiry_seconds=60, addressing_style="path",
+        )
+        if change != "none":
+            with pytest.raises(RuntimeError):
+                await provider.issue(plan, now=now)
+        else:
+            capability = await provider.issue(plan, now=now)
+            assert capability.schema_version == "loom.task-image-bundle-capability.v2"
+            assert capability.content_manifest == manifest
+            assert capability.file_count == 2  # Sidecar overhead does not consume data quota.
+            provider.validate(capability, plan, now=datetime.now(UTC))
+            for item in capability.objects:
+                # Real signed URLs, including exact plus/percent/Unicode paths.
+                response = minio_tls[2].get(item.url)
+                assert response.status_code == 200
+                assert len(response.content) == item.size_bytes
+                assert hashlib.sha256(response.content).hexdigest() == item.sha256
