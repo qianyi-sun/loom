@@ -541,9 +541,23 @@ and join that consumer before input cleanup; a pathname reconstructed from the
 allocation directory is not equivalent authority. An actual pinned TLS MinIO
 fixture now exercises verified upload → V2 authority issuance → this real Go
 downloader, including executable Unicode paths, without substituting a fake
-downloader. Config/release-owned CA loading, V2 claim/orchestration, renewable
-prebuild work and descriptor-bound executor handoff remain unintegrated. This
+downloader. V2 claim/orchestration, renewable prebuild work and descriptor-bound
+executor handoff remain unintegrated. This
 fixture is data-transfer acceptance, not a rootless native build or activation.
+
+The supervisor configuration now accepts optional `bundle` trust with exact
+`origin`, `bucket` and `ca` fields. The CA contains only `path` and bare `sha256`;
+its path must name a regular, single-link, owner-verified 0444 data file within
+the selected content-addressed release, below no-follow 0555 directories. Reads
+are bounded to 128 KiB and verify unchanged metadata and exact content digest.
+Only valid CA certificate PEM blocks are accepted, never private keys, ignored
+malformed prefixes or non-certificate data. The owned certificate pool survives
+later file replacement, and TLS does not augment it with ambient system roots.
+A real TLS downloader regression verifies both properties. Absent trust remains
+unavailable rather than granting capability-selected endpoints or certificates;
+explicit null or incomplete trust rejects configuration. Release assembly still
+needs to install/hash this data member and require configured trust before native
+claims. Configuration parsing alone neither enables claims nor certifies a release.
 
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention

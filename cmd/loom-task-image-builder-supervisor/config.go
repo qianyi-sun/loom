@@ -33,6 +33,7 @@ type Config struct {
 	CPUArch       string
 	Guard         GuardConfig
 	Runtime       RuntimeConfig
+	Bundle        *BundleDownloadTrust // Absent means native registered downloads are unavailable.
 }
 
 type GuardConfig struct {
@@ -57,11 +58,18 @@ type ExecutableMember struct {
 }
 
 type configDisk struct {
-	Schema        string            `json:"schema"`
-	ReleaseSHA256 string            `json:"release_sha256"`
-	CPUArch       string            `json:"cpu_arch"`
-	Guard         guardDiskConfig   `json:"guard"`
-	Runtime       runtimeDiskConfig `json:"runtime"`
+	Schema        string                 `json:"schema"`
+	ReleaseSHA256 string                 `json:"release_sha256"`
+	CPUArch       string                 `json:"cpu_arch"`
+	Guard         guardDiskConfig        `json:"guard"`
+	Runtime       runtimeDiskConfig      `json:"runtime"`
+	Bundle        *bundleTrustDiskConfig `json:"bundle,omitempty"`
+}
+
+type bundleTrustDiskConfig struct {
+	Origin string               `json:"origin"`
+	Bucket string               `json:"bucket"`
+	CA     executableDiskConfig `json:"ca"` // A data member, never executable or caller-supplied TLS trust.
 }
 
 type guardDiskConfig struct {
@@ -172,6 +180,9 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 	if err := expectJSONEOF(decoder); err != nil {
 		return Config{}, errors.New("config JSON invalid")
 	}
+	if err := validateBundleConfigFields(payload); err != nil {
+		return Config{}, err
+	}
 	if disk.Schema != configSchema {
 		return Config{}, errors.New("config schema invalid")
 	}
@@ -239,6 +250,13 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 		if err := verifyExecutableMember(member, releaseRoot); err != nil {
 			return Config{}, err
 		}
+	}
+	if disk.Bundle != nil {
+		trust, err := loadBundleDownloadTrust(*disk.Bundle, releaseRoot)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Bundle = &trust
 	}
 	return cfg, nil
 }
