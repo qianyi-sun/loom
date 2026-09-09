@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Generic, Literal, Protocol, TypeVar
+from typing import Annotated, Any, Generic, Literal, Protocol, Self, TypeVar, runtime_checkable
 from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import UUID, uuid4
 
@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -23,7 +24,15 @@ from pydantic import (
 from loom.task_image_build_plan import (
     MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
     MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
+    TaskImageBuildPlan,
     TaskImageBuildPlanV1,
+    TaskImageBuildPlanV2,
+    parse_task_image_build_plan,
+)
+from loom.task_image_bundle_manifest import (
+    TaskImageBundleContentManifestV1,
+    TaskImageBundleManifestFileV1,
+    parse_task_image_bundle_manifest,
 )
 
 MAX_TASK_IMAGE_BUNDLE_CAPABILITY_LIFETIME = timedelta(minutes=15)
@@ -74,6 +83,17 @@ class AsyncTaskImageBundleBackend(TaskImageBundlePresigner, Protocol):
         self, *, bucket: str, prefix: str, maximum_objects: int,
         maximum_bytes: int, expires_at: datetime,
     ) -> Sequence[TaskImageBundleObject]: ...
+
+
+@runtime_checkable
+class VerifiedTaskImageBundleBackend(TaskImageBundlePresigner, Protocol):
+    async def get_verified_bundle_manifest(
+        self, *, bucket: str, prefix: str, expected_sha256: str,
+        task_checksum: str, bundle_file_metadata_sha256: str,
+        maximum_objects: int, maximum_bytes: int, expires_at: datetime,
+    ) -> TaskImageBundleContentManifestV1:
+        """Authenticate the registered manifest and exact complete prefix inventory."""
+        ...
 
 
 _Backend = TypeVar("_Backend", bound=TaskImageBundlePresigner)
@@ -130,14 +150,20 @@ class TaskImageBundleObjectCapabilityV1(BaseModel):
         return _relative_path(value)
 
 
-class TaskImageBundleCapabilityV1(BaseModel):
+class TaskImageBundleObjectCapabilityV2(TaskImageBundleObjectCapabilityV1):
+    sha256: Digest
+    mode: Literal["0644", "0755"]
+
+
+_Object = TypeVar("_Object", bound=TaskImageBundleObjectCapabilityV1)
+
+
+class _TaskImageBundleCapability(BaseModel, Generic[_Object]):
     """Secret-bearing object URLs bound to one current build session."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["loom.task-image-bundle-capability.v1"] = (
-        "loom.task-image-bundle-capability.v1"
-    )
+    schema_version: str
     capability_id: NonzeroUUID
     grant_id: NonzeroUUID
     session_id: NonzeroUUID
@@ -150,7 +176,7 @@ class TaskImageBundleCapabilityV1(BaseModel):
     issued_at: datetime
     expires_at: datetime
     objects: Annotated[
-        tuple[TaskImageBundleObjectCapabilityV1, ...],
+        tuple[_Object, ...],
         Field(
             min_length=1,
             max_length=MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
@@ -185,7 +211,7 @@ class TaskImageBundleCapabilityV1(BaseModel):
         return value.astimezone(UTC)
 
     @model_validator(mode="after")
-    def _object_set_is_exact(self) -> TaskImageBundleCapabilityV1:
+    def _object_set_is_exact(self) -> Self:
         lifetime = self.expires_at - self.issued_at
         if lifetime <= timedelta(0) or lifetime > MAX_TASK_IMAGE_BUNDLE_CAPABILITY_LIFETIME:
             raise ValueError("bundle capability lifetime is invalid")
@@ -200,6 +226,55 @@ class TaskImageBundleCapabilityV1(BaseModel):
         if self.total_bytes != sum(item.size_bytes for item in self.objects):
             raise ValueError("bundle capability byte count does not match objects")
         return self
+
+
+class TaskImageBundleCapabilityV1(_TaskImageBundleCapability[TaskImageBundleObjectCapabilityV1]):
+    schema_version: Literal["loom.task-image-bundle-capability.v1"] = "loom.task-image-bundle-capability.v1"
+
+    @property
+    def content_manifest_digest(self) -> str:
+        return ""
+
+
+class TaskImageBundleCapabilityV2(_TaskImageBundleCapability[TaskImageBundleObjectCapabilityV2]):
+    schema_version: Literal["loom.task-image-bundle-capability.v2"] = "loom.task-image-bundle-capability.v2"
+    bundle_content_manifest_sha256: Digest
+
+    @property
+    def content_manifest_digest(self) -> str:
+        return self.bundle_content_manifest_sha256
+
+    @property
+    def content_manifest(self) -> TaskImageBundleContentManifestV1:
+        # URLs are transport secrets, never part of registered content identity.
+        return TaskImageBundleContentManifestV1(
+            task_checksum=self.task_checksum,
+            bundle_file_metadata_sha256=self.bundle_file_metadata_sha256,
+            files=tuple(TaskImageBundleManifestFileV1(
+                path=item.relative_path, size_bytes=item.size_bytes, sha256=item.sha256, mode=item.mode,
+            ) for item in self.objects),
+        )
+
+    @model_validator(mode="after")
+    def _registered_descriptors_are_exact(self) -> Self:
+        if self.content_manifest.digest != self.bundle_content_manifest_sha256:
+            raise ValueError("bundle capability registered content changed")
+        return self
+
+
+TaskImageBundleCapability = Annotated[
+    TaskImageBundleCapabilityV1 | TaskImageBundleCapabilityV2, Field(discriminator="schema_version"),
+]
+_CAPABILITY_ADAPTER: TypeAdapter[TaskImageBundleCapability] = TypeAdapter(TaskImageBundleCapability)
+
+
+def parse_task_image_bundle_capability(payload: str | bytes) -> TaskImageBundleCapability:
+    """Require an explicit version and bound the secret-bearing wire before parsing."""
+    if not isinstance(payload, (str, bytes)) or not 0 < len(payload) <= MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES:
+        raise ValueError("task-image bundle capability exceeds the response limit")
+    if isinstance(payload, str) and len(payload.encode("utf-8")) > MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES:
+        raise ValueError("task-image bundle capability exceeds the response limit")
+    return _CAPABILITY_ADAPTER.validate_json(payload)
 
 
 def _origin(value: str) -> tuple[str, str]:
@@ -285,7 +360,7 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
             raise TaskImageBundleCapabilityError("task-image bundle authorization expired")
         return current
 
-    def _validated_plan(self, plan: TaskImageBuildPlanV1) -> TaskImageBuildPlanV1:
+    def _validated_plan(self, plan: TaskImageBuildPlan) -> TaskImageBuildPlan:
         try:
             validated = TaskImageBuildPlanV1.model_validate(plan.model_dump(mode="python"))
         except (AttributeError, ValueError):
@@ -296,7 +371,7 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
 
     def _validated_objects(
         self,
-        plan: TaskImageBuildPlanV1,
+        plan: TaskImageBuildPlan,
         listed: Sequence[TaskImageBundleObject],
     ) -> tuple[tuple[str, TaskImageBundleObject], ...]:
         effective_objects = min(plan.bundle_file_limit, self._maximum_objects)
@@ -386,10 +461,10 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
 
     def _prepare_issue(
         self,
-        plan: TaskImageBuildPlanV1,
+        plan: TaskImageBuildPlan,
         *,
         now: datetime,
-    ) -> tuple[TaskImageBuildPlanV1, datetime, datetime, datetime]:
+    ) -> tuple[TaskImageBuildPlan, datetime, datetime, datetime]:
         if now.utcoffset() is None:
             raise ValueError("bundle capability issue time must be timezone-aware")
         now = now.astimezone(UTC)
@@ -407,7 +482,7 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
         return plan, now, expires_at, observed_at
 
     def validate(
-        self, capability: TaskImageBundleCapabilityV1, plan: TaskImageBuildPlanV1,
+        self, capability: TaskImageBundleCapability, plan: TaskImageBuildPlan,
         *, now: datetime,
     ) -> None:
         """Validate new or encrypted replay capabilities against current inputs.
@@ -417,13 +492,14 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
         """
         plan = self._validated_plan(plan)
         try:
-            capability = TaskImageBundleCapabilityV1.model_validate_json(capability.model_dump_json())
+            capability = parse_task_image_bundle_capability(capability.model_dump_json())
             if (
                 capability.grant_id != plan.grant_id or capability.session_id != plan.session_id
                 or capability.session_generation != plan.session_generation
                 or capability.materialization_id != plan.materialization_id
                 or capability.task_checksum != plan.task_checksum
                 or capability.bundle_file_metadata_sha256 != plan.bundle_file_metadata_sha256
+                or capability.content_manifest_digest != plan.content_manifest_digest
                 or now.utcoffset() is None or capability.issued_at > now
                 or capability.expires_at <= now or capability.expires_at > plan.authorization_expires_at
                 or capability.expires_at > capability.issued_at + timedelta(seconds=self._url_expiry_seconds)
@@ -495,8 +571,9 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
 class TaskImageBundleCapabilityProvider(_TaskImageBundleProviderBase[TaskImageBundleBackend]):
     """Synchronous injected-backend compatibility; native adapter requires async."""
 
-    def issue(self, plan: TaskImageBuildPlanV1, *, now: datetime) -> TaskImageBundleCapabilityV1:
+    def issue(self, plan: TaskImageBuildPlan, *, now: datetime) -> TaskImageBundleCapabilityV1:
         plan, now, expires_at, observed_at = self._prepare_issue(plan, now=now)
+        assert isinstance(plan, TaskImageBuildPlanV1)  # V1 validation rejects strong plans before I/O.
         try:
             objects = tuple(self._backend.list_objects(
                 bucket=plan.bundle_bucket, prefix=plan.bundle_prefix,
@@ -512,8 +589,70 @@ class TaskImageBundleCapabilityProvider(_TaskImageBundleProviderBase[TaskImageBu
 class AsyncTaskImageBundleCapabilityProvider(_TaskImageBundleProviderBase[AsyncTaskImageBundleBackend]):
     """Await bounded storage I/O; caller must not retain database authority locks."""
 
-    async def issue(self, plan: TaskImageBuildPlanV1, *, now: datetime) -> TaskImageBundleCapabilityV1:
+    def _validated_plan(self, plan: TaskImageBuildPlan) -> TaskImageBuildPlan:
+        try:
+            validated = parse_task_image_build_plan(plan.model_dump_json())
+        except (AttributeError, ValueError):
+            raise TaskImageBundleCapabilityError("task-image bundle plan is invalid") from None
+        if validated.bundle_bucket != self._expected_bucket:
+            raise TaskImageBundleCapabilityError("task-image bundle source is not authorized")
+        return validated
+
+    async def _issue_registered(
+        self, plan: TaskImageBuildPlanV2, *, now: datetime, expires_at: datetime, observed_at: datetime,
+    ) -> TaskImageBundleCapabilityV2:
+        if not isinstance(self._backend, VerifiedTaskImageBundleBackend):
+            raise TaskImageBundleCapabilityError("task-image registered bundle backend is unavailable")
+        try:
+            manifest = await self._backend.get_verified_bundle_manifest(
+                bucket=plan.bundle_bucket, prefix=plan.bundle_prefix,
+                expected_sha256=plan.bundle_content_manifest_sha256,
+                task_checksum=plan.task_checksum, bundle_file_metadata_sha256=plan.bundle_file_metadata_sha256,
+                maximum_objects=min(plan.bundle_file_limit, self._maximum_objects),
+                maximum_bytes=min(plan.bundle_byte_limit, self._maximum_bytes), expires_at=expires_at,
+            )
+            manifest = parse_task_image_bundle_manifest(
+                manifest.canonical_bytes, expected_sha256=plan.bundle_content_manifest_sha256,
+            )
+            if manifest.task_checksum != plan.task_checksum or manifest.bundle_file_metadata_sha256 != plan.bundle_file_metadata_sha256:
+                raise ValueError("registered bundle provenance changed")
+        except Exception:
+            raise TaskImageBundleCapabilityError("task-image registered bundle is unavailable") from None
+        observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
+        self._validated_objects(plan, tuple(
+            TaskImageBundleObject(key=plan.bundle_prefix + item.path, size_bytes=item.size_bytes)
+            for item in manifest.files
+        ))
+        objects: list[TaskImageBundleObjectCapabilityV2] = []
+        for item in manifest.files:
+            observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
+            key = plan.bundle_prefix + item.path
+            try:
+                url = self._backend.presign_get(bucket=plan.bundle_bucket, key=key, expires_at=expires_at)
+            except Exception:
+                raise TaskImageBundleCapabilityError("task-image bundle presigning is unavailable") from None
+            observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
+            objects.append(TaskImageBundleObjectCapabilityV2(
+                relative_path=item.path, size_bytes=item.size_bytes, sha256=item.sha256, mode=item.mode,
+                url=self._validated_url(url, key=key, now=observed_at, expires_at=expires_at),
+            ))
+        capability = TaskImageBundleCapabilityV2(
+            capability_id=_nonzero_uuid(self._capability_id_factory()),
+            grant_id=plan.grant_id, session_id=plan.session_id, session_generation=plan.session_generation,
+            materialization_id=plan.materialization_id, task_checksum=plan.task_checksum,
+            bundle_file_metadata_sha256=plan.bundle_file_metadata_sha256,
+            bundle_content_manifest_sha256=plan.bundle_content_manifest_sha256,
+            file_count=len(objects), total_bytes=sum(item.size_bytes for item in objects),
+            issued_at=now, expires_at=expires_at, objects=tuple(objects),
+        )
+        self.validate(capability, plan, now=observed_at)
+        self._checked_time(previous=observed_at, expires_at=expires_at)
+        return capability
+
+    async def issue(self, plan: TaskImageBuildPlan, *, now: datetime) -> TaskImageBundleCapability:
         plan, now, expires_at, observed_at = self._prepare_issue(plan, now=now)
+        if isinstance(plan, TaskImageBuildPlanV2):
+            return await self._issue_registered(plan, now=now, expires_at=expires_at, observed_at=observed_at)
         try:
             objects = await self._backend.list_objects(
                 bucket=plan.bundle_bucket, prefix=plan.bundle_prefix,
@@ -535,9 +674,14 @@ __all__ = [
     "AsyncTaskImageBundleBackend",
     "AsyncTaskImageBundleCapabilityProvider",
     "TaskImageBundleBackend",
+    "TaskImageBundleCapability",
     "TaskImageBundleCapabilityError",
     "TaskImageBundleCapabilityProvider",
     "TaskImageBundleCapabilityV1",
+    "TaskImageBundleCapabilityV2",
     "TaskImageBundleObject",
     "TaskImageBundleObjectCapabilityV1",
+    "TaskImageBundleObjectCapabilityV2",
+    "VerifiedTaskImageBundleBackend",
+    "parse_task_image_bundle_capability",
 ]

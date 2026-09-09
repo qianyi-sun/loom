@@ -486,8 +486,32 @@ empty continuation probe; that probe retains all page/byte/deadline bounds and
 rejects any additional object. The legacy listing entrypoint retains its limits.
 This comparison does not hash stored data or sidecar bytes: native download must
 verify every data-file hash, and must never download the transport sidecar into
-the build context. Native capability issuance still needs to consume this
-composition. Manifest presence is never proof of a completed prefix upload.
+the build context. Native V2 capability issuance consumes this composition.
+Manifest presence is never proof of a completed prefix upload.
+
+The explicitly versioned `loom.task-image-bundle-capability.v2` retains the
+grant/current-session/materialization/time/count envelope and adds the registered
+manifest digest. Its objects contain only data-file relative paths, sizes,
+per-file SHA-256 hashes, portable modes and short-lived exact GET URLs. It does
+not duplicate the manifest or download the mode sidecar. Reconstructing the
+canonical manifest from these descriptors (excluding URLs) must reproduce the
+registered digest and mode provenance. The asynchronous provider checks complete
+inventory before signing and independently validates the backend's manifest
+against the frozen plan. Limits remain 2,000 data files, 512 MiB data, 4,096 bytes
+per URL and 8 MiB per capability.
+
+Issuance uses one exact whole-second deadline bounded by current authorization;
+storage/signing/validation cannot extend it. Clock regression or expiry rejects
+the result. Cancellation propagates into the owned inventory reader before
+signing. New and encrypted-replay capabilities use the same CPU-only versioned
+validator, binding descriptors, limits, exact URL origin/path/deadline and the
+current issuance session without repeating storage work. The unlocked HTTP
+prepare/finalize flow and bounded encrypted reader preserve either explicit
+version. Legacy V1 capabilities cannot satisfy a V2 plan, and the synchronous
+compatibility provider rejects strong plans before storage. Pinned TLS MinIO
+tests exercise verified upload, inventory, V2 issuance and actual signed GETs,
+including Unicode/plus/percent paths. These are authority interoperability tests,
+not evidence for the still-incomplete real Go downloader or native admission.
 
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention
@@ -546,10 +570,10 @@ locked recheck. A successor session still cannot rewrite the original claim's
 identity. Database consumer tests seed explicit strong receipts; they are not
 evidence that native admission or content download is complete.
 
-Native derivation still rejects strong provenance before changing a lease, and
-the V1 bundle provider rejects V2 plans before storage work. Manifest-bearing
-derivation/issuance, complete inventory matching and the real Go downloader are
-still required. Producer orchestration remains unswitched. Do not infer manifest
+Native derivation still rejects strong provenance before changing a lease.
+Manifest-bearing derivation and the real Go downloader are still required;
+inventory matching and V2 capability issuance are implemented but do not open
+that admission boundary. Producer orchestration remains unswitched. Do not infer manifest
 authority from mutable stored objects. Native admission remains closed until the
 complete producer-to-downloader path and remaining activation boundaries are
 verified.

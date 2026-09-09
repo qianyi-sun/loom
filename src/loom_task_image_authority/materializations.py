@@ -36,9 +36,11 @@ from loom.task_image_build_plan import (
 )
 from loom_task_image_authority.bundle_capability import (
     AsyncTaskImageBundleCapabilityProvider,
+    TaskImageBundleCapability,
     TaskImageBundleCapabilityError,
     TaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityV1,
+    parse_task_image_bundle_capability,
 )
 from loom_task_image_authority.retention import attempt_is_retired
 
@@ -849,8 +851,8 @@ async def get_session_materialization_build_plan(
 
 @dataclass(frozen=True, slots=True)
 class TaskImageBundlePreparation:
-    plan: TaskImageBuildPlanV1
-    capability: TaskImageBundleCapabilityV1 | None = field(repr=False)
+    plan: TaskImageBuildPlan
+    capability: TaskImageBundleCapability | None = field(repr=False)
     checked_at: datetime
     valid_until: datetime
 
@@ -860,7 +862,7 @@ class _LockedBundleState:
     row: TaskImageMaterialization
     attempt: TaskImageMaterializationAttempt
     event: TaskImageMaterializationOperationEvent | None
-    plan: TaskImageBuildPlanV1
+    plan: TaskImageBuildPlan
     checked_at: datetime
     valid_until: datetime
 
@@ -960,7 +962,7 @@ async def _bundle_preparation(
                 event.secret_response_sha256,
             ):
                 raise ValueError("bundle capability digest changed")
-            capability = TaskImageBundleCapabilityV1.model_validate_json(payload)
+            capability = parse_task_image_bundle_capability(payload)
         except Exception:
             raise TaskImageBundleCapabilityError(
                 "task-image bundle capability replay is unavailable"
@@ -994,7 +996,7 @@ async def prepare_session_materialization_bundle(
 async def finalize_session_materialization_bundle(
     session: AsyncSession, *, authorization: TaskImageBuildSessionAuthorization,
     materialization_id: UUID, attempt_id: UUID, lease_epoch: int, operation_id: UUID,
-    prepared: TaskImageBundlePreparation, capability: TaskImageBundleCapabilityV1,
+    prepared: TaskImageBundlePreparation, capability: TaskImageBundleCapability,
     provider: TaskImageBundleCapabilityProvider | AsyncTaskImageBundleCapabilityProvider,
     secret_store: SecretStore, clock: Callable[[], datetime],
 ) -> TaskImageBundlePreparation:
@@ -1073,6 +1075,7 @@ async def issue_session_materialization_bundle(
         provider=provider, secret_store=secret_store, clock=lambda: now,
     )
     if prepared.capability is not None:
+        assert isinstance(prepared.capability, TaskImageBundleCapabilityV1)
         return prepared.capability
     finalized = await finalize_session_materialization_bundle(
         session, authorization=authorization, materialization_id=materialization_id,
@@ -1080,7 +1083,7 @@ async def issue_session_materialization_bundle(
         prepared=prepared, capability=provider.issue(prepared.plan, now=now),
         provider=provider, secret_store=secret_store, clock=lambda: now,
     )
-    assert finalized.capability is not None
+    assert isinstance(finalized.capability, TaskImageBundleCapabilityV1)
     return finalized.capability
 
 
