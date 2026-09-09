@@ -25,9 +25,9 @@ from loom_launcher.aider_distribution import (
 )
 
 SOURCE_NAME = "aider_chat-0.86.2-py3-none-any.whl"
-OUTPUT_NAME = "aider_chat-0.86.2+loom.1-py3-none-any.whl"
+OUTPUT_NAME = "aider_chat-0.86.2+loom.2-py3-none-any.whl"
 DIST_INFO = "aider_chat-0.86.2.dist-info"
-LOCAL_DIST_INFO = "aider_chat-0.86.2+loom.1.dist-info"
+LOCAL_DIST_INFO = "aider_chat-0.86.2+loom.2.dist-info"
 APPLICATION = b'__version__ = "0.86.2"\n'
 METADATA = (
     b"Metadata-Version: 2.1\n"
@@ -36,6 +36,8 @@ METADATA = (
     b"Summary: fixture\n"
     b"Requires-Dist: litellm==1.81.10\n"
     b"Requires-Dist: importlib-metadata==7.2.1\n"
+    b"Requires-Dist: gitpython==3.1.46\n"
+    b'Requires-Dist: gitpython==3.1.46; extra == "browser"\n'
     b"Requires-Dist: requests==2.32.3\n\n"
 )
 WHEEL = (
@@ -47,7 +49,7 @@ WHEEL = (
 RECORD = (
     b"aider/__init__.py,sha256=p2w1lOZCsNixTcC4CwTkeqA-kqhIGKq5OE-mIQKipaY,23\n"
     b"aider_chat-0.86.2.dist-info/METADATA,"
-    b"sha256=Awsb6NcI7dEfuRfMKA1eSVidpmuT1kpkp_d9XVXVhZo,178\n"
+    b"sha256=j_ebo_kDdcb62_wa_jx3zZBgMM_vMdWiAV-Dqz1-EVI,264\n"
     b"aider_chat-0.86.2.dist-info/RECORD,,\n"
     b"aider_chat-0.86.2.dist-info/WHEEL,"
     b"sha256=2_IrOF1jR2xNXEM3zpoG00Cl9D_z2vSqNSI6jX8JKVo,79\n"
@@ -164,9 +166,11 @@ def test_rebuilds_only_distribution_metadata_and_generates_a_valid_record(
     assert stat.S_IMODE(output.stat().st_mode) == 0o444
     with zipfile.ZipFile(output) as archive:
         metadata = BytesParser().parsebytes(archive.read(f"{LOCAL_DIST_INFO}/METADATA"))
-        assert metadata["Version"] == "0.86.2+loom.1"
+        assert metadata["Version"] == "0.86.2+loom.2"
         assert "litellm==1.84.1" in metadata.get_all("Requires-Dist")
         assert "importlib-metadata==8.9.0" in metadata.get_all("Requires-Dist")
+        assert "gitpython==3.1.59" in metadata.get_all("Requires-Dist")
+        assert 'gitpython==3.1.59; extra == "browser"' in metadata.get_all("Requires-Dist")
         assert "requests==2.32.3" in metadata.get_all("Requires-Dist")
         assert archive.read("aider/__init__.py") == APPLICATION
         assert f"{DIST_INFO}/METADATA" not in archive.namelist()

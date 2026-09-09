@@ -387,6 +387,15 @@ The compatibility name `openhands` is SDK-backed as well;
 `python -m openhands.server` is not used for non-interactive service-mode
 trials.
 
+Aider uses the shared installer in `loom-launcher`, including in the prebuilt
+sandbox. Its `0.86.2+loom.2` distribution preserves upstream application code and
+updates dependency metadata, including both normal and browser-extra GitPython
+pins to `3.1.59`. This fixes
+[CVE-2026-78676](https://github.com/gitpython-developers/GitPython/security/advisories/GHSA-284h-m62q-gf8w),
+where rewriting an untrusted multiline Git configuration could introduce active
+directives. The installer resolves the patched wheel's dependencies normally and
+runs `pip check` plus import/CLI smoke checks.
+
 The audit runs dependency probes inside the named Docker image and
 reports one row per displayed agent. `blocked` means an executable or
 Python module declared by `runtime_contract` is missing. `ready` means the
