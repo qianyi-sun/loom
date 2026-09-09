@@ -181,8 +181,8 @@ class ExecutionTargetV1(_StrictContract):
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     # Optional at the standalone V1 parsing boundary so already-persisted
-    # regional records remain readable. A current ExecutionTopologyV1 requires
-    # every binding to set the one accepted physical cluster scope.
+    # regional records remain readable. A current topology requires an explicit
+    # physical cluster scope for every target.
     cluster_scope_id: str | None = Field(
         default=None,
         pattern=r"^[a-z0-9][a-z0-9-]{0,79}$",
@@ -193,6 +193,10 @@ class ExecutionTargetV1(_StrictContract):
     failure_domain: str = Field(min_length=1, max_length=120)
     data_residency: Literal["eu"]
     namespace_name: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+    pod_identity_audience: str | None = Field(default=None, min_length=1, max_length=120)
+    service_account_name: str = Field(
+        default="loom-execution-attempt", pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+    )
     health_role: Literal["primary", "secondary"]
     health_check_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     health_check_interval_seconds: int = Field(ge=5, le=300)
@@ -208,19 +212,19 @@ class ExecutionTargetV1(_StrictContract):
 
 
 class ExecutionTopologyV1(_StrictContract):
-    """Checked deployed environment bindings for one physical cluster."""
+    """Explicit regional bindings within one pool and residency boundary."""
 
     schema_version: Literal["loom.execution-topology.v1"] = "loom.execution-topology.v1"
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     placement_policy: Literal["environment-local-health-first"]
-    targets: tuple[ExecutionTargetV1, ...] = Field(min_length=1, max_length=3)
+    targets: tuple[ExecutionTargetV1, ...] = Field(min_length=1, max_length=64)
 
     @model_validator(mode="after")
-    def _targets_form_one_shared_cluster_topology(self) -> ExecutionTopologyV1:
+    def _targets_form_explicit_regional_topology(self) -> ExecutionTopologyV1:
         target_ids = [target.target_id for target in self.targets]
         health_ids = [target.health_check_id for target in self.targets]
-        namespaces = [target.namespace_name for target in self.targets]
+        namespaces = [(target.cluster_scope_id, target.namespace_name) for target in self.targets]
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("execution target ids must be unique")
         if len(health_ids) != len(set(health_ids)):
@@ -233,18 +237,26 @@ class ExecutionTopologyV1(_StrictContract):
             if target.execution_class_id != self.execution_class_id:
                 raise ValueError("every target must bind the declared execution class")
 
-        environments = [target.environment for target in self.targets]
-        if len(environments) != len(set(environments)):
-            raise ValueError("every environment needs exactly one shared-cluster binding")
-        cluster_scope_ids = {target.cluster_scope_id for target in self.targets}
-        if None in cluster_scope_ids or len(cluster_scope_ids) != 1:
-            raise ValueError("every target must bind the same physical cluster scope")
-        if len({target.region for target in self.targets}) != 1:
-            raise ValueError("baseline shared-cluster bindings must use one region")
-        if len({target.failure_domain for target in self.targets}) != 1:
-            raise ValueError("shared-cluster bindings must expose one failure domain")
-        if {target.health_role for target in self.targets} != {"primary"}:
-            raise ValueError("baseline shared-cluster bindings must all be primary")
+        clusters: dict[str, tuple[str, str]] = {}
+        for target in self.targets:
+            if target.cluster_scope_id is None:
+                raise ValueError("every target must bind an explicit physical cluster scope")
+            scope = (target.region, target.failure_domain)
+            if clusters.setdefault(target.cluster_scope_id, scope) != scope:
+                raise ValueError("one physical cluster must have one region and failure domain")
+        for environment in {target.environment for target in self.targets}:
+            targets = [target for target in self.targets if target.environment == environment]
+            if sum(target.health_role == "primary" for target in targets) != 1:
+                raise ValueError("every environment needs exactly one primary target")
+            if len({target.data_residency for target in targets}) != 1:
+                raise ValueError("regional targets must preserve data residency")
+            if len({target.cluster_scope_id for target in targets}) != len(targets):
+                raise ValueError("an environment may bind a physical cluster only once")
+            if any(
+                target.health_role == "secondary" and target.pod_identity_audience is None
+                for target in targets
+            ):
+                raise ValueError("regional targets require native Pod identity")
         return self
 
 

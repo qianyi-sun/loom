@@ -31,6 +31,7 @@ from loom_control_plane.service_execution_output import ServiceExecutionOutputRo
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
 from loom_llm_gateway.egress_client_pool import EgressClientPool
+from loom_llm_gateway.pod_identity import ExecutionPodReviewer
 from loom_llm_gateway.provider_dispatch import settle_stale_provider_dispatches
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
@@ -155,6 +156,9 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         # Long-lived httpx client for native dialect passthroughs
         # (anthropic, openai responses, gemini). Plan 9 A9.1 — we do NOT
         # round-trip through LiteLLM for these.
+        app.state.execution_pod_reviewer = ExecutionPodReviewer.from_file(
+            settings.service_execution_kubernetes_config_file,
+        )
         app.state.upstream_client = httpx.AsyncClient(
             timeout=settings.upstream_timeout_sec,
         )
@@ -181,6 +185,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await provider_dispatch_reconciler
             await app.state.egress_client_pool.aclose()
+            await app.state.execution_pod_reviewer.close()
             await app.state.upstream_client.aclose()
             await engine.dispose()
 

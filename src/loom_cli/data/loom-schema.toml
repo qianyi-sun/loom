@@ -2038,3 +2038,8 @@ fields      = { max_connections = 150 }
 python_type = "table"
 description = "Cluster topology. `multi_node=true` renders Postgres through CloudNativePG, distributed MinIO, cross-node anti-affinity, and disruption budgets; `storage_backend=longhorn` requests the Longhorn StorageClass. `multi_node=false` renders single-pod Postgres and MinIO. Profiles must pin values that match the target cluster and its installed operators and storage classes. Supported storage backends are `host_path` and `longhorn`."
 fields      = { multi_node = false, storage_backend = "host_path", postgres_replicas = 1, minio_replicas = 1, min_available = 1, anti_affinity = "preferred" }
+
+[service_config.service_execution_kubernetes_config_file]
+used_by = ["llm-gateway"]
+python_type = "Path"
+description = "Mounted JSON mapping physical cluster scopes to explicit Kubernetes endpoint, CA file and native Nebius credential file for Pod TokenReview."

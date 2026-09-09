@@ -268,7 +268,8 @@ def test_job_renderer_rejects_mutable_image_missing_limits_and_wrong_scope() -> 
         )
 
 
-def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes() -> None:
+@pytest.mark.parametrize("audience", [None, "loom-execution"])
+def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes(audience: str | None) -> None:
     lease = _lease()
     assert lease.runtime_contract_json is not None
     plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
@@ -304,6 +305,7 @@ def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes() -> None:
         target_id="nebius-eu-north1-staging",
         namespace="loom-nebius-staging",
         runtime_class_name="loom-sandbox",
+        pod_identity_audience=audience,
     )
 
     manifest = render_execution_job(lease, target=target)
@@ -315,4 +317,39 @@ def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes() -> None:
     rendered = pod["initContainers"][1]
     assert rendered["restartPolicy"] == "Always"
     assert rendered["startupProbe"]["tcpSocket"] == {"port": 5432}
-    assert {item["name"] for item in pod["volumes"]} == {"runtime", "workspace", "output"}
+    expected_volumes = {"runtime", "workspace", "output"}
+    if audience is not None:
+        expected_volumes.add("execution-identity")
+        identity = next(item for item in pod["volumes"] if item["name"] == "execution-identity")
+        assert identity["projected"] == {
+            "defaultMode": 0o440,
+            "sources": [
+                {
+                    "serviceAccountToken": {
+                        "audience": audience,
+                        "expirationSeconds": 3600,
+                        "path": "token",
+                    }
+                }
+            ],
+        }
+        execution = pod["containers"][0]
+        assert {
+            "name": "LOOM_EXECUTION_POD_TOKEN_FILE",
+            "value": "/var/run/secrets/loom-execution/token",
+        } in execution["env"]
+        assert {
+            "name": "execution-identity",
+            "mountPath": "/var/run/secrets/loom-execution",
+            "readOnly": True,
+        } in execution["volumeMounts"]
+        assert all("subPath" not in mount for mount in execution["volumeMounts"])
+    else:
+        assert "LOOM_EXECUTION_POD_TOKEN_FILE" not in str(pod)
+    assert pod["automountServiceAccountToken"] is False
+    assert all(
+        mount["name"] != "execution-identity"
+        for container in pod["initContainers"]
+        for mount in container["volumeMounts"]
+    )
+    assert {item["name"] for item in pod["volumes"]} == expected_volumes

@@ -35,6 +35,7 @@ class ExecutionTargetRuntime:
     node_selector: dict[str, str] | None = None
     tolerations: tuple[dict[str, str], ...] = ()
     service_account_name: str = "loom-execution-attempt"
+    pod_identity_audience: str | None = None
     credential_broker_url: str = (
         "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution"
     )
@@ -42,6 +43,11 @@ class ExecutionTargetRuntime:
     def __post_init__(self) -> None:
         if not self.target_id or not self.namespace:
             raise ValueError("target and namespace are required")
+        if self.pod_identity_audience is not None and (
+            not self.pod_identity_audience.strip()
+            or self.pod_identity_audience != self.pod_identity_audience.strip()
+        ):
+            raise ValueError("Pod identity audience must be nonempty")
         if not self.credential_broker_url.startswith(("http://", "https://")):
             raise ValueError("credential broker URL must be HTTP(S)")
 
@@ -319,6 +325,39 @@ def render_execution_job(
             },
         },
     }
+    if target.pod_identity_audience is not None:
+        pod = job["spec"]["template"]["spec"]
+        pod["volumes"].append(
+            {
+                "name": "execution-identity",
+                "projected": {
+                    "defaultMode": 0o440,
+                    "sources": [
+                        {
+                            "serviceAccountToken": {
+                                "audience": target.pod_identity_audience,
+                                "expirationSeconds": 3600,
+                                "path": "token",
+                            }
+                        }
+                    ],
+                },
+            }
+        )
+        execution = pod["containers"][0]
+        execution["volumeMounts"].append(
+            {
+                "name": "execution-identity",
+                "mountPath": "/var/run/secrets/loom-execution",
+                "readOnly": True,
+            }
+        )
+        execution["env"].append(
+            {
+                "name": "LOOM_EXECUTION_POD_TOKEN_FILE",
+                "value": "/var/run/secrets/loom-execution/token",
+            }
+        )
     if target.runtime_class_name is None:
         del job["spec"]["template"]["spec"]["runtimeClassName"]
     if not target.node_selector:

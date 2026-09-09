@@ -126,53 +126,58 @@ func TestDecodeTaskInputManifestRejectsBindingDrift(t *testing.T) {
 	}
 }
 
-func TestMaterializeInputsRetriesUntilWorkloadIdentityIsObserved(t *testing.T) {
-	revisionDigest := sha256.Sum256(nil)
-	revision := "sha256:" + hex.EncodeToString(revisionDigest[:])
-	manifestBytes, err := json.Marshal(taskInputManifest{
-		SchemaVersion:      "loom.service-execution-input-manifest.v1",
-		TaskRevisionSHA256: revision,
-		Files:              []taskInputFile{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestDigest := sha256.Sum256(manifestBytes)
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if calls.Add(1) == 1 {
-			http.Error(writer, `{"detail":"workload_identity_not_observed"}`, http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = writer.Write(manifestBytes)
-	}))
-	defer server.Close()
-	root, err := url.Parse(server.URL + "/internal/service-execution")
-	if err != nil {
-		t.Fatal(err)
-	}
-	broker := &workloadBroker{
-		root: root,
-		identity: workloadIdentity{
-			LeaseID: "0194d739-8bec-7b7b-88f5-62f7cbd42cb3", Generation: 7, ExecutionRole: "attempt",
-		},
-		client: server.Client(),
-	}
-	p := testPlan("/workspace", phase{
-		Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: "/workspace", TimeoutSeconds: 1,
-	})
-	p.TaskRevisionSHA256 = revision
-	p.TaskInput = &taskInput{
-		SchemaVersion:  "loom.runtime-task-input.v1",
-		ManifestSHA256: "sha256:" + hex.EncodeToString(manifestDigest[:]),
-		FileCount:      0,
-		TotalBytes:     0,
-	}
-	if err := broker.materializeInputs(context.Background(), p, t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("expected one workload identity retry, got %d requests", calls.Load())
+func TestMaterializeInputsRetriesKnownIdentityAvailabilityErrors(t *testing.T) {
+	for _, reason := range []string{"workload_identity_not_observed", "execution_pod_review_unavailable", "execution_target_unavailable"} {
+		t.Run(reason, func(t *testing.T) {
+			revisionDigest := sha256.Sum256(nil)
+			revision := "sha256:" + hex.EncodeToString(revisionDigest[:])
+			manifestBytes, err := json.Marshal(taskInputManifest{
+				SchemaVersion:      "loom.service-execution-input-manifest.v1",
+				TaskRevisionSHA256: revision,
+				Files:              []taskInputFile{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifestDigest := sha256.Sum256(manifestBytes)
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if calls.Add(1) == 1 {
+					payload, _ := json.Marshal(map[string]string{"detail": reason})
+					http.Error(writer, string(payload), http.StatusServiceUnavailable)
+					return
+				}
+				_, _ = writer.Write(manifestBytes)
+			}))
+			defer server.Close()
+			root, err := url.Parse(server.URL + "/internal/service-execution")
+			if err != nil {
+				t.Fatal(err)
+			}
+			broker := &workloadBroker{
+				root: root,
+				identity: workloadIdentity{
+					LeaseID: "0194d739-8bec-7b7b-88f5-62f7cbd42cb3", Generation: 7, ExecutionRole: "attempt",
+				},
+				client: server.Client(),
+			}
+			p := testPlan("/workspace", phase{
+				Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: "/workspace", TimeoutSeconds: 1,
+			})
+			p.TaskRevisionSHA256 = revision
+			p.TaskInput = &taskInput{
+				SchemaVersion:  "loom.runtime-task-input.v1",
+				ManifestSHA256: "sha256:" + hex.EncodeToString(manifestDigest[:]),
+				FileCount:      0,
+				TotalBytes:     0,
+			}
+			if err := broker.materializeInputs(context.Background(), p, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("expected one workload identity retry, got %d requests", calls.Load())
+			}
+		})
 	}
 }
 
@@ -188,8 +193,8 @@ func TestWorkloadIdentityRetryClassificationIsNarrow(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "other unavailable response",
-			err:  &brokerHTTPError{statusCode: http.StatusServiceUnavailable, body: `{"detail":"execution_target_unavailable"}`},
+			name: "unknown unavailable response",
+			err:  &brokerHTTPError{statusCode: http.StatusServiceUnavailable, body: `{"detail":"unknown_unavailability"}`},
 		},
 		{
 			name: "permission failure",
@@ -198,8 +203,36 @@ func TestWorkloadIdentityRetryClassificationIsNarrow(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := workloadIdentityNotObserved(test.err); got != test.want {
+			if got := workloadIdentityTemporarilyUnavailable(test.err); got != test.want {
 				t.Fatalf("retry classification = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestInputIdentityDenialAndFenceConflictAreNotRetried(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusConflict} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				calls.Add(1)
+				// A retryable-looking reason cannot override the status code.
+				http.Error(writer, `{"detail":"execution_pod_review_unavailable"}`, status)
+			}))
+			defer server.Close()
+			root, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			broker := &workloadBroker{root: root, client: server.Client()}
+			for _, path := range []string{"/inputs/manifest", "/inputs/files/0"} {
+				_, err := broker.getInput(context.Background(), broker.endpoint(path))
+				if err == nil {
+					t.Fatal("authorization/fence failure was ignored")
+				}
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("denial/fence requests retried: calls=%d", calls.Load())
 			}
 		})
 	}

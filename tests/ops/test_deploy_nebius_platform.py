@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import deploy_nebius_platform as deploy
 from scripts.ops import nebius_candidate as candidate
+from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
 
 from loom.nebius_platform_render import build_platform, write_platform
 
@@ -337,3 +338,29 @@ def test_job_wait_returns_on_failure_or_completion_and_preserves_timeout(
             deploy.wait_for_job(kube, "test-migration", "test-namespace", 20)
     assert now == (20 if condition == "Pending" else 5)
     assert reads == (5 if condition == "Pending" else 2)
+
+
+def test_regional_deploy_waits_for_each_primary_actuator_and_checks_secret_keys(
+    rendered: tuple, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, _, _, _ = rendered
+    config, candidate, profile = request.getfixturevalue("regional_inputs")
+    config["cluster_id"] = "nebius-cluster-test"
+    args.expected_cluster_id = config["cluster_id"]
+    files = build_platform(config, candidate, profile, {}, repo_root=deploy.ROOT)
+    write_platform(files, config, candidate, args.render_dir)
+    args.apply = True
+    kube = FakeKubectl(config, files)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *_args: None)
+    assert deploy.deploy(args, kube=kube)["status"] == "complete"
+    target_id = config["regional_execution_targets"][0]["target_id"]
+    rollouts = [command[2] for command in kube.commands if command[:2] == ("rollout", "status")]
+    assert "deployment/loom-execution-actuator" in rollouts
+    assert "deployment/" + target_id + "-actuator" in rollouts
+    for role in ("actuator", "collector", "gateway"):
+        namespace = config["namespace"] if role == "gateway" else config["execution_namespace"]
+        assert kube.secrets[namespace, target_id + "-" + role + "-kubernetes"] == {
+            "ca.crt",
+            "credentials.json",
+        }
+    assert not any(target_id + "-collector-nebius" in name for _, name in kube.secrets)

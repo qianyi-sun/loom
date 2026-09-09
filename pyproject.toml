@@ -51,6 +51,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Gateway native Pod TokenReview needs IAM refresh, without the Kubernetes CLI/client.
+# Match the thin actuator and uv.lock so both images use the verified SDK API.
+nebius-gateway = ["nebius==0.6.1"]
 modal = [
   "modal>=0.66.55,<0.80",
 ]

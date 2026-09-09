@@ -446,3 +446,165 @@ definition. Existing catalog rows retain their stored representation; reapplying
 the same definition succeeds, while changing a class or target under its existing
 ID still returns a conflict. Catalog digest columns remain for database schema
 compatibility and do not decide semantic equality.
+
+
+## Optional regional execution
+
+`deploy/nebius/regional.platform.json.example` adds explicit EU secondary targets
+to the same logical pool. The original configuration remains valid. Fill the secondary's reviewed regional
+price rates and timestamps; the example's zero rates deliberately cannot pass
+render validation. Each secondary has its own native cluster/node group, namespace, quota observation,
+capacity policy, price binding and dedicated actuator/collector pair. Those
+processes run on the existing primary system node in the primary execution
+namespace; their Kubernetes clients connect to the named remote API using an
+explicit CA and automatically refreshed native IAM tokens. Database, Service,
+CP, Gateway, canonical storage and web/TLS remain in the primary region.
+
+The optional Terraform `regional_execution_targets` map in the existing platform
+root composes `modules/regional-execution`. Each entry creates exactly one MK8s
+control plane with audit logging, one fixed system node and one min-zero CPU
+execution group (technical default maximum100, explicit lower values honored).
+Inputs identify an existing regional project/subnet. Existing-ID mode supplies a
+regional registry-pull identity and creates only these three infrastructure resources.
+`node_platform` is required per regional Terraform target, rather than inherited
+from the north-region platform. The west example uses native `cpu-d3` (AMD EPYC
+Genoa), whose catalog includes the `4vcpu-16gb` system and `16vcpu-64gb` execution
+presets. The west example uses the native compatibility matrix's Kubernetes1.33
+with Ubuntu24.04. The primary retains `cpu-e2`. Verify native platform/preset availability
+and MK8s version compatibility in the destination before an activation plan;
+mocked Terraform tests do not prove either. The separate80Gi NETWORK_SSD boot
+disk remains unchanged. Regional price SKU is `cpu-d3-16vcpu-64gb`; enter current
+reviewed CPU/RAM/storage rates rather than copying the north-region Intel price.
+Neither mode creates a network, registry, bucket, database, public workload
+Service, VPN or CI runner. Before applying, separately review regional CPU and
+MK8s availability, project quota, cross-region registry access, cost, public API activation
+and any prerequisite identity grants; the example is not a cloud authorization.
+See the [official regional service matrix](https://docs.nebius.com/overview/regions).
+
+For a fresh regional identity set, use
+`deploy/terraform/nebius/regional-execution-managed-identities.tfvars.json.example`.
+Omit `node_registry_pull_service_account_id` and supply `managed_identities` with
+three distinct SPKI PEM **public** keys (`actuator_public_key`,
+`collector_public_key`, `gateway_public_key`), `collector_viewer_group_id` and
+`registry_pull_group_id`. This mode adds four regional service accounts, three
+native authorized-public-key registrations for the runtime accounts, and two
+memberships: collector in the existing observer group and node-pull in the
+existing registry viewer group. Together with the three infrastructure resources,
+this is **12 creates** for a new target, with no change to existing resources.
+The node groups wait for memberships and attach the new regional node-pull
+account, avoiding an unverified cross-project identity attachment. Node-pull has
+no registered key; actuator and Gateway receive no cloud group membership.
+
+Read back both existing groups' permissions before plan review: the observer
+group must provide the collector's required read-only tenant/project coverage,
+and the pull group must be viewer-only on the intended registry. Group IDs do
+not themselves prove those authorities. The module creates no group or access
+permit and grants no editor role. Supply only public key text to Terraform;
+private key generation and storage stay in the protected operator path, outside
+Terraform inputs, outputs and state. Authorized keys omit expiration, with
+rotation handled through an explicit reviewed update. After an approved apply,
+the output's `service_account_ids` map populates the environment's three runtime
+identities; `authorized_public_key_ids` supplies the native key references for
+protected credential files. The separate node-pull and membership IDs support
+readback. Outputs contain no key data or credentials. Existing-ID mode leaves
+runtime identity/key management with the operator and creates no IAM resources.
+
+The managed public API uses TLS, short-lived native IAM authentication and the
+explicit RBAC below. `public_control_plane_cidrs` is optional and defaults to[]
+([native empty-list semantics](https://pkg.go.dev/github.com/nebius/gosdk@v0.2.27/proto/nebius/mk8s/v1#PublicEndpointSpec)
+impose no source-IP restriction); a nonempty operator allowlist is preserved. An
+operator choosing that additional network restriction must establish the actual
+provider-confirmed primary egress CIDRs and approved operator addresses. The
+inbound Loom load-balancer allocation is not evidence of outbound source IP.
+No fixed-egress/NAT or VPN prerequisite is introduced for the default path.
+
+`public_gateway_ipv4` must be the read-back IPv4 of the existing fixed public
+allocation. Remote task NetworkPolicy permits DNS plus only that /32 on TCP443.
+The public Caddy listener forwards the `/internal/service-execution/` broker
+prefix and the existing authenticated model POST endpoints; `/admin` and other
+internal/model-prefix paths return404. Credentials and raw database access are
+never exposed. Inputs and outputs pass through the authenticated broker and
+stay in primary canonical storage. Model calls go through the runtime's local
+proxy, which derives the public Gateway origin from its broker URL; immutable
+execution plans do not need an endpoint rewrite.
+
+Secondary catalog targets require projected Pod identity with audience
+`loom-execution`, namespace-local ServiceAccount `loom-execution-attempt`, and
+native TokenReview at their own cluster. Primary execution retains the existing
+internal Pod-IP authorization and internal broker URL. A public proxy does not
+make a primary Pod's legacy identity valid; those calls fail closed. No primary
+IAM identity change is required by this extension.
+
+The environment lists three distinct native service-account IDs per secondary.
+The remote RBAC subjects are Kubernetes `User` entries containing those Nebius
+IDs, not local ServiceAccount subjects:
+
+| Identity | Remote Kubernetes authority |
+| --- | --- |
+| actuator | Namespace Jobs create/get/list/watch/delete and Pods get/list/watch |
+| collector | Cluster Nodes/Pods and DaemonSets get/list |
+| gateway | Only `authentication.k8s.io/tokenreviews` create |
+
+None can read Secrets through those roles; the attempt ServiceAccount has no
+API role and its token is projected only for broker identity. Existing native
+cloud viewer permissions for the collector must independently cover its
+regional node group/preset and tenant quota scope. Runtime Kubernetes authority
+never grants cloud mutation or project editor rights.
+
+Install protected Secrets before the primary apply. For each target `TARGET`,
+`TARGET-actuator-kubernetes` and `TARGET-collector-kubernetes` belong in the
+primary execution namespace; `TARGET-gateway-kubernetes` belongs in the primary
+platform namespace. Each has `ca.crt` (the remote cluster CA) and
+`credentials.json` (the matching native service-account credentials). The
+collector uses its one Secret for both read-only cloud observation and remote
+Kubernetes access; its existing init container makes the provider SDK's owned
+credential copy. Existing actuator DB and collector CP observation-token Secrets
+are reused. Runtime mounts use0440 with the existing non-root fsGroup, and the
+ordinary deploy preflight checks all Secret key names without printing values.
+
+Keep regional credentials/API CA and exact cluster binding under the existing
+protected operator path. Review Terraform with both the existing platform
+input and the optional regional input; retain the same versioned platform state:
+
+```sh
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/platform plan -var-file=/protected/platform.tfvars.json -var-file=/protected/regional-execution.tfvars.json -out=/protected/regional.tfplan
+```
+
+Only an approved plan may be applied. Native endpoint/namespace/RBAC readiness
+must precede switching the primary candidate to reference a secondary. Render
+primary and remote files to separate sibling directories:
+
+```sh
+uv run --no-sync python scripts/ops/render_nebius_platform.py --environment-config /protected/regional.environment.json --candidate /protected/candidate.json --runtime-profile /protected/runtime-profile.json --trusted-keyring /protected/trusted-keyring.json --output /protected/primary-render --regional-output /protected/regional-render
+kubectl --kubeconfig /protected/eu-west1.kubeconfig apply -f /protected/regional-render/nebius-eu-west1-integration.yaml
+```
+
+The second command is a separately authorized remote cluster mutation. Confirm
+its kubeconfig server, CA and cluster identity against the reviewed regional
+outputs first. Never pass the remote directory to `deploy_nebius_platform.py` or
+apply it through the primary kubeconfig. The primary renderer emits no remote
+namespace or regional ClusterRole objects in its deployment files. Apply the
+primary directory through the existing backup-first deploy command. It now waits
+for every configured primary-hosted actuator Deployment, including secondary
+targets. Actuator readiness requires successful command and full reconciliation
+loops; full reconciliation includes listing Jobs in the remote namespace.
+That proves API connectivity/reconciliation, not a successful regional task,
+capacity warmup, TokenReview authorization or regional workload acceptance.
+
+The ordinary regional collector runs every minute. To collect an initial sample
+without waiting for the schedule, use its existing CronJob after the relevant
+node warmup and mutation are authorized:
+
+```sh
+kubectl --kubeconfig /protected/primary.kubeconfig -n PRIMARY_EXECUTION_NAMESPACE create job regional-capacity-initial --from=cronjob/nebius-eu-west1-integration-collector
+kubectl --kubeconfig /protected/primary.kubeconfig -n PRIMARY_EXECUTION_NAMESPACE wait --for=condition=complete job/regional-capacity-initial --timeout=180s
+```
+
+Read back the target's authenticated CP capacity status and a compatible
+placement-format Ready-node sample. A new min-zero pool has no historical
+allocatable sample, so the bounded warmup described above must be planned and
+authorized; source configuration does not bootstrap a guessed sample. Then
+perform separately authorized remote task, data-path, model-attribution and
+scale-down acceptance. Each region's optional `execution_resource_quota` map
+applies only to that remote namespace; the primary namespace's override is not
+silently copied to remote pools.

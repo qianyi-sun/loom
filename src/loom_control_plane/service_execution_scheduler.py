@@ -89,14 +89,14 @@ def _deadline(
     return now + timedelta(seconds=requested_seconds)
 
 
-async def _ready_target(
+async def _ready_targets(
     session: AsyncSession,
     *,
     environment: str,
     pool_id: str,
     execution_class_id: str,
     now: datetime,
-) -> ServiceExecutionTarget | None:
+) -> list[ServiceExecutionTarget]:
     targets = (
         (
             await session.execute(
@@ -115,13 +115,14 @@ async def _ready_target(
         .scalars()
         .all()
     )
+    ready = []
     for target in targets:
         if target.health_observed_at is None:
             continue
         stale_after = int(target.spec_json["health_stale_after_seconds"])
         if target.health_observed_at + timedelta(seconds=stale_after) > now:
-            return target
-    return None
+            ready.append(target)
+    return sorted(ready, key=lambda target: target.spec_json.get("health_role") != "primary")
 
 
 async def reserve_next_service_execution(
@@ -202,43 +203,57 @@ async def _reserve_service_candidate(
             source_provenance=dict(row["task_source_provenance"] or {}),
             profile=runtime_profile,
         )
-    target = await _ready_target(
+    targets = await _ready_targets(
         session,
         environment=environment,
         pool_id=pool_id,
         execution_class_id=runtime_plan.execution_class_id,
         now=current_time,
     )
-    if target is None:
-        return None
-    request_id = canonical_uuid5(
-        _RESERVATION_REQUEST_NAMESPACE,
-        {
-            "schema_version": "loom.service-execution-reservation-request.v1",
-            "trial_id": str(row["id"]),
-            "attempt": int(row["attempt_count"]) + 1,
-            "target_id": target.id,
-            "task_revision_sha256": task_revision,
-            "runtime_contract_sha256": canonical_digest(runtime_plan.canonical_payload()),
-        },
-    )
-    return await reserve_trial_execution(
-        session,
-        request_id=request_id,
-        trial_id=row["id"],
-        execution_class_id=runtime_plan.execution_class_id,
-        target_id=target.id,
-        requirements=workload_requirements_from_task(task),
-        runtime_contract=runtime_plan,
-        image_admission_keyring=image_admission_keyring,
-        routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
-        deadline_at=_deadline(
-            runtime_plan,
-            now=current_time,
-            maximum_seconds=maximum_deadline_seconds,
-        ),
-        now=current_time,
-    )
+    requirements = workload_requirements_from_task(task)
+    blocked: ExecutionProvisioningBlockedError | None = None
+    for target in targets:
+        if requirements.data_residency and target.data_residency != requirements.data_residency:
+            continue
+        # A target's failed admission must not keep a route, cost reservation or
+        # attempt increment when the next eligible region is tried.
+        target_id = target.id
+        try:
+            async with session.begin_nested():
+                return await reserve_trial_execution(
+                    session,
+                    request_id=canonical_uuid5(
+                        _RESERVATION_REQUEST_NAMESPACE,
+                        {
+                            "schema_version": "loom.service-execution-reservation-request.v1",
+                            "trial_id": str(row["id"]),
+                            "attempt": int(row["attempt_count"]) + 1,
+                            "target_id": target_id,
+                            "task_revision_sha256": task_revision,
+                            "runtime_contract_sha256": canonical_digest(
+                                runtime_plan.canonical_payload()
+                            ),
+                        },
+                    ),
+                    trial_id=row["id"],
+                    execution_class_id=runtime_plan.execution_class_id,
+                    target_id=target_id,
+                    requirements=requirements,
+                    runtime_contract=runtime_plan,
+                    image_admission_keyring=image_admission_keyring,
+                    routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
+                    deadline_at=_deadline(
+                        runtime_plan,
+                        now=current_time,
+                        maximum_seconds=maximum_deadline_seconds,
+                    ),
+                    now=current_time,
+                )
+        except ExecutionProvisioningBlockedError as exc:
+            blocked = exc
+    if blocked is not None:
+        raise blocked
+    raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 
 async def run_service_execution_scheduler_loop(

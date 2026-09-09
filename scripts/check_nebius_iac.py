@@ -358,7 +358,13 @@ def check_nebius_iac(
         f"{state_wrapper}: ambient state credentials must be rejected",
     )
 
-    for directory in ("modules/execution-target", "stack", "modules/platform", "platform"):
+    for directory in (
+        "modules/execution-target",
+        "stack",
+        "modules/platform",
+        "platform",
+        "modules/regional-execution",
+    ):
         path = root / directory / "versions.tf"
         text = path.read_text(encoding="utf-8")
         _require(
@@ -445,7 +451,9 @@ def main() -> int:
         check_nebius_iac()
     except (ContractError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Nebius IaC contract failed: {exc}") from exc
-    print("Nebius IaC contract passed for the shared execution stack and independent platform roots.")
+    print(
+        "Nebius IaC contract passed for the shared execution stack and independent platform roots."
+    )
     return 0
 
 

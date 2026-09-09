@@ -5,6 +5,11 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from loom.nebius_kubernetes import (
+    NebiusKubernetesConnection,
+    NebiusKubernetesCredentials,
+    create_api_client,
+)
 from loom_execution_actuator.contracts import (
     ExecutionTerminationSummaryV1,
     KubernetesApiError,
@@ -229,25 +234,45 @@ class InClusterKubernetesJobApi:
     def __init__(
         self,
         *,
+        connection: NebiusKubernetesConnection | None = None,
         client_module: Any | None = None,
         batch_api: Any | None = None,
         core_api: Any | None = None,
     ) -> None:
+        self._api_client: Any | None = None
+        self._credentials: NebiusKubernetesCredentials | None = None
         try:
             from kubernetes import client, config
         except ModuleNotFoundError as exc:
             raise RuntimeError("install Loom with the cluster extra") from exc
+        if connection is not None and any(
+            value is not None for value in (client_module, batch_api, core_api)
+        ):
+            raise ValueError("remote connection cannot be combined with injected clients")
         if any(value is not None for value in (client_module, batch_api, core_api)):
             if client_module is None or batch_api is None or core_api is None:
                 raise ValueError("client_module, batch_api, and core_api must be provided together")
             self._client = client_module
             self._batch = batch_api
             self._core = core_api
+        elif connection is not None:
+            self._api_client, self._credentials = create_api_client(connection)
+            self._client = client
+            self._batch = client.BatchV1Api(self._api_client)
+            self._core = client.CoreV1Api(self._api_client)
         else:
             config.load_incluster_config()
             self._client = client
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
+
+    async def close(self) -> None:
+        try:
+            if self._api_client is not None:
+                await asyncio.to_thread(self._api_client.close)
+        finally:
+            if self._credentials is not None:
+                await self._credentials.close()
 
     def _pods_for_job(self, namespace: str, job_name: str) -> list[Any]:
         return list(

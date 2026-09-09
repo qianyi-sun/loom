@@ -46,6 +46,7 @@ class GatewaySettings(BaseSettings):
     minio_secret_key: SecretStr
     openai_api_key: SecretStr | None = None
     rate_card_cache_ttl_sec: int = 300
+    service_execution_kubernetes_config_file: Path | None = None
     service_execution_source_access_key: SecretStr | None = None
     service_execution_source_access_key_file: Path | None = None
     service_execution_source_bucket: str | None = None
