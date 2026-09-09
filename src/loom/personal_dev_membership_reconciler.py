@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, TypeVar
+from uuid import UUID
 
 from loom.personal_dev_capacity import (
     PersonalDevCapacityInstallation,
@@ -27,6 +28,7 @@ from loom.personal_dev_membership_client import (
     PersonalDevMembershipError,
     PersonalDevMembershipRevisionConflictError,
 )
+from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMembershipMutationV1,
@@ -57,6 +59,8 @@ class MembershipAdmissionGuard(Protocol):
 
 
 class MembershipReconciliationAuthority(Protocol):
+    async def create_membership_successor(self, **kwargs: object) -> object: ...
+
     async def prepare_capacity_membership(self, **kwargs: object) -> object: ...
 
     async def complete_activation(self, **kwargs: object) -> object: ...
@@ -154,6 +158,7 @@ class PersonalDevMembershipReconciler:
     observer: MembershipObserver | None = None
     cleanup_executor: MembershipCleanupExecutor | None = None
     admission: MembershipAdmissionGuard | None = None
+    successor_bindings: Mapping[UUID, PersonalDevMembershipSuccessorBindingV1] | None = None
 
     async def _assert_admission(
         self, *, now: Callable[[], datetime], run: MembershipLeaseRunner
@@ -179,6 +184,12 @@ class PersonalDevMembershipReconciler:
         operation = claim.operation
         if operation.capacity_mode != "membership-v1":
             raise ValueError("operation does not use membership")
+        if operation.checkpoint == "membership_outcome_resolved" and not (
+            operation.kind == "destroy" and operation.capacity_membership_envelope is not None
+            and isinstance(operation.capacity_membership_envelope.historical_outcome, PersonalMembershipOperationCommittedV1)
+        ):
+            await self._reconcile_successor(claim, lease=lease, now=now, run=run)
+            return
         if operation.kind == "destroy" and operation.checkpoint in {
             "cleanup_pending", "membership_outcome_resolved", "release_verified",
             "local_authority_sealed", "namespace_deleted", "database_deleted",
@@ -392,6 +403,43 @@ class PersonalDevMembershipReconciler:
             **lease, now=now(), outcome=outcome
         )
         return True
+
+    async def _reconcile_successor(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        *,
+        lease: dict[str, object],
+        now: Callable[[], datetime],
+        run: MembershipLeaseRunner,
+    ) -> None:
+        binding = (self.successor_bindings or {}).get(claim.operation.id)
+        if binding is None:
+            raise PersonalDevMembershipAdmissionError("reviewed successor adoption is not configured")
+
+        def validate_review() -> None:
+            timestamp = now()
+            if (
+                binding.predecessor_operation_id != claim.operation.id
+                or self.management_principal_id != binding.authority.management_principal_id
+                or timestamp.tzinfo is None or timestamp.utcoffset() is None
+                or not binding.reviewed_at <= timestamp < binding.expires_at
+            ):
+                raise PersonalDevMembershipAdmissionError("successor review identity or window is invalid")
+
+        validate_review()
+        checkpoint = await run(self.client.membership_checkpoint())
+        if (
+            checkpoint.execution != binding.authority.execution
+            or checkpoint.namespace_id != binding.authority.namespace_id
+        ):
+            raise PersonalDevMembershipAdmissionError("successor current mutation authority changed")
+        if claim.operation.kind != "destroy":
+            await self._assert_admission(now=now, run=run)
+        validate_review()
+        await self.authority.create_membership_successor(
+            **lease, binding=binding, expected_binding_sha256=canonical_digest(binding),
+            current_checkpoint=checkpoint, now=now(),
+        )
 
     async def _reconcile_destroy(
         self,

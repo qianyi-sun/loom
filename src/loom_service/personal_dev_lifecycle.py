@@ -6,10 +6,11 @@ import asyncio
 import logging
 import os
 import ssl
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -41,6 +42,7 @@ from loom.personal_dev_membership_reconciler import (
     MembershipObserver,
     PersonalDevMembershipReconciler,
 )
+from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 from loom.personal_dev_reconciler import (
     PersonalDevEnvironmentReconciler,
     PersonalDevPreparationExecutor,
@@ -80,6 +82,7 @@ class PersonalDevMembershipRuntime:
     observer: MembershipObserver
     admission: MembershipAdmissionGuard
     management_principal_id: str
+    successor_bindings: Mapping[UUID, PersonalDevMembershipSuccessorBindingV1] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +296,9 @@ class SessionPersonalDevReconciliationAuthority:
     async def prepare_capacity_membership(self, **kwargs: Any) -> Any:
         return await self._call("prepare_capacity_membership", **kwargs)
 
+    async def create_membership_successor(self, **kwargs: Any) -> Any:
+        return await self._call("create_membership_successor", **kwargs)
+
     async def refresh_capacity_membership(self, **kwargs: Any) -> Any:
         return await self._call("refresh_capacity_membership", **kwargs)
 
@@ -359,6 +365,7 @@ async def personal_dev_reconcile_run_loop(
                 observer=membership.observer,
                 cleanup_executor=executor,
                 admission=membership.admission,
+                successor_bindings=membership.successor_bindings,
             )
             if membership is not None else None
         ),
