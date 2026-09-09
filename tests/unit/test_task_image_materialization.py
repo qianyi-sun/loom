@@ -133,6 +133,7 @@ def test_manifest_qualified_key_never_reuses_legacy_or_other_content() -> None:
     legacy = task_image_materialization_key(**values)
     assert task_image_materialization_key(**values, bundle_content_manifest_sha256="") == legacy
     strong = task_image_materialization_key(**values, bundle_content_manifest_sha256="b" * 64)
+    assert strong == "6a9615584dfbf3de810afe0d35435c56744dbb4566d0833b6554a1dc19412a4d"
     assert strong != legacy
     assert strong == task_image_materialization_key(
         **{**values, "task_checksum": "sha256:" + "a" * 64},

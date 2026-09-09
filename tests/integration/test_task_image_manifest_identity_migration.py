@@ -8,8 +8,11 @@ import pytest
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from loom.db.schema import TaskImageMaterialization
+from loom.db.schema import Task, TaskImageMaterialization
+from loom.task_image_materialization import ensure_task_image_materializations
+from tests.integration.test_task_image_materialization_store import _task_values
 from tests.integration.test_task_image_registry_credential_migration import _config
 
 TABLE = "task_image_materializations"
@@ -147,9 +150,11 @@ def test_manifest_identity_database_binding_and_immutability(isolated_migration_
             "task_checksum = repeat('d', 64)",
             "cpu_arch = 'x86_64'",
             "materialization_key = repeat('d', 64)",
-            "task_config = '{\"changed\":true}'::jsonb",
+            "task_config = jsonb_build_object('changed', true)",
             "task_source = 's3://other/source/'",
-            "task_source_provenance = task_source_provenance || '{\"extra\":true}'::jsonb",
+            "task_source_provenance = task_source_provenance || jsonb_build_object('extra', true)",
+            f"{COLUMN} = repeat('d', 64), materialization_key = :other_key, "
+            f"task_source_provenance = jsonb_build_object('{COLUMN}', repeat('d', 64))",
             f"{COLUMN} = '', task_source_provenance = '{{}}'::jsonb, materialization_key = :legacy_key",
         ]
         for assignment in updates:
@@ -157,7 +162,7 @@ def test_manifest_identity_database_binding_and_immutability(isolated_migration_
                 with engine.begin() as connection:
                     connection.execute(
                         text(f"UPDATE {TABLE} SET {assignment} WHERE id = :id"),
-                        dict(id=strong_id, legacy_key=_key()),
+                        dict(id=strong_id, legacy_key=_key(), other_key=_key("d" * 64)),
                     )
         with pytest.raises(DBAPIError):
             with engine.begin() as connection:
@@ -243,3 +248,58 @@ def test_manifest_identity_migration_legacy_roundtrip_and_busy_lock(
             ).one() == (legacy_id, _key(), "")
     finally:
         engine.dispose()
+
+
+def test_manifest_identity_downgrade_refuses_one_strong_row_without_collision(
+    isolated_migration_postgres_url,
+):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            row_id = _insert(connection, "b" * 64)
+        with pytest.raises(DBAPIError, match="manifest-qualified materializations"):
+            command.downgrade(_config(isolated_migration_postgres_url), "0135")
+        with engine.connect() as connection:
+            assert connection.execute(text(f"SELECT id, {COLUMN} FROM {TABLE}")).one() == (
+                row_id,
+                "b" * 64,
+            )
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0136"
+    finally:
+        engine.dispose()
+
+
+async def test_legacy_ensure_cannot_silently_reuse_ready_row_for_strong_provenance(
+    isolated_migration_postgres_url,
+):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            task = Task(**_task_values(task_id="manifest-identity", checksum=CHECKSUM))
+            rows = await ensure_task_image_materializations(session, task_row=task)
+            for row in rows:
+                row.state = "ready"
+                row.registry_images = {"task": "registry.example/task@sha256:" + "d" * 64}
+            await session.commit()
+            before = (
+                await session.execute(
+                    text(
+                        f"SELECT id, materialization_key, state, {COLUMN} FROM {TABLE} ORDER BY id"
+                    )
+                )
+            ).all()
+            task.source_provenance = {**task.source_provenance, COLUMN: "b" * 64}
+            # Transitional safety: producers remain unswitched. The v1 insert
+            # must reject, not win ON CONFLICT and reuse a weak ready snapshot.
+            with pytest.raises(DBAPIError, match="manifest_binding_check"):
+                async with session.begin_nested():
+                    await ensure_task_image_materializations(session, task_row=task)
+            assert (
+                await session.execute(
+                    text(
+                        f"SELECT id, materialization_key, state, {COLUMN} FROM {TABLE} ORDER BY id"
+                    )
+                )
+            ).all() == before
+    finally:
+        await engine.dispose()
