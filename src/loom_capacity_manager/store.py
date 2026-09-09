@@ -4209,6 +4209,7 @@ class CapacityManagementStore:
         authority = (
             await session.execute(
                 select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
+                .execution_options(populate_existing=True)
             )
         ).scalar_one()
         if (
@@ -4257,6 +4258,7 @@ class CapacityManagementStore:
         preparation: ExecutionPreparationV3 | None = None
         membership = None
         managed_base_subjects: tuple[SubjectConfigurationV1, ...] = ()
+        typed_history = None
         if authority.execution_epoch > 0:
             execution_epoch_row = (
                 await session.execute(
@@ -4267,7 +4269,26 @@ class CapacityManagementStore:
             ).scalar_one_or_none()
             if execution_epoch_row is None:
                 raise AuthorityRecoveryError("execution epoch row is missing")
-            parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
+            if execution_epoch_row.manifest_payload.get("schema_version") == 4:
+                # Accounting-only read dispatch. Preparation and executable
+                # promotion remain closed until every typed executor is ready.
+                from loom_capacity_manager.typed_membership_store import (
+                    _load_typed_history,
+                    _validated_materialization,
+                )
+
+                typed_history = await _load_typed_history(session, execution_epoch_row.execution_epoch)
+                if typed_history.epoch.configuration_epoch != active.configuration_epoch:
+                    raise ConfigurationConflictError("typed membership active configuration changed")
+                typed_rows, _accounts = await _validated_materialization(
+                    session, typed_history.epoch, typed_history.fleet, typed_history.latest,
+                )
+                subjects = tuple(_parse_contract(SubjectConfigurationV1, row.payload) for row in typed_rows)
+                managed_ids = set(typed_history.preparation.personal_membership.managed_base_subject_ids)
+                managed_base_subjects = tuple(value for value in base_subjects if value.subject_id in managed_ids)
+                parsed_preparation = None
+            else:
+                parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
             if isinstance(parsed_preparation, ExecutionPreparationV3):
                 preparation = parsed_preparation
                 delegated_epoch_row = execution_epoch_row
@@ -4314,7 +4335,7 @@ class CapacityManagementStore:
                 )
                 if {value.subject_id for value in managed_base_subjects} != managed_ids:
                     raise ConfigurationConflictError("managed base membership is incomplete")
-            else:
+            elif typed_history is None:
                 subjects = base_subjects
         else:
             subjects = base_subjects
@@ -4502,6 +4523,16 @@ class CapacityManagementStore:
             existing_pending_slots=0,
             existing_pending_jobs=0,
         )
+        if typed_history is not None:
+            from loom_capacity_manager.build_membership_contracts import DelegatedAllocationInputV3
+            from loom_capacity_manager.membership import resolved_subject_references
+
+            typed_value = DelegatedAllocationInputV3(
+                **values, preparation=typed_history.preparation,
+                managed_base_subjects=managed_base_subjects, membership=typed_history.snapshot(),
+            )
+            resolved_subject_references(typed_value)
+            return typed_value
         if preparation is not None and membership is not None:
             return DelegatedAllocationInputV2(
                 **values,

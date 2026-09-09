@@ -9,6 +9,7 @@ supported; recreation, typed applications and executable V4 admission remain clo
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -22,6 +23,7 @@ from loom_capacity_manager.build_generation_store import (
 from loom_capacity_manager.build_membership_contracts import (
     ExecutionPreparationV4,
     PersonalBuildMemberV1,
+    PersonalMembershipSnapshotV2,
 )
 from loom_capacity_manager.contracts import (
     AccountPolicyV1,
@@ -55,6 +57,7 @@ from loom_capacity_manager.store import (
     ConfigurationConflictError,
     ExecutionConflictError,
     IdempotencyConflictError,
+    _canonical_json_digest,
     _derive_owner_account,
     _parse_contract,
     _subject_scalars_match,
@@ -68,6 +71,92 @@ from loom_capacity_manager.typed_membership_commands import (
     parse_typed_membership_mutation,
 )
 from loom_capacity_manager.typed_membership_events import validate_typed_membership_event_prefix
+
+
+@dataclass(frozen=True)
+class _TypedHistory:
+    epoch: CapacityExecutionEpoch
+    preparation: ExecutionPreparationV4
+    fleet: FleetManifestV1
+    events: tuple[CapacityPersonalMembershipEvent, ...]
+    results: tuple[PersonalMembershipResultV2, ...]
+    latest: dict[UUID, PersonalMembershipResultV2]
+    latest_requests: dict[UUID, PersonalMembershipMutationV2]
+
+    def snapshot(self, through_revision: int | None = None) -> PersonalMembershipSnapshotV2:
+        revision = len(self.events) if through_revision is None else through_revision
+        if type(revision) is not int or revision < 0 or revision > len(self.events):
+            raise ConfigurationConflictError("typed membership revision is invalid or unavailable")
+        latest = {result.member.configuration.subject_id: result.member for result in self.results[:revision]}
+        return PersonalMembershipSnapshotV2(
+            namespace_id=self.preparation.personal_membership.namespace_id,
+            revision=revision, head_sha256=self.events[revision - 1].head_sha256 if revision else "0" * 64,
+            members=tuple(latest.values()),
+        )
+
+
+async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _TypedHistory:
+    """Authenticate retained evidence, not current authority or permission to launch.
+
+    Read the whole log even for a historical prefix: reporter rotation is proved
+    by its successor, and the retained reporter represents its last generation.
+    Callers requiring currentness retain authority-first transactional fencing.
+    """
+    if type(execution_epoch) is not int or execution_epoch <= 0:
+        raise ConfigurationConflictError("typed membership execution epoch is invalid")
+    epoch = await session.get(CapacityExecutionEpoch, execution_epoch, populate_existing=True)
+    if epoch is None:
+        raise ExecutionConflictError("typed membership execution is unavailable")
+    try:
+        preparation = ExecutionPreparationV4.model_validate_json(json.dumps(epoch.manifest_payload))
+        _require_values(epoch, {
+            "execution_manifest_sha256": canonical_executable_digest(preparation),
+            "authority_incarnation": preparation.authority_incarnation,
+            "prepared_writer_epoch": preparation.expected_writer_epoch,
+            "configuration_epoch": preparation.configuration_epoch,
+            "fleet_generation": preparation.fleet_generation, "fleet_digest": preparation.fleet_digest,
+            "trusted_fleet_release_sha256": preparation.trusted_fleet_release_sha256,
+            "requested_ceiling": preparation.requested_ceiling,
+            "requested_rate_per_minute": preparation.requested_rate_per_minute,
+            "rollback_evidence_sha256": preparation.rollback_evidence_sha256,
+            "environment_acknowledgements_sha256": _canonical_json_digest([item.model_dump(mode="json") for item in preparation.subject_acknowledgements]),
+            "legacy_writer_manifest_sha256": _canonical_json_digest([item.model_dump(mode="json") for item in preparation.legacy_writer_fences]),
+        }, label="execution manifest")
+        for executor in preparation.executors:
+            _require_values(epoch, {f"{executor.pool_id}_{field}": getattr(executor, field) for field in (
+                "executor_id", "executor_incarnation", "pool_id", "pool_generation", "signing_key_sha256",
+                "local_authority_sha256", "controller_authority_sha256",
+            )}, label="execution executor")
+        fleet_row = (await session.scalars(select(CapacityConfigGeneration).where(
+            CapacityConfigGeneration.scope == "fleet", CapacityConfigGeneration.scope_generation == epoch.fleet_generation,
+            CapacityConfigGeneration.digest == epoch.fleet_digest,
+        ).execution_options(populate_existing=True))).one_or_none()
+        if fleet_row is None:
+            raise ConfigurationConflictError("typed membership fleet is unavailable")
+        fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
+        if fleet.fleet_generation != epoch.fleet_generation or canonical_digest(fleet) != epoch.fleet_digest:
+            raise ConfigurationConflictError("typed membership fleet changed")
+        events = tuple((await session.scalars(select(CapacityPersonalMembershipEvent).where(
+            CapacityPersonalMembershipEvent.execution_epoch == execution_epoch,
+        ).order_by(CapacityPersonalMembershipEvent.revision).execution_options(populate_existing=True))).all())
+        results = validate_typed_membership_event_prefix(events, preparation, fleet, execution_epoch=execution_epoch)
+        latest: dict[UUID, PersonalMembershipResultV2] = {}
+        latest_requests: dict[UUID, PersonalMembershipMutationV2] = {}
+        reporters: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1]] = {}
+        for event, result in zip(events, results, strict=True):
+            original = parse_typed_membership_mutation(json.dumps(event.request_payload))
+            if not isinstance(result.member, PersonalBuildMemberV1) or result.member.reincarnation is not None:
+                raise ConfigurationConflictError("typed membership history lifecycle is not yet admitted")
+            latest[event.subject_id] = result
+            latest_requests[event.subject_id] = original
+            reporters[event.reporter_incarnation] = (original, result.member)
+        for reporter_id, (original, member) in reporters.items():
+            current_reporter = latest[member.configuration.subject_id].member.configuration.demand_reporter_incarnation
+            await _require_staged_facts(session, original, member, preparation,
+                reporter_state="current" if reporter_id == current_reporter else "fenced")
+        return _TypedHistory(epoch, preparation, fleet, events, results, latest, latest_requests)
+    except ValueError as exc:
+        raise ConfigurationConflictError("typed membership historical evidence is invalid") from exc
 
 
 async def _require_account(session: AsyncSession, epoch: int, account: AccountPolicyV1, *, optional: bool = False) -> None:
@@ -142,6 +231,20 @@ async def _validated_materialization(
 class CapacityTypedMembershipStore:
     """Append exact pending build services under one SERIALIZABLE authority lock."""
 
+    async def snapshot(
+        self, session: AsyncSession, epoch: CapacityExecutionEpoch | int, *, through_revision: int | None = None,
+    ) -> PersonalMembershipSnapshotV2:
+        history = await _load_typed_history(session, epoch.execution_epoch if isinstance(epoch, CapacityExecutionEpoch) else epoch)
+        return history.snapshot(through_revision)
+
+    async def verify_snapshot_materialization(
+        self, session: AsyncSession, epoch: CapacityExecutionEpoch, snapshot: PersonalMembershipSnapshotV2,
+    ) -> None:
+        history = await _load_typed_history(session, epoch.execution_epoch)
+        if canonical_bytes(snapshot) != canonical_bytes(history.snapshot()):
+            raise ConfigurationConflictError("typed membership snapshot is not the current history")
+        await _validated_materialization(session, history.epoch, history.fleet, history.latest)
+
     async def apply_build(
         self, session: AsyncSession, request: PersonalMembershipMutationV2, *, actor: str, idempotency_key: UUID,
     ) -> PersonalMembershipResultV2:
@@ -180,13 +283,8 @@ class CapacityTypedMembershipStore:
             or preparation.configuration_epoch != epoch.configuration_epoch
         ):
             raise ExecutionConflictError("typed membership execution fence changed")
-        fleet_row = (await session.scalars(select(CapacityConfigGeneration).where(
-            CapacityConfigGeneration.scope == "fleet", CapacityConfigGeneration.scope_generation == epoch.fleet_generation,
-            CapacityConfigGeneration.digest == epoch.fleet_digest,
-        ).execution_options(populate_existing=True))).one_or_none()
-        if fleet_row is None:
-            raise ConfigurationConflictError("typed membership fleet is unavailable")
-        fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
+        history = await _load_typed_history(session, epoch.execution_epoch)
+        fleet = history.fleet
         member = derive_build_member(request, preparation, fleet)
         account = _derive_owner_account(fleet, member.owner_id)
         projection = request.command.projection
@@ -201,24 +299,7 @@ class CapacityTypedMembershipStore:
             replays[0].request_digest != digest, replays[0].request_payload != request.model_dump(mode="json"),
         ))):
             raise IdempotencyConflictError("typed membership replay identity changed")
-        events = list((await session.scalars(select(CapacityPersonalMembershipEvent).where(
-            CapacityPersonalMembershipEvent.execution_epoch == epoch.execution_epoch,
-        ).order_by(CapacityPersonalMembershipEvent.revision).with_for_update().execution_options(populate_existing=True))).all())
-        results = validate_typed_membership_event_prefix(events, preparation, fleet, execution_epoch=epoch.execution_epoch)
-        latest: dict[UUID, PersonalMembershipResultV2] = {}
-        latest_requests: dict[UUID, PersonalMembershipMutationV2] = {}
-        reporter_generations: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1]] = {}
-        for event, result in zip(events, results, strict=True):
-            original = parse_typed_membership_mutation(json.dumps(event.request_payload))
-            if not isinstance(result.member, PersonalBuildMemberV1) or result.member.reincarnation is not None:
-                raise ConfigurationConflictError("typed membership history lifecycle is not yet admitted")
-            latest[result.member.configuration.subject_id] = result
-            latest_requests[result.member.configuration.subject_id] = original
-            reporter_generations[result.member.configuration.demand_reporter_incarnation] = (original, result.member)
-        for reporter_id, (original, historical_member) in reporter_generations.items():
-            current_reporter = latest[historical_member.configuration.subject_id].member.configuration.demand_reporter_incarnation
-            await _require_staged_facts(session, original, historical_member, preparation,
-                reporter_state="current" if reporter_id == current_reporter else "fenced")
+        events, results, latest, latest_requests = history.events, history.results, history.latest, history.latest_requests
         rows, derived_accounts = await _validated_materialization(session, epoch, fleet, latest)
         if replays:
             replay = next((result for event, result in zip(events, results, strict=True) if event.id == replays[0].id), None)

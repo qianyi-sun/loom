@@ -735,6 +735,18 @@ remain replayable after update or destroy. This internal transaction is not yet
 exposed as runtime admission; recreation and typed application handling remain
 separate unfinished work.
 
+Typed membership snapshots now read the exact persisted execution manifest,
+fleet, full event chain and retained generation evidence. Historical prefixes
+remain readable after reporter rotation and teardown; the full chain proves the
+retired reporter's last generation. Current materialization validation separately
+rejects an old snapshot. The mutation transaction reuses this same history reader.
+Allocation input loading explicitly returns the typed input with base applications
+and owner build services, reusing the existing demand, pool, reservation, physical
+commitment and fairness readers. Disabled build services and old physical jobs
+remain represented for accounting. Cached writer authority is refreshed before
+accepting a writer fence. This is an accounting read path, not executable V4
+admission: the reconciler still rejects promotion of this typed input.
+
 These new contracts are deliberately not accepted by execution preparation or
 promotion yet. Direct preparation-store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a
