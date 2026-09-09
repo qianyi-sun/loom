@@ -220,6 +220,8 @@ async def write_storage_workload(
         raise DevInstanceRuntimeError("workload Job must use an API-generated selector")
     encoded = _canonical(spec)
     requested_attempt = _attempt(metadata)
+    if kind == "Job" and requested_attempt is None:
+        raise DevInstanceRuntimeError("bound workload Job requires attempt authority")
     if len(encoded.encode()) > 64 * 1024:
         raise DevInstanceRuntimeError("workload requested spec exceeds its byte bound")
     namespace = await kubectl.read_storage_namespace(identity)
@@ -236,6 +238,14 @@ async def write_storage_workload(
     if not isinstance(annotations, dict) or (set(ownership) | {_EPOCH, _PHASE, _SPEC}) & set(annotations):
         raise DevInstanceRuntimeError("workload annotations conflict with ownership")
     name, resource = metadata["name"], _KINDS[kind][1]
+    reservation = None
+    if kind == "Job" and requested_attempt is not None:
+        from loom.personal_dev_job_reservation import reserve_job_attempt
+
+        reservation = await reserve_job_attempt(
+            kubectl, identity, namespace_uid=namespace_uid, job_name=name, intent=encoded,
+            operation_epoch=operation_epoch, attempt=requested_attempt,
+        )
     reply = await kubectl.runner.run(kubectl._argv(
         "get", resource, name, "--namespace", identity.namespace, "--ignore-not-found", "-o", "json",
     ))
@@ -247,10 +257,21 @@ async def write_storage_workload(
         staged["metadata"]["annotations"] = {
             **annotations, **ownership, _EPOCH: str(operation_epoch), _PHASE: "staged", _SPEC: encoded,
         }
-        reply = await kubectl.runner.run(
-            kubectl._argv("create", "-f", "-", "-o", "json"), stdin=_canonical(staged),
-        )
-        observed = _decode(reply.stdout)
+        try:
+            reply = await kubectl.runner.run(
+                kubectl._argv("create", "-f", "-", "-o", "json"), stdin=_canonical(staged),
+            )
+            observed = _decode(reply.stdout)
+        except DevInstanceRuntimeError:
+            # A lost acknowledgement or concurrent inert CREATE is ambiguous,
+            # not permission to create again. Authenticate one existing object
+            # through the same namespace/intent/attempt checks below.
+            reply = await kubectl.runner.run(kubectl._argv(
+                "get", resource, name, "--namespace", identity.namespace, "--ignore-not-found", "-o", "json",
+            ))
+            observed = _decode(reply.stdout, optional=True)
+            if observed is None:
+                raise
     observed = _object(observed)
     stored = observed["metadata"].get("annotations", {})
     epoch = stored.get(_EPOCH) if isinstance(stored, dict) else None
@@ -280,6 +301,8 @@ async def write_storage_workload(
     current = await kubectl.read_storage_namespace(identity)
     if current is None or kubectl._namespace_uid(current) != namespace_uid:
         raise DevInstanceRuntimeError("storage namespace changed before workload update")
+    if reservation is not None:
+        await reservation.verify(kubectl)
     if created:
         # CREATE acknowledgement can precede the controller's initial status
         # update. Observe that one object again BEFORE attempting any CAS. Only
@@ -308,6 +331,8 @@ async def write_storage_workload(
         # Successful and active Jobs keep their UID. A genuinely failed previous
         # attempt is deleted only after authenticating its exact intent, UID/RV
         # and terminal state. Re-creation still passes through inert staging.
+        if reservation is not None:
+            await reservation.verify(kubectl)
         await _delete_failed_job(kubectl, observed)
         await write_storage_workload(kubectl, identity, document, operation_epoch=operation_epoch)
         return
@@ -319,4 +344,6 @@ async def write_storage_workload(
         final["metadata"]["annotations"]["deployment.kubernetes.io/revision"] = observed["metadata"]["annotations"]["deployment.kubernetes.io/revision"]
     # PUT cannot create a missing object and UID/RV prevents replacing a newer
     # object. Do not retry conflicts internally with freshly read authority.
+    if reservation is not None:
+        await reservation.verify(kubectl)
     await _replace_workload(kubectl, identity, observed, final)

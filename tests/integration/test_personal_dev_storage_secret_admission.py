@@ -263,13 +263,20 @@ async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secre
     reservation_name = "loom-workload-fence-" + retry_jobs[0]["metadata"]["name"]
     reservation = await managed.read_resource_json(namespace=identity.namespace, kind="configmap", name=reservation_name)
     assert reservation["data"]["sequence"] == "1"
-    for field, value in (("sequence", "0"), ("attempt", str(uuid4())), ("intent", "{}"), ("extra", "not-allowed")):
+    for field, value in (("epoch", "0"), ("sequence", "0"), ("sequence", "9223372036854775808"),
+                         ("attempt", str(uuid4())), ("intent", "{}"), ("job", "loom-migrate-abcdef0-g2"),
+                         ("extra", "not-allowed")):
         changed = deepcopy(reservation)
         changed["data"][field] = value
         with pytest.raises(DevInstanceRuntimeError):
             await managed.runner.run(managed._argv("replace", "--dry-run=server", "-f", "-"), stdin=json.dumps(changed))
     changed = deepcopy(reservation)
     changed["metadata"]["ownerReferences"][0]["controller"] = True
+    with pytest.raises(DevInstanceRuntimeError):
+        await managed.runner.run(managed._argv("replace", "--dry-run=server", "-f", "-"), stdin=json.dumps(changed))
+    changed = deepcopy(reservation)
+    changed["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    changed["metadata"]["annotations"]["loom.dev/storage-namespace-uid"] = changed["metadata"]["ownerReferences"][0]["uid"]
     with pytest.raises(DevInstanceRuntimeError):
         await managed.runner.run(managed._argv("replace", "--dry-run=server", "-f", "-"), stdin=json.dumps(changed))
     delete = kubectl._argv("delete", "configmap", reservation_name, "-n", identity.namespace, "--dry-run=server")

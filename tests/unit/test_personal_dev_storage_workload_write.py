@@ -67,3 +67,47 @@ async def test_malformed_workload_readback_rejects_before_mutation(payload):
         "spec": {"replicas": 1, "template": {}}}
     with pytest.raises(DevInstanceRuntimeError):
         await write_storage_workload(cluster, identity, document, operation_epoch=1)
+
+
+@pytest.mark.parametrize("recovery", ("missing", "malformed", "foreign", "drift", "namespace_replaced"))
+async def test_ambiguous_create_never_activates_unauthenticated_readback(recovery):
+    from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
+    from tests.unit.test_personal_dev_storage_vault import _Cluster
+
+    identity = _bound_claim().operation.storage_binding.identity
+
+    class Cluster(_Cluster):
+        creates = 0
+        recovering = False
+
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            if "create" in argv:
+                self.creates += 1
+                if recovery != "missing":
+                    await super().run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+                    stored = self.workloads[("Deployment", "probe")]
+                    if recovery == "foreign":
+                        stored["metadata"]["ownerReferences"][0]["uid"] = "foreign-uid"
+                    elif recovery == "drift":
+                        stored["spec"]["replicas"] = 99
+                    elif recovery == "namespace_replaced":
+                        self.namespace["metadata"]["uid"] = "successor-uid"
+                self.recovering = True
+                raise DevInstanceRuntimeError("ambiguous create")
+            if self.recovering and "get" in argv and "deployment" in argv and recovery == "malformed":
+                return CommandResult("{}", "")
+            if "replace" in argv:
+                assert "--dry-run=server" in argv, "ambiguous objects must not be activated"
+            return await super().run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+    cluster = Cluster()
+    cluster.namespace = {"metadata": {"name": identity.namespace, "uid": "namespace-uid",
+                                     "annotations": personal_dev_storage_annotations(identity)}}
+    document = {"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "probe", "namespace": identity.namespace},
+        "spec": {"replicas": 1, "template": {}}}
+    with pytest.raises(DevInstanceRuntimeError):
+        await write_storage_workload(KubectlClient("kubectl", runner=cluster), identity, document, operation_epoch=1)
+    assert cluster.creates == 1
+    assert all("replace" not in argv or "--dry-run=server" in argv for argv, _ in cluster.writes)
+    assert document["spec"]["replicas"] == 1

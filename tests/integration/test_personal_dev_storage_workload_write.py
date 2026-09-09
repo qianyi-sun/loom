@@ -35,7 +35,8 @@ def _workload(identity, kind="Deployment"):
     return {
         "apiVersion": "batch/v1" if kind == "Job" else "apps/v1",
         "kind": kind,
-        "metadata": {"name": "storage-workload-probe", "namespace": identity.namespace},
+        "metadata": {"name": "storage-workload-probe", "namespace": identity.namespace,
+                     **({"labels": {"loom.dev/attempt": str(uuid4()), "loom.dev/attempt-sequence": "0"}} if kind == "Job" else {})},
         "spec": spec,
     }
 
@@ -244,15 +245,19 @@ async def test_workload_lost_reply_retries_same_uid_and_rejects_old_epoch(
     class LostReply:
         async def run(self, argv, *, stdin=None, timeout_seconds=120):
             result = await kubectl.runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
-            if lost_at in argv and "--dry-run=server" not in argv:
+            payload = json.loads(stdin) if stdin else None
+            if lost_at in argv and "--dry-run=server" not in argv and isinstance(payload, dict) and payload.get("kind") == kind:
                 raise DevInstanceRuntimeError("lost reply")
             return result
 
-    with pytest.raises(DevInstanceRuntimeError, match="lost reply"):
+    if lost_at == "create":
         await write_storage_workload(KubectlClient("kubectl", runner=LostReply()), identity, document, operation_epoch=2)
+    else:
+        with pytest.raises(DevInstanceRuntimeError, match="lost reply"):
+            await write_storage_workload(KubectlClient("kubectl", runner=LostReply()), identity, document, operation_epoch=2)
     before = await kubectl.read_resource_json(namespace=identity.namespace, kind=kind.lower(), name=document["metadata"]["name"])
     await write_storage_workload(kubectl, identity, document, operation_epoch=2)
     after = await kubectl.read_resource_json(namespace=identity.namespace, kind=kind.lower(), name=document["metadata"]["name"])
     assert after["metadata"]["uid"] == before["metadata"]["uid"]
-    with pytest.raises(DevInstanceRuntimeError, match="epoch"):
+    with pytest.raises(DevInstanceRuntimeError, match=r"epoch|reservation attempt was superseded"):
         await write_storage_workload(kubectl, identity, document, operation_epoch=1)

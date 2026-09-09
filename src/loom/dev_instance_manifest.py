@@ -753,7 +753,7 @@ def dev_instance_manifest_documents(
         "spec": {
             "backoffLimit": 1,
             "activeDeadlineSeconds": 600,
-            "ttlSecondsAfterFinished": 600,
+            **({"ttlSecondsAfterFinished": 600} if identity.storage_binding is None else {}),
             "template": {
                 "metadata": {
                     "labels": {

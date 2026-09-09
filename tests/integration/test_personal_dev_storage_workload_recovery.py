@@ -8,7 +8,11 @@ from uuid import uuid4
 
 import pytest
 
-from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient
+from loom.dev_instance_runtime import (
+    DevInstanceRuntimeError,
+    KubectlClient,
+    WorkloadStatusConflictError,
+)
 from loom.personal_dev_storage_workload_write import write_storage_workload
 from tests.integration.test_personal_dev_storage_namespace import (
     disposable_storage_kubectl,  # noqa: F401
@@ -26,7 +30,7 @@ async def _reconcile_workload(kubectl, identity, document, *, operation_epoch):
         try:
             await write_storage_workload(kubectl, identity, document, operation_epoch=operation_epoch)
             return
-        except DevInstanceRuntimeError:
+        except WorkloadStatusConflictError:
             if attempt == 4:
                 raise
             await asyncio.sleep(0)

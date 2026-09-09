@@ -30,11 +30,13 @@ async def test_delayed_inert_create_is_collected_and_successor_workload_survives
 
     class DelayedCreate:
         async def run(self, argv, *, stdin=None, timeout_seconds=120):
-            if "create" in argv:
+            payload = json.loads(stdin) if stdin else None
+            workload_create = "create" in argv and isinstance(payload, dict) and payload.get("kind") == kind
+            if workload_create:
                 paused.set()
                 await resume.wait()
             reply = await kubectl.runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
-            if "create" in argv:
+            if workload_create:
                 created.append(json.loads(reply.stdout))
             return reply
 

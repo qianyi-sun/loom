@@ -448,7 +448,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "9c0fc91bd39a4c74332e8fd33966f4e3b82695180bbd2351061a7a2cdeded26f"
+        "594d20f3ac23042bf8b3ef1a34cf3b582b7e0dd0b85a2a6a7019c898edd75a30"
     )
 
     identities = {_identity(document) for document in documents}

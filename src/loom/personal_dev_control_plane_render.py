@@ -1487,6 +1487,56 @@ def _builder_support_resource_admission_validations(
     )
 
 
+def _job_reservation_contract(target: str) -> str:
+    metadata, data = f"{target}.metadata", f"{target}.data"
+    annotations, labels = f"{metadata}.annotations", f"{metadata}.labels"
+    owner = f"{metadata}.ownerReferences[0]"
+    epoch, sequence, attempt = (f"{data}['{key}']" for key in ("epoch", "sequence", "attempt"))
+    old_epoch, old_sequence = "oldObject.data['epoch']", "oldObject.data['sequence']"
+    storage_keys = ["loom.dev/storage-binding", "loom.dev/storage-binding-sha256", "loom.dev/storage-incarnation"]
+    same_storage = " && ".join(
+        f"{annotations}['{key}'] == namespaceObject.metadata.annotations['{key}']" for key in storage_keys
+    )
+    return (
+        f"{target}.apiVersion == 'v1' && {target}.kind == 'ConfigMap' && "
+        f"(!has({target}.binaryData) || {target}.binaryData.size() == 0) && "
+        f"(!has({target}.immutable) || !{target}.immutable) && "
+        f"(!has({metadata}.finalizers) || {metadata}.finalizers.size() == 0) && "
+        f"!has({metadata}.generateName) && "
+        f"has({labels}) && {labels}.size() == 3 && "
+        f"{labels}['app.kubernetes.io/managed-by'] == 'loom-dev-instance-controller' && "
+        f"{labels}['app.kubernetes.io/part-of'] == 'loom' && "
+        f"{labels}['loom.dev/instance'] == request.namespace.substring(9) && "
+        "namespaceObject != null && variables.personalStorageBound && "
+        f"has({annotations}) && {annotations}.size() == 4 && {same_storage} && "
+        # CEL exposes only name/generateName/labels/annotations on namespace
+        # metadata. Live UID authentication belongs to the writer; admission
+        # pins the submitted owner UID to its annotation and on every UPDATE.
+        f"{annotations}['loom.dev/storage-namespace-uid'].matches('^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$') && "
+        f"{annotations}['loom.dev/storage-namespace-uid'] != '00000000-0000-0000-0000-000000000000' && "
+        f"has({metadata}.ownerReferences) && {metadata}.ownerReferences.size() == 1 && "
+        f"{owner}.apiVersion == 'v1' && {owner}.kind == 'Namespace' && "
+        f"{owner}.name == request.namespace && {owner}.uid == {annotations}['loom.dev/storage-namespace-uid'] && "
+        f"!has({owner}.controller) && !has({owner}.blockOwnerDeletion) && "
+        f"has({data}) && {data}.size() == 5 && "
+        f"['job','intent','epoch','sequence','attempt'].all(key, key in {data}) && "
+        f"{data}['job'].matches('^loom-migrate-[0-9a-f]{{7}}-g[1-9][0-9]*$') && "
+        f"{metadata}.name == 'loom-workload-fence-' + {data}['job'] && "
+        f"{data}['intent'].size() > 0 && {data}['intent'].size() <= 65536 && "
+        f"{epoch}.matches('^[1-9][0-9]{{0,18}}$') && int({epoch}) > 0 && "
+        f"{sequence}.matches('^(0|[1-9][0-9]{{0,18}})$') && int({sequence}) >= 0 && "
+        f"{attempt}.matches('^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$') && "
+        f"{attempt} != '00000000-0000-0000-0000-000000000000' && "
+        "(request.operation != 'UPDATE' || ("
+        f"{annotations} == oldObject.metadata.annotations && "
+        f"{labels} == oldObject.metadata.labels && {metadata}.ownerReferences == oldObject.metadata.ownerReferences && "
+        f"{data}['job'] == oldObject.data['job'] && {data}['intent'] == oldObject.data['intent'] && "
+        f"(int({epoch}) > int({old_epoch}) || (int({epoch}) == int({old_epoch}) && "
+        f"(int({sequence}) > int({old_sequence}) || (int({sequence}) == int({old_sequence}) && "
+        f"{attempt} == oldObject.data['attempt']))))))"
+    )
+
+
 def _management_resource_admission(
     context: _RenderContext,
     *,
@@ -1503,7 +1553,7 @@ def _management_resource_admission(
         "request.resource.resource == 'pods' && request.subResource == 'exec' && "
         "request.name == 'loom-dev-minio-0')"
     )
-    app_resources = "['secrets','services','deployments','jobs','networkpolicies','rolebindings','roles']"
+    app_resources = "['configmaps','secrets','services','deployments','jobs','networkpolicies','rolebindings','roles']"
     build_resources = (
         "['configmaps','limitranges','resourcequotas','secrets','jobs',"
         "'networkpolicies','rolebindings']"
@@ -1530,6 +1580,8 @@ def _management_resource_admission(
     )
     personal_resource_names = (
         f"(request.resource.resource == 'secrets' || "
+        "(request.resource.resource == 'configmaps' && "
+        f"{target}.metadata.name.matches('^loom-workload-fence-loom-migrate-[0-9a-f]{{7}}-g[1-9][0-9]*$')) || "
         "(request.resource.resource == 'services' && "
         f"{target}.metadata.name.matches("
         "'^loom-(control-plane|llm-gateway|service|web)-g[1-9][0-9]*$')) || "
@@ -1687,6 +1739,14 @@ def _management_resource_admission(
                 },
             ],
             "validations": [
+                {
+                    "expression": (
+                        "request.resource.resource != 'configmaps' || "
+                        f"!({personal_namespace}) || "
+                        f"(request.operation != 'DELETE' && {_job_reservation_contract(target)})"
+                    ),
+                    "message": "bound Job reservation must retain exact ownership and monotonic attempt authority",
+                },
                 {
                     "expression": (f"request.namespace != 'loom-dev' || {shared_minio_exec}"),
                     "message": "management cluster authority cannot mutate shared infrastructure",

@@ -420,13 +420,36 @@ name cannot mount a successor's credentials.
 
 A terminal failed Job may be replaced on a newer authenticated attempt, using
 foreground DELETE with both UID and resource-version preconditions, followed by
-inert staging. Successful or active Jobs retain their UID during replay. This
-object-local sequence fence does **not** persist across deletion (including Job
-TTL cleanup): a durable reservation/tombstone or a redesigned retry identity is
-still needed to exclude stale attempts during delete/recreate. Positive helper
-tests with caller retries also do not establish automatic production retry of
-Kubernetes CAS conflicts. These object-lifetime boundaries remain unresolved and
-are not rollout acceptance.
+inert staging. Successful or active Jobs retain their UID during replay. Before
+writing a bound Job, the writer reserves its canonical immutable intent and
+monotonic `(operation epoch, attempt sequence, attempt UUID)` in a namespaced
+`loom-workload-fence-<job-name>` ConfigMap. The record survives failed-Job deletion;
+older attempts cannot reacquire authority in the absence gap. Bound migration
+Jobs have no TTL; legacy migration Jobs retain their 600-second TTL. Namespace
+teardown collects the Jobs and reservation records. A future per-generation
+cleanup mechanism must retain durable completion/attempt evidence first.
+
+Reservations carry the exact storage binding and Namespace owner reference, no
+credentials. The writer checks the live Namespace UID and verifies the reservation
+after creation, before activation and before failed-Job deletion. Reservation
+updates use UID/resource-version preconditions without an internal mutation retry.
+Admission restricts their names, shape, immutable intent and ownership, monotonic
+ordering, and rejects management DELETE. CEL cannot read the live Namespace UID:
+it checks equality of the submitted UID annotation and owner reference and pins
+both on UPDATE; live UID authentication remains the writer's responsibility.
+
+A lost CREATE reply or a concurrently created inert placeholder permits only one
+readback, never a repeated CREATE. The current attempt may reuse that object only
+after the same full Namespace, intent, phase and attempt authentication. This
+also recovers a delayed older inert CREATE during a newer replacement. Missing,
+malformed, foreign or changed-intent objects cannot authorize activation. Lost
+final PUT replies still require a fresh caller replay.
+
+The reservation and Job are not one atomic transaction. A final PUT racing a
+reservation advance can still win on the same Job UID/resource-version and same
+immutable intent; the current caller must retain an active/successful Job and can
+replace only an authenticated terminal failure. These tests establish named
+object ordering, not serialization of delayed descendant Pods or external effects.
 
 Candidate preparation now defers one narrowly evidenced failure to normal durable
 lease reclamation: kubectl must report its canonical single-line resource-version
@@ -452,8 +475,8 @@ The layout remains disabled. These management-write fences do not fence delayed
 ReplicaSet/Pod writes by Kubernetes controllers, or already-started PostgreSQL
 and MinIO effects. Namespace CEL checks cannot replace atomic fences: namespace
 objects used by admission policies come from an informer cache, and a namespace
-read is not atomic with a child write. External-effect fencing, durable retry
-authority and full concurrent-owner acceptance remain required before rollout.
+read is not atomic with a child write. External-effect fencing and full
+concurrent-owner acceptance remain required before rollout.
 
 These contracts do not enable the new layout in the live service. Full lifecycle
 acceptance, stale namespace-child-write fencing and allowlisted data transfer
