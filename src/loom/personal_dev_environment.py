@@ -247,6 +247,8 @@ class PersonalDevLifecycleOperationRecord:
     capacity_mode: PersonalDevCapacityMode = "shadow-v1"
     capacity_membership_envelope: PersonalDevMembershipEnvelopeV1 | None = None
     membership_predecessor_operation_id: UUID | None = None
+    # Derived from the unique predecessor relation, never persisted or accepted as input.
+    membership_successor_operation_id: UUID | None = None
     membership_accepted_operation_id: UUID | None = None
     membership_predecessor_envelope_sha256: str | None = None
     membership_successor_binding: PersonalDevMembershipSuccessorBindingV1 | None = None

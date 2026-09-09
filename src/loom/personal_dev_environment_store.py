@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
     DevInstance,
@@ -2969,8 +2971,31 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         self,
         operation_id: UUID,
     ) -> PersonalDevLifecycleOperationRecord | None:
-        row = await self.session.get(DevLifecycleOperation, operation_id)
-        return _operation_record(row) if row is not None else None
+        successor = aliased(DevLifecycleOperation)
+        pair = (await self.session.execute(
+            select(DevLifecycleOperation, successor).outerjoin(
+                successor, successor.membership_predecessor_operation_id == DevLifecycleOperation.id,
+            ).where(DevLifecycleOperation.id == operation_id).execution_options(populate_existing=True)
+        )).one_or_none()
+        if pair is None:
+            return None
+        row, child = pair
+        record = _operation_record(row)
+        if row.state != "superseded":
+            if child is not None:
+                raise RuntimeError("non-superseded operation has successor lineage")
+            return record
+        if (
+            row.checkpoint != "membership_successor_created" or child is None
+            or child.operation_epoch != row.operation_epoch + 1
+            or child.expected_operation_epoch != row.operation_epoch
+            or any(getattr(child, field) != getattr(row, field) for field in (
+                "environment_name", "owner_user_id", "owner_team_id", "subject_id",
+                "subject_incarnation", "candidate_id", "candidate_sha", "min_slots", "max_slots",
+            ))
+        ):
+            raise RuntimeError("membership successor lineage is missing or inconsistent")
+        return replace(record, membership_successor_operation_id=child.id)
 
     async def _retry_failed_operation(
         self,

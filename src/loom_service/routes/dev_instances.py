@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Protocol, cast
 from uuid import UUID
@@ -383,7 +384,11 @@ class PersonalDevLifecycleOperationResponse(BaseModel):
         "failed",
         "cancelling",
         "cancelled",
+        "superseded",
     ]
+    membership_predecessor_operation_id: UUID | None = None
+    membership_successor_operation_id: UUID | None = None
+    membership_continuation_kind: Literal["create", "update", "capacity", "destroy"] | None = None
     attempt_id: UUID
     attempt_sequence: int
     candidate_id: UUID
@@ -571,6 +576,9 @@ def _personal_operation_response(
         expected_operation_epoch=record.expected_operation_epoch,
         kind=record.kind,
         state=record.state,
+        membership_predecessor_operation_id=record.membership_predecessor_operation_id,
+        membership_successor_operation_id=record.membership_successor_operation_id,
+        membership_continuation_kind=record.membership_continuation_kind,
         attempt_id=record.attempt_id,
         attempt_sequence=record.attempt_sequence,
         candidate_id=record.candidate_id,
@@ -768,6 +776,11 @@ async def apply_personal_dev_environment(
             status_code=503,
             detail="personal-dev environment apply failed before external activation",
         ) from None
+    if reservation.operation.state == "superseded":
+        operation = await _personal_authority(request, session).get_operation(reservation.operation.id)
+        if operation is None:
+            raise HTTPException(status_code=503, detail="personal-dev recovery lineage is unavailable")
+        reservation = replace(reservation, operation=operation)
     response.status_code = 200 if reservation.operation.state == "succeeded" else 202
     return _personal_apply_response(reservation)
 
