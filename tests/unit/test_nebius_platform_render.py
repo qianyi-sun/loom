@@ -121,6 +121,28 @@ def test_config_only_change_creates_new_jobs_and_rollout(platform_inputs: tuple)
     assert templates(first) != templates(second)
 
 
+def test_batch_runner_token_is_required_by_bootstrap_and_service(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    secret = {"secretKeyRef": {"name": "loom-platform-batch-runner", "key": "token"}}
+    migration_env = files["30-migrate.yaml"][0]["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert next(row for row in migration_env if row["name"] == "LOOM_BATCH_RUNNER_TOKEN") == {
+        "name": "LOOM_BATCH_RUNNER_TOKEN",
+        "valueFrom": secret,
+    }
+    for doc in files["40-services.yaml"]:
+        if doc["kind"] != "Deployment":
+            continue
+        env = doc["spec"]["template"]["spec"]["containers"][0].get("env", [])
+        matches = [row for row in env if row["name"] == "LOOM_SVC_BATCH_RUNNER_CP_TOKEN"]
+        assert matches == (
+            [{"name": "LOOM_SVC_BATCH_RUNNER_CP_TOKEN", "valueFrom": secret}]
+            if doc["metadata"]["name"] == "loom-service"
+            else []
+        )
+    assert "loom-platform-batch-runner" not in json.dumps(files["50-configure.yaml"])
+
+
 @pytest.mark.parametrize("changed_input", ["profile", "keyring"])
 def test_runtime_configuration_changes_restart_consumers(
     platform_inputs: tuple, changed_input: str
