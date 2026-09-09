@@ -141,12 +141,13 @@ def test_legacy_application_event_hash_preimage_is_unchanged():
     ) == "e089567425f306b26e1853ae7f7780fbec7fdc83c007316edfdf585f9f15f8bf"
 
 
-def _next_build_row(first, *, operation="capacity", reincarnation=None, **changes):
+def _next_build_row(first, *, operation="capacity", reincarnation=None, build=True, **changes):
     from loom_capacity_manager.typed_membership_commands import (
+        derive_application_member,
         derive_build_member,
         parse_typed_membership_mutation,
     )
-    value, _request, _result, row = event_row(revision=first.revision + 1, previous=first.head_sha256,
+    value, _request, _result, row = event_row(build=build, revision=first.revision + 1, previous=first.head_sha256,
         operation_id=UUID(int=780 + first.revision), key=UUID(int=790 + first.revision))
     request = parse_typed_membership_mutation(json.dumps(first.request_payload))
     projection = request.command.projection.model_copy(update={
@@ -161,7 +162,8 @@ def _next_build_row(first, *, operation="capacity", reincarnation=None, **change
         "reporter_incarnation": projection.demand_reporter_incarnation,
     })
     request = request.model_copy(update={"expected_revision": first.revision, "command": request.command.model_copy(update={"projection": projection, "acknowledgement": ack})})
-    member = derive_build_member(request, value.preparation, value.fleet, reincarnation=reincarnation)
+    derive = derive_build_member if build else derive_application_member
+    member = derive(request, value.preparation, value.fleet, reincarnation=reincarnation)
     row.configuration_generation = projection.configuration_generation
     row.deployment_generation = projection.deployment_generation
     row.reporter_incarnation = projection.demand_reporter_incarnation
@@ -219,11 +221,12 @@ def test_disabled_build_requires_fresh_authenticated_recreation(operation):
 
 
 @pytest.mark.parametrize("wrong_head", (False, True))
-def test_build_recreation_structure_binds_its_own_predecessor_event(wrong_head):
+@pytest.mark.parametrize("build", (False, True))
+def test_typed_recreation_structure_binds_its_own_predecessor_event(wrong_head, build):
     from loom_capacity_manager.contracts import ConfigurationGenerationRefV1, SubjectConfigurationV1
     from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
-    value, _request, first_result, first = event_row()
-    second = _next_build_row(first, operation="destroy")
+    value, _request, first_result, first = event_row(build=build)
+    second = _next_build_row(first, operation="destroy", build=build)
     predecessor = SubjectConfigurationV1.model_validate_json(json.dumps(second.result_payload["member"]["configuration"]))
     origin = first_result.member.configuration
     evidence = PersonalReincarnationEvidenceV1(namespace_id=first.namespace_id,
@@ -234,14 +237,14 @@ def test_build_recreation_structure_binds_its_own_predecessor_event(wrong_head):
         predecessor_head_sha256="e" * 64 if wrong_head else second.head_sha256,
         admission_revision=3, successor_incarnation=UUID(int=995), release_set_sha256="f" * 64)
     third = _next_build_row(second, operation="create", subject_incarnation=UUID(int=995),
-        demand_reporter_incarnation=UUID(int=996), demand_reporter_token_sha256="a" * 64, reincarnation=evidence)
+        demand_reporter_incarnation=UUID(int=996), demand_reporter_token_sha256="a" * 64, reincarnation=evidence, build=build)
     if wrong_head:
         with pytest.raises(ValueError):
             _events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)
     else:
         # This only proves event structure. Actual release facts remain a mandatory store check.
         assert len(_events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)) == 3
-        fourth = _next_build_row(third, reincarnation=evidence)
+        fourth = _next_build_row(third, reincarnation=evidence, build=build)
         assert len(_events().validate_typed_membership_event_prefix((first, second, third, fourth), value.preparation, value.fleet, execution_epoch=42)) == 4
 
 
