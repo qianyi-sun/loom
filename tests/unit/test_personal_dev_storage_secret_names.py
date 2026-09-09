@@ -1,8 +1,8 @@
 """Personal workload credentials must never alias across namespace lifetimes."""
 
+import json
 from dataclasses import replace
 from importlib import import_module
-import json
 from uuid import uuid4
 
 import pytest
@@ -112,3 +112,11 @@ async def test_bound_vault_stages_incarnation_named_credentials_and_returns_exac
     before = dict(cluster.secrets)
     assert await _vault(cluster).store(identity, "b" * 32) == secret_ref
     assert cluster.secrets == before
+
+
+def test_storage_namespace_pins_secret_suffix_without_parsing_canonical_json_in_cel():
+    from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
+
+    identity = _bound_claim().operation.storage_binding.identity
+    assert personal_dev_storage_annotations(identity)["loom.dev/storage-incarnation"] == identity.storage_incarnation.hex
+    assert personal_dev_storage_annotations(derive_identity(identity.name)) == {}
