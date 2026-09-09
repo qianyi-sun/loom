@@ -85,3 +85,22 @@ async def test_terminating_current_namespace_cleanup_can_resume():
     cluster.namespace["metadata"]["deletionTimestamp"] = "2026-09-09T00:00:00Z"
     await KubectlClient("kubectl", runner=cluster).delete_storage_namespace(identity)
     assert len(cluster.deletes) == 1
+
+
+@pytest.mark.parametrize("delete_failed", (False, True))
+@pytest.mark.parametrize("malformed_uid", (None, "", 1, False))
+async def test_cleanup_never_treats_malformed_readback_as_proof_of_replacement(delete_failed, malformed_uid):
+    class MalformedReadback(_DeletingCluster):
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            result = await super().run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+            if "delete" in argv:
+                self.namespace = {"metadata": {"name": "loom-dev-alice", "uid": malformed_uid}}
+                if delete_failed:
+                    raise DevInstanceRuntimeError("delete failed")
+            return result
+
+    cluster = MalformedReadback()
+    identity = _bound_claim().operation.storage_binding.identity
+    await _vault(cluster).store(identity, _PASSWORD)
+    with pytest.raises(DevInstanceRuntimeError):
+        await KubectlClient("kubectl", runner=cluster).delete_storage_namespace(identity)

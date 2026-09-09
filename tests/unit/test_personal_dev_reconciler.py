@@ -650,26 +650,38 @@ async def _async_value(value):
     return value
 
 
-async def test_live_preparation_runtime_converges_fixtures_then_exact_generation() -> None:
+@pytest.mark.parametrize("bound_storage", (False, True))
+async def test_live_preparation_runtime_converges_fixtures_then_exact_generation(bound_storage) -> None:
+    from loom.dev_instance import derive_identity
+    from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+
+    claim = _bound_claim() if bound_storage else _claim()
+    identity = claim.operation.storage_binding.identity if bound_storage else derive_identity("alice")
     events: list[str] = []
     owner_access = type("OwnerAccess", (), {"user_id": _OWNER, "team_id": _TEAM})()
 
     class _Sql:
         async def apply_role_and_database(self, _identity, **_kwargs):
+            assert _identity == identity
+            assert f'CREATE DATABASE "{identity.database}"' in _kwargs["create_database_sql"]
             events.append("database")
 
     class _Buckets:
         async def ensure_buckets(self, _identity, _buckets):
+            assert _identity == identity
+            assert identity.task_bucket in _buckets
             events.append("buckets")
 
     class _Vault:
         password = None
 
         async def database_password(self, _identity):
+            assert _identity == identity
             assert events and events[-1] == "namespace-authority"
             return self.password
 
         async def store(self, _identity, password):
+            assert _identity == identity
             assert password == "a" * 20
             self.password = password
             events.append("secrets")
@@ -677,16 +689,19 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
 
     class _Tenant:
         async def converge(self, _identity):
+            assert _identity == identity
             events.append("tenant")
 
     class _Cluster:
         async def bootstrap(self, _identity, config):
+            assert _identity == identity
             assert config.candidate_sha == "a" * 64
             assert config.lifecycle_binding is not None
             assert config.lifecycle_binding.attempt_id == _ATTEMPT_ID
             events.append("namespace-authority")
 
         async def prepare(self, _identity, config):
+            assert _identity == identity
             assert config.candidate_sha == "a" * 64
             assert config.lifecycle_binding is not None
             assert config.lifecycle_binding.attempt_id == _ATTEMPT_ID
@@ -695,6 +710,7 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
 
     class _Access:
         async def bootstrap(self, _identity, *, password, access):
+            assert _identity == identity
             assert password == "a" * 20
             assert access is owner_access
             events.append("access")
@@ -711,7 +727,7 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
     )
 
     observation = await runtime.prepare(
-        _claim(),
+        claim,
         access=owner_access,  # type: ignore[arg-type]
     )
 
@@ -726,7 +742,7 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
     ]
 
     await runtime.bootstrap_access(
-        _claim(),
+        claim,
         access=owner_access,  # type: ignore[arg-type]
     )
     assert events[-2:] == ["namespace-authority", "access"]
