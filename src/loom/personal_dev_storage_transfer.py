@@ -6,6 +6,7 @@ destination operation before using this recipe. A digest is not that authority.
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -17,6 +18,7 @@ from loom.personal_dev_incarnation_storage import (
 from loom_capacity_manager.contracts import Digest, StrictV1Model, canonical_bytes, canonical_digest
 
 _MAX_TRANSFER_BINDING_BYTES = 32 * 1024
+StorageBucketPurpose = Literal["tasks", "trajectories", "artifacts"]
 
 
 class PersonalDevStorageTransferBindingV1(StrictV1Model):
@@ -69,7 +71,7 @@ def parse_storage_transfer_binding(payload: bytes, *, expected_sha256: str) -> P
     return binding
 
 
-def storage_transfer_bucket_pairs(binding: PersonalDevStorageTransferBindingV1) -> tuple[tuple[str, str, str], ...]:
+def storage_transfer_bucket_pairs(binding: PersonalDevStorageTransferBindingV1) -> tuple[tuple[StorageBucketPurpose, str, str], ...]:
     binding = parse_storage_transfer_binding(canonical_bytes(binding), expected_sha256=canonical_digest(binding))
     source, destination = binding.source.identity, binding.destination.identity
     return (

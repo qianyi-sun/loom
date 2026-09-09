@@ -562,6 +562,17 @@ Unknown paths, source changes, suspended versioning and inconsistent/truncated
 readback reject capture. These are tested storage primitives, not a wired
 snapshot ledger, restoration path, IAM policy deployment or in-flight drain.
 
+Object inventory scans all three exact source buckets with bounded pagination;
+missing buckets and malformed/cyclic responses fail rather than becoming empty
+data. A complete empty three-bucket inventory is valid. Inventory is capped at
+10,000 objects and 1 TiB, with bounded canonical documents. The snapshot manifest
+requires one matching version-pinned capture for every selected object, in the
+same canonical order and transfer/capture identity. Source mutation before a
+conditional copy prevents completion. This defines selected captured bytes, not
+an atomic S3 snapshot or a promise to preserve writes finishing after selection.
+Durable management attachment and the application-data transfer policy remain
+required before restoring or activating a successor.
+
 The separate active acceptance binding pins the entire V3 preparation, exact
 execution authority and a finite reviewed window; it cannot reinterpret old
 zero-capacity acceptance or operational certificates. The service loop accepts
