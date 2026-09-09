@@ -264,8 +264,8 @@ This permits valid signing after request start without extending authorization.
 Deterministic tests cover elapsed listing/signing time, expiry during I/O and
 response construction, backward/future clocks, exact deadline matching, and
 subsecond rounding. The composed fixture retains an actual advancing signing
-clock. These are provider-contract checks: the backend primitives below are not
-yet connected to this provider or the service entrypoint. A production
+clock. These are provider-contract checks: the backend and async provider below
+are not yet connected to the service entrypoint. A production
 adapter must compose the timestamp/deadline contract and bounded network I/O;
 test backends and post-call clock checks are not that evidence. The provider
 continues to fail closed when none is configured. Encrypted replay bypasses the
@@ -286,7 +286,7 @@ including spaces, plus signs, percent signs, Unicode and literal `%2F` in keys.
 Changed bucket/key/method/Host-port/signature and expired or wrong-secret
 requests are rejected by the actual server. This establishes the signing
 primitive, not an S3 backend or IAM policy: test credentials are disposable and
-the current provider still expects bucket-host paths. Production wiring must
+the synchronous compatibility provider defaults to bucket-host paths. Production wiring must
 compose explicit path-style validation, bounded asynchronous listing/parsing,
 owned credentials and unlocked I/O followed by fresh database admission. No
 storage network work should retain the heartbeat/renewal authority locks.
@@ -322,8 +322,8 @@ wire input, trust failures, queue/deadline/cancellation behavior and orphaned
 connection disposal; the pinned MinIO integration exercises production signing,
 reader and XML parser together across paginated responses.
 
-This is a transport primitive, not production adapter activation. Provider/API
-async composition, unlocked I/O
+This is a transport primitive, not production adapter activation. API async
+composition, unlocked I/O
 with fresh database re-admission, path-style consumer validation and explicit
 credential/settings/lifespan deployment wiring remain required.
 
@@ -340,6 +340,24 @@ The pinned TLS MinIO tests exercise exact complete inventories and subsequent
 GETs, as well as rejection of missing or excessive inventories. These do not
 prove immutable source provenance, retained metadata integrity, unlocked database
 admission, or a configured live service.
+
+An asynchronous capability provider composes that backend with the same inventory,
+deadline, object and response validation used by the synchronous injected-backend
+compatibility path. Addressing is explicitly `path` or `bucket-host`; the native
+MinIO composition selects `path`. Real TLS tests issue capabilities and fetch
+their exact object URLs, including ports, spaces, plus signs, Unicode and literal
+`%2F`. The API has not yet switched to unlocked preparation/I/O/fresh admission,
+and these component checks must not be treated as an activated service.
+
+Native downloader alignment is also still required: the production Go
+`DownloadBundle` currently accepts a different `schema`/`files` capability than
+the authority's `schema_version`/`objects`, and builds requests with empty URL
+queries. It cannot consume these signed object capabilities unchanged. The
+authority/guard/Go-orchestrator fixture substitutes bundle download and therefore
+does not prove this boundary. Align exact signed URL preservation, independently
+trusted TLS configuration, deadline/session bindings and authenticated content
+metadata together; do not remove the downloader's integrity checks to accept an
+incomplete capability.
 
 ## Statement and signer
 
