@@ -694,6 +694,25 @@ remain `pending`: publication and membership acknowledgement alone do not prove
 the management admission runtime is installed and executable. They contain no
 synthetic application-agent installation or application activation evidence.
 
+Migration `capacity_0018` adds the SQL boundary for initial build-service events.
+It retains the original V1 application insertion function and dispatches other
+wire versions to a separate, private, fixed-search-path guard. Only V2 build
+`create` commands under an exact active V4 authority are accepted. The guard
+checks the complete command/result and original event hash, deterministic UUID5
+identity, operator runtime/profile bindings, pending generation evidence, current
+reporter, owner/subject materialization, shared revision and membership limits.
+It rejects retained identity/name collisions, reused operation or idempotency
+keys, and noninteger wire schema versions. This is not build execution admission.
+Typed application commands, later lifecycle transitions and recreation remain
+blocked at this SQL boundary pending their durable history/release consumers.
+
+SQL UUID5 uses the standard `uuid-ossp` extension at its existing schema, or
+installs it in a new private `capacity_build_extensions` schema if absent.
+Migration does not move an existing extension or change its privileges. Downgrade
+refuses retained V4 epochs or typed history; otherwise it restores the original
+application trigger and removes its own helpers, preserving the extension and
+schema for unrelated dependents.
+
 These new contracts are deliberately not accepted by execution preparation or
 promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a
