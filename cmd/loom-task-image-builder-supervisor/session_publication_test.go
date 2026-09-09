@@ -17,9 +17,9 @@ func TestOrchestratorClosesCurrentSessionAfterPublicationSourceRenewal(t *testin
 		},
 	})
 	state := &orchestratorState{session: initial, sessionManager: manager}
-	var currentBytes []byte
+	var currentSecret *SecretBuffer
 	err := manager.RenewWithCurrent(context.Background(), func(_ *SessionEnvelope, secret *SecretBuffer) error {
-		currentBytes = secret.data
+		currentSecret = secret
 		return nil
 	})
 	if err != nil {
@@ -29,10 +29,8 @@ func TestOrchestratorClosesCurrentSessionAfterPublicationSourceRenewal(t *testin
 	if !successor.Secret.closed {
 		t.Fatal("current publication session was not closed")
 	}
-	for _, value := range currentBytes {
-		if value != 0 {
-			t.Fatal("current publication session bytes were not erased")
-		}
+	if currentSecret.data != nil {
+		t.Fatal("current publication session mapping not released")
 	}
 	state.closeSecrets()
 	if err := manager.WithCurrent(func(*SecretBuffer) error { t.Fatal("closed session lent to caller"); return nil }); err == nil {
