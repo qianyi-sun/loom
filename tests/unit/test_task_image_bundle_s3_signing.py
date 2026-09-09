@@ -1,0 +1,90 @@
+"""Exact S3 signing timestamp, public target and credential lifetime contracts."""
+
+import importlib
+import logging
+from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+NOW = datetime(2026, 9, 9, 12, tzinfo=UTC)
+
+
+def _module():
+    return importlib.import_module("loom_task_image_authority.bundle_s3_signing")
+
+
+def _sign(**changes):
+    module = _module()
+    values = dict(
+        public_origin="https://objects.example:9443", bucket="loom-bundles",
+        key="bench/revision/a space+%/café.toml", region="us-east-1",
+        credentials=module.S3SigningCredentials(
+            access_key="access-fixture", secret_key="private-secret-fixture",
+        ),
+        expires_at=NOW + timedelta(seconds=40), clock=lambda: NOW,
+    )
+    values.update(changes)
+    return module.presign_bundle_get(**values)
+
+
+def test_signs_exact_public_host_bucket_and_encoded_key_to_deadline(caplog):
+    caplog.set_level(logging.DEBUG)
+    url = _sign(clock=lambda: NOW + timedelta(seconds=1, microseconds=900000))
+    parsed = urlsplit(url)
+    assert parsed.netloc == "objects.example:9443"
+    assert parsed.path == "/loom-bundles/bench/revision/a%20space%2B%25/caf%C3%A9.toml"
+    query = parse_qs(parsed.query)
+    assert query["X-Amz-Date"] == ["20260909T120001Z"]
+    assert query["X-Amz-Expires"] == ["39"]
+    assert query["X-Amz-SignedHeaders"] == ["host"]
+    assert len(query["X-Amz-Signature"][0]) == 64
+    assert query["X-Amz-Credential"] == ["access-fixture/20260909/us-east-1/s3/aws4_request"]
+    assert "private-secret-fixture" not in caplog.text
+    assert query["X-Amz-Signature"][0] not in caplog.text
+
+
+def test_temporary_credentials_require_and_bind_sufficient_lifetime(caplog):
+    module = _module()
+    caplog.set_level(logging.DEBUG)
+    credentials = module.S3SigningCredentials(
+        access_key="temporary-access", secret_key="temporary-secret",
+        session_token="private-session-fixture", expires_at=NOW + timedelta(seconds=40),
+    )
+    url = _sign(credentials=credentials)
+    assert parse_qs(urlsplit(url).query)["X-Amz-Security-Token"] == ["private-session-fixture"]
+    assert "private-session-fixture" not in caplog.text + repr(credentials)
+    with pytest.raises(RuntimeError, match="credential"):
+        _sign(credentials=credentials, expires_at=NOW + timedelta(seconds=41))
+    with pytest.raises(RuntimeError, match="credential"):
+        module.S3SigningCredentials(
+            access_key="temporary-access", secret_key="temporary-secret", session_token="token",
+        )
+
+
+@pytest.mark.parametrize("changes", [
+    {"public_origin": "http://objects.example"},
+    {"public_origin": "https://user:private@objects.example"},
+    {"public_origin": "https://objects.example/prefix"},
+    {"bucket": "other/bucket"},
+    {"key": "../private"}, {"key": "/private"}, {"key": "a//private"},
+    {"key": "a\\private"}, {"key": "a\nprivate"}, {"key": "é" * 513},
+    {"region": "us-east-1/foreign"},
+    {"expires_at": NOW}, {"expires_at": NOW + timedelta(seconds=901)},
+    {"expires_at": NOW + timedelta(seconds=40, microseconds=1)},
+    {"expires_at": NOW.replace(tzinfo=None) + timedelta(seconds=40)},
+])
+def test_refuses_ambiguous_targets_or_invalid_deadlines_without_secret_echo(changes):
+    with pytest.raises(RuntimeError) as error:
+        _sign(**changes)
+    assert "private" not in str(error.value)
+
+
+def test_rejects_oversized_signed_url_without_exposing_it():
+    module = _module()
+    credentials = module.S3SigningCredentials(
+        access_key="access-fixture", secret_key="secret-fixture",
+        session_token="x" * 4096, expires_at=NOW + timedelta(seconds=60),
+    )
+    with pytest.raises(RuntimeError, match="limit"):
+        _sign(credentials=credentials)
