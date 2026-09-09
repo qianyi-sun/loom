@@ -10,13 +10,15 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from loom.db.schema import LlmCall, ProviderConnection, RateCard
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import USAGE_STATUS_KEY
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.rate_card import (
+    COST_META_CONFIDENCE_KEY,
+    COST_META_SOURCE_KEY,
     RateCardTable,
     compute_cost_usd,
     hash_table,
@@ -810,6 +812,19 @@ def usage_status_filter(status: str) -> Any:
     return LlmCall.provider_extras.op("->>")(USAGE_STATUS_KEY) == status
 
 
+def cost_meta_filter(key: str, value: str) -> Any:
+    """Interpret legacy local calls without inventing a configured price."""
+    local_value = {
+        COST_META_SOURCE_KEY: "unpriced",
+        COST_META_CONFIDENCE_KEY: "unavailable",
+    }[key]
+    effective = case(
+        (LlmCall.rate_card_hash == "local-server-no-card", local_value),
+        else_=func.coalesce(LlmCall.provider_extras.op("->>")(key), ""),
+    )
+    return effective == value
+
+
 def _is_facade_rate_card_hash(value: str) -> bool:
     return value.startswith("facade:")
 
@@ -851,7 +866,10 @@ async def price_snapshots_for_hashes(
         {
             str(value)
             for value in hashes
-            if isinstance(value, str) and value and not _is_facade_rate_card_hash(value)
+            if isinstance(value, str)
+            and value
+            and value != "local-server-no-card"
+            and not _is_facade_rate_card_hash(value)
         }
     )
     if not wanted:

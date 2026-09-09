@@ -80,6 +80,9 @@ from loom_service.service_execution_status import service_execution_lifecycle_st
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.usage_accounting import (
+    cost_meta_filter as _cost_meta_filter,
+)
+from loom_service.usage_accounting import (
     empty_usage_projection,
     price_snapshots_for_trials,
     project_trial_llm_evidence,
@@ -127,10 +130,6 @@ def _price_unknown_call_filter() -> Any:
     return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
         COST_META_SOURCE_KEY, "unpriced"
     )
-
-
-def _cost_meta_filter(key: str, value: str) -> Any:
-    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
 
 
 def _cost_source_counts(row: Any) -> dict[str, int]:

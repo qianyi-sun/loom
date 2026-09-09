@@ -50,8 +50,14 @@ _PRICING_MODES: frozenset[str] = frozenset(
     {"priced", "tokens-only", "price-unknown", "failed-upstream"},
 )
 _USAGE_STATUS_SQL = f"l.provider_extras ->> '{USAGE_STATUS_KEY}'"
-_COST_SOURCE_SQL = f"l.provider_extras ->> '{COST_META_SOURCE_KEY}'"
-_COST_CONFIDENCE_SQL = f"l.provider_extras ->> '{COST_META_CONFIDENCE_KEY}'"
+_COST_SOURCE_SQL = (
+    "CASE WHEN l.rate_card_hash = 'local-server-no-card' THEN 'unpriced' "
+    f"ELSE l.provider_extras ->> '{COST_META_SOURCE_KEY}' END"
+)
+_COST_CONFIDENCE_SQL = (
+    "CASE WHEN l.rate_card_hash = 'local-server-no-card' THEN 'unavailable' "
+    f"ELSE l.provider_extras ->> '{COST_META_CONFIDENCE_KEY}' END"
+)
 _BREAKDOWN_FIELDS: dict[str, tuple[str, str]] = {
     "team": ("t.team_id::text", "tm.name"),
     "user": (
