@@ -15,6 +15,43 @@ from loom_capacity_manager.models import (
 from tests.integration.test_capacity_membership import DELEGATE, _active_v3, _projection, _request
 
 
+async def installation(session, member, projection, origin):
+    from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
+
+    binding = ManagedApplicationOriginV1(configuration=member.configuration,
+        acknowledgement=member.acknowledgement, base_projection=projection, installation_projection=origin)
+    await import_module("loom_capacity_manager.application_generation_store").require_application_installation_evidence(session, binding)
+
+
+async def test_application_installation_read_is_independent_of_later_reporter_rotation(capacity_session):
+    store, active, origin, created = await initial(capacity_session)
+    update_projection = _projection(operation_kind="update", operation_epoch=2, operation_id=UUID(int=87302), reporter_incarnation=UUID(int=87202))
+    await store.apply(capacity_session, _request(active, update_projection, expected_revision=1), actor=DELEGATE, idempotency_key=UUID(int=87402))
+    await installation(capacity_session, created.member, origin, origin)
+    # A successful historical installation read never proves current reporting.
+    with pytest.raises(ValueError):
+        await require(capacity_session, created.member, origin, origin)
+
+
+async def test_application_generation_can_retain_original_installation_across_input_epochs(capacity_session):
+    store, active, origin, _created = await initial(capacity_session)
+    resized_projection = _projection(operation_kind="capacity", operation_epoch=2, operation_id=UUID(int=87502), deployment_generation=1)
+    resized_projection = resized_projection.model_copy(update={"demand_reporter_token_sha256": origin.demand_reporter_token_sha256})
+    resized = await store.apply(capacity_session, _request(active, resized_projection, expected_revision=1), actor=DELEGATE, idempotency_key=UUID(int=87602))
+    # The importing operation's epoch is authenticated by its caller. It must
+    # not overwrite the installation operation attested by the candidate row.
+    imported = resized_projection.model_copy(update={"expected_configuration_epoch": origin.expected_configuration_epoch + 1})
+    await installation(capacity_session, resized.member, imported, origin)
+    await require(capacity_session, resized.member, imported, origin)
+
+
+async def test_historical_installation_still_rejects_mutated_original_attestation(capacity_session):
+    _store, _active, origin, created = await initial(capacity_session)
+    await capacity_session.execute(text("UPDATE capacity_candidates SET attestation_payload=jsonb_set(attestation_payload,'{operation_epoch}','99') WHERE subject_id=:subject"), {"subject": created.member.configuration.subject_id})
+    with pytest.raises(ValueError):
+        await installation(capacity_session, created.member, origin, origin)
+
+
 async def require(session, member, projection, origin, *, state="current"):
     await import_module("loom_capacity_manager.application_generation_store").require_application_generation_evidence(
         session, member, projection, origin, reporter_state=state,
