@@ -23,6 +23,8 @@ from loom.task_image_bundle_manifest import (
 )
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
 
+MAX_REGISTRATION_TEXT_BYTES = 1024 * 1024
+
 
 def _task_id(value: str) -> str:
     if (
@@ -78,6 +80,8 @@ def _promote_registered_runtime_architecture(
     entry = next((item for item in manifest.files if item.path == path), None)
     if entry is None:
         return
+    if entry.size_bytes > MAX_REGISTRATION_TEXT_BYTES:
+        raise ValueError("registered Dockerfile exceeds text size limit")
     content = read_verified_task_image_bundle_file(task_dir, entry).decode("utf-8")
     if dockerfile_text_uses_runtime_arm64_fallback_base(content):
         environment["cpu_arch"] = "any"
@@ -100,6 +104,8 @@ def prepare_task_bundle_registration(
     task_file = next((item for item in manifest.files if item.path == "task.toml"), None)
     if task_file is None:
         raise ValueError("registered bundle requires captured task.toml")
+    if task_file.size_bytes > MAX_REGISTRATION_TEXT_BYTES:
+        raise ValueError("registered task.toml exceeds text size limit")
     payload = read_verified_task_image_bundle_file(task_dir, task_file)
     normalized = normalize_terminal_bench_task_toml(tomllib.loads(payload.decode("utf-8")))
     if promote_runtime_architecture:
