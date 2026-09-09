@@ -1016,11 +1016,15 @@ async def test_v2_candidate_route_persists_and_replays_mandatory_evidence(
     assert request.base_resolution.solve_ref not in metrics
 
 
+@pytest.mark.parametrize("initial_httpx_level", [logging.NOTSET, logging.WARNING])
 async def test_v2_candidate_invalid_evidence_is_redacted_and_never_persisted(
     authority_api: _ApiContext,
     isolated_migration_postgres_url: str,
     caplog: pytest.LogCaptureFixture,
+    initial_httpx_level: int,
 ) -> None:
+    # LiteLLM sets this child logger to WARNING when imported by earlier tests.
+    caplog.set_level(initial_httpx_level, logger="httpx")
     materialization_id = await _seed_materialization(isolated_migration_postgres_url)
     build_session = _renewed_session(authority_api)
     authority_api.now[0] = NOW + timedelta(seconds=14)
@@ -1045,7 +1049,7 @@ async def test_v2_candidate_invalid_evidence_is_redacted_and_never_persisted(
     payload["base_resolution"]["solve_ref"] = private_evidence
     path = f"/v2/projections/{GRANT_ID}/materializations/{materialization_id}/publication-candidate"
     caplog.clear()
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG), caplog.at_level(logging.DEBUG, logger="httpx"):
         response = authority_api.client.put(path, headers=_HEADERS, json=payload)
         metrics = authority_api.client.get("/metrics").text
     assert response.status_code == 422

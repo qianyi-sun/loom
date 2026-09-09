@@ -28,6 +28,7 @@ from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
     Task,
+    TaskImageMaterialization,
     TaskSet,
     TaskSetFenceCanaryAuthorization,
     TaskSetGenerationGcCursor,
@@ -326,6 +327,13 @@ async def materialization_setup(
             app.state.taskset_materializer_task.cancel()
         await engine.dispose()
         with sl() as s:
+            # Materializations retain task identities without a cascading FK.
+            # The owned namespace also covers removed tasks and old revisions.
+            s.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id.startswith(f"ts/{team_a}/")
+                )
+            )
             s.execute(delete(Task).where(Task.task_set_id.is_not(None)))
             s.execute(delete(TaskSetFenceCanaryAuthorization))
             s.execute(delete(TaskSetGenerationGcCursor))

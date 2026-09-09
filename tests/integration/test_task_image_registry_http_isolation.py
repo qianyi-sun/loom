@@ -94,7 +94,8 @@ async def test_credential_route_owns_read_committed_and_restores_default_isolati
     [
         (_lease_flow, {
             "claim_session_materialization", "start_session_materialization",
-            "heartbeat_session_materialization", "issue_session_materialization_bundle",
+            "heartbeat_session_materialization", "prepare_session_materialization_bundle",
+            "finalize_session_materialization_bundle",
             "release_session_materialization", "fail_session_materialization",
         }),
         (_registry_flow, {"issue_session_registry_credential", "record_session_publication_candidate"}),
@@ -108,7 +109,8 @@ async def test_actual_http_flows_own_admission_mode_and_preserve_control_default
     observed = set()
     admitting = {
         "claim_session_materialization", "start_session_materialization",
-        "heartbeat_session_materialization", "issue_session_materialization_bundle",
+        "heartbeat_session_materialization", "prepare_session_materialization_bundle",
+        "finalize_session_materialization_bundle",
         "issue_session_registry_credential", "record_session_publication_candidate",
         "record_session_publication_candidate_v2",
     }

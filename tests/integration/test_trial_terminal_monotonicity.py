@@ -204,8 +204,10 @@ async def test_terminal_guard_rolls_back_entire_multirow_statement(terminal_tria
         await session.rollback()  # discard this test's second Trial
 
 
+@pytest.mark.parametrize("public_schema_usage", [True, False])
 async def test_terminal_guard_applies_to_restricted_writer_without_function_grant(
     terminal_trial_sessions,
+    public_schema_usage,
 ):
     sessions, trial_id = terminal_trial_sessions
     role = f"terminal_writer_{uuid4().hex}"
@@ -214,11 +216,21 @@ async def test_terminal_guard_applies_to_restricted_writer_without_function_gran
         await session.commit()
         # Disposable transaction-local role, not an application owner or a
         # superuser. The trigger function itself has no PUBLIC execution grant.
+        await session.execute(text(
+            "GRANT USAGE ON SCHEMA public TO PUBLIC" if public_schema_usage
+            else "REVOKE USAGE ON SCHEMA public FROM PUBLIC"
+        ))
         await session.execute(text(f"CREATE ROLE {role} NOLOGIN NOSUPERUSER"))
+        # A table grant does not imply schema access on a hardened database.
+        await session.execute(text(f"GRANT USAGE ON SCHEMA public TO {role}"))
         await session.execute(text(f"GRANT SELECT, UPDATE ON trials TO {role}"))
         await session.execute(text(f"SET LOCAL ROLE {role}"))
         try:
             assert await session.scalar(text("SELECT current_user")) == role
+            assert not await session.scalar(text(
+                "SELECT has_function_privilege(current_user, "
+                "'public.trials_reject_terminal_reopening()', 'EXECUTE')"
+            ))
             await session.execute(
                 text("UPDATE trials SET failure_message='ordinary writer' WHERE id=:id"),
                 {"id": trial_id},

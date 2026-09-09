@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import Benchmark
+from loom.db.schema import Benchmark, TaskImageMaterialization
 from loom.db.schema import Task as TaskRow
 from loom.models.task_checksum import task_checksum
 from loom.trajectory.storage import (
@@ -428,6 +428,13 @@ async def test_publish_local_explicit_flatten_override_records_evidence(
             ) in store.objects
     finally:
         async with factory() as session:
+            # Publication queues prerequisites independently of the Task FK graph.
+            # Remove every revision in this test's namespace before its tasks.
+            await session.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id.startswith("source-useful-compat/")
+                ),
+            )
             await session.execute(
                 delete(TaskRow).where(
                     TaskRow.benchmark_id == "source-useful-compat",
