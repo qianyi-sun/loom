@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import warnings
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -96,9 +96,10 @@ _CANDIDATE_ID = UUID("aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae")
 
 
 class _FakeBundleBackend:
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], datetime] = lambda: NOW) -> None:
         self.list_calls = 0
         self.presign_calls = 0
+        self.clock = clock
 
     def list_objects(
         self,
@@ -124,14 +125,16 @@ class _FakeBundleBackend:
         *,
         bucket: str,
         key: str,
-        expires_in_seconds: int,
+        expires_at: datetime,
     ) -> str:
         assert bucket == "loom-bundles"
+        stamp = self.clock().replace(microsecond=0)
+        expires_in_seconds = int((expires_at - stamp).total_seconds())
         assert 0 < expires_in_seconds <= 600
         self.presign_calls += 1
         return (
             f"https://objects.example/{key}"
-            f"?X-Amz-Date=20260902T140000Z&X-Amz-Expires={expires_in_seconds}"
+            f"?X-Amz-Date={stamp:%Y%m%dT%H%M%SZ}&X-Amz-Expires={expires_in_seconds}"
             "&X-Amz-Signature=secret"
         )
 
@@ -291,7 +294,7 @@ async def authority_api(
     )
     current_now = [NOW + timedelta(seconds=4)]
     session_tokens = iter((_SESSION, _NEXT_SESSION))
-    bundle_backend = _FakeBundleBackend()
+    bundle_backend = _FakeBundleBackend(clock=lambda: current_now[0])
     capability_ids = iter(
         (
             UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
@@ -306,6 +309,7 @@ async def authority_api(
         maximum_bytes=settings.bundle_maximum_bytes,
         url_expiry_seconds=settings.bundle_url_expiry_seconds,
         capability_id_factory=lambda: next(capability_ids),
+        clock=lambda: current_now[0],
     )
     app = create_app(
         settings,
@@ -1296,6 +1300,7 @@ async def test_bundle_route_fails_closed_without_provider_and_redacts_backend_er
         maximum_objects=2_000,
         maximum_bytes=512 * 1024 * 1024,
         url_expiry_seconds=600,
+        clock=lambda: NOW + timedelta(seconds=16),
     )
     failing_app = create_app(
         authority_api.settings,

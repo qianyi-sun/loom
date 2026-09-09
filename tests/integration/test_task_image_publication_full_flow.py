@@ -111,10 +111,11 @@ class _ASGIAuthority(AuthorityClient):
 
 
 class _CurrentBundleBackend(_FakeBundleBackend):
-    def presign_get(self, *, bucket, key, expires_in_seconds):
+    def presign_get(self, *, bucket, key, expires_at):
         assert bucket == "loom-bundles"
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return f"https://objects.example/{key}?X-Amz-Date={stamp}&X-Amz-Expires={expires_in_seconds}&X-Amz-Signature=fixture"
+        stamp = datetime.now(UTC).replace(microsecond=0)
+        expires_in_seconds = int((expires_at - stamp).total_seconds())
+        return f"https://objects.example/{key}?X-Amz-Date={stamp:%Y%m%dT%H%M%SZ}&X-Amz-Expires={expires_in_seconds}&X-Amz-Signature=fixture"
 
 
 @pytest.mark.parametrize(

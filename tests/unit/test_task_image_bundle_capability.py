@@ -89,10 +89,10 @@ class _FakeBundleBackend:
         *,
         bucket: str,
         key: str,
-        expires_in_seconds: int,
+        expires_at: datetime,
     ) -> str:
         assert bucket == "loom-bundles"
-        self.presign_expiries.append(expires_in_seconds)
+        self.presign_expiries.append(int((expires_at - NOW).total_seconds()))
         return self.url(key)
 
 
@@ -108,6 +108,7 @@ def _provider(
         "maximum_bytes": 512 * 1024 * 1024,
         "url_expiry_seconds": 600,
         "capability_id_factory": lambda: CAPABILITY_ID,
+        "clock": lambda: NOW,
     }
     values.update(changes)
     return TaskImageBundleCapabilityProvider(**values)  # type: ignore[arg-type]

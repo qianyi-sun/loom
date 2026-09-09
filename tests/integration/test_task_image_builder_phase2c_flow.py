@@ -269,7 +269,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         bundle_expected_bucket="loom-bundles",
         bundle_url_expiry_seconds=600,
     )
-    bundle_backend = _FakeBundleBackend()
+    bundle_backend = _FakeBundleBackend(clock=lambda: flow_now())
     authority_events: list[str] = []
     provider = TaskImageBundleCapabilityProvider(
         backend=bundle_backend,
@@ -278,6 +278,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         maximum_objects=settings.bundle_maximum_objects,
         maximum_bytes=settings.bundle_maximum_bytes,
         url_expiry_seconds=settings.bundle_url_expiry_seconds,
+        clock=lambda: flow_now(),
     )
 
     def flow_now() -> datetime:
