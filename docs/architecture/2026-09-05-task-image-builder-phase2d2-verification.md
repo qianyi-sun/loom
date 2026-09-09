@@ -291,6 +291,24 @@ compose explicit path-style validation, bounded asynchronous listing/parsing,
 owned credentials and unlocked I/O followed by fresh database admission. No
 storage network work should retain the heartbeat/renewal authority locks.
 
+The authority also has a CPU-only ListObjectsV2 signer bound to the exact bucket,
+prefix, page size, continuation token and immutable deadline. These listing URLs
+are authority-only bearer material, never builder capabilities. A bounded XML
+parser checks request identity, single key decoding, exact sizes, unique ordered
+objects, counts and continuation progression. It rejects oversized input before
+parser allocation and bounds XML depth, nodes and text; DTDs, entities and
+processing instructions are refused. Unsupported encodings return a fixed error
+without echoing response-controlled text. This in-memory bound is not a network
+receive or decompression bound; those remain the asynchronous owner's job.
+
+The pinned native MinIO fixture encodes spaces as `+` and literal plus signs as
+`%2B` in URL-encoded listing XML. The parser requires an explicit `form` versus
+`percent` contract instead of guessing from key text. Actual TLS tests paginate
+using both independent SDK and production signatures, preserve space/plus/Unicode/
+literal-percent identities, fetch the parsed keys, and verify rejection of changed
+signed listing parameters. This evidence does not establish cross-page inventory
+immutability, total network budgets, cancellation cleanup or production wiring.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
