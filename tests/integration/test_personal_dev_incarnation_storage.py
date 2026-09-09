@@ -1,17 +1,24 @@
 """Management persists storage identity before any external provisioning."""
 
-from uuid import uuid4
+import asyncio
+import hashlib
+import json
+from dataclasses import replace
+from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, text
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import DevInstance, DevLifecycleOperation, PersonalDevCandidate, Team, User
-from loom.personal_dev_environment import PersonalDevEnvironmentApplyRequest
+from loom.personal_dev_environment import PersonalDevEnvironmentApplyRequest, PersonalDevEnvironmentDestroyRequest
 from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
 from loom_capacity_manager.contracts import canonical_digest
-from tests.integration.test_personal_dev_membership_successor import _row_values
+from tests.integration.test_personal_dev_membership_successor import _arguments, _row_values, _seed
 from tests.unit.test_personal_dev_reconciler import _NOW, _claim
 
 
@@ -94,5 +101,222 @@ async def test_same_incarnation_storage_binding_is_immutable(isolated_migration_
                 DevLifecycleOperation.id == result.operation.id,
             ))).one()
             assert operation.storage_binding == result.operation.storage_binding.model_dump(mode="json")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_storage_digest_owner_and_physical_target_drift(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        request, access = await _candidate(sessions)
+        async with sessions() as session:
+            result = await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1").apply(
+                request, access_binding=access, now=_NOW,
+            )
+        for table, amendment in (
+            ("dev_instances", "storage_binding_sha256 = repeat('e', 64)"),
+            ("dev_lifecycle_operations", "storage_binding_sha256 = repeat('e', 64)"),
+            ("dev_instances", "capacity_database = 'loom_dev_alice'"),
+            ("dev_instances", "storage_binding = storage_binding || '{\"owner_user_id\":\"00000000-0000-0000-0000-000000000099\"}'::jsonb"),
+            ("dev_lifecycle_operations", "storage_binding = storage_binding || '{\"database\":\"loom_staging\"}'::jsonb"),
+        ):
+            async with sessions() as session:
+                with pytest.raises(DBAPIError):
+                    await session.execute(text(f"UPDATE {table} SET {amendment}"))
+                    await session.commit()
+                await session.rollback()
+                row = await session.get(DevInstance, request.name)
+                assert row.storage_binding == result.operation.storage_binding.model_dump(mode="json")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ("legacy-name-v1", "incarnation-v1"))
+async def test_storage_migration_preserves_rows_and_rejects_lossy_downgrade(isolated_migration_postgres_url, layout):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    root = Path(__file__).resolve().parents[2]
+    config = Config(str(root / "migrations/alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
+
+    async def snapshot():
+        async with sessions() as session:
+            return {
+                table: (await session.execute(text(f"SELECT to_jsonb(row) FROM {table} row"))).scalars().all()
+                for table in ("dev_instances", "dev_lifecycle_operations")
+            }
+
+    try:
+        request, access = await _candidate(sessions)
+        async with sessions() as session:
+            await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout=layout).apply(
+                request, access_binding=access, now=_NOW,
+            )
+        before = await snapshot()
+        if layout == "incarnation-v1":
+            with pytest.raises(DBAPIError, match="cannot downgrade 0137"):
+                await asyncio.to_thread(command.downgrade, config, "0136")
+        else:
+            await asyncio.to_thread(command.downgrade, config, "0136")
+            await asyncio.to_thread(command.upgrade, config, "0137")
+        assert await snapshot() == before
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,outcome", (
+    ("create", "committed"), ("update", "committed"), ("capacity", "committed"),
+    ("create", "terminal-not-committed"), ("update", "terminal-not-committed"),
+    ("capacity", "terminal-not-committed"), ("destroy", "terminal-not-committed"),
+))
+async def test_incarnation_storage_survives_every_successor_decision(
+    isolated_migration_postgres_url, kind, outcome,
+):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        claim, binding = await _seed(sessions, kind, outcome, incarnation_storage=True)
+        storage = claim.operation.storage_binding
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            result = await authority.create_membership_successor(**_arguments(claim, binding))
+            assert result.operation.storage_binding == result.environment.storage_binding == storage
+            assert result.operation.subject_incarnation == storage.subject_incarnation
+            parent = await authority.get_operation(claim.operation.id)
+            assert parent.storage_binding == storage
+            if binding.accepted_operation_id is not None:
+                accepted = await authority.get_operation(binding.accepted_operation_id)
+                assert accepted.storage_binding == storage
+            replay = await authority.create_membership_successor(**_arguments(claim, binding))
+            assert not replay.acquired
+            assert replay.operation.storage_binding == storage
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_attack", ("rewind", "delete"))
+async def test_recreation_allocates_disjoint_storage_despite_layout_config_rollback(
+    isolated_migration_postgres_url, history_attack,
+):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        request, access = await _candidate(sessions)
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1")
+            created = await authority.apply(request, access_binding=access, now=_NOW)
+            claim = await authority.claim_next_reconciliation(
+                reconciler_id="storage-test", now=_NOW, lease_seconds=60,
+            )
+            assert claim is not None
+            await authority.fail_pre_activation(
+                operation_id=created.operation.id, operation_epoch=created.operation.operation_epoch,
+                attempt_id=claim.attempt.id, reconciler_id="storage-test",
+                lease_epoch=claim.attempt.lease_epoch, failure_reason="candidate_build_failed", now=_NOW,
+            )
+            retired = await authority.destroy(PersonalDevEnvironmentDestroyRequest(
+                name=request.name, owner_user_id=request.owner_user_id, owner_team_id=request.owner_team_id,
+                expected_operation_epoch=created.operation.operation_epoch, idempotency_key=uuid4(), keep_data=False,
+            ), access_binding=access, now=_NOW)
+            assert retired.environment.status == "deleted"
+            assert retired.operation.storage_binding == created.operation.storage_binding
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            recreated = await authority.apply(replace(
+                request, expected_operation_epoch=retired.operation.operation_epoch, idempotency_key=uuid4(),
+            ), access_binding=access, now=_NOW)
+            old, new = created.operation.storage_binding, recreated.operation.storage_binding
+            assert new.layout == old.layout == "incarnation-v1"
+            assert new.subject_incarnation != old.subject_incarnation
+            assert new.identity.namespace == old.identity.namespace == "loom-dev-alice"
+            for field in ("database", "db_role", "task_bucket", "trajectories_bucket", "artifacts_bucket"):
+                assert getattr(new.identity, field) != getattr(old.identity, field)
+            assert new.object_store_identity != old.object_store_identity
+            assert (await authority.get_operation(created.operation.id)).storage_binding == old
+            assert (await authority.get_operation(retired.operation.id)).storage_binding == old
+            with pytest.raises(DBAPIError, match="storage"):
+                if history_attack == "rewind":
+                    await session.execute(update(DevInstance).where(DevInstance.name == request.name).values(
+                        subject_incarnation=old.subject_incarnation,
+                        storage_binding=old.model_dump(mode="json"), storage_binding_sha256=canonical_digest(old),
+                        capacity_database=old.identity.database, operation_id=created.operation.id,
+                        operation_epoch=created.operation.operation_epoch,
+                    ))
+                else:
+                    # This non-current destroy remains an exact cleanup target.
+                    await session.execute(text("DELETE FROM dev_lifecycle_operation_attempts WHERE operation_id = :id"),
+                                          {"id": retired.operation.id})
+                    await session.execute(text("DELETE FROM dev_lifecycle_operations WHERE id = :id"),
+                                          {"id": retired.operation.id})
+                await session.commit()
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ("dev_instances", "dev_lifecycle_operations"))
+async def test_storage_digest_is_checked_on_initial_insert(isolated_migration_postgres_url, target, monkeypatch):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        request, access = await _candidate(sessions)
+        async with sessions() as session:
+            original_flush = session.flush
+
+            async def corrupt_flush(*args, **kwargs):
+                for row in session.new:
+                    if row.__tablename__ == target and row.storage_binding is not None:
+                        row.storage_binding_sha256 = "e" * 64
+                await original_flush(*args, **kwargs)
+
+            monkeypatch.setattr(session, "flush", corrupt_flush)
+            with pytest.raises(DBAPIError, match="personal storage binding digest is invalid"):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1").apply(
+                    request, access_binding=access, now=_NOW,
+                )
+            await session.rollback()
+            assert await session.get(DevInstance, request.name) is None
+            assert not (await session.scalars(select(DevLifecycleOperation))).all()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ("numeric_version", "subject_id", "subject_incarnation"))
+async def test_storage_database_rejects_unparseable_binding(isolated_migration_postgres_url, monkeypatch, defect):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        request, access = await _candidate(sessions)
+        async with sessions() as session:
+            original_flush = session.flush
+
+            async def corrupt_flush(*args, **kwargs):
+                for row in session.new:
+                    if isinstance(row, (DevInstance, DevLifecycleOperation)) and row.storage_binding is not None:
+                        if defect == "numeric_version":
+                            row.storage_binding = row.storage_binding | {"schema_version": 1.0}
+                        else:
+                            setattr(row, defect, UUID(int=0))
+                            row.storage_binding = row.storage_binding | {defect: str(UUID(int=0))}
+                        row.storage_binding_sha256 = hashlib.sha256(json.dumps(
+                            row.storage_binding, sort_keys=True, separators=(",", ":"),
+                        ).encode()).hexdigest()
+                await original_flush(*args, **kwargs)
+
+            monkeypatch.setattr(session, "flush", corrupt_flush)
+            with pytest.raises(DBAPIError, match="storage"):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session, storage_layout="incarnation-v1").apply(
+                    request, access_binding=access, now=_NOW,
+                )
+            await session.rollback()
+            assert await session.get(DevInstance, request.name) is None
     finally:
         await engine.dispose()

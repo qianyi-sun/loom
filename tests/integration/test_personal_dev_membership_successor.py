@@ -26,6 +26,7 @@ from loom.personal_dev_environment_store import (
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
 from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
+from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom_capacity_manager.contracts import canonical_digest
 from tests.unit.test_personal_dev_membership_reconciler import _NOW
 from tests.unit.test_personal_dev_membership_successor import successor_case
@@ -42,11 +43,25 @@ def _row_values(model, record):
             values[key] = value.model_dump(mode="json")
         elif isinstance(value, tuple):
             values[key] = list(value)
+    if values.get("storage_binding") is not None:
+        values["storage_binding_sha256"] = canonical_digest(record.storage_binding)
     return values
 
 
-async def _seed(sessions, kind, outcome):
+async def _seed(sessions, kind, outcome, *, incarnation_storage=False):
     claim, accepted, values = successor_case(kind, outcome)
+    if incarnation_storage:
+        storage = PersonalDevStorageBindingV1(
+            layout="incarnation-v1", environment_name=claim.operation.environment_name,
+            subject_id=claim.operation.subject_id,
+            subject_incarnation=claim.operation.subject_incarnation,
+            owner_user_id=claim.operation.owner_user_id,
+            owner_team_id=claim.operation.owner_team_id,
+        )
+        claim = replace(claim, environment=replace(claim.environment, storage_binding=storage),
+                        operation=replace(claim.operation, storage_binding=storage))
+        if accepted is not None:
+            accepted = replace(accepted, storage_binding=storage)
     # Match real durable rows, rather than the reconciler's lightweight fixtures.
     if kind in {"capacity", "destroy"}:
         claim = replace(
@@ -75,7 +90,10 @@ async def _seed(sessions, kind, outcome):
         await session.flush()
         env_values = _row_values(DevInstance, claim.environment)
         env_values.update(
-            capacity_namespace="loom-dev-alice", capacity_database="loom_dev_alice",
+            capacity_namespace="loom-dev-alice", capacity_database=(
+                claim.environment.storage_binding.identity.database
+                if claim.environment.storage_binding else "loom_dev_alice"
+            ),
             operation_step="membership_outcome_resolved",
         )
         if accepted is not None:
@@ -397,9 +415,10 @@ async def test_successor_migration_preserves_history_and_rejects_lossy_downgrade
         else:
             await asyncio.to_thread(command.downgrade, cfg, "0135")
             await asyncio.to_thread(command.upgrade, cfg, "0136")
+            await asyncio.to_thread(command.upgrade, cfg, "0137")
         assert await snapshot() == before
         async with sessions() as session:
-            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0136"
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0137"
             # Existing historical outcomes never gain invented successor authority.
             parent = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(claim.operation.id)
             assert (parent.membership_successor_operation_id is not None) is with_successor
