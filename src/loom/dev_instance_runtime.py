@@ -37,7 +37,14 @@ from loom.personal_dev_capacity_identity import (
     capacity_runtime_database_password,
     capacity_runtime_database_url,
 )
+from loom.personal_dev_incarnation_storage import validate_personal_dev_storage_identity
 from loom.personal_dev_reconciler import PersonalDevReadinessObservation
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+
+_STORAGE_JSON = "storage-binding.json"
+_STORAGE_SHA = "storage-binding.sha256"
+_STORAGE_ANNOTATION = "loom.dev/storage-binding"
+_STORAGE_SHA_ANNOTATION = "loom.dev/storage-binding-sha256"
 
 
 class DevInstanceRuntimeError(RuntimeError):
@@ -273,6 +280,21 @@ class KubectlClient:
                 raise TypeError
             return bool(metadata["name"] == namespace)
         except (KeyError, TypeError, json.JSONDecodeError):
+            raise DevInstanceRuntimeError("cluster namespace response was invalid") from None
+
+    async def read_namespace_optional(self, namespace: str) -> dict[str, Any] | None:
+        result = await self.runner.run(
+            self._argv("get", "namespace", namespace, "--ignore-not-found=true", "-o", "json"),
+            timeout_seconds=30,
+        )
+        try:
+            value = json.loads(result.stdout or "{}")
+            if value == {}:
+                return None
+            if not isinstance(value, dict) or value["metadata"]["name"] != namespace:
+                raise ValueError
+            return value
+        except (KeyError, TypeError, ValueError):
             raise DevInstanceRuntimeError("cluster namespace response was invalid") from None
 
     async def read_resource_json(
@@ -687,9 +709,9 @@ class KubectlSecretVault:
         default=lambda: secrets.token_urlsafe(48),
         repr=False,
     )
-    _admin_tokens: dict[str, str] | None = None
-    _object_credentials: dict[str, tuple[str, str]] | None = None
-    _database_passwords: dict[str, str] | None = None
+    _admin_tokens: dict[DevInstanceIdentity, str] | None = None
+    _object_credentials: dict[DevInstanceIdentity, tuple[str, str]] | None = None
+    _database_passwords: dict[DevInstanceIdentity, str] | None = None
 
     def __post_init__(self) -> None:
         self._admin_tokens = {}
@@ -716,23 +738,119 @@ class KubectlSecretVault:
         except (KeyError, StopIteration, UnicodeDecodeError, IndexError):
             raise DevInstanceRuntimeError("instance admin credential is invalid") from None
 
+    @staticmethod
+    def _object_credentials_from_secret(data: dict[str, bytes]) -> tuple[str, str]:
+        try:
+            access, secret = data["minio-access-key"].decode(), data["minio-secret-key"].decode()
+            if not access or not secret or "\n" in access or "\n" in secret or "\r" in access or "\r" in secret:
+                raise ValueError
+            return access, secret
+        except (KeyError, UnicodeDecodeError, ValueError):
+            raise DevInstanceRuntimeError("instance object credential is invalid") from None
+
+    @staticmethod
+    def _storage_data(identity: DevInstanceIdentity) -> dict[str, str]:
+        binding = identity.storage_binding
+        return {} if binding is None else {
+            _STORAGE_JSON: canonical_bytes(binding).decode(),
+            _STORAGE_SHA: canonical_digest(binding),
+        }
+
+    async def _bound_namespace(self, identity: DevInstanceIdentity) -> dict[str, Any] | None:
+        namespace = await self.kubectl.read_namespace_optional(identity.namespace)
+        if namespace is not None:
+            expected = self._storage_data(identity)
+            metadata = namespace.get("metadata", {})
+            annotations = metadata.get("annotations", {})
+            if (
+                not isinstance(annotations, dict)
+                or annotations.get(_STORAGE_ANNOTATION) != expected[_STORAGE_JSON]
+                or annotations.get(_STORAGE_SHA_ANNOTATION) != expected[_STORAGE_SHA]
+                or not metadata.get("uid")
+                or metadata.get("deletionTimestamp") is not None
+            ):
+                raise DevInstanceRuntimeError("instance namespace storage binding is invalid")
+        return namespace
+
+    def _assert_storage_data(self, identity: DevInstanceIdentity, data: dict[str, bytes]) -> None:
+        if identity.storage_binding is None and ({_STORAGE_JSON, _STORAGE_SHA} & data.keys()):
+            raise DevInstanceRuntimeError("bound storage credential cannot use legacy identity")
+        if any(data.get(key) != value.encode() for key, value in self._storage_data(identity).items()):
+            raise DevInstanceRuntimeError("instance secret storage binding is invalid")
+
+    async def _assert_legacy_cache_namespace(self, identity: DevInstanceIdentity) -> None:
+        namespace = await self.kubectl.read_namespace_optional(identity.namespace)
+        if namespace is not None:
+            annotations = namespace.get("metadata", {}).get("annotations", {})
+            if not isinstance(annotations, dict) or {_STORAGE_ANNOTATION, _STORAGE_SHA_ANNOTATION} & annotations.keys():
+                raise DevInstanceRuntimeError("bound storage namespace cannot use legacy cached credentials")
+
+    async def _bound_secrets(
+        self, identity: DevInstanceIdentity,
+    ) -> tuple[dict[str, bytes] | None, dict[str, bytes] | None, dict[str, bytes] | None]:
+        # Bound credentials are always reread, including after cache fill. A stable
+        # namespace name is not authority to reuse data from its previous lifetime.
+        namespace = await self._bound_namespace(identity)
+        if namespace is None:
+            return None, None, None
+        main = await self.kubectl.read_secret_optional(identity.namespace, "loom-secrets")
+        admin = await self.kubectl.read_secret_optional(identity.namespace, "loom-admin-secret")
+        runtime = await self.kubectl.read_secret_optional(identity.namespace, PROTECTED_WORKER_RUNTIME_SECRET_NAME)
+        if main is None and (admin is not None or runtime is not None):
+            raise DevInstanceRuntimeError("instance secret set is incomplete")
+        for data in (main, admin, runtime):
+            if data is not None:
+                self._assert_storage_data(identity, data)
+        if main is not None:
+            password = self._password_from_secret(main)
+            self._object_credentials_from_secret(main)
+            expected_url = instance_database_url(self.database_admin_url, identity, password).encode()
+            assert identity.storage_binding is not None
+            if (
+                any(main.get(key) != expected_url for key in ("cp-db-url", "svc-db-url", "gw-db-url"))
+                or main.get("minio-access-key") != identity.storage_binding.object_store_identity[0].encode()
+                or not main.get("minio-secret-key")
+            ):
+                raise DevInstanceRuntimeError("instance storage credential target is invalid")
+        if admin is not None:
+            self._admin_token_from_secret(admin)
+        if runtime is not None:
+            self._assert_protected_worker_runtime_secret(identity, runtime)
+        return main, admin, runtime
+
     async def database_password(self, identity: DevInstanceIdentity) -> str | None:
+        identity = validate_personal_dev_storage_identity(identity)
+        if identity.storage_binding is not None:
+            main, _, _ = await self._bound_secrets(identity)
+            return None if main is None else self._password_from_secret(main)
         assert self._database_passwords is not None
-        cached = self._database_passwords.get(identity.name)
+        cached = self._database_passwords.get(identity)
         if cached is not None:
+            await self._assert_legacy_cache_namespace(identity)
             return cached
         data = await self.kubectl.read_secret_optional(identity.namespace, "loom-secrets")
         if data is None:
             return None
+        self._assert_storage_data(identity, data)
         password = self._password_from_secret(data)
-        self._database_passwords[identity.name] = password
+        self._database_passwords[identity] = password
         return password
 
     async def store(self, identity: DevInstanceIdentity, password: str) -> str:
+        identity = validate_personal_dev_storage_identity(identity)
         labels = {
             "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
             "loom.dev/instance": identity.name,
         }
+        if identity.storage_binding is not None:
+            existing_main, existing_admin, existing_runtime = await self._bound_secrets(identity)
+        else:
+            existing_main, existing_admin, existing_runtime = await self._legacy_secrets(identity)
+        return await self._store(identity, password, labels, existing_main, existing_admin, existing_runtime)
+
+    async def _legacy_secrets(
+        self, identity: DevInstanceIdentity,
+    ) -> tuple[dict[str, bytes] | None, dict[str, bytes] | None, dict[str, bytes] | None]:
         existing_main = await self.kubectl.read_secret_optional(
             identity.namespace,
             "loom-secrets",
@@ -749,28 +867,43 @@ class KubectlSecretVault:
             if self.protected_worker_runtime
             else None
         )
+        for data in (existing_main, existing_admin, existing_runtime):
+            if data is not None:
+                self._assert_storage_data(identity, data)
+        return existing_main, existing_admin, existing_runtime
+
+    async def _store(
+        self, identity: DevInstanceIdentity, password: str, labels: dict[str, str],
+        existing_main: dict[str, bytes] | None, existing_admin: dict[str, bytes] | None,
+        existing_runtime: dict[str, bytes] | None,
+    ) -> str:
+        if existing_main is not None and self._password_from_secret(existing_main) != password:
+            raise ValueError("instance database password binding changed")
+        if identity.storage_binding is not None and existing_main is not None and existing_admin is None:
+            # Main is always persisted first. A failed create reply or interrupted
+            # sequence is recovered by filling only missing views; never rotate
+            # an existing credential or overwrite a concurrently created Secret.
+            await self._create_bound_secret(self._admin_secret(
+                identity, labels, "loom_admin_" + secrets.token_urlsafe(32),
+            ))
+            existing_main, existing_admin, existing_runtime = await self._bound_secrets(identity)
         if (existing_main is None) != (existing_admin is None):
             raise DevInstanceRuntimeError("instance secret set is incomplete")
         if existing_main is not None and existing_admin is not None:
             existing_password = self._password_from_secret(existing_main)
             if existing_password != password:
                 raise ValueError("instance database password binding changed")
-            try:
-                object_credentials = (
-                    existing_main["minio-access-key"].decode(),
-                    existing_main["minio-secret-key"].decode(),
-                )
-            except (KeyError, UnicodeDecodeError):
-                raise DevInstanceRuntimeError("instance object credential is invalid") from None
+            object_credentials = self._object_credentials_from_secret(existing_main)
             admin_token = self._admin_token_from_secret(existing_admin)
             if self.protected_worker_runtime:
                 if existing_runtime is None:
-                    await self.kubectl.apply(
-                        yaml.safe_dump(
-                            self._protected_worker_runtime_secret(identity, labels),
-                            sort_keys=False,
+                    runtime_secret = self._protected_worker_runtime_secret(identity, labels)
+                    if identity.storage_binding is not None:
+                        await self._create_bound_secret(runtime_secret)
+                    else:
+                        await self.kubectl.apply(
+                            yaml.safe_dump(runtime_secret, sort_keys=False)
                         )
-                    )
                 else:
                     self._assert_protected_worker_runtime_secret(
                         identity,
@@ -779,20 +912,18 @@ class KubectlSecretVault:
             assert self._admin_tokens is not None
             assert self._object_credentials is not None
             assert self._database_passwords is not None
-            self._admin_tokens[identity.name] = admin_token
-            self._object_credentials[identity.name] = object_credentials
-            self._database_passwords[identity.name] = existing_password
+            self._admin_tokens[identity] = admin_token
+            self._object_credentials[identity] = object_credentials
+            self._database_passwords[identity] = existing_password
             return f"k8s-secret://{identity.namespace}/loom-secrets"
         database_url = instance_database_url(self.database_admin_url, identity, password)
         admin_token = "loom_admin_" + secrets.token_urlsafe(32)
-        object_access_key = f"loomdev-{identity.name}"
+        object_access_key = KubectlMinioTenantProvisioner._names(identity)[0]
         object_secret_key = secrets.token_urlsafe(48)
         assert self._admin_tokens is not None
         assert self._object_credentials is not None
         assert self._database_passwords is not None
-        self._admin_tokens[identity.name] = admin_token
-        self._object_credentials[identity.name] = (object_access_key, object_secret_key)
-        self._database_passwords[identity.name] = password
+        namespace: dict[str, Any]
         if self.manifest_config is None:
             namespace = {
                 "apiVersion": "v1",
@@ -809,7 +940,21 @@ class KubectlSecretVault:
             }
         else:
             namespace = dev_instance_manifest_documents(identity, self.manifest_config)[0]
-        await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
+        storage_data = self._storage_data(identity)
+        if identity.storage_binding is not None:
+            namespace["metadata"].setdefault("annotations", {}).update({
+                _STORAGE_ANNOTATION: storage_data[_STORAGE_JSON],
+                _STORAGE_SHA_ANNOTATION: storage_data[_STORAGE_SHA],
+            })
+            if await self._bound_namespace(identity) is None:
+                # CREATE, not APPLY: a concurrent namespace creator must cause a
+                # conflict rather than let us attach provenance to its namespace.
+                await self.kubectl.runner.run(
+                    self.kubectl._argv("create", "-f", "-"),
+                    stdin=yaml.safe_dump(namespace, sort_keys=False),
+                )
+        else:
+            await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
         secret = {
             "apiVersion": "v1",
             "kind": "Secret",
@@ -820,6 +965,7 @@ class KubectlSecretVault:
             },
             "type": "Opaque",
             "stringData": {
+                **storage_data,
                 "cp-db-url": database_url,
                 "svc-db-url": database_url,
                 "gw-db-url": database_url,
@@ -829,26 +975,39 @@ class KubectlSecretVault:
                 "secret-store-master-key": base64.b64encode(secrets.token_bytes(32)).decode(),
             },
         }
-        admin = {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": "loom-admin-secret",
-                "namespace": identity.namespace,
-                "labels": labels,
-            },
-            "type": "Opaque",
-            "stringData": {"secrets.toml": f'[admin]\ntoken = "{admin_token}"\n'},
-        }
+        admin = self._admin_secret(identity, labels, admin_token)
         runtime = (
             (self._protected_worker_runtime_secret(identity, labels),)
             if self.protected_worker_runtime
             else ()
         )
-        await self.kubectl.apply(
-            yaml.safe_dump_all((secret, admin, *runtime), sort_keys=False, explicit_start=True),
-        )
+        if identity.storage_binding is not None:
+            for document in (secret, admin, *runtime):
+                await self._create_bound_secret(document)
+        else:
+            await self.kubectl.apply(
+                yaml.safe_dump_all((secret, admin, *runtime), sort_keys=False, explicit_start=True),
+            )
+        self._admin_tokens[identity] = admin_token
+        self._object_credentials[identity] = (object_access_key, object_secret_key)
+        self._database_passwords[identity] = password
         return f"k8s-secret://{identity.namespace}/loom-secrets"
+
+    async def _create_bound_secret(self, document: dict[str, Any]) -> None:
+        document = {**document, "immutable": True}
+        await self.kubectl.runner.run(
+            self.kubectl._argv("create", "-f", "-"),
+            stdin=yaml.safe_dump(document, sort_keys=False),
+        )
+
+    def _admin_secret(
+        self, identity: DevInstanceIdentity, labels: dict[str, str], token: str,
+    ) -> dict[str, Any]:
+        return {
+            "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": "loom-admin-secret", "namespace": identity.namespace, "labels": labels},
+            "stringData": {**self._storage_data(identity), "secrets.toml": f'[admin]\ntoken = "{token}"\n'},
+        }
 
     def _assert_protected_worker_runtime_secret(
         self,
@@ -856,7 +1015,8 @@ class KubectlSecretVault:
         data: dict[str, bytes],
     ) -> None:
         try:
-            if set(data) != {"database-url"}:
+            self._assert_storage_data(identity, data)
+            if set(data) != {"database-url", *self._storage_data(identity)}:
                 raise CapacityRuntimeCredentialError
             value = data["database-url"].decode("utf-8")
             password = capacity_runtime_database_password(value, identity)
@@ -896,6 +1056,7 @@ class KubectlSecretVault:
             },
             "type": "Opaque",
             "stringData": {
+                **self._storage_data(identity),
                 "database-url": capacity_runtime_database_url(
                     self.database_admin_url,
                     identity,
@@ -905,38 +1066,49 @@ class KubectlSecretVault:
         }
 
     async def admin_token(self, identity: DevInstanceIdentity) -> str:
+        identity = validate_personal_dev_storage_identity(identity)
+        if identity.storage_binding is not None:
+            _, admin, _ = await self._bound_secrets(identity)
+            if admin is None:
+                raise DevInstanceRuntimeError("instance admin credential is unavailable")
+            return self._admin_token_from_secret(admin)
         assert self._admin_tokens is not None
-        cached = self._admin_tokens.get(identity.name)
+        cached = self._admin_tokens.get(identity)
         if cached is not None:
+            await self._assert_legacy_cache_namespace(identity)
             return cached
         data = await self.kubectl.read_secret(identity.namespace, "loom-admin-secret")
+        self._assert_storage_data(identity, data)
         token = self._admin_token_from_secret(data)
-        self._admin_tokens[identity.name] = token
+        self._admin_tokens[identity] = token
         return token
 
     async def object_credentials(self, identity: DevInstanceIdentity) -> tuple[str, str]:
+        identity = validate_personal_dev_storage_identity(identity)
         assert self._object_credentials is not None
-        cached = self._object_credentials.get(identity.name)
+        cached = self._object_credentials.get(identity) if identity.storage_binding is None else None
         if cached is not None:
+            await self._assert_legacy_cache_namespace(identity)
             return cached
-        data = await self.kubectl.read_secret(identity.namespace, "loom-secrets")
-        try:
-            credentials = (
-                data["minio-access-key"].decode(),
-                data["minio-secret-key"].decode(),
-            )
-        except (KeyError, UnicodeDecodeError):
-            raise DevInstanceRuntimeError("instance object credential is invalid") from None
-        self._object_credentials[identity.name] = credentials
+        if identity.storage_binding is not None:
+            data, _, _ = await self._bound_secrets(identity)
+            if data is None:
+                raise DevInstanceRuntimeError("instance object credential is unavailable")
+        else:
+            data = await self.kubectl.read_secret(identity.namespace, "loom-secrets")
+        self._assert_storage_data(identity, data)
+        credentials = self._object_credentials_from_secret(data)
+        self._object_credentials[identity] = credentials
         return credentials
 
     async def delete(self, identity: DevInstanceIdentity) -> None:
+        identity = validate_personal_dev_storage_identity(identity)
         assert self._admin_tokens is not None
         assert self._object_credentials is not None
         assert self._database_passwords is not None
-        self._admin_tokens.pop(identity.name, None)
-        self._object_credentials.pop(identity.name, None)
-        self._database_passwords.pop(identity.name, None)
+        self._admin_tokens.pop(identity, None)
+        self._object_credentials.pop(identity, None)
+        self._database_passwords.pop(identity, None)
         # Namespace deletion owns Kubernetes Secret cleanup. This remains an
         # explicit idempotent seam for non-Kubernetes vaults and future moves.
 
@@ -953,6 +1125,9 @@ class KubectlMinioTenantProvisioner:
 
     @staticmethod
     def _names(identity: DevInstanceIdentity) -> tuple[str, str]:
+        identity = validate_personal_dev_storage_identity(identity)
+        if identity.storage_binding is not None:
+            return identity.storage_binding.object_store_identity
         return f"loomdev-{identity.name}", f"loom-dev-{identity.name}"
 
     @staticmethod
