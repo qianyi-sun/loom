@@ -92,6 +92,18 @@ def _deadline(seconds=5):
     return asyncio.get_running_loop().time() + seconds
 
 
+@pytest.fixture(params=["listing", "manifest"])
+def fetch_request(request, tls_listing):
+    """Exercise shared wire/lifecycle guarantees through both public entrypoints."""
+    async def fetch(reader, *, deadline):
+        if request.param == "listing":
+            return await reader.fetch(tls_listing.url, deadline=deadline)
+        digest = "a" * 64
+        url = tls_listing.origin + f"/loom-bundles/loom-bundle-manifests/v1/sha256/{digest}.json?X-Amz-Signature=private-fixture"
+        return await reader.fetch_manifest(url, expected_sha256=digest, deadline=deadline)
+    return fetch
+
+
 async def test_reads_exact_bytes_over_verified_tls_and_closes_connection(tls_listing, caplog):
     async with _reader(tls_listing) as reader:
         assert await reader.fetch(tls_listing.url, deadline=_deadline()) == b"<xml/>"
@@ -113,21 +125,21 @@ async def test_reads_exact_bytes_over_verified_tls_and_closes_connection(tls_lis
     b"HTTP/1.1 200 " + b"X" * (513 - len(b"HTTP/1.1 200 \r\nContent-Length: 1\r\n\r\n")) + b"\r\nContent-Length: 1\r\n\r\nx",
     b"HTTP/1.1 200 OK\r\nX:" + b" " * (513 - len(b"HTTP/1.1 200 OK\r\nX:a\r\nContent-Length: 1\r\n\r\n")) + b"a\r\nContent-Length: 1\r\n\r\nx",
 ], ids=lambda _: "unsafe-wire")
-async def test_rejects_unsafe_response_without_echo_or_redirect(tls_listing, response):
+async def test_rejects_unsafe_response_without_echo_or_redirect(tls_listing, response, fetch_request):
     tls_listing.response = response
     async with _reader(tls_listing, maximum_body_bytes=100, maximum_header_bytes=512) as reader:
         with pytest.raises(RuntimeError) as error:
-            await reader.fetch(tls_listing.url, deadline=_deadline())
+            await fetch_request(reader, deadline=_deadline())
     assert "private" not in str(error.value).lower()
     await asyncio.wait_for(tls_listing.closed.wait(), 2)
     assert len(tls_listing.requests) == 1
 
 
 @pytest.mark.parametrize("end", ["cancel", "close", "idle", "total"])
-async def test_cancellation_shutdown_and_deadlines_close_owned_socket(tls_listing, end):
+async def test_cancellation_shutdown_and_deadlines_close_owned_socket(tls_listing, end, fetch_request):
     tls_listing.response = None
     async with _reader(tls_listing, idle_timeout_seconds=0.1 if end == "idle" else 5.0) as reader:
-        request = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline(0.2 if end == "total" else 5)))
+        request = asyncio.create_task(fetch_request(reader, deadline=_deadline(0.2 if end == "total" else 5)))
         await asyncio.wait_for(tls_listing.received.wait(), 2)
         if end == "cancel":
             request.cancel()
@@ -138,13 +150,13 @@ async def test_cancellation_shutdown_and_deadlines_close_owned_socket(tls_listin
         await asyncio.wait_for(tls_listing.closed.wait(), 2)
 
 
-async def test_queued_read_uses_same_total_deadline_without_opening_connection(tls_listing):
+async def test_queued_read_uses_same_total_deadline_without_opening_connection(tls_listing, fetch_request):
     tls_listing.response = None
     async with _reader(tls_listing, maximum_concurrent_reads=1) as reader:
         first = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline()))
         await asyncio.wait_for(tls_listing.received.wait(), 2)
         with pytest.raises(RuntimeError):
-            await reader.fetch(tls_listing.url, deadline=_deadline(0.05))
+            await fetch_request(reader, deadline=_deadline(0.05))
         assert len(tls_listing.requests) == 1
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -159,13 +171,13 @@ async def test_rejects_unbound_url_before_connect(tls_listing, suffix):
     assert not tls_listing.requests
 
 
-async def test_expired_deadline_or_closed_reader_never_opens_connection(tls_listing):
+async def test_expired_deadline_or_closed_reader_never_opens_connection(tls_listing, fetch_request):
     reader = _reader(tls_listing)
     with pytest.raises(RuntimeError):
-        await reader.fetch(tls_listing.url, deadline=_deadline(-1))
+        await fetch_request(reader, deadline=_deadline(-1))
     await reader.aclose()
     with pytest.raises(RuntimeError):
-        await reader.fetch(tls_listing.url, deadline=_deadline())
+        await fetch_request(reader, deadline=_deadline())
     assert not tls_listing.requests
 
 
@@ -189,7 +201,7 @@ async def test_different_origin_is_rejected_before_connection(tls_listing):
     assert not tls_listing.requests
 
 
-async def test_tls_certificate_must_match_trusted_ca(tls_listing, monkeypatch):
+async def test_tls_certificate_must_match_trusted_ca(tls_listing, monkeypatch, fetch_request):
     # Loading the system roots instead of the disposable CA cannot validate the
     # self-signed fixture. Keep hostname checking and CERT_REQUIRED unchanged.
     def system_roots(context, *args, **kwargs):
@@ -198,22 +210,60 @@ async def test_tls_certificate_must_match_trusted_ca(tls_listing, monkeypatch):
     monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", system_roots)
     async with _reader(tls_listing) as reader:
         with pytest.raises(RuntimeError):
-            await reader.fetch(tls_listing.url, deadline=_deadline())
+            await fetch_request(reader, deadline=_deadline())
     assert not tls_listing.requests
 
 
-async def test_shutdown_closes_active_and_queued_reads(tls_listing):
+async def test_shutdown_closes_active_and_queued_reads(tls_listing, fetch_request):
     tls_listing.response = None
     reader = _reader(tls_listing, maximum_concurrent_reads=1)
     first = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline()))
     await asyncio.wait_for(tls_listing.received.wait(), 2)
-    second = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline()))
+    second = asyncio.create_task(fetch_request(reader, deadline=_deadline()))
     await asyncio.sleep(0)  # Admit the queued coroutine, not a wall-time assumption.
     await asyncio.gather(reader.aclose(), reader.aclose())
     results = await asyncio.gather(first, second, return_exceptions=True)
     assert all(isinstance(result, asyncio.CancelledError) for result in results)
     await asyncio.wait_for(tls_listing.closed.wait(), 2)
     assert len(tls_listing.requests) == 1
+
+
+async def test_manifest_fetch_preserves_exact_signed_target(tls_listing):
+    digest = "a" * 64
+    target = f"/loom-bundles/loom-bundle-manifests/v1/sha256/{digest}.json?X-Amz-Credential=access%2Fscope&X-Amz-Signature=private-fixture"
+    async with _reader(tls_listing) as reader:
+        assert await reader.fetch_manifest(tls_listing.origin + target, expected_sha256=digest, deadline=_deadline()) == b"<xml/>"
+        # Listing authority must not become arbitrary object-read authority.
+        with pytest.raises(RuntimeError):
+            await reader.fetch(tls_listing.origin + target, deadline=_deadline())
+    assert tls_listing.requests[0].startswith(f"GET {target} HTTP/1.1\r\n".encode())
+    assert b"Accept: application/json\r\n" in tls_listing.requests[0]
+
+
+@pytest.mark.parametrize("change", ["digest", "encoded", "parent", "bucket", "origin", "fragment", "unsigned", "invalid_digest"])
+async def test_manifest_fetch_rejects_other_targets_before_network(tls_listing, change):
+    digest = "a" * 64
+    url = tls_listing.origin + f"/loom-bundles/loom-bundle-manifests/v1/sha256/{digest}.json?sig=private"
+    if change == "digest":
+        url = url.replace(digest, "b" * 64)
+    elif change == "encoded":
+        url = url.replace("sha256/", "sha256%2F")
+    elif change == "parent":
+        url = url.replace("sha256/", "sha256/../sha256/")
+    elif change == "bucket":
+        url = url.replace("/loom-bundles/", "/foreign/")
+    elif change == "origin":
+        url = url.replace(tls_listing.origin, "https://foreign.example")
+    elif change == "fragment":
+        url += "#fragment"
+    elif change == "unsigned":
+        url = url.split("?")[0]
+    else:
+        digest = "A" * 64
+    async with _reader(tls_listing) as reader:
+        with pytest.raises(RuntimeError):
+            await reader.fetch_manifest(url, expected_sha256=digest, deadline=_deadline())
+    assert not tls_listing.requests
 
 
 async def test_cancelled_connect_handoff_aborts_orphaned_writer(tls_listing, monkeypatch):

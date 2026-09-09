@@ -1,6 +1,7 @@
 """Whole-inventory budgets and explicit native MinIO authority contracts."""
 
 import asyncio
+import hashlib
 import importlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from xml.sax.saxutils import escape
 
 import pytest
 
+from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom_task_image_authority.bundle_s3_signing import S3SigningCredentials
 
 NOW = datetime(2026, 9, 9, 12, tzinfo=UTC)
@@ -232,3 +234,157 @@ async def test_backend_redacts_unexpected_storage_failure(monkeypatch):
 def test_inventory_configuration_is_finite_typed_and_bounded(limits):
     with pytest.raises(RuntimeError):
         _module().S3InventoryLimits(**limits)
+
+
+@pytest.fixture
+def manifest(tmp_path):
+    (tmp_path / "Dockerfile").write_bytes(b"FROM scratch\n")
+    return capture_task_image_bundle_manifest(tmp_path)
+
+
+class _ManifestReader(_Reader):
+    def __init__(self, payload):
+        super().__init__()
+        self.payload = payload
+
+    async def fetch_manifest(self, url, *, expected_sha256, deadline):
+        self.requests.append((url, deadline, expected_sha256))
+        self.on_fetch()
+        return self.payload
+
+
+async def _get_manifest(backend, manifest, **changes):
+    options = dict(
+        bucket="loom-bundles", expected_sha256=manifest.digest,
+        task_checksum=manifest.task_checksum,
+        bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256,
+        expires_at=NOW + timedelta(seconds=60),
+    )
+    options.update(changes)
+    return await backend.get_manifest(**options)
+
+
+async def test_get_manifest_verifies_registered_bytes_and_exact_signed_key(monkeypatch, manifest):
+    reader = _ManifestReader(manifest.canonical_bytes)
+    backend, _ = _backend(monkeypatch, reader=reader)
+    async with backend:
+        assert await _get_manifest(backend, manifest) == manifest
+    url, deadline, expected = reader.requests[0]
+    assert urlsplit(url).path == f"/loom-bundles/loom-bundle-manifests/v1/sha256/{manifest.digest}.json"
+    assert parse_qs(urlsplit(url).query)["X-Amz-Expires"] == ["60"]
+    assert expected == manifest.digest
+    assert 0 < deadline - asyncio.get_running_loop().time() <= 30
+    assert reader.closed
+
+
+@pytest.mark.parametrize("changes", [
+    {"bucket": "foreign"}, {"expected_sha256": "A" * 64}, {"expected_sha256": "0" * 64},
+    {"expected_sha256": None}, {"task_checksum": "sha256:" + "a" * 64},
+    {"task_checksum": True}, {"bundle_file_metadata_sha256": ""},
+    {"expires_at": NOW},
+])
+async def test_manifest_rejects_invalid_frozen_scope_before_network(monkeypatch, manifest, changes):
+    reader = _ManifestReader(manifest.canonical_bytes)
+    backend, _ = _backend(monkeypatch, reader=reader)
+    with pytest.raises(RuntimeError):
+        await _get_manifest(backend, manifest, **changes)
+    assert not reader.requests
+
+
+@pytest.mark.parametrize("change", ["content", "noncanonical", "checksum", "modes", "oversized"])
+async def test_manifest_rejects_corruption_encoding_and_frozen_binding_drift(monkeypatch, manifest, change):
+    payload = manifest.canonical_bytes
+    options = {}
+    if change == "content":
+        payload = payload.replace(b"Dockerfile", b"Dockerfild")
+    elif change == "noncanonical":
+        payload += b"\n"
+        options["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    elif change == "checksum":
+        options["task_checksum"] = "b" * 64
+    elif change == "modes":
+        options["bundle_file_metadata_sha256"] = "b" * 64
+    else:
+        payload = b" " * (4 * 1024 * 1024 + 1)
+        options["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    backend, _ = _backend(monkeypatch, reader=_ManifestReader(payload))
+    with pytest.raises(RuntimeError):
+        await _get_manifest(backend, manifest, **options)
+
+
+@pytest.mark.parametrize("advanced", [NOW - timedelta(seconds=1), NOW + timedelta(seconds=60), NOW.replace(tzinfo=None)])
+async def test_manifest_rejects_post_fetch_clock_regression_or_expiry(monkeypatch, manifest, advanced):
+    observed = [NOW]
+    reader = _ManifestReader(manifest.canonical_bytes)
+    reader.on_fetch = lambda: observed.__setitem__(0, advanced)
+    backend, _ = _backend(monkeypatch, reader=reader, clock=lambda: observed[0])
+    with pytest.raises(RuntimeError):
+        await _get_manifest(backend, manifest)
+
+
+async def test_manifest_signing_shortens_deadline_on_forward_clock_movement(monkeypatch, manifest):
+    observations = [NOW, NOW, NOW + timedelta(seconds=59)]
+
+    def clock():
+        return observations.pop(0) if len(observations) > 1 else observations[0]
+
+    reader = _ManifestReader(manifest.canonical_bytes)
+    remaining = []
+    reader.on_fetch = lambda: remaining.append(reader.requests[-1][1] - asyncio.get_running_loop().time())
+    backend, _ = _backend(monkeypatch, reader=reader, clock=clock)
+    await _get_manifest(backend, manifest)
+    assert 0 < remaining[0] <= 1
+
+
+async def test_manifest_rechecks_authorization_after_canonical_parsing(monkeypatch, manifest):
+    observed = [NOW]
+    module = _module()
+    original = getattr(module, "parse_task_image_bundle_manifest", None)
+    assert original is not None
+
+    def parse(*args, **kwargs):
+        result = original(*args, **kwargs)
+        observed[0] = NOW + timedelta(seconds=60)
+        return result
+
+    monkeypatch.setattr(module, "parse_task_image_bundle_manifest", parse)
+    backend, _ = _backend(monkeypatch, reader=_ManifestReader(manifest.canonical_bytes), clock=lambda: observed[0])
+    with pytest.raises(RuntimeError):
+        await _get_manifest(backend, manifest)
+
+
+async def test_manifest_timeout_cancellation_and_closed_backend(monkeypatch, manifest):
+    entered = asyncio.Event()
+
+    class WaitingReader(_ManifestReader):
+        async def fetch_manifest(self, url, *, expected_sha256, deadline):
+            entered.set()
+            await asyncio.Future()
+
+    backend, reader = _backend(monkeypatch, reader=WaitingReader(b""), limits=_module().S3InventoryLimits(total_timeout_seconds=0.02))
+    with pytest.raises(RuntimeError):
+        await _get_manifest(backend, manifest)
+    assert entered.is_set()
+    entered.clear()
+    task = asyncio.create_task(_get_manifest(backend, manifest))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await backend.aclose()
+    with pytest.raises(RuntimeError):
+        await _get_manifest(backend, manifest)
+    assert reader.closed
+
+
+async def test_manifest_redacts_storage_errors(monkeypatch, manifest):
+    reader = _ManifestReader(manifest.canonical_bytes)
+
+    def fail():
+        raise RuntimeError("private-storage-response")
+
+    reader.on_fetch = fail
+    backend, _ = _backend(monkeypatch, reader=reader)
+    with pytest.raises(RuntimeError) as error:
+        await _get_manifest(backend, manifest)
+    assert "private" not in str(error.value)
