@@ -19,8 +19,7 @@ from loom_service.routes.dev_instances import (
     _personal_activation_intent_response,
     _personal_environment_response,
 )
-from tests.unit.test_personal_dev_activation_agent import _intent
-from tests.unit.test_personal_dev_activation_agent import _ActivationKubectlRunner
+from tests.unit.test_personal_dev_activation_agent import _ActivationKubectlRunner, _intent
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 
@@ -183,7 +182,10 @@ async def test_independent_activation_observes_exact_bound_physical_identity(mon
 
 async def test_bound_readiness_digest_covers_namespace_uid_and_storage_binding():
     from loom.dev_instance_manifest import dev_instance_manifest_documents
-    from loom.dev_instance_runtime import DevInstanceRuntimeError, observe_personal_dev_candidate_generation
+    from loom.dev_instance_runtime import (
+        DevInstanceRuntimeError,
+        observe_personal_dev_candidate_generation,
+    )
 
     intent = _v2()
     identity = intent.storage_binding.identity

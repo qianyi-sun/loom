@@ -14,7 +14,10 @@ import yaml  # type: ignore[import-untyped]
 from loom.dev_instance import DevInstanceIdentity
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
 from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
-from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
+from loom.personal_dev_incarnation_storage import (
+    personal_dev_storage_annotations,
+    validate_personal_dev_storage_identity,
+)
 
 _MANAGED_LABELS = {
     "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
@@ -557,6 +560,12 @@ def dev_instance_manifest_documents(
     config: DevInstanceManifestConfig,
 ) -> tuple[dict[str, Any], ...]:
     """Return namespace, migration, and runtime documents with no secret values."""
+    identity = validate_personal_dev_storage_identity(identity)
+    if identity.storage_binding is not None and config.lifecycle_binding is not None and (
+        identity.storage_binding.subject_id != config.lifecycle_binding.subject_id
+        or identity.storage_binding.subject_incarnation != config.lifecycle_binding.subject_incarnation
+    ):
+        raise ValueError("manifest lifecycle differs from its storage binding")
     personal_candidate = config.image_references is not None
     generation_suffix = f"-g{config.deployment_generation}" if personal_candidate else ""
     cp_name = f"loom-control-plane{generation_suffix}"

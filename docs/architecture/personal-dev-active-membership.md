@@ -326,9 +326,19 @@ digest. Historical version-1 canonical bytes and its unversioned HTTP response
 remain unchanged. Management checks the environment, operation and candidate
 owner before emitting the new intent; the independent agent uses its bound
 physical identity. Owner responses report those same persisted storage names.
+Candidate fixture preparation now resolves the persisted claim before any external
+work and uses the identity-taking SQL plan. Namespace bootstrap rejects unbound
+or differently bound existing namespaces; same-incarnation namespace updates carry
+the observed UID. Readiness covers that UID and the canonical storage digest.
+Namespace cleanup captures the authenticated namespace UID and sends it as a
+Kubernetes DELETE precondition, then waits until that UID is absent or replaced.
+It never retries deletion by name against a replacement, and malformed readbacks
+cannot count as successful cleanup. Disposable Kubernetes integration exercises
+real raw-DELETE transport, stale-UID rejection, bootstrap rejection and partial
+Secret recovery; no live cluster is used by these tests.
 
-These contracts do not enable storage provisioning. Runtime and independent
-activation propagation, UID-fenced namespace cleanup and
+These contracts do not enable storage provisioning. Remaining capacity installer
+and status propagation, full lifecycle acceptance and
 allowlisted data transfer remain required before selecting the new layout in the
 live service or lifting the retained-data recreation interlock.
 

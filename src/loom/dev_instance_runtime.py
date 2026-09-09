@@ -327,7 +327,7 @@ class KubectlClient:
         namespace = await self.read_storage_namespace(identity, allow_terminating=True)
         if namespace is None:
             return
-        uid = namespace["metadata"]["uid"]
+        uid = self._namespace_uid(namespace)
         try:
             await self.runner.run(
                 self._argv("delete", f"--raw=/api/v1/namespaces/{identity.namespace}", "-f", "-"),
@@ -336,18 +336,26 @@ class KubectlClient:
             )
         except DevInstanceRuntimeError:
             current = await self.read_namespace_optional(identity.namespace)
-            if current is None or current["metadata"].get("uid") != uid:
+            if current is None or self._namespace_uid(current) != uid:
                 return
             raise
         try:
             async with asyncio.timeout(300):
                 while True:
                     current = await self.read_namespace_optional(identity.namespace)
-                    if current is None or current["metadata"].get("uid") != uid:
+                    if current is None or self._namespace_uid(current) != uid:
                         return
                     await asyncio.sleep(1)
         except TimeoutError:
             raise DevInstanceRuntimeError("instance namespace deletion timed out") from None
+
+    @staticmethod
+    def _namespace_uid(namespace: dict[str, Any]) -> str:
+        metadata = namespace.get("metadata")
+        uid = metadata.get("uid") if isinstance(metadata, dict) else None
+        if not isinstance(uid, str) or not uid:
+            raise DevInstanceRuntimeError("cluster namespace UID response was invalid")
+        return uid
 
     async def read_resource_json(
         self,
@@ -989,7 +997,7 @@ class KubectlSecretVault:
                 # CREATE, not APPLY: a concurrent namespace creator must cause a
                 # conflict rather than let us attach provenance to its namespace.
                 await self.kubectl.runner.run(
-                    self.kubectl._argv("create", "-f", "-"),
+                    self.kubectl._argv("create", "--field-manager", self.kubectl.field_manager, "-f", "-"),
                     stdin=yaml.safe_dump(namespace, sort_keys=False),
                 )
         else:
@@ -1293,7 +1301,7 @@ class KubectlClusterProvisioner:
 
     async def destroy(self, identity: DevInstanceIdentity, *, keep_data: bool) -> None:
         del keep_data
-        await self.kubectl.delete_namespace(identity.namespace)
+        await self.kubectl.delete_storage_namespace(identity)
 
 
 @dataclass(slots=True)
@@ -1319,6 +1327,19 @@ class KubectlCandidateGenerationProvisioner:
             raise DevInstanceRuntimeError(
                 "personal namespace read authority is unavailable",
             ) from None
+        if identity.storage_binding is not None:
+            observed = await self.kubectl.read_storage_namespace(identity)
+            namespace = documents[0]
+            if observed is None:
+                await self.kubectl.runner.run(
+                    self.kubectl._argv("create", "--field-manager", self.kubectl.field_manager, "-f", "-"),
+                    stdin=yaml.safe_dump(namespace, sort_keys=False),
+                )
+            else:
+                namespace["metadata"]["uid"] = observed["metadata"]["uid"]
+                await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
+            await self.kubectl.apply(yaml.safe_dump(management_binding, sort_keys=False))
+            return
         await self.kubectl.apply(
             yaml.safe_dump_all(
                 (documents[0], management_binding),
@@ -1372,7 +1393,7 @@ class KubectlCandidateGenerationProvisioner:
         )
 
     async def destroy(self, identity: DevInstanceIdentity) -> None:
-        await self.kubectl.delete_namespace(identity.namespace)
+        await self.kubectl.delete_storage_namespace(identity)
 
 
 async def observe_personal_dev_candidate_generation(
@@ -1381,6 +1402,7 @@ async def observe_personal_dev_candidate_generation(
     config: DevInstanceManifestConfig,
 ) -> PersonalDevReadinessObservation:
     """Recompute stable readiness evidence for one exact immutable generation."""
+    identity = validate_personal_dev_storage_identity(identity)
     if config.lifecycle_binding is None or config.image_references is None:
         raise ValueError("personal-dev readiness observation requires lifecycle bindings")
     binding = config.lifecycle_binding
@@ -1397,6 +1419,20 @@ async def observe_personal_dev_candidate_generation(
         for component in ("control-plane", "llm-gateway", "service", "web")
     }
     evidence: list[dict[str, object]] = []
+    if identity.storage_binding is not None:
+        if (
+            identity.storage_binding.subject_id != binding.subject_id
+            or identity.storage_binding.subject_incarnation != binding.subject_incarnation
+        ):
+            raise ValueError("readiness lifecycle differs from its storage binding")
+        namespace = await kubectl.read_storage_namespace(identity)
+        if namespace is None:
+            raise DevInstanceRuntimeError("candidate storage namespace is unavailable")
+        evidence.append({
+            "kind": "Namespace", "name": identity.namespace,
+            "uid": namespace["metadata"]["uid"],
+            "storage_binding_sha256": canonical_digest(identity.storage_binding),
+        })
     deployed_images: dict[str, str] = {}
     for component, name in names.items():
         resource = await kubectl.read_resource_json(

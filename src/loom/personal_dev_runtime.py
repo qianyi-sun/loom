@@ -11,12 +11,12 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 from uuid import UUID
 
-from loom.dev_instance import DevInstanceIdentity, derive_identity
+from loom.dev_instance import DevInstanceIdentity
 from loom.dev_instance_manifest import (
     DevInstanceManifestConfig,
     PersonalDevManifestBinding,
 )
-from loom.dev_instance_provision import provisioning_plan
+from loom.dev_instance_provision import provisioning_plan_for_identity
 from loom.dev_instance_provisioner import (
     AccessBootstrap,
     BucketEnsurer,
@@ -27,6 +27,7 @@ from loom.dev_instance_provisioner import (
 )
 from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_incarnation_storage import resolve_personal_dev_storage_identity
 from loom.personal_dev_membership_cleanup import validated_membership_destroy
 from loom.personal_dev_reconciler import (
     PersonalDevReadinessObservation,
@@ -461,7 +462,7 @@ class PersonalDevPreparationRuntime:
     ) -> tuple[DevInstanceIdentity, DevInstanceManifestConfig]:
         operation = claim.operation
         images = personal_dev_candidate_images(claim)
-        identity = derive_identity(operation.environment_name)
+        identity = resolve_personal_dev_storage_identity(claim)
         return identity, DevInstanceManifestConfig(
             image_tag="",
             candidate_sha=operation.candidate_sha,
@@ -500,7 +501,7 @@ class PersonalDevPreparationRuntime:
             if operation.kind == "update":
                 raise RuntimeError("personal-dev update has no existing fixture credential")
             password = self.password_factory()
-        plan = provisioning_plan(identity.name, password)
+        plan = provisioning_plan_for_identity(identity, password)
         await self.sql.apply_role_and_database(
             identity,
             role_sql=str(plan["role_sql"]),
@@ -536,7 +537,7 @@ class PersonalDevPreparationRuntime:
             raise ValueError("personal-dev cleanup requires a destroy operation")
         if claim.operation.capacity_mode == "membership-v1":
             validated_membership_destroy(claim, checkpoints=checkpoints)
-        return derive_identity(claim.operation.environment_name)
+        return resolve_personal_dev_storage_identity(claim)
 
     async def delete_namespace(self, claim: PersonalDevReconciliationClaim) -> None:
         await self.cluster.destroy(
