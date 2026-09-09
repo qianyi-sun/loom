@@ -21,8 +21,26 @@ def upgrade() -> None:
         LOCK TABLE public.task_image_materializations,
           public.task_image_materialization_attempts,
           public.task_image_registry_credentials,
-          public.task_image_publication_candidates
+          public.task_image_publication_candidates,
+          public.trials
           IN ACCESS EXCLUSIVE MODE NOWAIT;
+    """)
+    # A terminal reference cannot become live again after retention releases it.
+    # Check the final row after all BEFORE-trigger transformations, including
+    # updates that did not explicitly name state. No cross-row locks or queries.
+    op.execute("""
+        CREATE FUNCTION public.trials_reject_terminal_reopening() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        BEGIN
+          RAISE EXCEPTION 'terminal trial cannot become nonterminal; submit a new trial'
+            USING ERRCODE = '23514', CONSTRAINT = 'trials_terminal_state_monotonic';
+        END $$;
+        REVOKE ALL ON FUNCTION public.trials_reject_terminal_reopening() FROM PUBLIC;
+        CREATE TRIGGER trials_terminal_state_monotonic
+          AFTER UPDATE ON public.trials FOR EACH ROW
+          WHEN (OLD.state IN ('succeeded', 'failed', 'cancelled')
+            AND NEW.state NOT IN ('succeeded', 'failed', 'cancelled'))
+          EXECUTE FUNCTION public.trials_reject_terminal_reopening();
     """)
     # Issuance is the durable pre-push inventory, even before a candidate exists.
     # Keep published 0131 unchanged; protect both existing and future audit rows.
@@ -319,7 +337,8 @@ def downgrade() -> None:
           public.task_image_publication_jobs,
           public.task_image_registry_credentials,
           public.task_image_publication_candidates,
-          public.task_image_materializations
+          public.task_image_materializations,
+          public.trials
           IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
           IF NOT EXISTS (
@@ -336,6 +355,8 @@ def downgrade() -> None:
         END $$;
     """)
     op.execute("""
+        DROP TRIGGER trials_terminal_state_monotonic ON public.trials;
+        DROP FUNCTION public.trials_reject_terminal_reopening();
         DROP TRIGGER task_image_materializations_preserve_ready ON task_image_materializations;
         DROP FUNCTION task_image_materialization_preserve_ready();
         ALTER TABLE task_image_materializations
