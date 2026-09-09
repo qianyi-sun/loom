@@ -1431,7 +1431,7 @@ class PsycopgPersonalDevCapacityDatabase:
         identity: DevInstanceIdentity,
         configuration: ReporterConfigurationV1,
         agent_database_url: str,
-        retirement_from_generation: int | None = None,
+        retirement_from_generation: int | tuple[int, ...] | None = None,
     ) -> dict[str, object]:
         """Read installed protected authority without reopening migration logins."""
         return await observe_database(

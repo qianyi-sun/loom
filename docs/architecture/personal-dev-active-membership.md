@@ -1,8 +1,9 @@
 # Personal development membership under active capacity authority
 
 Status: manager-side application membership and durable lifecycle implemented;
-service connection under validation. Capacity-accounted builds, successor
-recovery/storage, operational enablement and live acceptance remain incomplete.
+service connection and reviewed successor recovery under validation.
+Capacity-accounted builds, incarnation storage, operational enablement and live
+acceptance remain incomplete.
 
 ## Outcome
 
@@ -207,6 +208,65 @@ stays pending for exact replay. Recording it as historical resolution requires
 an authenticated current-state observation proving an authority transition.
 Historical resolution preserves the original evidence and does not mark a new
 authority ready. Successor re-attestation remains a distinct transition.
+
+### Reviewed historical continuation
+
+After `membership_outcome_resolved`, a protected operator plan may continue the
+exact original owner intent through one fresh linked operation. It does not
+rewrite the original envelope, import historical subjects, or select whatever
+authority is currently available. The reviewed V3 preparation must explicitly
+adopt the exact active accepted subject into its managed base; a noncommitted
+first create instead has no adopted subject. The manager still makes the final
+atomic admission and identity decision.
+
+Migration `0136` retains the predecessor and independently accepted source with
+restricting foreign keys. The predecessor envelope and referenced accepted
+operation/attempt evidence remain immutable. In one lease-fenced transaction,
+the predecessor becomes `superseded` at `membership_successor_created`, a fresh
+operation/key/attempt is created at the next epoch, and the environment points
+to that running child. A deferred database check requires the complete runnable
+handoff. Exact retries return the same child. Downgrade refuses to discard any
+successor history.
+
+An adopted create/update/capacity continuation is an ordinary fresh update, with
+a higher deployment generation and newly verified installation. A noncommitted
+first create remains create. A noncommitted destroy retains its exact accepted
+deployment evidence and starts at retirement; it cannot seal or delete before
+its new disabled receipt and authenticated release. An already committed
+historical destroy keeps the existing release flow and gets no successor.
+
+Optional service settings `LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_SUCCESSOR_PLAN_FILE`
+and `LOOM_SVC_PERSONAL_DEV_MEMBERSHIP_SUCCESSOR_PLAN_SHA256` must be paired. The
+file is canonical `PersonalDevMembershipSuccessorPlanV1` JSON, owned by the
+service identity with mode `0600`, not a symlink. The bounded plan contains
+1–128 unique predecessor bindings and is limited to 8 MiB. Its independent
+canonical digest and every binding's full current acceptance authority must
+match protected service configuration. Both settings default empty: no plan
+means no successor authority. Personal source and owner requests cannot provide
+these settings or bindings.
+Legacy modes reject either setting, including when personal deployments are
+disabled; misplaced recovery authority is never silently ignored.
+
+Each binding has its own reviewed window of at most 24 hours. The reconciler
+checks the exact current delegate/checkpoint and review window across I/O;
+non-destroy work also needs positive admission. Expired positive admission does
+not prohibit reviewed destroy recovery. The retirement installer derives its
+allowed starting generations only from the immutable reviewed adopted member and
+failed predecessor. It advances the exact disabled guard and reporter registration
+to the fresh generation without resetting reporter history. Secret/Deployment
+retries accept only these exact retained manifests or the target; candidate build
+failure does not block authenticated teardown. Both retained credential Secrets
+must identify the independently retained accepted operation, not merely agree
+with each other. These source-level ports are not
+live enablement: operational adoption and end-to-end recovery must be verified
+before provisioning the plan in a deployment.
+
+Owner status exposes only the derived parent/child identifiers and original
+continuation kind, not the protected plan. CLI replay follows the exact chain
+from the original apply receipt and accepts readiness only for its matching
+terminal operation and environment projection. A pending update may still show
+the previous accepted deployment; that is not a completed new deployment.
+Application readiness remains separate from observed worker availability.
 
 `POST /v1/personal-memberships/subjects/status/query` and
 `POST /v1/personal-memberships/subjects/release/query` bind an exact immutable

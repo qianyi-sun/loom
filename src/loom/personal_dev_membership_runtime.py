@@ -28,11 +28,13 @@ from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipEnvelopeV1,
     PersonalDevMembershipObservationV1,
 )
+from loom.personal_dev_membership_successor import parse_membership_successor_binding
 from loom_capacity_agent.contracts import AgentRegistrationV1, ReporterConfigurationV1
 from loom_capacity_agent.store import CapacityAgentStore, read_agent_reporter_high_water
 from loom_capacity_guard.contracts import GuardFenceV1, canonical_digest
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
 from loom_capacity_guard.store import CapacityGuardStore
+from loom_capacity_manager.contracts import canonical_bytes
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutionAuthorityV2,
@@ -54,7 +56,7 @@ class PersonalDevMembershipDatabase(Protocol):
         identity: DevInstanceIdentity,
         configuration: ReporterConfigurationV1,
         agent_database_url: str,
-        retirement_from_generation: int | None = None,
+        retirement_from_generation: int | tuple[int, ...] | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -68,6 +70,12 @@ def validate_membership_observation_context(
     if execution_pin is None or checkpoint.execution != execution_pin:
         raise ValueError("membership execution differs from trusted prepared execution")
     operation, attempt = claim.operation, claim.attempt
+    successor = operation.membership_successor_binding
+    if successor is not None and (
+        successor.authority.execution != checkpoint.execution
+        or successor.authority.namespace_id != checkpoint.namespace_id
+    ):
+        raise ValueError("membership successor authority differs from reviewed execution")
     if (
         observed_at.tzinfo is None
         or operation.capacity_mode != "membership-v1"
@@ -85,7 +93,7 @@ def validate_membership_observation_context(
         or not operation.local_activation_sha256
         or claim.candidate.id != operation.candidate_id
         or claim.candidate.candidate_sha != operation.candidate_sha
-        or claim.candidate.status != "ready"
+        or (operation.kind != "destroy" and claim.candidate.status != "ready")
         or not claim.candidate.publication_sha256
     ):
         raise ValueError("membership observation requires a fresh exact leased operation")
@@ -97,13 +105,77 @@ def _registration(configuration: ReporterConfigurationV1) -> AgentRegistrationV1
     )
 
 
+def _retirement_generations(value: int | tuple[int, ...], *, target: int) -> tuple[int, ...]:
+    generations = (value,) if type(value) is int else value
+    if (
+        not isinstance(generations, tuple)
+        or not 1 <= len(generations) <= 2
+        or any(type(generation) is not int or not 0 < generation < target for generation in generations)
+        or len(set(generations)) != len(generations)
+    ):
+        raise ValueError("protected retirement requires bounded earlier generations")
+    return generations
+
+
+def retirement_from_generation(
+    claim: PersonalDevReconciliationClaim, execution_pin: ExecutionAuthorityV2 | None,
+) -> int | tuple[int, ...]:
+    """Select retained generations from durable review, never from installed data."""
+    operation = claim.operation
+    if operation.membership_predecessor_operation_id is None:
+        if any(value is not None for value in (
+            operation.membership_successor_binding, operation.membership_successor_binding_sha256,
+            operation.membership_accepted_operation_id, operation.membership_predecessor_envelope_sha256,
+            operation.membership_continuation_kind,
+        )):
+            raise ValueError("membership successor retirement linkage is incomplete")
+        _retirement_generations(operation.expected_operation_epoch, target=operation.operation_epoch)
+        return operation.expected_operation_epoch
+    if operation.membership_successor_binding is None:
+        raise ValueError("membership successor retirement requires reviewed adoption")
+    binding = parse_membership_successor_binding(
+        canonical_bytes(operation.membership_successor_binding),
+        expected_binding_sha256=operation.membership_successor_binding_sha256 or "",
+    )
+    member = binding.adopted_member
+    if (
+        operation.kind != "destroy" or operation.membership_continuation_kind != "destroy"
+        or operation.operation_epoch != operation.expected_operation_epoch + 1
+        or binding.authority.execution != execution_pin
+        or binding.predecessor_operation_id != operation.membership_predecessor_operation_id
+        or binding.predecessor_envelope_sha256 != operation.membership_predecessor_envelope_sha256
+        or binding.accepted_operation_id is None
+        or binding.accepted_operation_id != operation.membership_accepted_operation_id
+        or binding.owner_team_id != operation.owner_team_id
+        or member is None
+    ):
+        raise ValueError("membership successor retirement differs from reviewed linkage")
+    subject, acknowledgement = member.configuration, member.acknowledgement
+    if (
+        member.owner_id != operation.owner_user_id
+        or subject.subject_id != operation.subject_id
+        or subject.subject_incarnation != operation.subject_incarnation
+        or subject.display_name != f"dev-{operation.environment_name}"
+        or subject.deployment_generation != operation.deployment_generation
+        or subject.demand_reporter_incarnation != operation.capacity_reporter_incarnation
+        or acknowledgement.candidate.identity != operation.candidate_sha
+        or acknowledgement.candidate.publication_sha256 != claim.candidate.publication_sha256
+        or acknowledgement.protected_admission_sha256 != operation.protected_admission_sha256
+    ):
+        raise ValueError("membership successor retirement differs from retained subject")
+    generations = tuple(dict.fromkeys((
+        subject.configuration_generation, operation.expected_operation_epoch,
+    )))
+    return _retirement_generations(generations, target=operation.operation_epoch)
+
+
 async def read_protected_membership(
     session: AsyncSession,
     *,
     owner: str,
     agent: str,
     configuration: ReporterConfigurationV1,
-    retirement_from_generation: int | None = None,
+    retirement_from_generation: int | tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Measure protected history, optionally advancing only a retirement binding.
 
@@ -123,19 +195,22 @@ async def read_protected_membership(
         {name: getattr(configuration, name) for name in GuardFenceV1.model_fields}
     )
     if retirement_from_generation is not None:
-        prior = expected.model_copy(update={"configuration_generation": retirement_from_generation})
-        prior_fence = expected_fence.model_copy(
-            update={"configuration_generation": retirement_from_generation}
+        generations = _retirement_generations(
+            retirement_from_generation, target=configuration.configuration_generation
         )
-        if actual not in (prior, expected) or fence not in (prior_fence, expected_fence):
+        prior = tuple(expected.model_copy(update={"configuration_generation": generation})
+                      for generation in generations)
+        prior_fences = tuple(expected_fence.model_copy(update={"configuration_generation": generation})
+                             for generation in generations)
+        if actual not in (*prior, expected) or fence not in (*prior_fences, expected_fence):
             raise ValueError("protected retirement binding differs from retained installation")
         if fence != expected_fence:
             await guard.reconfigure_disabled_authority(
-                expected_fence, expected_configuration_generation=retirement_from_generation
+                expected_fence, expected_configuration_generation=fence.configuration_generation
             )
         if actual != expected:
             await store.reconfigure_agent(
-                expected, expected_configuration_generation=retirement_from_generation
+                expected, expected_configuration_generation=actual.configuration_generation
             )
         fence = await guard.read_guard_fence()
         actual = await store._read_registration(lock=True)
@@ -192,7 +267,7 @@ async def observe_database(
     identity: DevInstanceIdentity,
     configuration: ReporterConfigurationV1,
     agent_database_url: str,
-    retirement_from_generation: int | None = None,
+    retirement_from_generation: int | tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     owner, _migrator, agent, _executor, observer, runtime = capacity_role_names(identity)
     trusted_url = make_url(fixture_database_url(admin_url, identity.database))
@@ -347,6 +422,12 @@ class PersonalDevMembershipObserver:
         )
 
         runtime = self.installer
+        retained_generations = (
+            _retirement_generations(
+                retirement_from_generation(claim, runtime._membership_execution),
+                target=claim.operation.operation_epoch,
+            ) if retirement else ()
+        )
         identity = derive_identity(claim.operation.environment_name)
         seed = await runtime._kubectl.read_secret_optional(
             identity.namespace, _CREDENTIALS_SECRET_NAME
@@ -360,11 +441,15 @@ class PersonalDevMembershipObserver:
         credential_claim = claim
         if retirement:
             # Retirement retains the original installed operation's credential tags.
+            credential_operation_id = UUID(_decode_secret_text(seed, "operation-id"))
+            if (
+                claim.operation.membership_predecessor_operation_id is not None
+                and credential_operation_id != claim.operation.membership_accepted_operation_id
+            ):
+                raise ValueError("successor retained credential operation differs from accepted history")
             credential_claim = replace(
                 claim,
-                operation=replace(
-                    claim.operation, id=UUID(_decode_secret_text(seed, "operation-id"))
-                ),
+                operation=replace(claim.operation, id=credential_operation_id),
             )
         await runtime._assert_installed_credentials(credential_claim, installation, identity)
         credentials = CapacityDatabaseCredentials(
@@ -384,12 +469,9 @@ class PersonalDevMembershipObserver:
             }
         )
         if retirement:
-            prior = expected.model_copy(
-                update={
-                    "configuration_generation": claim.operation.expected_operation_epoch,
-                }
-            )
-            if configuration not in (prior, expected):
+            prior = tuple(expected.model_copy(update={"configuration_generation": generation})
+                          for generation in retained_generations)
+            if configuration not in (*prior, expected):
                 raise ValueError("retirement agent configuration differs from retained publication")
         elif configuration != expected:
             raise ValueError("installed membership agent publication differs from operation")
@@ -440,7 +522,7 @@ class PersonalDevMembershipObserver:
         alternatives = [documents]
         if retirement:
             for generation in (
-                claim.operation.expected_operation_epoch,
+                *retained_generations,
                 claim.operation.operation_epoch,
             ):
                 alternative, changed_digest = runtime._manifests(
@@ -517,7 +599,7 @@ class PersonalDevMembershipObserver:
             identity=identity,
             configuration=configuration,
             agent_database_url=database.agent_database_url,
-            retirement_from_generation=claim.operation.expected_operation_epoch
+            retirement_from_generation=retirement_from_generation(claim, self.installer._membership_execution)
             if retirement
             else None,
         )
