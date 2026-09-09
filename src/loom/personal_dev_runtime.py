@@ -479,6 +479,7 @@ class PersonalDevPreparationRuntime:
                 subject_incarnation=operation.subject_incarnation,
                 operation_id=operation.id,
                 attempt_id=claim.attempt.id,
+                attempt_sequence=claim.attempt.attempt_sequence,
                 operation_epoch=operation.operation_epoch,
             ),
         )

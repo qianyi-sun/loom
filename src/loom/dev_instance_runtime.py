@@ -1383,15 +1383,16 @@ class KubectlCandidateGenerationProvisioner:
             )
         )
         runtime = documents[migration_index + 1 :]
+        if identity.storage_binding is not None:
+            bootstrap = (*bootstrap, *(document for document in runtime if document["kind"] not in {"Deployment", "Job"}))
+            runtime = tuple(document for document in runtime if document["kind"] in {"Deployment", "Job"})
         await self.kubectl.apply(
             yaml.safe_dump_all(bootstrap, sort_keys=False, explicit_start=True),
         )
-        await self.kubectl.apply(yaml.safe_dump(migration, sort_keys=False))
+        await self._apply_generation_workloads(identity, config, (migration,))
         migration_name = str(migration["metadata"]["name"])
         await self.kubectl.wait_job(identity.namespace, migration_name)
-        await self.kubectl.apply(
-            yaml.safe_dump_all(runtime, sort_keys=False, explicit_start=True),
-        )
+        await self._apply_generation_workloads(identity, config, runtime)
         names = {
             component: f"loom-{component}-g{config.deployment_generation}"
             for component in ("control-plane", "llm-gateway", "service", "web")
@@ -1404,6 +1405,27 @@ class KubectlCandidateGenerationProvisioner:
             identity,
             config,
         )
+
+    async def _apply_generation_workloads(
+        self, identity: DevInstanceIdentity, config: DevInstanceManifestConfig,
+        documents: tuple[dict[str, Any], ...],
+    ) -> None:
+        if identity.storage_binding is None:
+            await self.kubectl.apply(yaml.safe_dump_all(documents, sort_keys=False, explicit_start=True))
+            return
+        from loom.personal_dev_storage_workload_write import write_storage_workload
+
+        if config.lifecycle_binding is None:
+            raise DevInstanceRuntimeError("bound candidate workload requires lifecycle authority")
+        for document in documents:
+            if document["kind"] not in {"Job", "Deployment"}:
+                await self.kubectl.apply(yaml.safe_dump(document, sort_keys=False))
+        for document in documents:
+            if document["kind"] in {"Job", "Deployment"}:
+                await write_storage_workload(
+                    self.kubectl, identity, document,
+                    operation_epoch=config.lifecycle_binding.operation_epoch,
+                )
 
     async def destroy(self, identity: DevInstanceIdentity) -> None:
         await self.kubectl.delete_storage_namespace(identity)

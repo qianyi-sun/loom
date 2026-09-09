@@ -166,7 +166,7 @@ class _Kubectl:
         self.runner = _Cluster()
         self.secrets = self.runner.secrets
         self.secrets["loom-protected-worker-runtime"] = {"database-url": _RUNTIME_DATABASE_URL.encode()}
-        self.resources = {}
+        self.resources = self.runner.workloads
         self.applies = 0
         self.waits = 0
 

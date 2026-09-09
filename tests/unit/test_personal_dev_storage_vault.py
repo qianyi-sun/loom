@@ -2,6 +2,7 @@
 
 import base64
 import json
+from copy import deepcopy
 from dataclasses import replace
 from uuid import uuid4
 
@@ -38,12 +39,16 @@ class _Cluster:
         self.secret_immutable = {}
         self.version = 0
         self.writes = []
+        self.workloads = {}
 
     async def run(self, argv, *, stdin=None, timeout_seconds=120):
         if "get" in argv:
             index = argv.index("get")
             if argv[index + 1] == "namespace":
                 result = self.namespace or {}
+            elif argv[index + 1] == "deployment":
+                workload = self.workloads.get(("Deployment", argv[index + 2]))
+                return CommandResult(json.dumps(workload) if workload is not None else "", "")
             else:
                 data = self.secrets.get(argv[index + 2])
                 name = argv[index + 2]
@@ -55,7 +60,25 @@ class _Cluster:
             return CommandResult(json.dumps(result), "")
         self.writes.append((argv, stdin))
         for document in yaml.safe_load_all(stdin or ""):
-            if document["kind"] == "Namespace":
+            if document["kind"] == "Deployment":
+                key = ("Deployment", document["metadata"]["name"])
+                old = self.workloads.get(key)
+                if "create" in argv and old is not None:
+                    raise DevInstanceRuntimeError("workload already exists")
+                if "replace" in argv and (old is None or any(
+                    document["metadata"].get(field) != old["metadata"].get(field)
+                    for field in ("uid", "resourceVersion")
+                )):
+                    raise DevInstanceRuntimeError("workload update was superseded")
+                if "--dry-run=server" in argv:
+                    return CommandResult(json.dumps(document), "")
+                self.version += 1
+                document["metadata"].update(
+                    uid=old["metadata"]["uid"] if old else str(uuid4()),
+                    resourceVersion=str(self.version),
+                )
+                self.workloads[key] = deepcopy(document)
+            elif document["kind"] == "Namespace":
                 if "create" in argv and self.namespace is not None:
                     raise DevInstanceRuntimeError("namespace already exists")
                 self.namespace = document

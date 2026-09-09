@@ -278,6 +278,7 @@ class KubectlPersonalDevActivationExecutor:
                 subject_incarnation=intent.subject_incarnation,
                 operation_id=intent.operation_id,
                 attempt_id=intent.attempt_id,
+                attempt_sequence=intent.attempt_sequence,
                 operation_epoch=intent.operation_epoch,
             ),
             minio_region=self.minio_region,

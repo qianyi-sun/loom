@@ -18,7 +18,7 @@ def test_bound_retry_keeps_immutable_workload_fields_but_updates_attempt_evidenc
         config.lifecycle_binding, subject_id=identity.storage_binding.subject_id,
         subject_incarnation=identity.storage_incarnation,
     ))
-    retry = replace(config, lifecycle_binding=replace(config.lifecycle_binding, attempt_id=uuid4()))
+    retry = replace(config, lifecycle_binding=replace(config.lifecycle_binding, attempt_id=uuid4(), attempt_sequence=1))
     first = dev_instance_manifest_documents(identity, config)
     second = dev_instance_manifest_documents(identity, retry)
     checked = set()
@@ -27,6 +27,7 @@ def test_bound_retry_keeps_immutable_workload_fields_but_updates_attempt_evidenc
             continue
         checked.add(old["kind"])
         assert new["metadata"]["labels"]["loom.dev/attempt"] == str(retry.lifecycle_binding.attempt_id)
+        assert new["metadata"]["labels"]["loom.dev/attempt-sequence"] == "1"
         assert old["metadata"]["labels"]["loom.dev/attempt"] != new["metadata"]["labels"]["loom.dev/attempt"]
         if old["kind"] == "Deployment":
             assert old["spec"]["selector"] == new["spec"]["selector"]

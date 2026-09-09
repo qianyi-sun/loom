@@ -7,6 +7,38 @@ from loom.personal_dev_storage_workload_write import write_storage_workload
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 
+@pytest.mark.parametrize("owner_change", ("absent", "wrong_uid", "extra", "controller", "block_deletion"))
+async def test_workload_rejects_noncanonical_namespace_owner_without_writes(owner_change):
+    from copy import deepcopy
+
+    from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
+    from tests.unit.test_personal_dev_storage_vault import _Cluster
+
+    identity = _bound_claim().operation.storage_binding.identity
+    cluster = _Cluster()
+    cluster.namespace = {"metadata": {"name": identity.namespace, "uid": "namespace-uid",
+                                     "annotations": personal_dev_storage_annotations(identity)}}
+    kubectl = KubectlClient("kubectl", runner=cluster)
+    document = {"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "probe", "namespace": identity.namespace},
+        "spec": {"replicas": 1, "template": {}}}
+    await write_storage_workload(kubectl, identity, document, operation_epoch=1)
+    stored = cluster.workloads[("Deployment", "probe")]
+    references = stored["metadata"]["ownerReferences"]
+    if owner_change == "absent":
+        stored["metadata"].pop("ownerReferences")
+    elif owner_change == "wrong_uid":
+        references[0]["uid"] = "foreign-namespace-uid"
+    elif owner_change == "extra":
+        references.append(deepcopy(references[0]))
+    else:
+        references[0]["controller" if owner_change == "controller" else "blockOwnerDeletion"] = True
+    before = deepcopy(cluster.writes)
+    with pytest.raises(DevInstanceRuntimeError, match="incarnation"):
+        await write_storage_workload(kubectl, identity, document, operation_epoch=1)
+    assert cluster.writes == before
+
+
 @pytest.mark.parametrize("payload", ('{}', '[]', 'null', 'false', '0', '"bad"', '{', '{"metadata":{}}'))
 async def test_malformed_workload_readback_rejects_before_mutation(payload):
     identity = _bound_claim().operation.storage_binding.identity

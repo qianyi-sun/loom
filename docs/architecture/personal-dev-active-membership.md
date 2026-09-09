@@ -389,11 +389,51 @@ allowlists and forbids changing/removing storage annotations on a namespace UID.
 Bound preparation persists immutable vault credentials before mutating database
 roles, so a losing credential writer cannot change the winner's SQL password.
 
-This remains disabled pending real mounted-workload acceptance and UID-fenced
-staged workload activation. Workload CREATE/apply is not yet fenced. Namespace CEL
-checks alone cannot replace those fences: namespace objects used by admission
-policies come from an informer cache, and a namespace read is not atomic with a
-child write. PostgreSQL external-effect fencing is also a separate boundary.
+Bound migration Jobs and runtime/capacity Deployments now use inert CREATE
+followed by UID/resource-version-pinned update-only activation: Jobs begin
+suspended with their final immutable template, and Deployments begin at zero
+replicas. Management verifies the exact namespace UID and binding after CREATE.
+An additional observation may accept only status/controller bookkeeping changes
+on that acknowledged object; it cannot adopt a changed spec, identity or epoch.
+Conflicts propagate without an internal fresh-authority overwrite. NetworkPolicies
+and Services are installed before activation.
+
+Each workload records its canonical requested spec and namespace provenance.
+Server-side dry-run UPDATE normalizes defaults before comparison with persisted
+spec; arbitrary observed defaults are not copied into requested intent. Jobs
+retain only API-generated, UID-checked selectors/controller labels. Deployment
+updates rebuild desired fields so removed configuration does not survive.
+Attempt evidence is excluded from bound immutable selectors and Job templates.
+The durable attempt sequence accompanies its UUID: at the same operation epoch,
+an existing workload rejects older sequences and different UUIDs at the same
+sequence. Capacity configuration updates retain their supported same-epoch
+semantics and are not given fabricated attempt identity.
+
+One exact Namespace owner reference, including its UID, is retained on all
+workload PUTs. Kubernetes garbage-collects a delayed inert CREATE that refers to
+the deleted Namespace UID, even when the namespace name has already been reused.
+This provides asynchronous cleanup only, not activation authority. Disposable
+Kubernetes coverage verifies Jobs and Deployments are collected and successor
+objects survive; actual management RBAC/admission coverage exercises staging and
+activation. Running-Pod tests separately verify that an old incarnation's Secret
+name cannot mount a successor's credentials.
+
+A terminal failed Job may be replaced on a newer authenticated attempt, using
+foreground DELETE with both UID and resource-version preconditions, followed by
+inert staging. Successful or active Jobs retain their UID during replay. This
+object-local sequence fence does **not** persist across deletion (including Job
+TTL cleanup): a durable reservation/tombstone or a redesigned retry identity is
+still needed to exclude stale attempts during delete/recreate. Positive helper
+tests with caller retries also do not establish automatic production retry of
+Kubernetes CAS conflicts; generic preparation failures currently fail the
+operation. These are unresolved lifecycle boundaries, not rollout acceptance.
+
+The layout remains disabled. These management-write fences do not fence delayed
+ReplicaSet/Pod writes by Kubernetes controllers, or already-started PostgreSQL
+and MinIO effects. Namespace CEL checks cannot replace atomic fences: namespace
+objects used by admission policies come from an informer cache, and a namespace
+read is not atomic with a child write. External-effect fencing, durable retry
+authority and full concurrent-owner acceptance remain required before rollout.
 
 These contracts do not enable the new layout in the live service. Full lifecycle
 acceptance, stale namespace-child-write fencing and allowlisted data transfer

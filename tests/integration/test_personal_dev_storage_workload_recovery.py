@@ -55,12 +55,13 @@ async def test_new_attempt_replaces_failed_job_but_replays_success_without_dupli
     identity = _bound_claim().operation.storage_binding.identity
     await _namespace(kubectl, identity)
     document = _workload(identity, "Job")
-    document["metadata"]["labels"] = {"loom.dev/attempt": str(uuid4())}
+    document["metadata"]["labels"] = {"loom.dev/attempt": str(uuid4()), "loom.dev/attempt-sequence": "0"}
     await write_storage_workload(kubectl, identity, document, operation_epoch=1)
     old = await kubectl.read_resource_json(namespace=identity.namespace, kind="job", name=document["metadata"]["name"])
     await kubectl.runner.run(kubectl._argv("patch", "job", document["metadata"]["name"], "-n", identity.namespace,
         "--subresource=status", "--type=merge", "-p", json.dumps({"status": {
             "startTime": datetime.now(UTC).isoformat(), "failed": 1,
+            "active": 0, "ready": 0, "terminating": 0,
             "conditions": [
                 {"type": "FailureTarget", "status": "True", "reason": "BackoffLimitExceeded"},
                 {"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"},
@@ -68,19 +69,26 @@ async def test_new_attempt_replaces_failed_job_but_replays_success_without_dupli
         }})))
     retry = deepcopy(document)
     retry["metadata"]["labels"]["loom.dev/attempt"] = str(uuid4())
+    retry["metadata"]["labels"]["loom.dev/attempt-sequence"] = "1"
     await _reconcile_workload(kubectl, identity, retry, operation_epoch=1)
     current = await kubectl.read_resource_json(namespace=identity.namespace, kind="job", name=document["metadata"]["name"])
     assert current["metadata"]["uid"] != old["metadata"]["uid"]
     assert not current.get("status", {}).get("failed")
+    # The real controller can already have counted an unscheduled Pod active.
+    # A synthetic terminal fixture must explicitly clear all live-Pod counters.
+    await kubectl.runner.run(kubectl._argv("patch", "job", document["metadata"]["name"], "-n", identity.namespace,
+        "--subresource=status", "--type=merge", "-p", '{"status":{"active":1}}'))
     await kubectl.runner.run(kubectl._argv("patch", "job", document["metadata"]["name"], "-n", identity.namespace,
         "--subresource=status", "--type=merge", "-p", json.dumps({"status": {
             "startTime": datetime.now(UTC).isoformat(), "completionTime": datetime.now(UTC).isoformat(),
+            "active": 0, "ready": 0, "terminating": 0,
             "succeeded": 1, "conditions": [
                 {"type": "SuccessCriteriaMet", "status": "True"},
                 {"type": "Complete", "status": "True"},
             ],
         }})))
     retry["metadata"]["labels"]["loom.dev/attempt"] = str(uuid4())
+    retry["metadata"]["labels"]["loom.dev/attempt-sequence"] = "2"
     await _reconcile_workload(kubectl, identity, retry, operation_epoch=1)
     complete = await kubectl.read_resource_json(namespace=identity.namespace, kind="job", name=document["metadata"]["name"])
     assert complete["metadata"]["uid"] == current["metadata"]["uid"]
@@ -119,8 +127,9 @@ async def test_acknowledged_create_allows_status_only_observation_not_new_spec_a
         assert observed["spec"]["replicas"] == 1
 
 
+@pytest.mark.parametrize("stale_sequence", ("0", "1"))
 async def test_stale_attempt_cannot_replace_newer_terminal_failed_job(
-    disposable_storage_kubectl,  # noqa: F811
+    disposable_storage_kubectl, stale_sequence,  # noqa: F811
 ):
     kubectl = disposable_storage_kubectl
     identity = _bound_claim().operation.storage_binding.identity
@@ -134,10 +143,11 @@ async def test_stale_attempt_cannot_replace_newer_terminal_failed_job(
     await kubectl.runner.run(kubectl._argv("patch", "job", document["metadata"]["name"], "-n", identity.namespace,
         "--subresource=status", "--type=merge", "-p", json.dumps({"status": {
             "startTime": datetime.now(UTC).isoformat(), "failed": 1,
+            "active": 0, "ready": 0, "terminating": 0,
             "conditions": [{"type": "FailureTarget", "status": "True"}, {"type": "Failed", "status": "True"}],
         }})))
     stale = deepcopy(document)
-    stale["metadata"]["labels"].update({"loom.dev/attempt": str(uuid4()), "loom.dev/attempt-sequence": "0"})
+    stale["metadata"]["labels"].update({"loom.dev/attempt": str(uuid4()), "loom.dev/attempt-sequence": stale_sequence})
     with pytest.raises(DevInstanceRuntimeError, match="attempt"):
         await write_storage_workload(kubectl, identity, stale, operation_epoch=1)
     remaining = await kubectl.read_resource_json(namespace=identity.namespace, kind="job", name=document["metadata"]["name"])

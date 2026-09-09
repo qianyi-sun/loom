@@ -250,6 +250,13 @@ async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secre
         with pytest.raises(DevInstanceRuntimeError):
             await managed.read_secret_optional(identity.namespace, f"{purpose}-{uuid4().hex}")
 
+    # Actual GET/CREATE/dry-run PUT/activation PUT under the rendered management
+    # role, not an impersonated cluster-admin grant.
+    workloads = tuple(document for document in dev_instance_manifest_documents(identity, config)
+                      if document["kind"] == "Job" or (document["kind"] == "Deployment" and "loom-web" in document["metadata"]["name"]))
+    await KubectlCandidateGenerationProvisioner(managed)._apply_generation_workloads(identity, config, workloads)
+    await KubectlCandidateGenerationProvisioner(managed)._apply_generation_workloads(identity, config, workloads)
+
     role = next(document for document in dev_instance_manifest_documents(identity, config) if document["kind"] == "Role")
     for widened in (
         {**role["rules"][0], "resourceNames": ["unrelated-secret"]},

@@ -38,10 +38,13 @@ class PersonalDevManifestBinding:
     operation_id: UUID
     attempt_id: UUID
     operation_epoch: int
+    attempt_sequence: int = 0
 
     def __post_init__(self) -> None:
         if type(self.operation_epoch) is not int or self.operation_epoch <= 0:
             raise ValueError("personal-dev manifest operation epoch must be positive")
+        if type(self.attempt_sequence) is not int or not 0 <= self.attempt_sequence < 2**63:
+            raise ValueError("personal-dev manifest attempt sequence must be nonnegative and bounded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,17 +120,29 @@ def _literal_env(name: str, value: str) -> dict[str, str]:
     return {"name": name, "value": value}
 
 
-def _lifecycle_labels(config: DevInstanceManifestConfig) -> dict[str, str]:
+def _lifecycle_labels(config: DevInstanceManifestConfig, identity: DevInstanceIdentity) -> dict[str, str]:
     if config.lifecycle_binding is None:
         return {}
     binding = config.lifecycle_binding
     return {
+        **({"loom.dev/attempt-sequence": str(binding.attempt_sequence)} if identity.storage_binding is not None else {}),
         "loom.dev/subject": str(binding.subject_id),
         "loom.dev/incarnation": str(binding.subject_incarnation),
         "loom.dev/operation": str(binding.operation_id),
         "loom.dev/attempt": str(binding.attempt_id),
         "loom.dev/operation-epoch": str(binding.operation_epoch),
         "loom.dev/generation": str(config.deployment_generation),
+    }
+
+
+def _immutable_execution_labels(
+    identity: DevInstanceIdentity, labels: dict[str, str],
+) -> dict[str, str]:
+    # Reconciliation retries retain operation/generation but get a new attempt.
+    # Keep mutable attempt evidence out of bound immutable execution fields.
+    return {
+        key: value for key, value in labels.items()
+        if identity.storage_binding is None or key not in {"loom.dev/attempt", "loom.dev/attempt-sequence"}
     }
 
 
@@ -193,7 +208,7 @@ def _metadata(
             "loom.dev/instance": identity.name,
             "loom.dev/environment": identity.runtime_environment,
             "loom.dev/candidate": config.candidate_sha[:12],
-            **_lifecycle_labels(config),
+            **_lifecycle_labels(config, identity),
         },
     }
 
@@ -258,7 +273,7 @@ def _deployment(
         "app": name,
         "loom.dev/instance": identity.name,
         "loom.dev/generation": str(config.deployment_generation),
-        **_lifecycle_labels(config),
+        **_lifecycle_labels(config, identity),
     }
     return {
         "apiVersion": "apps/v1",
@@ -267,7 +282,7 @@ def _deployment(
         "spec": {
             "replicas": 1,
             "revisionHistoryLimit": 2,
-            "selector": {"matchLabels": labels},
+            "selector": {"matchLabels": _immutable_execution_labels(identity, labels)},
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
@@ -518,7 +533,7 @@ def _web_deployment(
         "app": name,
         "loom.dev/instance": identity.name,
         "loom.dev/generation": str(config.deployment_generation),
-        **_lifecycle_labels(config),
+        **_lifecycle_labels(config, identity),
     }
     return {
         "apiVersion": "apps/v1",
@@ -527,7 +542,7 @@ def _web_deployment(
         "spec": {
             "replicas": 1,
             "revisionHistoryLimit": 2,
-            "selector": {"matchLabels": labels},
+            "selector": {"matchLabels": _immutable_execution_labels(identity, labels)},
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
@@ -720,7 +735,7 @@ def dev_instance_manifest_documents(
                 **_MANAGED_LABELS,
                 "loom.dev/instance": identity.name,
                 "pod-security.kubernetes.io/enforce": "restricted",
-                **_lifecycle_labels(config),
+                **_lifecycle_labels(config, identity),
             },
         },
     }
@@ -743,7 +758,7 @@ def dev_instance_manifest_documents(
                 "metadata": {
                     "labels": {
                         "app": "loom-migration",
-                        **_lifecycle_labels(config),
+                        **_immutable_execution_labels(identity, _lifecycle_labels(config, identity)),
                     }
                 },
                 "spec": {

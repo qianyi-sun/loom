@@ -1124,6 +1124,12 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
         changed_installation.capacity_agent_installation_sha256
         != first.capacity_agent_installation_sha256
     )
+    changed_deployment = (
+        kubectl.runner.workloads[("Deployment", "loom-capacity-agent")]
+        if bound_storage else next(document for document in kubectl.documents if document["kind"] == "Deployment")
+    )
+    changed_command = changed_deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert changed_command[changed_command.index("--max-attempts") + 1] == "9999"
 
     capacity_operation = replace(
         create.operation,
@@ -1170,7 +1176,10 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
     assert database.configurations[-1].candidate_digest == "b" * 64
     assert database.configurations[-1].deployment_generation == 2
 
-    deployment = next(document for document in kubectl.documents if document["kind"] == "Deployment")
+    deployment = (
+        kubectl.runner.workloads[("Deployment", "loom-capacity-agent")]
+        if bound_storage else next(document for document in kubectl.documents if document["kind"] == "Deployment")
+    )
     assert deployment["kind"] == "Deployment"
     assert "registry.example/loom-service@sha256:" in str(deployment)
     assert "registry.example/loom-service@sha256:" + "1" * 64 in str(deployment)

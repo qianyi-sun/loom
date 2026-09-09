@@ -2250,13 +2250,26 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         documents: tuple[dict[str, object], ...],
     ) -> None:
         if identity.storage_binding is not None:
+            from loom.personal_dev_storage_workload_write import write_storage_workload
+
+            support = tuple(document for document in documents if document.get("kind") not in {"Secret", "Deployment", "Job"})
+            if support:
+                await self._kubectl.apply(yaml.safe_dump_all(support, sort_keys=False, explicit_start=True))
             for document in documents:
                 if document.get("kind") == "Secret":
                     await write_storage_secret(
                         self._kubectl, identity, document,
                         operation_epoch=claim.operation.operation_epoch,
                     )
-            documents = tuple(document for document in documents if document.get("kind") != "Secret")
+            for document in documents:
+                if document.get("kind") in {"Deployment", "Job"}:
+                    await write_storage_workload(
+                        self._kubectl, identity, document,
+                        operation_epoch=claim.operation.operation_epoch,
+                    )
+            return
+        if not documents:
+            return
         await self._kubectl.apply(
             yaml.safe_dump_all(documents, sort_keys=False, explicit_start=True)
         )
