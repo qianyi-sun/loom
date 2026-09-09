@@ -655,6 +655,17 @@ output is exercised against this consumer. The expected release digest must be
 independently approved operator input; this loader does not query CI, certify a
 node/runtime profile, or authorize executable membership.
 
+A non-authorizing schema-3 controller-policy resolver supports an exact set of
+purpose-tagged launch profiles under one pool authority root. Each entry commits
+the complete profile, including shape/resources, image, node domains and launcher
+configuration, excluding only its self-referencing controller-root field.
+Resolution verifies the complete supplied set and the selected intent's purpose,
+pool/generation, profile identity, resources, trusted release and node domain.
+Legacy V2 resolution/rendering retains its original single-policy digest rule
+and rejects the new root. Executable adoption still requires authenticated purpose
+and this policy binding throughout signing, submission, reconciliation and cleanup;
+this resolver is not wired into existing live execution.
+
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,
