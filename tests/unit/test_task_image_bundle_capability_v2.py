@@ -10,7 +10,10 @@ from uuid import uuid4
 import pytest
 
 from loom.task_image_build_plan import TaskImageBuildPlanV2
-from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+from loom.task_image_bundle_manifest import (
+    TaskImageBundleContentManifestV1,
+    capture_task_image_bundle_manifest,
+)
 from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_task_image_authority import bundle_capability as module
 from loom_task_image_authority.materializations import _bundle_preparation
@@ -49,6 +52,19 @@ class VerifiedBackend(Backend):
             await self.wait.wait()
         self.now += timedelta(seconds=self.listing_seconds)
         return self.manifest
+
+
+def test_native_go_manifest_vector_matches_python_canonical_and_legacy_encodings():
+    # Paired with Go TestRegisteredManifestMatchesIndependentPythonRFC8785AndLegacyModeVectors.
+    paths = ['a"<&>.txt', "café\u2028\u2029.sh", "\ue000.txt", "😀.txt"]
+    files = [dict(path=path, size_bytes=i, sha256=hashlib.sha256(bytes(i)).hexdigest(), mode="0755" if i % 2 else "0644") for i, path in enumerate(paths)]
+    metadata = json.dumps(dict(schema_version=1, files={item["path"]: dict(mode=item["mode"]) for item in files}), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    manifest = TaskImageBundleContentManifestV1.model_validate_json(json.dumps(dict(
+        task_checksum="4" * 64, bundle_file_metadata_sha256=hashlib.sha256(metadata).hexdigest(), files=files,
+    )))
+    assert manifest.digest == "cb43cfc9ffa01829856e09529fdae263027daa520d680575005f2e2ecf90edbc"
+    assert manifest.bundle_file_metadata_sha256 == "a035ff1f504fa372da12d29a7c95d7641915ef59bb2d2f74c2d90a3e45c64b3c"
+    assert manifest.mode_metadata_bytes == metadata
 
 
 async def test_native_issuance_uses_verified_inventory_and_only_registered_data(registered):
