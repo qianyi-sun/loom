@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    TaskImageAttemptRetention,
     TaskImageBuildGrant,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
@@ -50,6 +51,7 @@ from loom_task_image_authority.publication_receipts import (
 from loom_task_image_authority.registry_credentials import parse_stored_publication_candidate_v2
 from loom_task_image_authority.registry_public import validate_stored_registry_credential_public
 from loom_task_image_authority.registry_token import publication_repository
+from loom_task_image_authority.retention import attempt_is_retired
 from loom_task_image_authority.store import (
     TaskImageBuildSessionAuthorization,
     validate_current_task_image_build_session,
@@ -57,6 +59,7 @@ from loom_task_image_authority.store import (
 
 Clock = Callable[[], datetime]
 _ROWS = (
+    TaskImageAttemptRetention,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
     TaskImageRegistryCredentialGeneration,
@@ -318,6 +321,8 @@ async def lock_publication_input(
         or attempt.session_generation is None
     ):
         raise PublicationJobAuthorizationError("publication attempt lease unavailable")
+    if await attempt_is_retired(session, attempt_id=attempt.id):
+        raise PublicationJobAuthorizationError("publication attempt is permanently retired")
     plan = TaskImageBuildPlanV1.model_validate_json(json.dumps(attempt.claim_plan_json))
     payload = plan.model_dump(mode="json", exclude_none=False)
     if (

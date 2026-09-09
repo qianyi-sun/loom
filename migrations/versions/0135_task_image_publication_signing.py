@@ -45,6 +45,60 @@ def upgrade() -> None:
     # Issuance is the durable pre-push inventory, even before a candidate exists.
     # Keep published 0131 unchanged; protect both existing and future audit rows.
     op.execute("""
+        CREATE TABLE public.task_image_attempt_retention (
+          attempt_id UUID PRIMARY KEY REFERENCES public.task_image_materialization_attempts(id)
+            ON DELETE RESTRICT,
+          observed_at TIMESTAMPTZ NOT NULL,
+          unreferenced_since TIMESTAMPTZ,
+          retired_at TIMESTAMPTZ,
+          canonical_inventory BYTEA,
+          inventory_sha256 VARCHAR(64),
+          CONSTRAINT task_image_attempt_retention_time_check CHECK (
+            isfinite(observed_at) AND (unreferenced_since IS NULL OR
+              (isfinite(unreferenced_since) AND unreferenced_since <= observed_at))),
+          CONSTRAINT task_image_attempt_retention_shape_check CHECK (
+            (retired_at IS NULL AND canonical_inventory IS NULL AND inventory_sha256 IS NULL) OR
+            (retired_at IS NOT NULL AND unreferenced_since IS NOT NULL
+              AND canonical_inventory IS NOT NULL AND inventory_sha256 IS NOT NULL
+              AND retired_at = observed_at AND retired_at >= unreferenced_since
+              AND octet_length(canonical_inventory) BETWEEN 1 AND 131072
+              AND inventory_sha256 = encode(sha256(canonical_inventory), 'hex')))
+        );
+        CREATE INDEX task_image_attempt_retention_pending_idx
+          ON public.task_image_attempt_retention(unreferenced_since, attempt_id)
+          WHERE retired_at IS NULL;
+        CREATE INDEX task_image_attempt_retention_retired_idx
+          ON public.task_image_attempt_retention(retired_at, attempt_id)
+          WHERE retired_at IS NOT NULL;
+        CREATE FUNCTION public.task_image_preserve_retirement() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        BEGIN
+          IF TG_OP = 'TRUNCATE' THEN
+            RAISE EXCEPTION 'task-image retirement evidence is immutable' USING ERRCODE = '23514';
+          ELSIF TG_OP = 'DELETE' THEN
+            IF OLD.retired_at IS NOT NULL THEN
+              RAISE EXCEPTION 'task-image retirement evidence is immutable' USING ERRCODE = '23514';
+            END IF;
+            RETURN OLD;
+          END IF;
+          IF OLD.retired_at IS NOT NULL AND NEW IS DISTINCT FROM OLD THEN
+            RAISE EXCEPTION 'task-image retirement evidence is immutable' USING ERRCODE = '23514';
+          END IF;
+          IF NEW.attempt_id IS DISTINCT FROM OLD.attempt_id OR NEW.observed_at < OLD.observed_at THEN
+            RAISE EXCEPTION 'task-image retention identity or observation clock regressed'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END $$;
+        REVOKE ALL ON FUNCTION public.task_image_preserve_retirement() FROM PUBLIC;
+        CREATE TRIGGER task_image_attempt_retention_preserve
+          AFTER UPDATE OR DELETE ON public.task_image_attempt_retention
+          FOR EACH ROW EXECUTE FUNCTION public.task_image_preserve_retirement();
+        CREATE TRIGGER task_image_attempt_retention_no_truncate
+          BEFORE TRUNCATE ON public.task_image_attempt_retention
+          FOR EACH STATEMENT EXECUTE FUNCTION public.task_image_preserve_retirement();
+    """)
+    op.execute("""
         CREATE FUNCTION task_image_registry_preserve_audit() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
         BEGIN
@@ -338,9 +392,14 @@ def downgrade() -> None:
           public.task_image_registry_credentials,
           public.task_image_publication_candidates,
           public.task_image_materializations,
-          public.trials
+          public.task_image_materialization_attempts,
+          public.trials,
+          public.task_image_attempt_retention
           IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM public.task_image_attempt_retention WHERE retired_at IS NOT NULL) THEN
+            RAISE EXCEPTION 'retirement authority cannot be discarded' USING ERRCODE = '23514';
+          END IF;
           IF NOT EXISTS (
             SELECT 1 FROM public.task_image_publication_state
             WHERE singleton_id = 1 AND revocation_epoch = 0 AND keyset_version = 0
@@ -355,6 +414,8 @@ def downgrade() -> None:
         END $$;
     """)
     op.execute("""
+        DROP TABLE public.task_image_attempt_retention;
+        DROP FUNCTION public.task_image_preserve_retirement();
         DROP TRIGGER trials_terminal_state_monotonic ON public.trials;
         DROP FUNCTION public.trials_reject_terminal_reopening();
         DROP TRIGGER task_image_materializations_preserve_ready ON task_image_materializations;

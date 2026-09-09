@@ -15,6 +15,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    TaskImageAttemptRetention,
     TaskImageBuildGrant,
     TaskImageBuildProjection,
     TaskImageBuildProjectionEvent,
@@ -30,6 +31,7 @@ from loom_task_image_authority.bundle_capability import (
     TaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityV1,
 )
+from loom_task_image_authority.retention import attempt_is_retired
 
 DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS = 300.0
 MAX_SESSION_MATERIALIZATION_LEASE_SECONDS = 15 * 60.0
@@ -164,6 +166,20 @@ def _stored_claim_plan(
     return plan
 
 
+def _reject_pending_materialization_authority(session: AsyncSession) -> None:
+    # Check before any SELECT can autoflush a later retention/parent write.
+    # Refreshing locked rows must not silently discard caller-owned edits when
+    # autoflush is suppressed, either. Reads require committed/flushed authority.
+    models = (TaskImageAttemptRetention, TaskImageMaterialization, TaskImageMaterializationAttempt)
+    if any(
+        isinstance(row, models)
+        for row in (*session.new, *session.dirty, *session.deleted)
+    ):
+        raise TaskImageSessionMaterializationConflictError(
+            "task-image materialization authority has unflushed changes"
+        )
+
+
 async def lock_current_task_image_build_session_authority(
     session: AsyncSession,
     *,
@@ -172,6 +188,7 @@ async def lock_current_task_image_build_session_authority(
 ) -> TaskImageBuildSessionGeneration:
     """Recheck and lock grant → projection → current generation in canonical order."""
 
+    _reject_pending_materialization_authority(session)
     if (
         authorization.authority_version != 2
         or authorization.builder_release_sha256 is None
@@ -318,6 +335,8 @@ async def _claim_replay(
         raise TaskImageSessionMaterializationConflictError(
             "task-image claim replay identity changed"
         )
+    if await attempt_is_retired(session, attempt_id=attempt.id):
+        raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     return row, _stored_claim_plan(
         attempt,
         authorization=authorization,
@@ -483,12 +502,17 @@ async def _operation_replay(
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if row is None:
         raise TaskImageSessionMaterializationConflictError(
             "task-image operation replay materialization is unavailable"
         )
+    if operation_type in ("start", "heartbeat") and await attempt_is_retired(
+        session, attempt_id=attempt_id
+    ):
+        raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     return row
 
 
@@ -501,10 +525,15 @@ async def lock_session_materialization_lease(
     lease_epoch: int,
     allowed_states: tuple[str, ...],
     now: datetime,
+    cleanup_only: bool = False,
 ) -> tuple[TaskImageMaterialization, TaskImageMaterializationAttempt]:
+    # Only trusted release/failure transitions opt out: they return no bundle,
+    # build plan, registry credential, candidate or publication authority.
+    _reject_pending_materialization_authority(session)
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if (
@@ -527,12 +556,15 @@ async def lock_session_materialization_lease(
             TaskImageMaterializationAttempt.grant_id == authorization.grant_id,
             TaskImageMaterializationAttempt.claim_id.is_not(None),
         )
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if attempt is None:
         raise TaskImageSessionMaterializationConflictError(
             "stale task-image session materialization attempt"
         )
+    if not cleanup_only and await attempt_is_retired(session, attempt_id=attempt.id):
+        raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     return row, attempt
 
 
@@ -657,6 +689,7 @@ async def _prepare_operation(
         lease_epoch=lease_epoch,
         allowed_states=allowed_states,
         now=now,
+        cleanup_only=operation_type in ("release", "containment_release", "deterministic_fail"),
     )
     return now, row, attempt
 

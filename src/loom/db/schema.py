@@ -3057,6 +3057,52 @@ class TaskImageMaterializationAttempt(Base):
     )
 
 
+class TaskImageAttemptRetention(Base):
+    """Observation until retirement, then immutable exact-attempt evidence.
+
+    This record is not proof of reference eligibility or registry quiescence.
+    Alembic installs guards against rewriting retired evidence or moving its
+    observation clock backward. Maintenance receipts are a separate lifecycle.
+    """
+
+    __tablename__ = "task_image_attempt_retention"
+    __table_args__ = (
+        CheckConstraint(
+            "isfinite(observed_at) AND (unreferenced_since IS NULL OR "
+            "(isfinite(unreferenced_since) AND unreferenced_since <= observed_at))",
+            name="task_image_attempt_retention_time_check",
+        ),
+        CheckConstraint(
+            "(retired_at IS NULL AND canonical_inventory IS NULL AND inventory_sha256 IS NULL) OR "
+            "(retired_at IS NOT NULL AND unreferenced_since IS NOT NULL "
+            "AND canonical_inventory IS NOT NULL AND inventory_sha256 IS NOT NULL "
+            "AND retired_at = observed_at AND retired_at >= unreferenced_since "
+            "AND octet_length(canonical_inventory) BETWEEN 1 AND 131072 "
+            "AND inventory_sha256 = encode(sha256(canonical_inventory), 'hex'))",
+            name="task_image_attempt_retention_shape_check",
+        ),
+        Index(
+            "task_image_attempt_retention_pending_idx", "unreferenced_since", "attempt_id",
+            postgresql_where=text("retired_at IS NULL"),
+        ),
+        Index(
+            "task_image_attempt_retention_retired_idx", "retired_at", "attempt_id",
+            postgresql_where=text("retired_at IS NOT NULL"),
+        ),
+    )
+
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_image_materialization_attempts.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    unreferenced_since: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    canonical_inventory: Mapped[bytes | None] = mapped_column(LargeBinary)
+    inventory_sha256: Mapped[str | None] = mapped_column(String(64))
+
+
 class TaskImageMaterializationOperationEvent(Base):
     """One bounded idempotent transition result for a session-owned lease."""
 
