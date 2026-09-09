@@ -550,6 +550,18 @@ binding validation. This record is not a transfer capability or proof of release
 management must authenticate and persist its relationship to the source destroy
 and current successor operation. It does not lift the recreation interlock.
 
+The object-capture primitive uses a separately configured, control-owned versioned
+bucket. It conditionally copies exact source objects (including multipart objects
+up to 64 GiB), pins the returned non-null VersionId, and streams that version to
+verify its byte count and SHA-256 without a local object cache. Snapshot keys are
+derived from the transfer, capture ID and object intent. Later writes to the same
+key create new versions and cannot change a pinned capture. A lost completion
+reply yields no success receipt; retry may leave an additional unreferenced
+version for subsequent scoped cleanup. Part failures abort only their own upload.
+Unknown paths, source changes, suspended versioning and inconsistent/truncated
+readback reject capture. These are tested storage primitives, not a wired
+snapshot ledger, restoration path, IAM policy deployment or in-flight drain.
+
 The separate active acceptance binding pins the entire V3 preparation, exact
 execution authority and a finite reviewed window; it cannot reinterpret old
 zero-capacity acceptance or operational certificates. The service loop accepts
