@@ -141,11 +141,36 @@ def task_image_materialization_key(
     task_id: str,
     task_checksum: str,
     cpu_arch: str,
+    bundle_content_manifest_sha256: str = "",
 ) -> str:
+    """Preserve v1 identities; opt-in content manifests select a separate domain.
+
+    The empty discriminator means historical, checksum-only identity. A supplied
+    digest is deliberately bare and strict, unlike the legacy checksum input.
+    Producers must not opt in until their complete reader path verifies content.
+    """
     if cpu_arch not in {"x86_64", "arm64"}:
         raise ValueError("cpu_arch must be x86_64 or arm64")
     checksum = canonical_task_checksum(task_checksum)
-    material = "\0".join((_KEY_DOMAIN, task_id, checksum, cpu_arch))
+    if type(bundle_content_manifest_sha256) is not str or (
+        bundle_content_manifest_sha256 != ""
+        and _CHECKSUM_RE.fullmatch(bundle_content_manifest_sha256) is None
+    ):
+        raise ValueError("bundle_content_manifest_sha256 must be empty or a bare SHA-256 digest")
+    if bundle_content_manifest_sha256:
+        if "\0" in task_id:
+            raise ValueError("task_id must not contain an identity separator")
+        material = "\0".join(
+            (
+                "task-image-materialization-v2",
+                task_id,
+                checksum,
+                cpu_arch,
+                bundle_content_manifest_sha256,
+            )
+        )
+    else:
+        material = "\0".join((_KEY_DOMAIN, task_id, checksum, cpu_arch))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 

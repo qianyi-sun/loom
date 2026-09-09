@@ -469,11 +469,28 @@ Registration must require the complete upload to succeed before binding provenan
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention
 bindings, capability metadata and the real Go downloader must change together.
-In particular, the current task/checksum/architecture key and uniqueness rule
-would reuse legacy rows even when a stronger source manifest differs. Do not
-silently upgrade an existing ready image or infer manifest authority from mutable
-stored objects. Native admission must remain closed until those bindings and
-the real producer-to-downloader path are verified.
+The additive identity foundation in migration `0136` reserves a separate identity
+for strong manifests. `bundle_content_manifest_sha256` is empty only for legacy
+rows; stronger rows carry the exact bare digest from source provenance. The
+natural unique tuple includes this discriminator. Legacy v1 keys are unchanged;
+v2 keys include the digest under a new domain, with database checks enforcing
+both the key derivation and exact provenance binding. Existing rows are not
+upgraded: unexpected preexisting content-manifest provenance aborts migration.
+The discriminator cannot change in place, and strong rows also freeze their
+task/config/source identity. Ordinary lease and lifecycle updates remain allowed.
+The migration takes an upfront NOWAIT table lock and refuses downgrade while
+any strong row remains, even if the old unique tuple would have no duplicates.
+
+This foundation does not yet switch application ensure or reader contracts.
+Legacy insertion carrying stronger provenance fails the database binding check
+instead of silently returning a weak ready row. Subsequent integration must
+qualify current-task retention references and frozen publication/execution
+plans, preserve exact historical trial links, and verify downloaded content.
+The Phase 1 build-cache tag also needs the stronger identity: verifying input
+files and then looking up an image by the legacy checksum would still permit
+incorrect cache reuse. Do not silently upgrade an existing ready image or infer
+manifest authority from mutable stored objects. Native admission remains closed
+until these bindings and the real producer-to-downloader path are verified.
 
 ## Statement and signer
 

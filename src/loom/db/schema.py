@@ -2145,7 +2145,7 @@ class Task(Base):
 
 
 class TaskImageMaterialization(Base):
-    """Immutable per-architecture build prerequisite for one task checksum."""
+    """Per-architecture prerequisite, optionally qualified by a strong manifest."""
 
     __tablename__ = "task_image_materializations"
     __table_args__ = (
@@ -2174,6 +2174,25 @@ class TaskImageMaterialization(Base):
             name="task_image_materializations_checksum_check",
         ),
         CheckConstraint(
+            "(bundle_content_manifest_sha256 = '' AND NOT "
+            "(task_source_provenance ? 'bundle_content_manifest_sha256')) OR "
+            "(bundle_content_manifest_sha256 ~ '^[0-9a-f]{64}$' AND COALESCE("
+            "jsonb_typeof(task_source_provenance) = 'object' AND "
+            "jsonb_typeof(task_source_provenance -> 'bundle_content_manifest_sha256') = 'string' "
+            "AND task_source_provenance ->> 'bundle_content_manifest_sha256' = "
+            "bundle_content_manifest_sha256, false))",
+            name="task_image_materializations_manifest_binding_check",
+        ),
+        CheckConstraint(
+            "bundle_content_manifest_sha256 = '' OR materialization_key = encode(sha256("
+            "convert_to('task-image-materialization-v2', 'UTF8') || decode('00', 'hex') || "
+            "convert_to(task_id, 'UTF8') || decode('00', 'hex') || "
+            "convert_to(task_checksum, 'UTF8') || decode('00', 'hex') || "
+            "convert_to(cpu_arch, 'UTF8') || decode('00', 'hex') || "
+            "convert_to(bundle_content_manifest_sha256, 'UTF8')), 'hex')",
+            name="task_image_materializations_manifest_key_check",
+        ),
+        CheckConstraint(
             "cpu_arch IN ('x86_64', 'arm64')",
             name="task_image_materializations_cpu_arch_check",
         ),
@@ -2193,6 +2212,7 @@ class TaskImageMaterialization(Base):
             "task_id",
             "task_checksum",
             "cpu_arch",
+            "bundle_content_manifest_sha256",
             name="task_image_materializations_task_arch_uidx",
         ),
         Index(
@@ -2219,6 +2239,9 @@ class TaskImageMaterialization(Base):
     materialization_key: Mapped[str] = mapped_column(String(64), nullable=False)
     task_id: Mapped[str] = mapped_column(Text, nullable=False)
     task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    bundle_content_manifest_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default=text("''"), default="",
+    )
     cpu_arch: Mapped[str] = mapped_column(String(16), nullable=False)
     task_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     task_source: Mapped[str | None] = mapped_column(Text, nullable=True)
