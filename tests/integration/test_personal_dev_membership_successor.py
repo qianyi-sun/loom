@@ -197,6 +197,10 @@ async def test_successor_is_one_lease_fenced_linked_operation(
                 DevLifecycleOperation.membership_predecessor_operation_id == claim.operation.id
             ))).all()
             assert len(children) == 1
+            status = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(parent.id)
+            assert status.membership_successor_operation_id == child.id
+            child_status = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(child.id)
+            assert child_status.membership_successor_operation_id is None
             for statement, row_id in (
                 ("UPDATE dev_lifecycle_operations SET min_slots = 1 WHERE id = :id", child.id),
                 ("UPDATE dev_lifecycle_operations SET checkpoint = 'complete' WHERE id = :id", parent.id),
