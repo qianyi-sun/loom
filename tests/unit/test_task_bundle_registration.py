@@ -36,7 +36,8 @@ def test_registration_binds_catalog_and_authored_identity_without_rewriting_byte
     before = (root / "task.toml").read_bytes()
     captured = capture_task_image_bundle_manifest(root)
     registered = _module().prepare_task_bundle_registration(
-        root, task_id="benchmark/local-id",
+        root,
+        task_id="benchmark/local-id",
     )
     assert registered.task_config.task.id == "benchmark/local-id"
     assert registered.task_config.task.name == "Source task"
@@ -58,9 +59,13 @@ def test_registration_binds_catalog_and_authored_identity_without_rewriting_byte
             rfc8785.dumps(registered.task_config.model_dump(mode="json")),
         ).hexdigest(),
     }
-    assert _module().prepare_task_bundle_registration(
-        root, task_id="benchmark/local-id",
-    ) == registered
+    assert (
+        _module().prepare_task_bundle_registration(
+            root,
+            task_id="benchmark/local-id",
+        )
+        == registered
+    )
 
 
 @pytest.mark.parametrize("task_id", ["", "a" * 513, "bad\0id", "bad\nid"])
@@ -111,12 +116,15 @@ def test_registration_views_cannot_change_the_frozen_binding(tmp_path):
     config = registered.task_config
     config.task.labels.append("changed")
     assert registered.task_config.task.labels == []
-    assert registered.source_provenance["bundle_task_identity"]["catalog_task_id"] == "bench/local-id"
+    assert (
+        registered.source_provenance["bundle_task_identity"]["catalog_task_id"] == "bench/local-id"
+    )
 
 
 @pytest.mark.parametrize("explicit_arch", [None, "x86_64", "arm64", "any"])
 def test_registration_runtime_architecture_promotion_preserves_explicit_choices(
-    tmp_path, explicit_arch,
+    tmp_path,
+    explicit_arch,
 ):
     from loom.driver.task_image import TERMINUS_2_FULL_IMAGE
 
@@ -124,19 +132,30 @@ def test_registration_runtime_architecture_promotion_preserves_explicit_choices(
     (root / "Dockerfile").write_text(f"FROM {TERMINUS_2_FULL_IMAGE}\n")
     if explicit_arch is not None:
         path = root / "task.toml"
-        path.write_text(path.read_text().replace(
-            '[environment]', f'[environment]\ncpu_arch = "{explicit_arch}"',
-        ))
+        path.write_text(
+            path.read_text().replace(
+                "[environment]",
+                f'[environment]\ncpu_arch = "{explicit_arch}"',
+            )
+        )
     unchanged = capture_task_image_bundle_manifest(root)
     registered = _module().prepare_task_bundle_registration(
-        root, task_id="bench/local-id", promote_runtime_architecture=True,
+        root,
+        task_id="bench/local-id",
+        promote_runtime_architecture=True,
     )
     assert registered.task_config.environment.cpu_arch == (explicit_arch or "any")
     assert registered.manifest == unchanged
     if explicit_arch is None:
-        assert _module().prepare_task_bundle_registration(
-            root, task_id="bench/local-id",
-        ).task_config.environment.cpu_arch == "x86_64"
+        assert (
+            _module()
+            .prepare_task_bundle_registration(
+                root,
+                task_id="bench/local-id",
+            )
+            .task_config.environment.cpu_arch
+            == "x86_64"
+        )
 
 
 def test_architecture_promotion_rejects_dockerfile_changed_after_capture(tmp_path, monkeypatch):
@@ -154,5 +173,7 @@ def test_architecture_promotion_rejects_dockerfile_changed_after_capture(tmp_pat
     monkeypatch.setattr(module, "capture_task_image_bundle_manifest", capture_then_change)
     with pytest.raises(ValueError):
         module.prepare_task_bundle_registration(
-            root, task_id="bench/local-id", promote_runtime_architecture=True,
+            root,
+            task_id="bench/local-id",
+            promote_runtime_architecture=True,
         )

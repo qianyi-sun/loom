@@ -9,11 +9,12 @@ from __future__ import annotations
 import hashlib
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import rfc8785
 
+from loom.driver.task_image import dockerfile_text_uses_runtime_arm64_fallback_base
 from loom.models.task import TaskConfig, normalize_steps
 from loom.task_image_bundle_manifest import (
     TaskImageBundleContentManifestV1,
@@ -62,7 +63,32 @@ class RegisteredTaskBundle:
         }
 
 
-def prepare_task_bundle_registration(task_dir: Path, *, task_id: str) -> RegisteredTaskBundle:
+def _promote_registered_runtime_architecture(
+    normalized: dict[str, Any],
+    task_dir: Path,
+    manifest: TaskImageBundleContentManifestV1,
+) -> None:
+    environment = normalized.get("environment")
+    if not isinstance(environment, dict) or "cpu_arch" in environment:
+        return
+    relative = environment.get("dockerfile")
+    if not isinstance(relative, str):
+        return
+    path = PurePosixPath(relative).as_posix()
+    entry = next((item for item in manifest.files if item.path == path), None)
+    if entry is None:
+        return
+    content = read_verified_task_image_bundle_file(task_dir, entry).decode("utf-8")
+    if dockerfile_text_uses_runtime_arm64_fallback_base(content):
+        environment["cpu_arch"] = "any"
+
+
+def prepare_task_bundle_registration(
+    task_dir: Path,
+    *,
+    task_id: str,
+    promote_runtime_architecture: bool = False,
+) -> RegisteredTaskBundle:
     """Bind normalized catalog config to exactly the captured authored file.
 
     The catalog ID is the execution identity; it does not replace the authored
@@ -76,6 +102,8 @@ def prepare_task_bundle_registration(task_dir: Path, *, task_id: str) -> Registe
         raise ValueError("registered bundle requires captured task.toml")
     payload = read_verified_task_image_bundle_file(task_dir, task_file)
     normalized = normalize_terminal_bench_task_toml(tomllib.loads(payload.decode("utf-8")))
+    if promote_runtime_architecture:
+        _promote_registered_runtime_architecture(normalized, task_dir, manifest)
     authored = normalize_steps(TaskConfig.model_validate(normalized))
     bundle_id = _task_id(authored.task.id)
     registered = authored.model_dump(mode="json")
