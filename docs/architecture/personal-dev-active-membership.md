@@ -666,6 +666,17 @@ and rejects the new root. Executable adoption still requires authenticated purpo
 and this policy binding throughout signing, submission, reconciliation and cleanup;
 this resolver is not wired into existing live execution.
 
+Separate schema-3 signed ownership contracts preserve purpose, complete launch
+profile digest, exact subject configuration reference, whole-acknowledgement
+digest and the selected immutable personal-member event. Their signature binds
+the protocol domain and signing-key ID; legacy V2 signing/verification rejects
+these proofs. The event reference is historical provenance, not a requirement
+that this owner remain the latest writer of the shared membership log. Signature
+verification proves authenticity, not current admission. The trusted producer
+must authenticate base/member selection and join the configuration, actual
+candidate acknowledgement and event before signing. These contracts do not yet
+enable typed rendering, journal/inventory adoption or build execution.
+
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,

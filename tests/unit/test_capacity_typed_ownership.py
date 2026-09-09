@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from loom_capacity_manager.contracts import ConfigurationGenerationRefV1
+from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, ConfigurationGenerationRefV1
 from loom_capacity_manager.executable_contracts import (
     SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
@@ -170,6 +170,15 @@ def test_old_proof_cannot_enter_typed_verifier_and_wrong_keys_fail():
     assert not keyring.verify_typed_executable(_proof_value, expected_public_key_sha256="f" * 64)
 
 
+def test_signing_key_id_is_signed_even_when_another_keyring_accepts_its_alias():
+    _module, context, proof, _keyring = _proof()
+    alias = "oldlab-key-alias"
+    keyring = OwnershipKeyring({alias: context.ownership_key.private_key.public_key()})
+    changed = proof.model_copy(update={"signing_key_id": alias})
+    assert keyring.matches(alias, context.ownership_key.public_key_sha256)
+    assert not keyring.verify_typed_executable(changed, expected_public_key_sha256=context.ownership_key.public_key_sha256)
+
+
 @pytest.mark.parametrize("version", (3.0, "3", True, 2))
 def test_new_wire_version_is_exact_at_nested_and_top_levels(version):
     module, context, proof, keyring = _proof()
@@ -185,6 +194,6 @@ def test_parser_rejects_noncanonical_duplicate_and_oversized_bytes():
     module, _context, proof, _keyring = _proof()
     raw = module.canonical_typed_ownership_bytes(proof)
     for malformed in (b" " + raw, raw.replace(b'"schema_version":3', b'"schema_version":3,"schema_version":3', 1),
-                      json.dumps(json.loads(raw), indent=2).encode(), b" " * (1024 * 1024 + 1)):
+                      json.dumps(json.loads(raw), indent=2).encode(), b" " * (MAX_CONTRACT_BYTES + 1)):
         with pytest.raises(ValueError):
             module.parse_typed_executable_ownership(malformed)
