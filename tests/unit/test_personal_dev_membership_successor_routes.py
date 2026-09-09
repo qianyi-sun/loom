@@ -12,7 +12,7 @@ from loom_service.routes.dev_instances import (
     _personal_operation_response,
     apply_personal_dev_environment,
 )
-from tests.unit.test_dev_instance_routes import _OWNER, _Store, _ctx, _request
+from tests.unit.test_dev_instance_routes import _OWNER, _ctx, _request, _Store
 from tests.unit.test_personal_dev_membership_successor import successor_case
 
 
