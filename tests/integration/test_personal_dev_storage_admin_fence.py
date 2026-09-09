@@ -13,6 +13,7 @@ from loom.dev_instance_runtime import DevInstanceRuntimeError, PsycopgSharedFixt
 from loom.personal_dev_capacity_runtime import (
     PersonalDevCapacityInstallationError,
     PsycopgPersonalDevCapacityDatabase,
+    _new_credentials,
 )
 from loom.personal_dev_storage_admin_fence import (
     PersonalDevStorageRetiredError,
@@ -74,6 +75,56 @@ async def test_guard_catalog_row_lock_serializes_across_databases(admin_url):
             if not retirement.done():
                 retirement.cancel()
             await asyncio.gather(retirement, return_exceptions=True)
+
+
+async def test_seal_waits_for_actual_capacity_target_admin_transaction(admin_url, monkeypatch):
+    identity = _bound_claim().operation.storage_binding.identity
+    await _provision(admin_url, identity)
+    database = PsycopgPersonalDevCapacityDatabase(admin_url)
+    paused, resume = asyncio.Event(), asyncio.Event()
+    original = psycopg.AsyncConnection.execute
+    target_pid = None
+
+    async def pause_target(self, query, *args, **kwargs):
+        nonlocal target_pid
+        rendered = query.as_string(self) if isinstance(query, sql.Composable) else query
+        if self.info.dbname == identity.database and str(rendered).startswith("REVOKE ALL PRIVILEGES ON SCHEMA public"):
+            target_pid = self.info.backend_pid
+            paused.set()
+            await resume.wait()
+            # Rollback releases the actual target's lock, without requiring an
+            # application migration solely to test this administration boundary.
+            raise RuntimeError("injected target transaction rollback")
+        return await original(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "execute", pause_target)
+    writer = asyncio.create_task(database._converge_roles(identity, _new_credentials()))
+    tasks = [writer]
+    try:
+        async with asyncio.timeout(25):
+            await paused.wait()
+            retirement = asyncio.create_task(database.seal(identity))
+            tasks.append(retirement)
+            async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as observer:
+                while not retirement.done():
+                    blocked = await observer.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid)))",
+                        (target_pid,),
+                    )
+                    if await blocked.fetchone() == (True,):
+                        break
+                    await asyncio.sleep(0.01)
+                assert not retirement.done(), "seal acknowledged while target admin could still write"
+            resume.set()
+            with pytest.raises(PersonalDevCapacityInstallationError):
+                await writer
+            await retirement
+    finally:
+        resume.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.parametrize("cleanup", ("seal", "destroy", "fixture"))
