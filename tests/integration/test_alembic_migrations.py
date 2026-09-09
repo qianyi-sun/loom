@@ -2606,6 +2606,17 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
         conn.execute(text("UPDATE trials SET state='running' WHERE id=:id"), {"id": trial_id})
     assert in_flight() == 1
 
+    # A nonterminal retry releases capacity, then claims it again.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE trials SET state='queued' WHERE id=:id"), {"id": trial_id})
+    assert in_flight() == 0
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE trials SET state='claimed' WHERE id=:id"), {"id": trial_id})
+    assert in_flight() == 1
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE trials SET state='running' WHERE id=:id"), {"id": trial_id})
+    assert in_flight() == 1
+
     # running → succeeded: -1
     with engine.begin() as conn:
         conn.execute(
@@ -2614,11 +2625,11 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
         )
     assert in_flight() == 0
 
-    # Re-queue → +1 next time we go claimed
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE trials SET state='queued' WHERE id=:id"), {"id": trial_id})
-        conn.execute(text("UPDATE trials SET state='claimed' WHERE id=:id"), {"id": trial_id})
-    assert in_flight() == 1
+    # Terminal evidence cannot be reopened, and rejection must not change capacity.
+    with pytest.raises(DBAPIError, match="terminal trial cannot become nonterminal"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE trials SET state='queued' WHERE id=:id"), {"id": trial_id})
+    assert in_flight() == 0
 
 
 def test_in_flight_count_trigger_is_safe_under_locked_search_path(
