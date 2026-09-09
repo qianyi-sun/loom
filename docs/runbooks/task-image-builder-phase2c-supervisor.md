@@ -31,7 +31,15 @@ ELF/grant checks remain mandatory.
 ## Assemble an offline provider release
 
 Build the guard bundles and rootless runtimes through their pinned release
-procedures first. Then certify both architectures in one all-or-nothing
+procedures first. When guard sources change, refresh both architecture bundle
+digests in `deploy/task-image-builder/provider-release-v1.json` together with its
+guard-spec digest. Updating only the spec digest leaves an incompatible input
+pair that the assembler correctly rejects. Derive bundle digests from repeated
+assembly and verify the retained tool bytes against their previously pinned
+release; cache presence alone is not provenance. Offline assembly does not
+establish native containment or authorize activation.
+
+Then certify both architectures in one all-or-nothing
 assembler invocation:
 
 ```bash
