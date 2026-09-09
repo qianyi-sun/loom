@@ -30,10 +30,15 @@ from loom.driver.task_image import (
     resolve_task_image,
 )
 from loom.models.task import TaskConfig
-from loom.task_image_materialization import required_task_image_architectures
+from loom.task_image_materialization import (
+    required_task_image_architectures,
+    task_bundle_content_manifest_digest,
+    task_image_materialization_key,
+)
 from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
+from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
 from loom_worker.task_sidecars import build_task_sidecar_images
 from loom_worker.trial_cache import (
     ManagedImageCleanupResult,
@@ -189,6 +194,18 @@ async def materialize_and_publish_task_images(
     task_config = TaskConfig.model_validate(claim.task_config)
     if claim.cpu_arch not in required_task_image_architectures(task_config):
         raise RuntimeError("task image claim architecture is not required by its task snapshot")
+    manifest_digest = task_bundle_content_manifest_digest(claim.task_source_provenance)
+    if manifest_digest and (
+        task_config.task.id != claim.task_id
+        or claim.materialization_key
+        != task_image_materialization_key(
+            task_id=claim.task_id,
+            task_checksum=claim.task_checksum,
+            cpu_arch=claim.cpu_arch,
+            bundle_content_manifest_sha256=manifest_digest,
+        )
+    ):
+        raise TaskImageBuildError("content manifest does not match the build claim identity")
     registry_repo = settings.trial_cache_registry_repo.strip()
     if not registry_repo:
         raise RuntimeError("task image builder requires a configured registry repository")
@@ -205,28 +222,36 @@ async def materialize_and_publish_task_images(
         timeout_sec=settings.task_materialize_timeout_sec,
     )
     try:
-        actual_checksum = sha256_of_dir(task_dir)
-        if actual_checksum != claim.task_checksum:
-            raise TaskImageBuildError(
-                "materialized task bundle checksum mismatch "
-                f"expected={claim.task_checksum} actual={actual_checksum}"
-            )
-        expected_metadata_checksum = claim.task_source_provenance.get("bundle_file_metadata_sha256")
-        if expected_metadata_checksum is not None:
-            actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
-            if actual_metadata_checksum != expected_metadata_checksum:
+        image_cache_checksum = verified_task_image_cache_identity(
+            task_dir,
+            task_checksum=claim.task_checksum,
+            source_provenance=claim.task_source_provenance,
+        )
+        # Strong capture already checks content, legacy checksum and mode
+        # provenance in one bounded pass. Keep the historical legacy path intact.
+        if not manifest_digest:
+            actual_checksum = sha256_of_dir(task_dir)
+            if actual_checksum != claim.task_checksum:
                 raise TaskImageBuildError(
-                    "materialized task bundle metadata mismatch "
-                    f"expected={expected_metadata_checksum} "
-                    f"actual={actual_metadata_checksum}"
+                    "materialized task bundle checksum mismatch "
+                    f"expected={claim.task_checksum} actual={actual_checksum}"
                 )
+            expected_metadata_checksum = claim.task_source_provenance.get("bundle_file_metadata_sha256")
+            if expected_metadata_checksum is not None:
+                actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
+                if actual_metadata_checksum != expected_metadata_checksum:
+                    raise TaskImageBuildError(
+                        "materialized task bundle metadata mismatch "
+                        f"expected={expected_metadata_checksum} "
+                        f"actual={actual_metadata_checksum}"
+                    )
 
         local_images: dict[str, str] = {}
         if task_config.environment.dockerfile is not None:
             local_images["task"] = await resolve_task_image(
                 task_config=task_config,
                 task_dir=task_dir,
-                task_checksum=claim.task_checksum,
+                task_checksum=image_cache_checksum,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 require_containment=False,
                 cpu_arch=claim.cpu_arch,
@@ -235,7 +260,7 @@ async def materialize_and_publish_task_images(
         sidecars = await build_task_sidecar_images(
             task_config=task_config,
             task_dir=task_dir,
-            task_checksum=claim.task_checksum,
+            task_checksum=image_cache_checksum,
             cpu_arch=claim.cpu_arch,
             docker_api_timeout_sec=settings.docker_api_timeout_sec,
         )

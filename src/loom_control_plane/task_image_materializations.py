@@ -6,13 +6,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
-    Task,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
     TaskImagePublicationEvidence,
@@ -21,6 +20,7 @@ from loom.db.schema import (
 )
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    current_task_image_reference,
     required_task_image_components,
     validate_task_image_registry_images,
 )
@@ -205,13 +205,7 @@ async def record_task_image_publication(
 
 
 def _durable_reference_exists(row: Any) -> ColumnElement[bool]:
-    current_task = exists().where(
-        Task.id == row.task_id,
-        or_(
-            Task.checksum == row.task_checksum,
-            Task.checksum == func.concat("sha256:", row.task_checksum),
-        ),
-    )
+    current_task = exists().where(current_task_image_reference(row))
     live_trial = exists().where(
         TrialTaskImageMaterialization.materialization_id == row.id,
         Trial.id == TrialTaskImageMaterialization.trial_id,

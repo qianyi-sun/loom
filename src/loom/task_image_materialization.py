@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -15,9 +16,10 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
     Task,
@@ -69,7 +71,26 @@ class TaskImageExecutionGrantV1(BaseModel):
         expected = required_task_image_components(task)
         if set(self.registry_images) != expected:
             raise ValueError("registry_images do not match the frozen task snapshot")
+        manifest_digest = task_bundle_content_manifest_digest(self.task_source_provenance)
+        if manifest_digest and self.materialization_key != task_image_materialization_key(
+            task_id=task.task.id,
+            task_checksum=self.task_checksum,
+            cpu_arch=self.cpu_arch,
+            bundle_content_manifest_sha256=manifest_digest,
+        ):
+            raise ValueError("content manifest does not match the execution grant identity")
         return self
+
+
+def task_bundle_content_manifest_digest(provenance: Mapping[str, Any]) -> str:
+    """Only absent provenance selects legacy identity; malformed presence rejects."""
+    key = "bundle_content_manifest_sha256"
+    if key not in provenance:
+        return ""
+    digest = provenance[key]
+    if type(digest) is not str or _CHECKSUM_RE.fullmatch(digest) is None:
+        raise ValueError("bundle_content_manifest_sha256 must be a bare SHA-256 digest")
+    return digest
 
 
 def canonical_task_checksum(task_checksum: str) -> str:
@@ -77,6 +98,27 @@ def canonical_task_checksum(task_checksum: str) -> str:
     if _CHECKSUM_RE.fullmatch(checksum) is None:
         raise ValueError("task_checksum must be a SHA-256 digest")
     return checksum
+
+
+def current_task_image_reference(row: Any) -> ColumnElement[bool]:
+    """Match the catalog revision without broadening exact historical trial pins."""
+    key = "bundle_content_manifest_sha256"
+    digest = row.bundle_content_manifest_sha256
+    return and_(
+        Task.id == row.task_id,
+        or_(
+            Task.checksum == row.task_checksum,
+            Task.checksum == func.concat("sha256:", row.task_checksum),
+        ),
+        or_(
+            and_(digest == "", ~Task.source_provenance.bool_op("?")(key)),
+            and_(
+                digest != "",
+                func.jsonb_typeof(Task.source_provenance[key]) == "string",
+                Task.source_provenance[key].astext == digest,
+            ),
+        ),
+    )
 
 
 def required_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, ...]:
@@ -193,11 +235,15 @@ async def ensure_task_image_materializations(
         raise RuntimeError("task image ensure has pending materialization writes")
 
     task_checksum = canonical_task_checksum(task_row.checksum)
+    manifest_digest = task_bundle_content_manifest_digest(task_row.source_provenance)
+    if manifest_digest and task.task.id != task_row.id:
+        raise ValueError("frozen task snapshot identity differs from the materialization")
     keys = {
         cpu_arch: task_image_materialization_key(
             task_id=task_row.id,
             task_checksum=task_checksum,
             cpu_arch=cpu_arch,
+            bundle_content_manifest_sha256=manifest_digest,
         )
         for cpu_arch in architectures
     }
@@ -209,6 +255,7 @@ async def ensure_task_image_materializations(
                 materialization_key=keys[cpu_arch],
                 task_id=task_row.id,
                 task_checksum=task_checksum,
+                bundle_content_manifest_sha256=manifest_digest,
                 cpu_arch=cpu_arch,
                 task_config=task_row.config,
                 task_source=task_row.source,
@@ -234,6 +281,16 @@ async def ensure_task_image_materializations(
     by_arch = {row.cpu_arch: row for row in rows}
     if set(by_arch) != set(architectures):
         raise RuntimeError("task image materialization identity conflict")
+    if manifest_digest and any(
+        row.bundle_content_manifest_sha256 != manifest_digest
+        or row.task_id != task_row.id
+        or row.task_checksum != task_checksum
+        or row.task_config != task_row.config
+        or row.task_source != task_row.source
+        or row.task_source_provenance != task_row.source_provenance
+        for row in rows
+    ):
+        raise ValueError("frozen content-manifest snapshot conflicts with existing materialization")
     now = datetime.now(UTC)
     for row in rows:
         row.last_referenced_at = now

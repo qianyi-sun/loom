@@ -481,16 +481,43 @@ task/config/source identity. Ordinary lease and lifecycle updates remain allowed
 The migration takes an upfront NOWAIT table lock and refuses downgrade while
 any strong row remains, even if the old unique tuple would have no duplicates.
 
-This foundation does not yet switch application ensure or reader contracts.
-Legacy insertion carrying stronger provenance fails the database binding check
-instead of silently returning a weak ready row. Subsequent integration must
-qualify current-task retention references and frozen publication/execution
-plans, preserve exact historical trial links, and verify downloaded content.
-The Phase 1 build-cache tag also needs the stronger identity: verifying input
-files and then looking up an image by the legacy checksum would still permit
-incorrect cache reuse. Do not silently upgrade an existing ready image or infer
-manifest authority from mutable stored objects. Native admission remains closed
-until these bindings and the real producer-to-downloader path are verified.
+Application ensure now derives the discriminator from strict provenance and
+creates distinct queued rows for distinct manifests, even when the old checksum
+matches a ready image. Exact re-ensure preserves IDs. A strong identity with a
+different frozen config, source or provenance fails instead of silently reusing
+the prior snapshot; callers own the transaction and must roll it back on any
+ensure error. Older insertion code carrying stronger provenance but omitting the
+discriminator fails the database binding check before ON CONFLICT can reuse a
+weak ready row. Current-catalog retention references match the full manifest
+identity; historical nonterminal trial and execution references remain exact-ID
+pins. No existing ready row is upgraded in place.
+
+Python builders and trial workers verify a captured per-file manifest against
+the registered digest before image lookup or runtime construction. Capture also
+checks the legacy checksum and supplied mode provenance. Both main and sidecar
+cache keys use a separate `bundle-manifest-sha256:<digest>` domain, while trial
+metadata retains the original checksum. Verifying bytes and then looking up an
+image by the legacy checksum would still permit incorrect cache reuse. These
+checks require the downloaded directory to remain private and worker-owned until
+use; they do not make a shared concurrently writable directory immutable. If a
+materializer retained the transport mode sidecar, the worker validates its exact
+canonical bytes against the verified file manifest and removes it from private
+staging before any image lookup or runtime use. Bounded no-follow descriptor
+reads require owned single-link regular files and unchanged descriptor/path
+identity. A malformed or replaced sidecar rejects; unauthenticated transport
+bytes cannot become extra Docker context under a verified cache key. This does
+not modify the original source bundle or shared download cache, and it does not
+infer missing executable modes: materialization must already have restored them.
+Legacy bundles retain their original checks and cache keys. Strong execution
+grants additionally validate the manifest-qualified materialization key.
+
+Native V1 build plans cannot carry this content authority and explicitly reject
+strong provenance before changing a lease. Manifest-bearing native plans,
+publication/retention plan bindings, capabilities and the real Go downloader are
+still required. Producer orchestration remains unswitched. Do not infer manifest
+authority from mutable stored objects. Native admission remains closed until the
+complete producer-to-downloader path and remaining activation boundaries are
+verified.
 
 ## Statement and signer
 

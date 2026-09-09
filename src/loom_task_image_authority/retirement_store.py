@@ -36,6 +36,7 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_materialization import current_task_image_reference
 from loom_task_image_authority.publication_jobs import PublicationJobConflictError
 from loom_task_image_authority.publication_store import _credential, _result
 from loom_task_image_authority.registry_credentials import parse_stored_publication_candidate_v2
@@ -345,8 +346,7 @@ async def _pins(
         select(
             select(Task.id)
             .where(
-                Task.id == row.task_id,
-                Task.checksum.in_((row.task_checksum, "sha256:" + row.task_checksum)),
+                current_task_image_reference(row),
             )
             .exists()
         )
@@ -429,6 +429,7 @@ async def observe_or_retire_attempt(
                             TaskImageMaterialization.id,
                             TaskImageMaterialization.task_id,
                             TaskImageMaterialization.task_checksum,
+                            TaskImageMaterialization.bundle_content_manifest_sha256,
                             TaskImageMaterialization.state,
                             TaskImageMaterialization.lease_epoch,
                             TaskImageMaterialization.claimed_by,

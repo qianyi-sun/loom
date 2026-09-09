@@ -346,6 +346,11 @@ def derive_task_image_build_plan(
 
     if authorization.authority_version != 2 or authorization.builder_release_sha256 is None:
         raise ValueError("task-image build plan requires V2 release authority")
+    if "bundle_content_manifest_sha256" in row.task_source_provenance:
+        # Never drop stronger registration authority into a schema that cannot
+        # carry it. The manifest-bearing capability/Go reader is a separate
+        # integration boundary; production rootless admission remains disabled.
+        raise ValueError("content manifest requires a manifest-bearing native build plan")
     if row.cpu_arch not in {"x86_64", "arm64"} or row.cpu_arch != authorization.cpu_arch:
         raise ValueError("task-image materialization and session architecture disagree")
 
