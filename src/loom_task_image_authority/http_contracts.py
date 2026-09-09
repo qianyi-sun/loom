@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_build_plan import TaskImageBuildPlan
 from loom_task_image_authority.contracts import (
     Digest,
     ManifestDigest,
@@ -36,7 +36,7 @@ class TaskImageMaterializationClaimResponseV1(_StrictResponse):
     state: Literal["claimed", "running"]
     deterministic_failure_count: Annotated[int, Field(ge=0)]
     lease_expires_at: datetime
-    plan: TaskImageBuildPlanV1
+    plan: TaskImageBuildPlan
 
     @field_validator("claim_id", "materialization_id", "attempt_id")
     @classmethod

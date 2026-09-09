@@ -35,7 +35,7 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
-from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_build_plan import parse_task_image_build_plan
 from loom.task_image_materialization import current_task_image_reference
 from loom_task_image_authority.publication_jobs import PublicationJobConflictError
 from loom_task_image_authority.publication_store import _credential, _result
@@ -118,7 +118,7 @@ def _validate_publication(
             )
         job = _result(row)
         snapshot = job.snapshot
-        plan = TaskImageBuildPlanV1.model_validate_json(prepared.canonical_plan)
+        plan = parse_task_image_build_plan(prepared.canonical_plan)
         materialization = prepared.materialization_values
         attempt = prepared.attempt_values
         if (

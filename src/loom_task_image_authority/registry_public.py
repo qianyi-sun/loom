@@ -12,7 +12,7 @@ import rfc8785
 from pydantic import ConfigDict, TypeAdapter
 
 from loom.db.schema import TaskImageRegistryCredentialGeneration
-from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_build_plan import TaskImageBuildPlan
 from loom_task_image_authority.contracts import TaskImageRegistryCredentialV1
 
 _CREDENTIAL_FIELDS: dict[str, TypeAdapter[Any]] = {
@@ -26,7 +26,7 @@ def validate_stored_registry_credential_public(
     row: TaskImageRegistryCredentialGeneration,
     *,
     registry_origin: str,
-    plan: TaskImageBuildPlanV1,
+    plan: TaskImageBuildPlan,
 ) -> None:
     payload = row.response_public_json
     if (

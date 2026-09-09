@@ -28,7 +28,12 @@ from loom.db.schema import (
     TaskImageMaterializationOperationEvent,
 )
 from loom.security.secret_store import SecretStore
-from loom.task_image_build_plan import TaskImageBuildPlanV1, derive_task_image_build_plan
+from loom.task_image_build_plan import (
+    TaskImageBuildPlan,
+    TaskImageBuildPlanV1,
+    derive_task_image_build_plan,
+    parse_task_image_build_plan,
+)
 from loom_task_image_authority.bundle_capability import (
     AsyncTaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityError,
@@ -134,7 +139,7 @@ def _lease_deadline(*, now: datetime, lease_seconds: float) -> datetime:
     return now + timedelta(seconds=lease_seconds)
 
 
-def _plan_snapshot(plan: TaskImageBuildPlanV1) -> tuple[dict[str, object], str]:
+def _plan_snapshot(plan: TaskImageBuildPlan) -> tuple[dict[str, object], str]:
     payload = plan.model_dump(mode="json", exclude_none=False)
     return payload, hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
 
@@ -144,13 +149,13 @@ def _stored_attempt_claim_plan(
     *,
     authorization: TaskImageBuildSessionAuthorization,
     materialization_id: UUID,
-) -> TaskImageBuildPlanV1:
+) -> TaskImageBuildPlan:
     if attempt.claim_plan_json is None or attempt.claim_plan_sha256 is None:
         raise TaskImageSessionMaterializationAuthorizationError(
             "task-image claim receipt is unavailable"
         )
     try:
-        plan = TaskImageBuildPlanV1.model_validate_json(json.dumps(attempt.claim_plan_json))
+        plan = parse_task_image_build_plan(json.dumps(attempt.claim_plan_json, ensure_ascii=False, separators=(",", ":")))
         payload, digest = _plan_snapshot(plan)
     except (TypeError, ValueError):
         raise TaskImageSessionMaterializationAuthorizationError(
@@ -179,7 +184,7 @@ def _stored_claim_plan(
     *,
     authorization: TaskImageBuildSessionAuthorization,
     materialization_id: UUID,
-) -> TaskImageBuildPlanV1:
+) -> TaskImageBuildPlan:
     plan = _stored_attempt_claim_plan(
         attempt, authorization=authorization, materialization_id=materialization_id,
     )
@@ -309,7 +314,7 @@ async def _claim_replay(
     *,
     authorization: TaskImageBuildSessionAuthorization,
     claim_id: UUID,
-) -> tuple[TaskImageMaterialization, TaskImageBuildPlanV1] | None:
+) -> tuple[TaskImageMaterialization, TaskImageBuildPlan] | None:
     # Discover identity without taking the child lock. Normal lease operations
     # and retirement acquire materialization -> attempt; child-first replay would
     # deadlock with either parent owner. The observation is not authority and is
@@ -380,7 +385,7 @@ async def claim_session_materialization(
     claim_id: UUID,
     now: datetime,
     lease_seconds: float,
-) -> tuple[TaskImageMaterialization, TaskImageBuildPlanV1] | None:
+) -> tuple[TaskImageMaterialization, TaskImageBuildPlan] | None:
     """Claim one native materialization under the exact current build session."""
 
     now = _utc(now)

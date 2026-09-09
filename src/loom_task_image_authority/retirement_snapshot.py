@@ -29,7 +29,10 @@ from loom_task_image_authority.retention_inventory import (
 )
 
 MAX_RETIREMENT_CREDENTIALS = 128 * 512
-_MATERIALIZATION_FIELDS = ("id", "materialization_key", "task_id", "task_checksum", "cpu_arch")
+_MATERIALIZATION_FIELDS = (
+    "id", "materialization_key", "task_id", "task_checksum", "cpu_arch",
+    "bundle_content_manifest_sha256",
+)
 _ATTEMPT_FIELDS = (
     "id", "materialization_id", "attempt_number", "lease_epoch", "builder_id", "grant_id",
     "session_id", "session_generation", "claim_id", "claim_plan_sha256",

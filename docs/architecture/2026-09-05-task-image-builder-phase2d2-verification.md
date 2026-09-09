@@ -525,9 +525,21 @@ infer missing executable modes: materialization must already have restored them.
 Legacy bundles retain their original checks and cache keys. Strong execution
 grants additionally validate the manifest-qualified materialization key.
 
-Native V1 build plans cannot carry this content authority and explicitly reject
-strong provenance before changing a lease. Manifest-bearing native plans,
-publication/retention plan bindings, capabilities and the real Go downloader are
+The native plan reader now supports an explicitly versioned
+`loom.task-image-build-plan.v2` carrying the mandatory registered content-manifest
+digest and a content-qualified bundle prefix. V1 fields, defaults and wire bytes
+remain unchanged; retained canonical hashes are not rewritten. Claim replay and
+registry/publication/retirement readers preserve the version. Publication,
+credential and retirement inventory readers require the plan discriminator to
+match the materialization column and recompute the manifest-qualified key. The
+restricted retirement snapshot includes that column for detached validation and
+locked recheck. A successor session still cannot rewrite the original claim's
+identity. Database consumer tests seed explicit strong receipts; they are not
+evidence that native admission or content download is complete.
+
+Native derivation still rejects strong provenance before changing a lease, and
+the V1 bundle provider rejects V2 plans before storage work. Manifest-bearing
+derivation/issuance, complete inventory matching and the real Go downloader are
 still required. Producer orchestration remains unswitched. Do not infer manifest
 authority from mutable stored objects. Native admission remains closed until the
 complete producer-to-downloader path and remaining activation boundaries are

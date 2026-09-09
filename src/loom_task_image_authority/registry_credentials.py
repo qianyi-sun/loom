@@ -22,7 +22,8 @@ from loom.db.schema import (
     TaskImageRegistryCredentialGeneration,
 )
 from loom.security.secret_store import InvalidRefError, SecretStore, parse_ref
-from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_build_plan import TaskImageBuildPlan, parse_task_image_build_plan
+from loom.task_image_materialization import task_image_materialization_key
 from loom_task_image_authority.contracts import (
     TaskImagePublicationCandidateRequestV1,
     TaskImagePublicationCandidateRequestV2,
@@ -106,13 +107,13 @@ def _stored_claim_component(
     *,
     authorization: TaskImageBuildSessionAuthorization,
     component: str,
-) -> TaskImageBuildPlanV1:
+) -> TaskImageBuildPlan:
     if attempt.claim_plan_json is None or attempt.claim_plan_sha256 is None:
         raise TaskImageSessionMaterializationAuthorizationError(
             "task-image claim receipt is unavailable"
         )
     try:
-        plan = TaskImageBuildPlanV1.model_validate_json(json.dumps(attempt.claim_plan_json))
+        plan = parse_task_image_build_plan(json.dumps(attempt.claim_plan_json, ensure_ascii=False, separators=(",", ":")))
         payload = plan.model_dump(mode="json", exclude_none=False)
         digest = hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
     except (TypeError, ValueError, ValidationError):
@@ -130,6 +131,13 @@ def _stored_claim_component(
         or plan.builder_id != attempt.builder_id
         or plan.cpu_arch != row.cpu_arch
         or plan.cpu_arch != authorization.cpu_arch
+        or plan.task_id != row.task_id
+        or plan.task_checksum != row.task_checksum
+        or plan.content_manifest_digest != row.bundle_content_manifest_sha256
+        or row.materialization_key != task_image_materialization_key(
+            task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
+            bundle_content_manifest_sha256=plan.content_manifest_digest,
+        )
         or component not in {item.name for item in plan.components}
     ):
         raise TaskImageSessionMaterializationAuthorizationError(

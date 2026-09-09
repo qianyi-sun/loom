@@ -16,7 +16,7 @@ from loom.db.schema import (
     TaskImageMaterializationAttempt,
     TaskImageRegistryCredentialGeneration,
 )
-from loom.task_image_build_plan import TaskImageBuildPlanV1
+from loom.task_image_build_plan import parse_task_image_build_plan
 from loom.task_image_materialization import task_image_materialization_key
 from loom_task_image_authority.config import _validate_https_origin
 from loom_task_image_authority.registry_public import validate_stored_registry_credential_public
@@ -70,7 +70,7 @@ def _derive(
     _validate_https_origin(registry_origin, label="registry origin")
     if attempt.claim_plan_json is None or len(credentials) > 128 * 512:
         raise ValueError("inventory is outside bounds")
-    plan = TaskImageBuildPlanV1.model_validate_json(json.dumps(attempt.claim_plan_json))
+    plan = parse_task_image_build_plan(json.dumps(attempt.claim_plan_json, ensure_ascii=False, separators=(",", ":")))
     payload = plan.model_dump(mode="json", exclude_none=False)
     if (
         payload != attempt.claim_plan_json
@@ -87,9 +87,11 @@ def _derive(
         or plan.task_id != row.task_id
         or plan.task_checksum != row.task_checksum
         or plan.cpu_arch != row.cpu_arch
+        or plan.content_manifest_digest != row.bundle_content_manifest_sha256
         or row.materialization_key
         != task_image_materialization_key(
-            task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch
+            task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
+            bundle_content_manifest_sha256=plan.content_manifest_digest,
         )
     ):
         raise ValueError("frozen attempt identity changed")
