@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 from dataclasses import FrozenInstanceError
 from datetime import timedelta
 from uuid import uuid4
@@ -20,6 +21,7 @@ from loom.task_image_build_plan import derive_task_image_build_plan
 from loom.task_image_materialization import task_image_materialization_key
 from loom_task_image_authority.registry_token import publication_repository
 from tests.unit.test_task_image_build_plan import _authorization, _row
+from tests.unit.test_task_image_build_plan_versions import strong_payload
 from tests.unit.test_task_image_registry_contracts import (
     ATTEMPT_ID,
     GRANT_ID,
@@ -41,6 +43,7 @@ def inventory_module():
 def fixture(arch="arm64"):
     materialization = TaskImageMaterialization(
         **vars(_row(id=MATERIALIZATION_ID, cpu_arch=arch)),
+        bundle_content_manifest_sha256="",
         materialization_key=task_image_materialization_key(
             task_id="bench/task-1", task_checksum="4" * 64, cpu_arch=arch
         ),
@@ -159,6 +162,47 @@ def test_inventory_collapses_successors_and_orders_components_deterministically(
 def test_no_issued_credentials_produces_no_deletion_paths():
     materialization, attempt, _ = fixture()
     assert derive(materialization, attempt, []).repositories == ()
+
+
+def strong_fixture():
+    row, attempt, old_plan = fixture()
+    payload = dict(old_plan.model_dump(mode="json"))
+    for field in ("schema_version", "bundle_prefix", "bundle_content_manifest_sha256"):
+        payload[field] = strong_payload()[field]
+    plan = importlib.import_module("loom.task_image_build_plan").parse_task_image_build_plan(json.dumps(payload))
+    row.bundle_content_manifest_sha256 = plan.bundle_content_manifest_sha256
+    row.task_source_provenance = dict(row.task_source_provenance, bundle_content_manifest_sha256=plan.bundle_content_manifest_sha256)
+    row.task_source = f"s3://{plan.bundle_bucket}/{plan.bundle_prefix}"
+    row.materialization_key = task_image_materialization_key(
+        task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
+        bundle_content_manifest_sha256=plan.bundle_content_manifest_sha256,
+    )
+    attempt.claim_plan_json = plan.model_dump(mode="json")
+    attempt.claim_plan_sha256 = hashlib.sha256(rfc8785.dumps(attempt.claim_plan_json)).hexdigest()
+    return row, attempt, plan
+
+
+def test_retained_v2_plan_uses_registered_manifest_qualified_identity():
+    row, attempt, plan = strong_fixture()
+    credential = credential_row(plan)
+    assert derive(row, attempt, [credential]).repositories[0].repository == credential.repository
+
+
+@pytest.mark.parametrize("corruption", ["digest", "legacy_key", "weak_plan", "weak_row"])
+def test_retained_v2_plan_rejects_manifest_identity_collapse(corruption):
+    row, attempt, plan = strong_fixture()
+    if corruption == "digest":
+        row.bundle_content_manifest_sha256 = "7" * 64
+    elif corruption == "legacy_key":
+        row.materialization_key = task_image_materialization_key(task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch)
+    elif corruption == "weak_plan":
+        attempt.claim_plan_json.pop("bundle_content_manifest_sha256")
+        attempt.claim_plan_json["schema_version"] = "loom.task-image-build-plan.v1"
+        attempt.claim_plan_sha256 = hashlib.sha256(rfc8785.dumps(attempt.claim_plan_json)).hexdigest()
+    else:
+        row.bundle_content_manifest_sha256 = ""
+    with pytest.raises(ValueError):
+        derive(row, attempt, [credential_row(plan)])
 
 
 def test_historical_registry_identity_rotation_preserves_inventory():
