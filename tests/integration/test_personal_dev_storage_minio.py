@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from minio import Minio
 from minio.error import S3Error
+from testcontainers.core.container import DockerContainer
 from testcontainers.minio import MinioContainer
 
 from loom.dev_instance_runtime import (
@@ -22,16 +23,15 @@ from tests.unit.test_personal_dev_storage_vault import _PASSWORD, _Cluster, _vau
 class _MinioRunner:
     """Replace only kubectl transport; execute the exact production shell/stdin."""
 
-    def __init__(self, server, client_image):
+    def __init__(self, server, client_container):
         self.server = server
-        self.client_image = client_image
+        self.client_container = client_container
 
     async def run(self, argv, *, stdin=None, timeout_seconds=60):
         assert "exec" in argv and argv[-4:-1] == ["/bin/sh", "-eu", "-c"]
         return await AsyncCommandRunner().run([
-            "docker", "run", "--rm", "-i", "--network", f"container:{self.server.get_wrapped_container().id}",
-            "--env", "MINIO_ROOT_USER=minioadmin", "--env", "MINIO_ROOT_PASSWORD=minioadmin",
-            "--entrypoint", "/bin/sh", self.client_image, "-eu", "-c", argv[-1],
+            "docker", "exec", "-i", self.client_container.get_wrapped_container().id,
+            "/bin/sh", "-eu", "-c", argv[-1],
         ], stdin=stdin, timeout_seconds=timeout_seconds)
 
 
@@ -39,11 +39,17 @@ class _MinioRunner:
 def pinned_minio():
     images = json.loads((Path(__file__).parents[2] / "deploy/dev-fleet/personal-dev-external-images.json").read_text())["images"]
     with MinioContainer(image=images["minio"]["reference"]) as server:
-        yield server, images["minio_client"]["reference"]
+        # Production execs in a long-lived admin container. Preserve exact
+        # script/stdin semantics without cold-starting one container per read.
+        client = DockerContainer(images["minio_client"]["reference"]).with_kwargs(
+            entrypoint="/bin/sh", network_mode=f"container:{server.get_wrapped_container().id}",
+        ).with_env("MINIO_ROOT_USER", "minioadmin").with_env("MINIO_ROOT_PASSWORD", "minioadmin").with_command(["-c", "sleep 86400"])
+        with client:
+            yield server, client
 
 
 async def test_full_length_incarnation_tenants_isolate_owners_and_stale_cleanup(pinned_minio):
-    server, client_image = pinned_minio
+    server, client_container = pinned_minio
     first = PersonalDevStorageBindingV1(
         layout="incarnation-v1", environment_name="a" * 20,
         subject_id=uuid4(), subject_incarnation=uuid4(), owner_user_id=uuid4(), owner_team_id=uuid4(),
@@ -59,7 +65,7 @@ async def test_full_length_incarnation_tenants_isolate_owners_and_stale_cleanup(
         identity = binding.identity
         await vault.store(identity, _PASSWORD)
         provisioner = KubectlMinioTenantProvisioner(
-            KubectlClient("kubectl", runner=_MinioRunner(server, client_image)), vault,
+            KubectlClient("kubectl", runner=_MinioRunner(server, client_container)), vault,
         )
         for bucket in (identity.task_bucket, identity.trajectories_bucket, identity.artifacts_bucket):
             admin.make_bucket(bucket)

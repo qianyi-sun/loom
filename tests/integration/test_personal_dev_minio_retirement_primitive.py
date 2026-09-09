@@ -20,11 +20,11 @@ from tests.unit.test_personal_dev_storage_vault import _PASSWORD, _Cluster, _vau
 
 
 async def test_iam_deny_survives_credential_updates_and_concurrent_allow_attachment(pinned_minio):  # noqa: F811
-    server, client_image = pinned_minio
+    server, client_container = pinned_minio
     identity = _bound_claim().operation.storage_binding.identity
     vault = _vault(_Cluster())
     await vault.store(identity, _PASSWORD)
-    kubectl = KubectlClient("kubectl", runner=_MinioRunner(server, client_image))
+    kubectl = KubectlClient("kubectl", runner=_MinioRunner(server, client_container))
     provisioner = KubectlMinioTenantProvisioner(kubectl, vault)
     admin = server.get_client()
     admin.make_bucket(identity.task_bucket)

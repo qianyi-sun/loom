@@ -57,25 +57,29 @@ async def test_stale_primary_database_provisioning_cannot_reopen_sealed_incarnat
                 pass
 
 
-async def test_already_started_minio_converge_cannot_restore_deleted_tenant(pinned_minio):  # noqa: F811
-    server, client_image = pinned_minio
+@pytest.mark.parametrize("initial_tenant", (True, False))
+async def test_already_started_minio_converge_cannot_restore_deleted_tenant(pinned_minio, initial_tenant):  # noqa: F811
+    server, client_container = pinned_minio
     identity = _bound_claim().operation.storage_binding.identity
     vault = _vault(_Cluster())
     await vault.store(identity, _PASSWORD)
-    runner = _MinioRunner(server, client_image)
+    runner = _MinioRunner(server, client_container)
     provisioner = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=runner), vault)
     admin = server.get_client()
-    admin.make_bucket(identity.task_bucket)
-    await provisioner.converge(identity)
+    if initial_tenant:
+        admin.make_bucket(identity.task_bucket)
+        await provisioner.converge(identity)
     access, secret = await vault.object_credentials(identity)
     client = Minio(server.get_config()["endpoint"], access_key=access, secret_key=secret, secure=False)
-    client.put_object(identity.task_bucket, "retained", io.BytesIO(b"owned"), 5)
+    if initial_tenant:
+        client.put_object(identity.task_bucket, "retained", io.BytesIO(b"owned"), 5)
     paused, resume = asyncio.Event(), asyncio.Event()
 
     class DelayedExecution:
         async def run(self, argv, *, stdin=None, timeout_seconds=60):
-            paused.set()
-            await resume.wait()
+            if "mc admin user add" in argv[-1]:
+                paused.set()
+                await resume.wait()
             return await runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
 
     stale = KubectlMinioTenantProvisioner(KubectlClient("kubectl", runner=DelayedExecution()), vault)
@@ -84,6 +88,10 @@ async def test_already_started_minio_converge_cannot_restore_deleted_tenant(pinn
         async with asyncio.timeout(60):
             await paused.wait()
             await provisioner.delete(identity)
+            if not initial_tenant:
+                # Retirement must also work before any tenant or bucket exists.
+                admin.make_bucket(identity.task_bucket)
+                admin.put_object(identity.task_bucket, "retained", io.BytesIO(b"owned"), 5)
             with pytest.raises(S3Error):
                 client.put_object(identity.task_bucket, "after-delete", io.BytesIO(b"bad"), 3)
             resume.set()
@@ -97,3 +105,26 @@ async def test_already_started_minio_converge_cannot_restore_deleted_tenant(pinn
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_retained_deny_policy_prevents_adopting_a_deleted_minio_user(pinned_minio):  # noqa: F811
+    server, client_container = pinned_minio
+    identity = _bound_claim().operation.storage_binding.identity
+    vault = _vault(_Cluster())
+    await vault.store(identity, _PASSWORD)
+    runner = _MinioRunner(server, client_container)
+    kubectl = KubectlClient("kubectl", runner=runner)
+    provisioner = KubectlMinioTenantProvisioner(kubectl, vault)
+    admin = server.get_client()
+    admin.make_bucket(identity.task_bucket)
+    await provisioner.converge(identity)
+    await provisioner.delete(identity)
+    access, _ = await vault.object_credentials(identity)
+    # Independently remove only the retired principal, not its permanent
+    # policy record. A later normal provisioner must not adopt that absence.
+    await kubectl.exec_stdin(namespace="loom-dev", pod="loom-dev-minio-0", container="admin", script=(
+        'export MC_HOST_fixture="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000"\n'
+        f"mc admin user rm fixture {access} >/dev/null"
+    ))
+    with pytest.raises(DevInstanceRuntimeError):
+        await provisioner.converge(identity)
