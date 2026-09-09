@@ -713,6 +713,20 @@ refuses retained V4 epochs or typed history; otherwise it restores the original
 application trigger and removes its own helpers, preserving the extension and
 schema for unrelated dependents.
 
+`CapacityTypedMembershipStore.apply_build` now owns the initial pending-build
+transaction. It resolves the pinned management delegation, preparation and fleet
+from current database authority under a SERIALIZABLE authority-first lock. Before
+insertion or replay it validates the full typed event prefix, retained generation
+facts, immutable base configuration, and indexed subject/account materialization.
+Exact retries return their original receipt even after another owner advances the
+shared head; stale new mutations must retry against the new revision. Concurrent
+transactions cannot leave duplicate or partial build generations. Staging,
+materialization and the guarded event insert roll back together, including on a
+late SQL rejection. Retained reads refresh ORM objects and compare nested JSON
+canonically, so cached values and integer/boolean/float aliases cannot authenticate
+changed evidence. This internal transaction is not yet exposed as runtime admission;
+later lifecycle and typed application handling remain separate unfinished work.
+
 These new contracts are deliberately not accepted by execution preparation or
 promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a

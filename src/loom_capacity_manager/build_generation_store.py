@@ -9,6 +9,7 @@ separate authenticated convergence. Application installation fields are not used
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import or_, select
@@ -68,8 +69,16 @@ def _deployment_values(member: PersonalBuildMemberV1, preparation: ExecutionPrep
 
 
 def _require_values(row: object | None, expected: dict[str, Any], *, label: str) -> None:
-    if row is None or any(getattr(row, field) != value for field, value in expected.items()):
+    if row is None:
         raise ValueError(f"retained build {label} evidence changed")
+    for field, value in expected.items():
+        actual = getattr(row, field)
+        if isinstance(value, (dict, list)):
+            matches = json.dumps(actual, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) == json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+        else:
+            matches = actual == value and (not isinstance(value, (int, bool)) or type(actual) is type(value))
+        if not matches:
+            raise ValueError(f"retained build {label} evidence changed")
 
 
 async def _require_staged_facts(
@@ -81,19 +90,19 @@ async def _require_staged_facts(
         CapacityCandidate.subject_id == subject.subject_id,
         CapacityCandidate.subject_incarnation == subject.subject_incarnation,
         CapacityCandidate.candidate_generation == subject.candidate_generation,
-    ))).one_or_none()
+    ).execution_options(populate_existing=True))).one_or_none()
     _require_values(candidate, _candidate_values(member, preparation), label="candidate")
     deployment = (await session.scalars(select(CapacityDeploymentGeneration).where(
         CapacityDeploymentGeneration.subject_id == subject.subject_id,
         CapacityDeploymentGeneration.subject_incarnation == subject.subject_incarnation,
         CapacityDeploymentGeneration.deployment_generation == subject.deployment_generation,
-    ))).one_or_none()
+    ).execution_options(populate_existing=True))).one_or_none()
     _require_values(deployment, _deployment_values(member, preparation), label="deployment")
     reporter = (await session.scalars(select(CapacityDemandReporter).where(
         CapacityDemandReporter.subject_id == subject.subject_id,
         CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
         CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,
-    ))).one_or_none()
+    ).execution_options(populate_existing=True))).one_or_none()
     _require_values(reporter, {
         "configuration_generation": subject.configuration_generation,
         "deployment_generation": subject.deployment_generation, "state": "current",
@@ -103,7 +112,7 @@ async def _require_staged_facts(
         CapacityWorkerProfile.subject_id == subject.subject_id,
         CapacityWorkerProfile.subject_incarnation == subject.subject_incarnation,
         CapacityWorkerProfile.deployment_generation == subject.deployment_generation,
-    ))).all()
+    ).execution_options(populate_existing=True))).all()
     if len(profiles) != len(subject.profiles):
         raise ValueError("retained build worker profile set changed")
     for profile in subject.profiles:
