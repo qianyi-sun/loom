@@ -51,7 +51,8 @@ def load_render(
         for filename in PHASE_FILES
     }
     configs = [
-        row for row in files["10-config-network.yaml"]
+        row
+        for row in files["10-config-network.yaml"]
         if row["kind"] == "ConfigMap" and row["metadata"]["name"] == "loom-platform-config"
     ]
     if len(configs) != 1:
@@ -67,10 +68,14 @@ def load_render(
                 namespace = metadata["name"]
             if row["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
                 if metadata["name"] != config["execution_namespace"] + "-collector":
-                    raise DeploymentError("cluster resource does not belong to the integration target")
+                    raise DeploymentError(
+                        "cluster resource does not belong to the integration target"
+                    )
                 continue
             if namespace not in namespaces:
-                raise DeploymentError(f"rendered resource targets a different namespace: {filename}")
+                raise DeploymentError(
+                    f"rendered resource targets a different namespace: {filename}"
+                )
     profile = json.loads(configs[0]["data"]["profile.json"])
     deployment = {
         "candidate_sha": profile["candidate_sha"],
@@ -168,6 +173,21 @@ def job_failed(job: dict[str, Any]) -> bool:
         condition.get("type") == "Failed" and condition.get("status") == "True"
         for condition in job.get("status", {}).get("conditions", [])
     )
+
+
+def wait_for_job(kube: Kubectl, name: str, namespace: str, seconds: int) -> None:
+    """Return on either terminal condition, preserving failures for diagnosis."""
+    deadline = time.monotonic() + seconds
+    while True:
+        job = kube.get("job", name, namespace)
+        if job_failed(job):
+            raise DeploymentError(f"job {name} reached Failed condition")
+        if job_complete(job):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DeploymentError(f"job {name} completion timed out")
+        time.sleep(min(5, remaining))
 
 
 def preflight(
@@ -334,17 +354,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             kube.run("apply", "-f", str(snapshot_root / filename))
 
         def wait_job(name: str, seconds: int = 660) -> None:
-            kube.run(
-                "wait",
-                "--for=condition=complete",
-                f"job/{name}",
-                "-n",
-                ns,
-                f"--timeout={seconds}s",
-                timeout=seconds + 40,
-            )
-            if not job_complete(kube.get("job", name, ns)):
-                raise DeploymentError("job completion readback is missing")
+            wait_for_job(kube, name, ns, seconds)
 
         def run_job(filename: str) -> None:
             name = files[filename][0]["metadata"]["name"]

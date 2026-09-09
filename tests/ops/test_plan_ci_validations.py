@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from scripts.component_ownership import load_manifest
+from scripts.component_ownership import load_manifest, select_release_image_matrix
 from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -279,7 +279,6 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
     "path",
     [
         "scripts/ops/deploy_nebius_platform.py",
-        "scripts/ops/nebius_candidate.py",
         "scripts/ops/nebius_registry_auth.py",
         "deploy/nebius/integration.platform.json.example",
         ".github/workflows/nebius-candidate.yml",
@@ -289,6 +288,80 @@ def test_nebius_platform_tools_do_not_fall_back_to_unrelated_heavy_lanes(path: s
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == {"integration"}
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("scripts/ops/nebius_candidate.py", set()),
+        ("scripts/validate_trivy_release_report.py", {"images"}),
+    ],
+)
+def test_publication_tools_select_only_their_consumers(path: str, expected: set[str]) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.docs_only is False
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == expected
+
+
+def test_publication_scan_change_preserves_all_shared_image_compatibility() -> None:
+    paths = (
+        "scripts/ops/nebius_candidate.py",
+        "scripts/validate_trivy_release_report.py",
+        "tests/ops/test_nebius_candidate.py",
+        "tests/ops/test_validate_trivy_release_report.py",
+        "docs/ops/nebius-candidate.md",
+    )
+    plan = plan_validations(changed_paths=paths, labels=set(), event_name="pull_request")
+    assert plan.selected_heavy_checks() == {"images"}
+    assert plan.unowned_runtime is False
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    # Match ci.yml's existing image-planner flags, without forcing all lanes.
+    for changed_paths in (paths, (*paths, "src/loom/driver/docker.py")):
+        plan = plan_validations(
+            changed_paths=changed_paths, labels=set(), event_name="pull_request"
+        )
+        images = select_release_image_matrix(
+            manifest,
+            changed_paths=changed_paths,
+            force_all=plan.unowned_runtime,
+            fallback_all=plan.images,
+        )
+        assert {row["image"] for row in images} == {
+            component.id for component in manifest.release_components()
+        }
+        assert len(images) == 13
+    for path in paths[2:4]:
+        assert manifest.test_owner_for_path(path).lane == "tests-root"
+
+
+@pytest.mark.parametrize(
+    ("extra_path", "labels", "expected", "unowned"),
+    [
+        ("scripts/ops/new_publisher.py", set(), set(HEAVY_CHECKS), True),
+        (
+            "src/loom/driver/docker.py",
+            set(),
+            {"integration", "integration_docker", "images", "staging_smoke"},
+            False,
+        ),
+        (
+            "",
+            {"ci:integration", "cluster-smoke"},
+            {"images", "integration", "cluster_smoke"},
+            False,
+        ),
+    ],
+)
+def test_publication_ownership_preserves_other_coverage(
+    extra_path: str, labels: set[str], expected: set[str], unowned: bool
+) -> None:
+    paths = ["scripts/ops/nebius_candidate.py", "scripts/validate_trivy_release_report.py"]
+    if extra_path:
+        paths.append(extra_path)
+    plan = plan_validations(changed_paths=paths, labels=labels, event_name="pull_request")
+    assert plan.selected_heavy_checks() == expected
+    assert plan.unowned_runtime is unowned
 
 
 @pytest.mark.parametrize(

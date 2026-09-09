@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -108,12 +110,20 @@ func main() {
 		client := &http.Client{Timeout: 3 * time.Second}
 		response, err := client.Get(os.Args[2])
 		if err != nil {
-			fmt.Println("exit:1")
+			reason := "network"
+			var dnsError *net.DNSError
+			var networkError net.Error
+			if errors.As(err, &dnsError) {
+				reason = "dns"
+			} else if errors.As(err, &networkError) && networkError.Timeout() {
+				reason = "timeout"
+			}
+			fmt.Printf("exit:1 reason:%s error:%s\n", reason, err)
 			return
 		}
 		_ = response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 400 {
-			fmt.Println("exit:1")
+			fmt.Printf("exit:1 reason:http status:%d\n", response.StatusCode)
 			return
 		}
 		fmt.Println("exit:0")

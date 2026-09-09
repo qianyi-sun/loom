@@ -47,6 +47,7 @@ def _assert_direct_postgres_connection(connectable: Any) -> None:
             f"not loom-pgbouncer:6432."
         )
 
+
 target_metadata = Base.metadata
 
 # The block below only executes when Alembic drives this file directly.
@@ -66,7 +67,9 @@ if hasattr(context, "config"):
         raise RuntimeError(
             "sqlalchemy.url or LOOM_DB_URL must be set to run migrations",
         )
-    config.set_main_option("sqlalchemy.url", db_url)
+    # ConfigParser consumes percent escapes; escape only at this INI boundary
+    # so the engine receives the original URL (including credentials and TLS).
+    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
     def run_migrations_offline() -> None:
         context.configure(

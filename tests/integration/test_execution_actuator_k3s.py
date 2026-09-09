@@ -399,6 +399,38 @@ def _pod_probe(core: object, namespace: str, name: str, url: str) -> str:
     )
 
 
+async def _wait_for_allowed_peer(
+    core: object, namespace: str, name: str, url: str, *, timeout: float = 30
+) -> str:
+    # Pod Ready does not establish Service DNS/endpoints/dataplane convergence.
+    deadline = time.monotonic() + timeout
+    while True:
+        result = await asyncio.to_thread(_pod_probe, core, namespace, name, url)
+        if "exit:0" in result:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"allowed Gateway Service did not become reachable: {result}")
+        await asyncio.sleep(min(0.25, remaining))
+
+
+async def test_allowed_peer_waits_for_service_convergence(monkeypatch: pytest.MonkeyPatch) -> None:
+    probes = iter(("exit:1 reason:dns", "exit:1 reason:network", "exit:0"))
+    monkeypatch.setattr(__name__ + "._pod_probe", lambda *args: next(probes))
+    assert (
+        await _wait_for_allowed_peer(None, "test", "client", "http://gateway", timeout=2)
+        == "exit:0"
+    )
+
+
+async def test_allowed_peer_failure_is_bounded_and_retains_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(__name__ + "._pod_probe", lambda *args: "exit:1 reason:timeout")
+    with pytest.raises(AssertionError, match="reason:timeout"):
+        await _wait_for_allowed_peer(None, "test", "client", "http://gateway", timeout=0.01)
+
+
 async def test_actuator_api_converges_against_disposable_k3s() -> None:
     from kubernetes import client
 
@@ -652,21 +684,18 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
                 )
                 for item in pods
             }
-            await asyncio.sleep(3)
-
+            allowed = await _wait_for_allowed_peer(
+                core,
+                attempt_namespace,
+                "execution-client",
+                "http://gateway.loom.svc.cluster.local:9100",
+            )
             direct_gateway = await asyncio.to_thread(
                 _pod_probe,
                 core,
                 attempt_namespace,
                 "execution-client",
                 f"http://{ready['gateway'].status.pod_ip}:9100",
-            )
-            allowed = await asyncio.to_thread(
-                _pod_probe,
-                core,
-                attempt_namespace,
-                "execution-client",
-                "http://gateway.loom.svc.cluster.local:9100",
             )
             assert "exit:0" in direct_gateway, f"direct Gateway peer was denied: {direct_gateway}"
             assert "exit:0" in allowed, f"DNS Gateway peer was denied: {allowed}"

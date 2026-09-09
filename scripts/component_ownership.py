@@ -1084,6 +1084,7 @@ def select_release_image_matrix(
                 ".github/workflows/images.yml",
                 "config/component-ownership.toml",
                 "scripts/component_ownership.py",
+                "scripts/validate_trivy_release_report.py",
             }
             for path in changed_paths
         ):
