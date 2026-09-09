@@ -6,7 +6,8 @@ on:
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
+    # Draft opens and pushes already validate; marking Ready needs no repeat.
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
   merge_group:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.
@@ -29,11 +30,8 @@ on:
         type: boolean
         default: false
 
-# Every subscribed event validates its candidate. Older head/base events cannot
-# cancel the current candidate; same-candidate events may supersede earlier runs.
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Let every subscribed run report its required check. Cancelling overlapping
+# metadata events can leave the latest suite empty and the required check pending.
 
 permissions:
   contents: read

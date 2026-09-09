@@ -260,10 +260,11 @@ legacy `dev` branch retains its four protected contexts. Validation labels
 only add work to the path-inferred plan; author or reviewer identity does not
 grant gate authority. Metadata changes can therefore start another real run.
 
-Nebius concurrency includes the head and base SHA: same-candidate events may
-supersede an earlier run, while an older candidate cannot cancel a different
-head/base validation. Older-candidate work may finish. A delayed draft event
-also runs real checks, and optional labels use the event's snapshot.
+CI runs do not automatically cancel one another: cancellation of overlapping
+metadata events can leave the latest suite without its required check, even
+after another run on the same commit succeeds. Draft opens and pushes already
+validate, so marking a PR Ready does not start a duplicate run. Base retargets
+and label changes still run real checks; optional labels use the event's snapshot.
 
 Each protected name is the final aggregate job emitted directly by its source
 GitHub Actions workflow. The aggregate runs with `if: always()` and fails when
