@@ -168,3 +168,24 @@ def test_production_backend_refuses_temporary_or_ambient_identity(monkeypatch):
         _backend(monkeypatch, credentials=None)
     with pytest.raises(RuntimeError):
         _backend(monkeypatch, credentials=S3SigningCredentials(access_key="a", secret_key="b", session_token="token", expires_at=NOW + timedelta(seconds=60)))
+
+
+def test_get_rejects_clock_regression_after_actual_signing_stamp(monkeypatch):
+    observations = iter([NOW, NOW + timedelta(seconds=10), NOW + timedelta(seconds=5)])
+    backend, _ = _backend(monkeypatch, clock=lambda: next(observations))
+    with pytest.raises(RuntimeError):
+        backend.presign_get(bucket="loom-bundles", key="revision/a", expires_at=NOW + timedelta(seconds=60))
+
+
+async def test_forward_clock_during_signing_shortens_network_deadline(monkeypatch):
+    observations = [NOW, NOW, NOW + timedelta(seconds=59)]
+
+    def clock():
+        return observations.pop(0) if len(observations) > 1 else observations[0]
+
+    reader = _Reader()
+    remaining = []
+    reader.on_fetch = lambda: remaining.append(reader.requests[-1][1] - asyncio.get_running_loop().time())
+    backend, _ = _backend(monkeypatch, reader=reader, clock=clock)
+    await _list(backend)
+    assert 0 < remaining[0] <= 1.0
