@@ -1,10 +1,13 @@
 """Durable successor lineage preserves historical receipts across retry and takeover."""
 
+import asyncio
 import json
 from dataclasses import fields, replace
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -15,7 +18,10 @@ from loom.db.schema import (
     Team,
     User,
 )
-from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
+from loom.personal_dev_environment_store import (
+    PersonalDevEnvironmentOperationFencedError,
+    SqlAlchemyPersonalDevEnvironmentAuthority,
+)
 from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 from loom_capacity_manager.contracts import canonical_digest
 from tests.unit.test_personal_dev_membership_reconciler import _NOW
@@ -143,6 +149,17 @@ async def test_successor_is_one_lease_fenced_linked_operation(
         )
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            for invalid in (
+                {"lease_epoch": claim.attempt.lease_epoch - 1},
+                {"reconciler_id": "other-reconciler"},
+                {"attempt_id": uuid4()},
+                {"operation_epoch": claim.operation.operation_epoch + 1},
+                {"expected_binding_sha256": "e" * 64},
+                {"current_checkpoint": args["current_checkpoint"].model_copy(update={"namespace_id": uuid4()})},
+            ):
+                with pytest.raises((PersonalDevEnvironmentOperationFencedError, ValueError)):
+                    await authority.create_membership_successor(**(args | invalid))
+                await session.rollback()
             result = await authority.create_membership_successor(**args)
             child = result.operation
             assert result.acquired
@@ -180,5 +197,159 @@ async def test_successor_is_one_lease_fenced_linked_operation(
                 DevLifecycleOperation.membership_predecessor_operation_id == claim.operation.id
             ))).all()
             assert len(children) == 1
+            for statement, row_id in (
+                ("UPDATE dev_lifecycle_operations SET min_slots = 1 WHERE id = :id", child.id),
+                ("UPDATE dev_lifecycle_operations SET checkpoint = 'complete' WHERE id = :id", parent.id),
+                ("DELETE FROM dev_lifecycle_operations WHERE id = :id", parent.id),
+                ("DELETE FROM dev_lifecycle_operations WHERE id = :id", child.id),
+                ("UPDATE dev_lifecycle_operation_attempts SET lease_epoch = lease_epoch + 1 WHERE id = :id", attempt.id),
+            ):
+                with pytest.raises(DBAPIError):
+                    async with session.begin_nested():
+                        await session.execute(text(statement), {"id": row_id})
+    finally:
+        await engine.dispose()
+
+
+def _arguments(claim, binding):
+    return dict(
+        operation_id=claim.operation.id, operation_epoch=claim.operation.operation_epoch,
+        attempt_id=claim.attempt.id, reconciler_id=claim.attempt.claimed_by,
+        lease_epoch=claim.attempt.lease_epoch, binding=binding,
+        expected_binding_sha256=canonical_digest(binding),
+        current_checkpoint=claim.operation.capacity_membership_envelope.expected_checkpoint.model_copy(
+            update={"execution": binding.authority.execution, "namespace_id": binding.authority.namespace_id}
+        ),
+        now=_NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_successor_creation_has_one_winner(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        claim, binding = await _seed(sessions, "create", "terminal-not-committed")
+        arguments = _arguments(claim, binding)
+
+        async def create():
+            async with sessions() as session:
+                return await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(**arguments)
+
+        first, second = await asyncio.wait_for(asyncio.gather(create(), create()), timeout=15)
+        assert sorted((first.acquired, second.acquired)) == [False, True]
+        assert first.operation.id == second.operation.id
+        assert first.operation.attempt_id == second.operation.attempt_id
+        assert first.operation.idempotency_key == second.operation.idempotency_key
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_successor_retains_independent_accepted_history(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        claim, binding = await _seed(sessions, "update", "terminal-not-committed")
+        async with sessions() as session:
+            await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(
+                **_arguments(claim, binding)
+            )
+            for statement in (
+                "UPDATE dev_lifecycle_operations SET local_activation_sha256 = repeat('e', 64) WHERE id = :id",
+                "UPDATE dev_lifecycle_operation_attempts SET lease_epoch = lease_epoch + 1 WHERE operation_id = :id",
+                "DELETE FROM dev_lifecycle_operation_attempts WHERE operation_id = :id",
+            ):
+                with pytest.raises(DBAPIError):
+                    async with session.begin_nested():
+                        await session.execute(text(statement), {"id": binding.accepted_operation_id})
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("defect", (
+    "child_attempt_state", "child_attempt_checkpoint", "child_checkpoint",
+    "environment_step", "environment_status", "destroy_evidence", "effective_kind",
+))
+@pytest.mark.asyncio
+async def test_database_rejects_corrupt_successor_handoff(
+    isolated_migration_postgres_url, monkeypatch, defect,
+):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        kind = "destroy" if defect == "destroy_evidence" else "create"
+        claim, binding = await _seed(sessions, kind, "terminal-not-committed")
+        async with sessions() as session:
+            real_flush = session.flush
+
+            async def corrupt_flush(*args, **kwargs):
+                for row in tuple(session.new):
+                    if isinstance(row, DevLifecycleOperation) and row.membership_predecessor_operation_id:
+                        if defect == "destroy_evidence":
+                            row.local_activation_sha256 = None
+                        elif defect == "effective_kind":
+                            row.kind = "update"
+                        elif defect == "child_checkpoint":
+                            row.checkpoint = "requested"
+                    if isinstance(row, DevLifecycleOperationAttempt):
+                        if defect == "child_attempt_state":
+                            row.state = "failed"
+                            row.finished_at = _NOW
+                            row.failure_reason = "injected corruption"
+                        elif defect == "child_attempt_checkpoint":
+                            row.checkpoint = "requested"
+                for row in tuple(session.dirty):
+                    if isinstance(row, DevInstance) and row.operation_id != claim.operation.id:
+                        if defect == "environment_step":
+                            row.operation_step = "requested"
+                        elif defect == "environment_status":
+                            row.status = "deleting"
+                return await real_flush(*args, **kwargs)
+
+            monkeypatch.setattr(session, "flush", corrupt_flush)
+            with pytest.raises(DBAPIError):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(
+                    **_arguments(claim, binding)
+                )
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("fail_after_flush", (1, 2))
+@pytest.mark.asyncio
+async def test_partial_successor_transition_rolls_back_without_losing_history(
+    isolated_migration_postgres_url, monkeypatch, fail_after_flush,
+):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        claim, binding = await _seed(sessions, "create", "committed")
+        arguments = _arguments(claim, binding)
+        async with sessions() as session:
+            real_flush = session.flush
+            flush_count = 0
+
+            async def fail_flush(*args, **kwargs):
+                nonlocal flush_count
+                await real_flush(*args, **kwargs)
+                flush_count += 1
+                if flush_count == fail_after_flush:
+                    raise RuntimeError("injected transition crash")
+
+            monkeypatch.setattr(session, "flush", fail_flush)
+            with pytest.raises(RuntimeError, match="injected transition crash"):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(**arguments)
+            await session.rollback()
+        async with sessions() as session:
+            parent = await session.get(DevLifecycleOperation, claim.operation.id)
+            assert parent.state == claim.operation.state
+            assert parent.capacity_membership_envelope == claim.operation.capacity_membership_envelope.model_dump(mode="json")
+            assert parent.checkpoint == "membership_outcome_resolved"
+            env = await session.get(DevInstance, claim.environment.name)
+            assert env.operation_id == parent.id
+            retry = await SqlAlchemyPersonalDevEnvironmentAuthority(session).create_membership_successor(**arguments)
+            assert retry.acquired
     finally:
         await engine.dispose()
