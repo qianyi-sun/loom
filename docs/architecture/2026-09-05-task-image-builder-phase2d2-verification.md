@@ -509,12 +509,13 @@ entire multirow statement.
 
 Credential INSERT explicitly requires READ COMMITTED. REPEATABLE READ and
 SERIALIZABLE fail closed because locking an unchanged attempt cannot refresh an
-old snapshot of its separate retirement marker. Read-only credential replay is
-unaffected. The credential HTTP transition explicitly selects READ COMMITTED on
-its owned connection before the first query. Other authority HTTP transitions
-retain their existing SERIALIZABLE default; pooled connections restore that
-default after credential issuance/replay. Switching the whole authority engine
-is unnecessary for this credential-specific fence. A narrow SECURITY DEFINER
+old snapshot of its separate retirement marker. Read-only credential replay does
+not INSERT, but still requires the application retirement admission contract
+below. Build-admitting HTTP transitions explicitly select READ COMMITTED on
+their owned connection before the first query. Control and cleanup-only routes
+retain the engine's SERIALIZABLE default; pooled connections restore that
+default after admission. Switching the whole authority engine is unnecessary.
+A narrow SECURITY DEFINER
 function uses fully qualified tables,
 `search_path=pg_catalog` and `row_security=off`; PUBLIC execution is revoked.
 Restricted callers cannot hide retirement through search-path or RLS policies.
@@ -544,11 +545,26 @@ their normal identity, session and lease checks; skipping the artifact-retiremen
 check does not grant build inputs or publication authority. Historical completion
 receipt replay remains read-only and cannot restore readiness.
 
-These scalar retirement-freshness tests establish the READ COMMITTED store
-contract. Non-credential HTTP routes still use SERIALIZABLE; their snapshot
-interaction with retirement remains a composition gate before collector/runtime
-activation. Locking an unchanged parent alone does not establish that a separate
-marker lookup observes a concurrent commit under an older transaction snapshot.
+The shared marker lookup enforces READ COMMITTED and a non-null
+`pg_catalog.pg_current_xact_id_if_assigned()` in the same SELECT. The preceding
+parent FOR UPDATE assigns that transaction ID; AUTOCOMMIT releases it before
+the later SELECT and is rejected. An assigned ID is a transaction-mode check,
+not proof of exact parent lock ownership: callers must still acquire and retain
+the documented shared parent fence. REPEATABLE READ and SERIALIZABLE are rejected
+because locking an unchanged parent cannot refresh a separate marker's old
+snapshot. Actual owned retirement followed by claim/plan/publication admission
+is covered under all three modes, including deliberately old otherwise-live time.
+
+HTTP claim, start/heartbeat (including replays), bundle, registry credential,
+candidate V1/V2, and publication submit/poll own READ COMMITTED. Projection,
+session control, revocation and cleanup-only operations retain SERIALIZABLE.
+The verification worker independently selects READ COMMITTED for its final
+completion transaction before any query, even with a fixed-snapshot session
+factory; other worker transactions retain the supplied default. Direct store
+callers own this transaction contract and must roll back on any failure.
+Incompatible HTTP callers fail closed with a bounded 503. Historical receipt
+reads remain non-admitting. These database/HTTP checks do not establish registry
+token revocation, native containment, collector activation or safe physical GC.
 
 `observe_or_retire_attempt` now owns one bounded, READ COMMITTED transaction per
 attempt. Credential inventory and publication metadata are prepared in separate
