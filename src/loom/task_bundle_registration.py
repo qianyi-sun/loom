@@ -7,6 +7,7 @@ Callers must publish the captured bytes and register their lifecycle separately.
 from __future__ import annotations
 
 import hashlib
+import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -49,6 +50,12 @@ class RegisteredTaskBundle:
     @property
     def task_config(self) -> TaskConfig:
         return TaskConfig.model_validate_json(self._task_config_bytes)
+
+    @property
+    def task_config_document(self) -> dict[str, Any]:
+        """Canonical JSON view for persistence, without reserializing model sets."""
+        result: dict[str, Any] = json.loads(self._task_config_bytes)
+        return result
 
     @property
     def source_provenance(self) -> dict[str, Any]:
@@ -115,10 +122,16 @@ def prepare_task_bundle_registration(
     registered = authored.model_dump(mode="json")
     registered["task"]["id"] = catalog_id
     config = TaskConfig.model_validate(registered)
+    document = config.model_dump(mode="json")
+    # RFC8785 sorts object keys, not arrays. This model field is a set; ordered
+    # fields such as steps, commands and dependencies must retain authored order.
+    document["environment"]["network_policies_supported"] = sorted(
+        config.environment.network_policies_supported,
+    )
     return RegisteredTaskBundle(
         manifest=manifest,
         catalog_task_id=catalog_id,
         bundle_task_id=bundle_id,
         task_toml_sha256=task_file.sha256,
-        _task_config_bytes=rfc8785.dumps(config.model_dump(mode="json")),
+        _task_config_bytes=rfc8785.dumps(document),
     )
