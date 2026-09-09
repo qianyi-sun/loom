@@ -575,7 +575,7 @@ must precede switching the primary candidate to reference a secondary. Render
 primary and remote files to separate sibling directories:
 
 ```sh
-uv run python scripts/ops/render_nebius_platform.py --environment-config /protected/regional.environment.json --candidate /protected/candidate.json --runtime-profile /protected/runtime-profile.json --trusted-keyring /protected/trusted-keyring.json --output /protected/primary-render --regional-output /protected/regional-render
+uv run --no-sync python scripts/ops/render_nebius_platform.py --environment-config /protected/regional.environment.json --candidate /protected/candidate.json --runtime-profile /protected/runtime-profile.json --trusted-keyring /protected/trusted-keyring.json --output /protected/primary-render --regional-output /protected/regional-render
 kubectl --kubeconfig /protected/eu-west1.kubeconfig apply -f /protected/regional-render/nebius-eu-west1-integration.yaml
 ```
 

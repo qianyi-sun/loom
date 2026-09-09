@@ -1,3 +1,5 @@
+import re
+import shlex
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,16 +27,22 @@ def test_editable_root_images_install_neutral_bundle_checksum_first() -> None:
         ), dockerfile
         checksum_install = "pip install --no-cache-dir -e ./packages/loom-bundle-checksum"
         assert checksum_install in text, dockerfile
-        install_lines = [
-            line.strip().removeprefix("RUN ") for line in text.splitlines() if "pip install" in line
+        install_commands = [
+            shlex.split(line.strip().removeprefix("RUN ").removesuffix("\\"))
+            for line in text.splitlines()
+            if "pip install" in line
         ]
         checksum_index = next(
-            index for index, line in enumerate(install_lines) if line.startswith(checksum_install)
+            index
+            for index, command in enumerate(install_commands)
+            if command[:5] == shlex.split(checksum_install)
         )
         root_index = next(
             index
-            for index, line in enumerate(install_lines)
-            if line in {"pip install --no-cache-dir -e .", "pip install --no-cache-dir -e . && \\"}
+            for index, command in enumerate(install_commands)
+            if command[:4] == ["pip", "install", "--no-cache-dir", "-e"]
+            and len(command) >= 5
+            and re.fullmatch(r"\.(?:\[[A-Za-z0-9_,-]+\])?", command[4])
         )
         assert checksum_index < root_index, dockerfile
 

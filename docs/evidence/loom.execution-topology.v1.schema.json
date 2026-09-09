@@ -77,6 +77,20 @@
           "title": "Namespace Name",
           "type": "string"
         },
+        "pod_identity_audience": {
+          "anyOf": [
+            {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pod Identity Audience"
+        },
         "provider": {
           "const": "nebius",
           "title": "Provider",
@@ -92,6 +106,12 @@
           "const": "loom.execution-target.v1",
           "default": "loom.execution-target.v1",
           "title": "Schema Version",
+          "type": "string"
+        },
+        "service_account_name": {
+          "default": "loom-execution-attempt",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+          "title": "Service Account Name",
           "type": "string"
         },
         "target_id": {
@@ -120,7 +140,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Checked deployed environment bindings for one physical cluster.",
+  "description": "Explicit regional bindings within one pool and residency boundary.",
   "properties": {
     "execution_class_id": {
       "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
@@ -147,7 +167,7 @@
       "items": {
         "$ref": "#/$defs/ExecutionTargetV1"
       },
-      "maxItems": 3,
+      "maxItems": 64,
       "minItems": 1,
       "title": "Targets",
       "type": "array"
