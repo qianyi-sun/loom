@@ -21,6 +21,7 @@ from loom_task_image_authority.bundle_s3_signing import S3SigningCredentials, pr
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 IMAGE = "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
 KEYS = ("revision/task.toml", "revision/a space+%.toml", "revision/café.toml", "revision/literal%2Fkey")
+FORM_PREFIX_KEY = "revision space+/literal%2Fkey"
 PAYLOAD = b"disposable-exact-bundle-content"
 
 
@@ -80,9 +81,9 @@ def minio_tls(tmp_path_factory):
             )
             for bucket in ("loom-bundles", "other-bundles"):
                 admin.create_bucket(Bucket=bucket)
-                for key in KEYS:
+                for key in (*KEYS, FORM_PREFIX_KEY):
                     admin.put_object(Bucket=bucket, Key=key, Body=PAYLOAD)
-            yield origin, credentials, client
+            yield origin, credentials, client, admin
     finally:
         if admin is not None:
             admin.close()
@@ -92,7 +93,7 @@ def minio_tls(tmp_path_factory):
 
 
 def _signed(fixture, key, **changes):
-    origin, credentials, _ = fixture
+    origin, credentials, _ = fixture[:3]
     now = datetime.now(UTC).replace(microsecond=0)
     options = dict(public_origin=origin, bucket="loom-bundles", key=key, region="us-east-1", credentials=credentials, expires_at=now + timedelta(seconds=60))
     options.update(changes)
@@ -130,3 +131,36 @@ def test_actual_minio_rejects_modified_or_expired_capability(minio_tls, mutation
         url = prefix + "=" + ("0" if signature[0] != "0" else "1") + signature[1:]
     response = minio_tls[2].request("PUT" if mutation == "method" else "GET", url)
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize("prefix,expected_keys", [("revision/", KEYS), ("revision space+/", (FORM_PREFIX_KEY,))])
+def test_actual_minio_listing_pages_preserve_key_bytes_and_continuation(minio_tls, prefix, expected_keys):
+    from loom_task_image_authority.bundle_s3_listing import parse_list_objects_v2
+
+    token = None
+    objects = []
+    for _ in range(3):
+        params = {"Bucket": "loom-bundles", "Prefix": prefix, "MaxKeys": 2, "EncodingType": "url"}
+        if token is not None:
+            params["ContinuationToken"] = token
+        # The SDK supplies the independent signed request in this parser test.
+        # This is not yet the asynchronous production listing transport.
+        url = minio_tls[3].generate_presigned_url("list_objects_v2", Params=params, ExpiresIn=60)
+        response = minio_tls[2].get(url)
+        assert response.status_code == 200
+        page = parse_list_objects_v2(
+            response.content, expected_bucket="loom-bundles", prefix=prefix,
+            maximum_keys=2, continuation_token=token, url_encoding="form",
+        )
+        objects.extend(page.objects)
+        token = page.next_token
+        if token is None:
+            break
+    assert token is None
+    assert len(objects) == len(expected_keys)
+    assert {obj.key for obj in objects} == set(expected_keys)
+    assert {obj.size_bytes for obj in objects} == {len(PAYLOAD)}
+    for obj in objects:
+        response = minio_tls[2].get(_signed(minio_tls, obj.key))
+        assert response.status_code == 200
+        assert response.content == PAYLOAD

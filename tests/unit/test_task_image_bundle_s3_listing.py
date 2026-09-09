@@ -19,7 +19,7 @@ def _xml(*, contents=None, fields="", truncated="false", prefix="revision%2F", c
 
 
 def _parse(payload=None, **changes):
-    options = dict(expected_bucket="loom-bundles", prefix="revision/", maximum_keys=2, continuation_token=None)
+    options = dict(expected_bucket="loom-bundles", prefix="revision/", maximum_keys=2, continuation_token=None, url_encoding="percent")
     options.update(changes)
     return _module().parse_list_objects_v2(_xml() if payload is None else payload, **options)
 
@@ -30,6 +30,48 @@ def test_decodes_keys_once_and_preserves_exact_sizes():
         ("revision/a space+%.toml", 7), ("revision/literal%2Fkey", 0),
     ]
     assert page.next_token is None
+
+
+@pytest.mark.parametrize("encoding,expected", [("percent", "revision/a+space+%.toml"), ("form", "revision/a space+%.toml")])
+def test_plus_decoding_requires_explicit_service_encoding(encoding, expected):
+    page = _parse(_xml(contents=[("revision%2Fa+space%2B%25.toml", "7")]), url_encoding=encoding)
+    assert page.objects[0].key == expected
+
+
+def test_form_encoded_prefix_is_decoded_exactly_once():
+    page = _parse(_xml(prefix="revision+space%2B%2F", contents=[("revision+space%2B%2Fa%252F", "7")]), prefix="revision space+/", url_encoding="form")
+    assert page.objects[0].key == "revision space+/a%2F"
+
+
+@pytest.mark.parametrize("options", [
+    {"url_encoding": "guess"}, {"url_encoding": None}, {"url_encoding": []},
+    {"maximum_keys": True}, {"maximum_keys": 0}, {"maximum_keys": 1001},
+    {"prefix": "revision\n/"}, {"prefix": "revision\x7f/"},
+    {"prefix": "x" * 1024 + "/"}, {"prefix": "revision"},
+    {"continuation_token": "x" * 4097}, {"continuation_token": "token\n"},
+    {"continuation_token": ""}, {"continuation_token": "é"},
+], ids=lambda _: "invalid-request")
+def test_rejects_invalid_request_before_parser_allocation(monkeypatch, options):
+    _module()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid request must be refused before XML parser allocation")
+
+    monkeypatch.setattr("xml.parsers.expat.ParserCreate", unexpected)
+    with pytest.raises(RuntimeError):
+        _parse(**options)
+
+
+@pytest.mark.parametrize("payload", [
+    _xml(fields="<NextContinuationToken>" + "x" * 4097 + "</NextContinuationToken>", truncated="true"),
+    _xml().replace(b"opaque", b"x" * 8193),
+    _xml().replace(b"<ETag>opaque</ETag>", b"<Owner><ID><Nested><Deep>x</Deep></Nested></ID></Owner>"),
+    _xml().replace(b"<ETag>opaque</ETag>", b"<Owner>" + b"<ID/>" * 16384 + b"</Owner>"),
+    _xml().replace(b"<ETag>opaque</ETag>", b"<Owner>" + b"<ID>" + b"x&#32;" * 32769 + b"</ID></Owner>"),
+], ids=lambda _: "structural-limit")
+def test_rejects_bounded_structure_and_token_overflows(payload):
+    with pytest.raises(RuntimeError):
+        _parse(payload)
 
 
 def test_truncated_page_has_bounded_non_replayed_continuation():
@@ -81,7 +123,7 @@ def test_rejects_replayed_token_or_empty_truncated_progress():
 
 
 def test_rejects_excessive_page_bytes_before_xml_parser(monkeypatch):
-    module = _module()
+    _module()
 
     def unexpected(*args, **kwargs):
         pytest.fail("oversized input must be refused before XML parser allocation")
