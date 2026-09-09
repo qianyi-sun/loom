@@ -105,3 +105,32 @@ def test_lost_multipart_completion_can_retry_without_reusing_the_unproven_receip
     versions = client.list_object_versions(Bucket=bucket, Prefix=receipt.snapshot_key)["Versions"]
     assert len(versions) == 2
     assert receipt.snapshot_version_id in {version["VersionId"] for version in versions}
+
+
+def test_failed_part_aborts_only_its_own_snapshot_upload(object_store):
+    module = import_module("loom.personal_dev_storage_object_capture")
+    client, recipe, bucket = object_store
+    payload = b"x" * (9 * 1024 * 1024)
+    uploaded = client.put_object(Bucket=recipe.source.identity.task_bucket, Key="task/data", Body=payload)
+    foreign = client.create_multipart_upload(Bucket=bucket, Key="foreign-upload")
+
+    class FailedPart:
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def upload_part_copy(self, **kwargs):
+            if kwargs["PartNumber"] == 2:
+                raise TimeoutError("injected part failure")
+            return client.upload_part_copy(**kwargs)
+
+    try:
+        with pytest.raises(module.StorageObjectCaptureError):
+            module.S3RetainedObjectCapture(FailedPart(), snapshot_bucket=bucket).capture(
+                recipe, capture_id=UUID(int=800), purpose="tasks", key="task/data",
+                expected_etag=uploaded["ETag"], size_bytes=len(payload),
+            )
+        remaining = client.list_multipart_uploads(Bucket=bucket)["Uploads"]
+        assert [(item["Key"], item["UploadId"]) for item in remaining] == [("foreign-upload", foreign["UploadId"])]
+        assert not client.list_objects_v2(Bucket=bucket).get("Contents")
+    finally:
+        client.abort_multipart_upload(Bucket=bucket, Key="foreign-upload", UploadId=foreign["UploadId"])
