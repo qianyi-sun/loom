@@ -21,7 +21,10 @@ from loom_task_image_authority.materializations import (
     release_session_materialization,
     start_session_materialization,
 )
-from loom_task_image_authority.publication_jobs import PublicationJobAuthorizationError
+from loom_task_image_authority.publication_jobs import (
+    PublicationJobAuthorizationError,
+    PublicationJobConflictError,
+)
 from loom_task_image_authority.publication_store import submit_publication_job
 from loom_task_image_authority.retention_inventory import derive_attempt_repository_inventory
 from tests.integration.test_task_image_candidate_v2 import _prepared, _record
@@ -31,6 +34,7 @@ from tests.integration.test_task_image_publication_completion import (
     completion,
 )
 from tests.integration.test_task_image_publication_jobs import (
+    _submit,
     registry_authority_session as registry_authority_session,
 )
 from tests.integration.test_task_image_registry_credentials import (
@@ -69,6 +73,27 @@ async def _mark_retired(session, attempt_id):
     marker.inventory_sha256 = hashlib.sha256(inventory.canonical_bytes).hexdigest()
     session.add(marker)
     await session.commit()
+
+
+@pytest.mark.parametrize("pending", ["new", "dirty", "deleted"])
+async def test_publication_rejects_pending_retirement_before_autoflush(
+    registry_authority_session, registry_issuer, pending
+):
+    async with registry_authority_session() as session:
+        _, values = await _submit(session, registry_issuer)
+        marker = TaskImageAttemptRetention(attempt_id=values["attempt_id"], observed_at=NOW)
+        if pending != "new":
+            session.add(marker)
+            await session.commit()
+        if pending == "deleted":
+            await session.delete(marker)
+        elif pending == "dirty":
+            marker.observed_at = NOW + timedelta(seconds=1)
+        else:
+            session.add(marker)
+        with pytest.raises(PublicationJobConflictError, match="unflushed changes"):
+            await submit_publication_job(session, **values)
+        assert marker in getattr(session, pending)
 
 
 @pytest.mark.parametrize("replay", [False, True])
