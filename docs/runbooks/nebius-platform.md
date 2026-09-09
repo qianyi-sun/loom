@@ -17,6 +17,7 @@ Set `quota_parent_id` from the Terraform input `tenant_id`, while `project_id`
 identifies the project containing the platform resources. This deployment reads
 the tenant's allocated quota limits. Using the project ID instead returns
 usage-only entries without active allowance limits and prevents collection.
+
 All application images come from one published Nebius candidate. PostgreSQL 16
 Bookworm and the matching `pg_dump` image must also be mirrored to Nebius and
 pinned by digest; the PostgreSQL pod uses the image's UID/GID 999. Native CSI
@@ -215,3 +216,10 @@ checksums, both declared artifacts, trajectory, verifier output and usage, then
 scale-to-zero. Source retention may still be pending and must be reported
 separately; resume its existing read-only cleanup command with the original
 evidence. This does not prove worker-loss recovery, repeated upgrades or restore.
+
+Catalog configuration can be reapplied after a Control Plane restart. Execution
+class network capabilities are a set: JSON ordering does not change the class
+definition. Existing catalog rows retain their stored representation; reapplying
+the same definition succeeds, while changing a class or target under its existing
+ID still returns a conflict. Catalog digest columns remain for database schema
+compatibility and do not decide semantic equality.
