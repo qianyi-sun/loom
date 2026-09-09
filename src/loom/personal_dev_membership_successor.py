@@ -8,7 +8,7 @@ its lease before running the ordinary installation/membership protocol.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -43,6 +43,8 @@ class PersonalDevMembershipSuccessorBindingV1(StrictV1Model):
         "historical-membership-authority-transition"
     )
     authority: PersonalDevMembershipAcceptanceBindingV1
+    reviewed_at: datetime
+    expires_at: datetime
     current_configuration: ConfigurationSnapshotV1
     predecessor_operation_id: UUID
     predecessor_envelope_sha256: Digest
@@ -51,6 +53,13 @@ class PersonalDevMembershipSuccessorBindingV1(StrictV1Model):
     adopted_member: PersonalApplicationMemberV1 | None
     accepted_shadow_configuration: ConfigurationSnapshotV1 | None = None
     accepted_shadow_projection: DynamicDevelopmentSubjectProjectionV1 | None = None
+
+    @field_validator("reviewed_at", "expires_at")
+    @classmethod
+    def _utc_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("successor review time must be timezone-aware")
+        return value.astimezone(UTC)
 
     @field_validator("predecessor_operation_id", "owner_team_id")
     @classmethod
@@ -70,6 +79,8 @@ class PersonalDevMembershipSuccessorBindingV1(StrictV1Model):
     def _reviewed_adoption(self) -> PersonalDevMembershipSuccessorBindingV1:
         preparation = self.authority.preparation
         snapshot = self.current_configuration
+        if not timedelta(0) < self.expires_at - self.reviewed_at <= timedelta(hours=24):
+            raise ValueError("successor review must have a positive window of at most 24 hours")
         if (self.accepted_shadow_configuration is None) != (
             self.accepted_shadow_projection is None
         ):
@@ -237,7 +248,11 @@ def validate_membership_successor(
     if (
         now.tzinfo is None
         or now.utcoffset() is None
-        or not binding.authority.started_at <= now < binding.authority.expires_at
+        or not binding.reviewed_at <= now < binding.expires_at
+        or (
+            operation.kind != "destroy"
+            and not binding.authority.started_at <= now < binding.authority.expires_at
+        )
         or binding.authority.execution == envelope.request.execution
         or binding.predecessor_operation_id != operation.id
         or binding.predecessor_envelope_sha256 != canonical_digest(envelope)
