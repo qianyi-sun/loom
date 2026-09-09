@@ -32,6 +32,25 @@ endpoint behavior. TLS, headers, response sizes, chunk sizes, idle time, total
 time and concurrent jobs have explicit limits. Stream closure is mandatory on
 success, rejection, cancellation and connection failure.
 
+Push and verifier-pull JWTs retain Loom's RFC 7638 public-key thumbprint as their
+audited key ID and include only the RSA public `kty`, `e` and `n` in a protected
+`jwk` header. Pinned Distribution 2.8.3 interprets a `kid`-only token as a libtrust
+fingerprint, not that thumbprint; the previous header was rejected despite a
+matching trusted public certificate. Its supported JWK path derives the
+libtrust identity, checks membership in the configured certificate-root keys,
+then verifies the signature. Supplying a JWK does not establish trust. No private
+key fields, inner JWK `kid`, or caller-provided certificate chain are emitted;
+existing audit IDs and historical credential evidence are unchanged.
+Both issuance methods reject encoded tokens above the existing 16 KiB bearer
+ceiling before returning them; the wire model shares that same limit. Tests
+cover 3072/4096-bit keys and exact-limit/overflow behavior.
+
+Maintained tests run the actual pinned registry with a disposable trusted public
+certificate: exact push/pull succeeds, other repository/action/issuer/audience
+and untrusted keys fail, and the registry's 60-second expiry leeway is exercised.
+Their loopback HTTP fixture tests token interoperability, not production TLS,
+native routing, ongoing clock health or permanent retired-repository denial.
+
 The fixed GET transport uses verified asyncio TLS streams and the public h11
 HTTP/1.1 state machine, with one connection per admitted object. Informational
 responses and upgrades are rejected; no response head may be silently discarded
@@ -491,7 +510,12 @@ entire multirow statement.
 Credential INSERT explicitly requires READ COMMITTED. REPEATABLE READ and
 SERIALIZABLE fail closed because locking an unchanged attempt cannot refresh an
 old snapshot of its separate retirement marker. Read-only credential replay is
-unaffected. A narrow SECURITY DEFINER function uses fully qualified tables,
+unaffected. The credential HTTP transition explicitly selects READ COMMITTED on
+its owned connection before the first query. Other authority HTTP transitions
+retain their existing SERIALIZABLE default; pooled connections restore that
+default after credential issuance/replay. Switching the whole authority engine
+is unnecessary for this credential-specific fence. A narrow SECURITY DEFINER
+function uses fully qualified tables,
 `search_path=pg_catalog` and `row_security=off`; PUBLIC execution is revoked.
 Restricted callers cannot hide retirement through search-path or RLS policies.
 An owner itself subject to RLS fails closed rather than silently missing rows;
