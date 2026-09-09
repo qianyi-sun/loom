@@ -114,3 +114,61 @@ def test_apply_accepts_retained_previous_target_while_original_intent_is_pending
         )
         assert operation["max_slots"] == 2
         assert environment["max_slots"] == 1
+
+
+@pytest.mark.parametrize("field,value", (
+    ("candidate_id", str(uuid4())), ("idempotency_key", str(uuid4())),
+    ("subject_id", str(uuid4())), ("subject_incarnation", str(uuid4())),
+    ("kind", "destroy"), ("operation_epoch", 2),
+))
+def test_apply_rejects_receipt_different_from_the_owner_request(field, value):
+    def handler(request):
+        payload = json.loads(request.content)
+        return httpx.Response(202, json={
+            "environment": _environment(status="provisioning", epoch=1),
+            "operation": _operation(state="running") | {"idempotency_key": payload["idempotency_key"], field: value},
+        })
+
+    with httpx.Client(base_url="https://loom.example", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PersonalDevDeployError):
+            PersonalDevDeployClient(client).apply(
+                name="alice", candidate={"id": _CANDIDATE_ID, "candidate_sha": _CANDIDATE_SHA},
+                min_slots=0, max_slots=2, expected_operation_epoch=0,
+            )
+
+
+@pytest.mark.parametrize("field,value", (
+    ("checkpoint", "candidate_build"), ("kind", "destroy"),
+))
+def test_succeeded_state_alone_does_not_prove_apply_readiness(field, value):
+    def handler(request):
+        return httpx.Response(200, json=(
+            _operation(state="succeeded") | {field: value}
+            if "/operations/" in request.url.path else _environment(status="ready", epoch=1)
+        ))
+
+    with httpx.Client(base_url="https://loom.example", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PersonalDevDeployError):
+            PersonalDevDeployClient(client).wait_ready(
+                "alice", operation_id=_OPERATION_ID, candidate_sha=_CANDIDATE_SHA,
+                min_slots=0, max_slots=2, operation_epoch=1, timeout=1, poll_interval=0.01,
+            )
+
+
+@pytest.mark.parametrize("field,value", (
+    ("subject_id", str(uuid4())), ("deployment_generation", 2), ("kind", "update"),
+))
+def test_first_poll_is_bound_to_the_apply_receipt(field, value):
+    def handler(request):
+        return httpx.Response(200, json=(
+            _operation(state="succeeded") | {field: value}
+            if "/operations/" in request.url.path else _environment(status="ready", epoch=1) | {field: value}
+        ))
+
+    with httpx.Client(base_url="https://loom.example", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PersonalDevDeployError):
+            PersonalDevDeployClient(client).wait_ready(
+                "alice", operation_id=_OPERATION_ID, candidate_sha=_CANDIDATE_SHA,
+                min_slots=0, max_slots=2, operation_epoch=1, timeout=1, poll_interval=0.01,
+                operation_receipt=_operation(state="running"),
+            )
