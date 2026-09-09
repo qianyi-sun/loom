@@ -10,14 +10,30 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 
-from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4, PersonalBuildTemplateV1, personal_build_subject_id
+from loom_capacity_manager.build_membership_contracts import (
+    ExecutionPreparationV4,
+    PersonalBuildTemplateV1,
+    personal_build_subject_id,
+)
 from loom_capacity_manager.contracts import canonical_digest, canonical_digest_excluding
-from loom_capacity_manager.executable_contracts import CandidateBindingV2, SubjectExecutionAcknowledgementV2, canonical_executable_digest
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    SubjectExecutionAcknowledgementV2,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.membership_contracts import PersonalMembershipPolicyV1
 from loom_capacity_manager.models import CapacityAuthorityState, CapacityExecutionEpoch
 from loom_capacity_manager.store import _canonical_json_digest
-from loom_capacity_manager.typed_membership_commands import PersonalBuildCommandV2, PersonalBuildProjectionV1, PersonalMembershipMutationV2
-from tests.capacity_execution_fixtures import execution_policy, register_execution_executors, setup_execution
+from loom_capacity_manager.typed_membership_commands import (
+    PersonalBuildCommandV2,
+    PersonalBuildProjectionV1,
+    PersonalMembershipMutationV2,
+)
+from tests.capacity_execution_fixtures import (
+    execution_policy,
+    register_execution_executors,
+    setup_execution,
+)
 from tests.capacity_fixtures import fleet_with_development_template
 
 
@@ -102,7 +118,10 @@ async def staged_build_event(session, management, preparation, fleet, request, *
     from loom_capacity_manager.membership_store import CapacityMembershipStore
     from loom_capacity_manager.models import CapacityPersonalMembershipEvent, CapacitySubject
     from loom_capacity_manager.store import _derive_owner_account
-    from loom_capacity_manager.typed_membership_commands import PersonalMembershipResultV2, derive_build_member
+    from loom_capacity_manager.typed_membership_commands import (
+        PersonalMembershipResultV2,
+        derive_build_member,
+    )
     member = derive_build_member(request, preparation, fleet)
     await stage_build_generation_evidence(session, request, member, preparation, fleet)
     rows = (await session.scalars(select(CapacitySubject).where(CapacitySubject.configuration_epoch == preparation.configuration_epoch))).all()
