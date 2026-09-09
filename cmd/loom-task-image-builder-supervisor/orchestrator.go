@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -71,19 +72,21 @@ func (t realTimer) C() <-chan time.Time { return t.timer.C }
 func (t realTimer) Stop() bool { return t.timer.Stop() }
 
 type ExecutorFactory func(Config, *AllocationCapabilities, BuildPlan) (BuildExecutor, error)
+type RegisteredExecutorFactory func(Config, *AllocationCapabilities, BuildPlan, int) (BuildExecutor, error)
 
 type Orchestrator struct {
-	GrantID       string
-	Config        Config
-	Guard         TaskImageGuard
-	Clock         Clock
-	NewExecutor   ExecutorFactory
-	Download      BundleDownloader
-	Handoff       PublicationHandoff
-	PostProject   func(context.Context, *AllocationCapabilities) error
-	IdleGrace     time.Duration
-	CleanupGrace  time.Duration
-	RecordOutcome func(BuildOutcome)
+	GrantID               string
+	Config                Config
+	Guard                 TaskImageGuard
+	Clock                 Clock
+	NewExecutor           ExecutorFactory
+	NewRegisteredExecutor RegisteredExecutorFactory
+	Download              BundleDownloader
+	Handoff               PublicationHandoff
+	PostProject           func(context.Context, *AllocationCapabilities) error
+	IdleGrace             time.Duration
+	CleanupGrace          time.Duration
+	RecordOutcome         func(BuildOutcome)
 }
 
 func (o *Orchestrator) Run(ctx context.Context) (err error) {
@@ -275,12 +278,98 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 	}
 	s.claimData = claim
 	s.built = nil
+	var registered *DownloadedRegisteredBundle
 	if claim.RegisteredBundle != nil {
-		// Keep native admission closed until renewable preparation and executor
-		// input ownership are composed. A strong claim must never fall back to V1.
-		s.record(BuildOutcomeTransientFailure, "registered_bundle_unavailable", claim.firstComponent())
-		return safeError("registered_bundle_unavailable")
+		if s.o.Config.Bundle == nil || s.o.NewRegisteredExecutor == nil {
+			s.record(BuildOutcomeTransientFailure, "registered_bundle_unavailable", claim.firstComponent())
+			return safeError("registered_bundle_unavailable")
+		}
+		registered, err = s.prepareRegisteredBundle()
+		if err != nil {
+			if errors.Is(err, errCleanupAmbiguous) {
+				s.cleanupUnproven = true
+			}
+			s.record(BuildOutcomeTransientFailure, "bundle_download_failed", claim.firstComponent())
+			return errors.Join(safeError("bundle_download_failed"), err)
+		}
+		defer func() {
+			if s.cleanupUnproven || s.buildUnjoined {
+				err = errors.Join(err, registered.retainForAllocationCleanup())
+			} else if cleanupErr := registered.Close(); cleanupErr != nil {
+				s.cleanupUnproven = true
+				err = errors.Join(err, cleanupErr)
+			}
+		}()
+	} else if err := s.prepareLegacyBundle(); err != nil {
+		return err
 	}
+
+	lease, err := s.startClaim()
+	if err != nil {
+		return err
+	}
+	var executor BuildExecutor
+	if registered != nil {
+		var inputFD int
+		inputFD, err = registered.DupDirectoryFD()
+		if err == nil {
+			executor, err = s.o.NewRegisteredExecutor(s.o.Config, s.caps, claim.Plan, inputFD)
+			_ = syscall.Close(inputFD)
+		}
+	} else {
+		executor, err = s.o.NewExecutor(s.o.Config, s.caps, claim.Plan)
+	}
+	if err != nil || executor == nil {
+		s.record(BuildOutcomeContainmentFailure, "executor_create_failed", claim.firstComponent())
+		return errors.Join(safeError("executor_create_failed"), s.failLease("containment"))
+	}
+	s.executor = executor
+	defer func() {
+		if cleanupErr := s.closeActiveExecutor(executor); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+	if err := executor.Start(s.ctx); err != nil {
+		s.record(BuildOutcomeContainmentFailure, "executor_start_failed", claim.firstComponent())
+		return errors.Join(safeError("executor_start_failed"), s.failLease("containment"))
+	}
+	if err := s.buildComponents(lease); err != nil {
+		return err
+	}
+
+	set := BuiltComponentSet{
+		GrantID: s.o.GrantID, MaterializationID: claim.MaterializationID,
+		AttemptID: claim.AttemptID, LeaseEpoch: claim.LeaseEpoch,
+		Components: append([]BuiltComponent(nil), s.built...),
+	}
+	receipt, err := s.acceptPublication(set)
+	if err != nil {
+		return s.handlePublicationError(err)
+	}
+	// Atomic publication completion already cleared this lease.
+	if receipt == nil {
+		if err := s.releaseLease(); err != nil {
+			s.record(BuildOutcomeLeaseLost, "release_failed", "")
+			return err
+		}
+	}
+	if err := s.closeActiveExecutor(executor); err != nil {
+		s.record(BuildOutcomeContainmentFailure, "cleanup_failed", "")
+		return err
+	}
+	if registered != nil {
+		if err := registered.Close(); err != nil {
+			s.cleanupUnproven = true
+			s.record(BuildOutcomeContainmentFailure, "cleanup_failed", "")
+			return err
+		}
+	}
+	s.recordBuilt()
+	return nil
+}
+
+func (s *orchestratorState) prepareLegacyBundle() error {
+	claim := s.claimData
 	bundleID, err := newUUID()
 	if err != nil {
 		s.record(BuildOutcomeTransientFailure, "uuid_failed", "")
@@ -300,67 +389,43 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 		s.record(BuildOutcomeDeterministicFailure, "bundle_download_failed", claim.firstComponent())
 		return safeError("bundle_download_failed")
 	}
+	return nil
+}
 
+func (s *orchestratorState) startClaim() (*LeaseResponse, error) {
+	claim := s.claimData
 	startID, err := newUUID()
 	if err != nil {
 		s.record(BuildOutcomeTransientFailure, "uuid_failed", "")
-		return safeError("uuid_failed")
+		return nil, safeError("uuid_failed")
 	}
 	var lease *LeaseResponse
-	if err := s.sessionManager.WithCurrent(func(current *SecretBuffer) error {
+	started := s.clock.Now()
+	opCtx, stop := context.WithTimeout(s.ctx, publicationOperationTimeout)
+	defer stop()
+	if err := s.sessionManager.WithCurrentEnvelope(func(envelope *SessionEnvelope, current *SecretBuffer) error {
+		if envelope.GrantID != s.o.GrantID || !envelope.ExpiresAt.After(started) ||
+			claim.LeaseExpiresAtPtr == nil || !claim.LeaseExpiresAtPtr.After(started) {
+			return safeError("start_expired")
+		}
+		s.session = envelope
 		var err error
-		lease, err = s.o.Guard.Start(s.ctx, s.o.GrantID, startID, claim.MaterializationID, claim.AttemptID, claim.LeaseEpoch, current)
+		lease, err = s.o.Guard.Start(opCtx, s.o.GrantID, startID, claim.MaterializationID, claim.AttemptID, claim.LeaseEpoch, current)
+		if opCtx.Err() != nil || s.clock.Now().Before(started) || !envelope.ExpiresAt.After(s.clock.Now()) {
+			return safeError("start_expired")
+		}
 		return err
 	}); err != nil {
 		s.record(BuildOutcomeLeaseLost, "start_failed", claim.firstComponent())
-		return errors.Join(safeError("start_failed"), err)
+		return nil, errors.Join(safeError("start_failed"), err)
 	}
-	if err := claim.validateLease(lease); err != nil {
+	if err := claim.validateLease(lease); err != nil || lease.Operation != "start" || lease.OperationID != startID ||
+		lease.GrantID != s.o.GrantID || lease.State != "running" || !lease.LeaseExpiresAt.After(s.clock.Now()) {
 		s.record(BuildOutcomeLeaseLost, "start_invalid", claim.firstComponent())
-		return safeError("start_invalid")
+		return nil, safeError("start_invalid")
 	}
 	claim.LeaseExpiresAtPtr = lease.LeaseExpiresAt
-
-	executor, err := s.o.NewExecutor(s.o.Config, s.caps, claim.Plan)
-	if err != nil {
-		s.record(BuildOutcomeContainmentFailure, "executor_create_failed", claim.firstComponent())
-		return errors.Join(safeError("executor_create_failed"), s.failLease("containment"))
-	}
-	s.executor = executor
-	defer func() {
-		if cleanupErr := s.closeActiveExecutor(executor); cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
-		}
-	}()
-	if err := executor.Start(s.ctx); err != nil {
-		s.record(BuildOutcomeContainmentFailure, "executor_start_failed", claim.firstComponent())
-		return errors.Join(safeError("executor_start_failed"), s.failLease("containment"))
-	}
-	if err := s.buildComponents(lease); err != nil {
-		return err
-	}
-
-	set := BuiltComponentSet{
-		GrantID:           s.o.GrantID,
-		MaterializationID: claim.MaterializationID,
-		AttemptID:         claim.AttemptID,
-		LeaseEpoch:        claim.LeaseEpoch,
-		Components:        append([]BuiltComponent(nil), s.built...),
-	}
-	receipt, err := s.acceptPublication(set)
-	if err != nil {
-		return s.handlePublicationError(err)
-	}
-	// Atomic publication completion already cleared this lease. Never release
-	// or fail it again after exact authenticated receipt confirmation.
-	if receipt == nil {
-		if err := s.releaseLease(); err != nil {
-			s.record(BuildOutcomeLeaseLost, "release_failed", "")
-			return err
-		}
-	}
-	s.recordBuilt()
-	return nil
+	return lease, nil
 }
 
 func (s *orchestratorState) acceptPublication(set BuiltComponentSet) (*publicationReceipt, error) {

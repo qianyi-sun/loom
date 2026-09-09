@@ -8,8 +8,8 @@ import (
 
 // prepareRegisteredBundle composes actual capability issuance and verified
 // download with prebuild liveness. It does not start an executor or extend the
-// returned capability's deadline. Native runClaim remains closed until build
-// cancellation joins context consumers before executor/input cleanup.
+// returned capability's deadline. runClaim owns the verified input until all
+// build/publication consumers join and executor cleanup is proven.
 func (s *orchestratorState) prepareRegisteredBundle() (*DownloadedRegisteredBundle, error) {
 	invalid := errors.New("registered bundle preparation unavailable")
 	if s.o == nil || s.o.Config.Bundle == nil || s.o.Guard == nil || s.sessionManager == nil || s.clock == nil ||

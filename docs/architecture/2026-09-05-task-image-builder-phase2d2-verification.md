@@ -547,15 +547,16 @@ sidecar names, plan-slice ownership and exact component-path binding. Executor
 close now cancels its single active build and joins all build-local deferred
 cleanup before releasing input. Concurrent closes serialize cleanup ownership;
 waiters honor cancellation. An unsuccessful join reports ambiguous cleanup and
-retains input for a later retry/allocation cleanup. The orchestration layer must
-still join its build goroutines and must not remove a downloaded tree after
-ambiguous executor close. It is not yet using this constructor or that complete
-input lifecycle. A pathname reconstructed from the allocation directory is not
+retains input for a later retry/allocation cleanup. The orchestration layer now
+joins build wrappers before cleanup. A failed join retains allocation descriptors;
+failed executor close retains quota-owned input and suppresses clean Finish.
+Normal completion joins builds, finishes publication, closes the executor and
+removes verified input before reporting built. A pathname reconstructed from the allocation directory is not
 equivalent authority. An actual pinned TLS MinIO
 fixture now exercises verified upload → V2 authority issuance → this real Go
 downloader, including executable Unicode paths, without substituting a fake
-downloader. V2 claim/orchestration and renewable prebuild work remain unintegrated
-with the descriptor-aware executor. This
+downloader. A separate actual TLS/download orchestration fixture connects a V2
+claim to descriptor input ownership with fake guard and executor boundaries. This
 fixture is data-transfer acceptance, not a rootless native build or activation.
 
 The supervisor configuration now accepts optional `bundle` trust with exact
@@ -578,14 +579,21 @@ preserves the original builder identity and rejects missing/null strong fields,
 V1 downgrade and invalid component/context bindings. Character limits match the
 Python plan (including astral Unicode): 512 for task ID, 4096 for prefix and
 component paths, plus the 64 KiB encoded plan ceiling. V1 does not gain registered
-content authority. `runClaim` still explicitly rejects V2 before legacy download;
-parser support alone does not open native execution or authority derivation.
+content authority. `runClaim` now requires configured trust and an explicit
+registered executor factory for V2; missing dependencies fail without a V1
+fallback. The production factory uses `NewExecutorWithContext`; independent
+startup, publication and authority-derivation gates remain closed.
 
 Registered preparation now composes actual guard capability issuance and the real
 TLS downloader with a single prebuild liveness owner. A session manager lends at
 most one owned, bounded locked-memory snapshot outside its mutex, so bundle I/O
 does not block heartbeat/renewal. Superseding the original secret does not destroy
-that active copy; returning from its callback destroys it. The captured session
+that active copy; returning from its callback destroys it. Production secrets
+use distinct private anonymous mappings, locked before credential reads, then
+zeroed and unmapped on close. Heap slices can share pages and Linux memory locks
+are not reference-counted: closing the old owner previously unlocked a live
+snapshot's page. Regression coverage checks disjoint pages and surviving locks.
+Borrowed token slices are invalid after the owning credential closes. The captured session
 binds issuance only and never rewrites original claim provenance. Generation drift
 during issuance gets at most three fresh-operation attempts; unchanged-generation
 errors do not retry. Real TLS tests cover successor success, the attempt ceiling,
@@ -596,10 +604,14 @@ ceiling and liveness calls have five seconds. Capability/grant/session/lease lim
 remain independent and may expire earlier. Cancellation and failure join fetch
 before input disposal, including success racing cancellation. Clock regression,
 expiry and failed liveness reject acceptance. Cleanup ambiguity remains a distinct
-error without exposing transport secrets. This preparation entrypoint is tested
-but not called by native `runClaim` yet. Production composition still requires
-fresh start admission, end-to-end executor/input cleanup ownership, guard/runtime
-assembly and the remaining publication/execution/capacity activation gates.
+error without exposing transport secrets. Native `runClaim` now calls this
+preparation, then admits Start through the fresh current session with a five-second
+operation bound. Exact operation, grant, attempt, materialization, epoch, running
+state and future lease expiry are required; session expiry and clock regression
+reject admission before executor construction. Tests exercise these bindings,
+cancelled/unjoined input consumers, cleanup retention and no built outcome after
+failed close. Guard/runtime assembly and the remaining publication/execution/
+capacity activation gates still prevent production activation.
 
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention

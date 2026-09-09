@@ -72,10 +72,13 @@ func run(args []string, environ []string) error {
 
 func productionOrchestrator(grantID string, cfg Config) *Orchestrator {
 	return &Orchestrator{
-		GrantID:      grantID,
-		Config:       cfg,
-		Guard:        NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second),
-		NewExecutor:  productionSupervisorNewExec,
+		GrantID:     grantID,
+		Config:      cfg,
+		Guard:       NewGuardClient(cfg.Guard.SocketPath, cfg.Guard.MaxPacketBytes, time.Duration(cfg.Guard.AckTimeoutSeconds)*time.Second),
+		NewExecutor: productionSupervisorNewExec,
+		NewRegisteredExecutor: func(cfg Config, caps *AllocationCapabilities, plan BuildPlan, fd int) (BuildExecutor, error) {
+			return NewExecutorWithContext(cfg, caps, plan, fd)
+		},
 		Download:     productionSupervisorDownload,
 		Handoff:      productionPublicationHandoff,
 		CleanupGrace: time.Duration(cfg.Guard.AckTimeoutSeconds) * time.Second,

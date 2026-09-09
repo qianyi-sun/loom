@@ -51,6 +51,18 @@ func (b *DownloadedRegisteredBundle) Close() error {
 	return nil
 }
 
+// Retain quota-owned input when a consumer's cleanup cannot be proven. Drop
+// only this owner's descriptors; other consumers own their duplicates. The
+// allocation guard must later prove process termination before deleting data.
+func (b *DownloadedRegisteredBundle) retainForAllocationCleanup() error {
+	if b == nil || b.rootFD < 0 {
+		return nil
+	}
+	root, parent := b.rootFD, b.parentFD
+	b.rootFD, b.parentFD = -1, -1
+	return errors.Join(errCleanupAmbiguous, syscall.Close(root), syscall.Close(parent))
+}
+
 func createRegisteredBundleDirectory(jobFD int) (*DownloadedRegisteredBundle, error) {
 	id, err := newUUID()
 	if err != nil {
