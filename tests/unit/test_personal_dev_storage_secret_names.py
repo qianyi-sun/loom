@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from importlib import import_module
+import json
 from uuid import uuid4
 
 import pytest
@@ -10,6 +11,7 @@ from loom.dev_instance import derive_identity
 from loom.dev_instance_manifest import dev_instance_manifest_documents
 from tests.unit.test_dev_instance_manifest import _config, _immutable_config
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+from tests.unit.test_personal_dev_storage_vault import _Cluster, _vault
 
 _PURPOSES = (
     "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime",
@@ -85,3 +87,28 @@ def test_bound_manifest_mounts_only_its_own_incarnation_credentials(protected):
             *(("loom-protected-worker-runtime",) if protected else ()),
         )
     }
+
+
+async def test_bound_vault_stages_incarnation_named_credentials_and_returns_exact_ref():
+    cluster = _Cluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    vault = _vault(cluster)
+    secret_ref = await vault.store(identity, "b" * 32)
+    expected = {
+        f"{name}-{identity.storage_incarnation.hex}"
+        for name in ("loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime")
+    }
+    assert set(cluster.secrets) == expected
+    assert secret_ref == f"k8s-secret://{identity.namespace}/loom-secrets-{identity.storage_incarnation.hex}"
+    for argv, payload in cluster.writes:
+        if "create" not in argv:
+            continue
+        # Namespace creates use YAML; staged Secret writes are JSON.
+        if payload.lstrip().startswith("{"):
+            document = json.loads(payload)
+            if document["kind"] == "Secret":
+                assert document.get("data", {}) == {}
+                assert not document.get("stringData")
+    before = dict(cluster.secrets)
+    assert await _vault(cluster).store(identity, "b" * 32) == secret_ref
+    assert cluster.secrets == before
