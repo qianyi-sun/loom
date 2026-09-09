@@ -1,6 +1,7 @@
 """A seeded retirement marker is a hard fence, not proof of retirement eligibility."""
 
 import hashlib
+from contextlib import nullcontext
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -18,6 +19,7 @@ from loom_task_image_authority.materializations import (
     claim_session_materialization,
     get_session_materialization_build_plan,
     heartbeat_session_materialization,
+    lock_session_materialization_lease,
     release_session_materialization,
     start_session_materialization,
 )
@@ -35,6 +37,8 @@ from tests.integration.test_task_image_publication_completion import (
 )
 from tests.integration.test_task_image_publication_jobs import (
     _submit,
+)
+from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
 )
 from tests.integration.test_task_image_registry_credentials import (
@@ -94,6 +98,75 @@ async def test_publication_rejects_pending_retirement_before_autoflush(
         with pytest.raises(PublicationJobConflictError, match="unflushed changes"):
             await submit_publication_job(session, **values)
         assert marker in getattr(session, pending)
+
+
+@pytest.mark.parametrize("surface", ["plan", "credential", "lease"])
+@pytest.mark.parametrize("autoflush", [False, True])
+async def test_builder_rejects_pending_retention_before_any_admission(
+    registry_authority_session, registry_issuer, surface, autoflush
+):
+    async with registry_authority_session() as session:
+        auth, _, _, build_session, secrets, row, attempt = await _claimed_attempt(session)
+        marker = TaskImageAttemptRetention(attempt_id=attempt.id, observed_at=NOW)
+        for pending in ("new", "dirty", "deleted"):
+            if pending == "new":
+                session.add(marker)
+            elif pending == "dirty":
+                marker.observed_at = NOW + timedelta(seconds=1)
+            else:
+                await session.delete(marker)
+            with (
+                nullcontext() if autoflush else session.no_autoflush,
+                pytest.raises(TaskImageSessionMaterializationConflictError, match="unflushed"),
+            ):
+                if surface == "credential":
+                    await _issue_first(
+                        session, authorization=auth, build_session=build_session,
+                        secrets=secrets, row=row, attempt=attempt, issuer=registry_issuer,
+                    )
+                else:
+                    operation = (
+                        get_session_materialization_build_plan if surface == "plan"
+                        else lock_session_materialization_lease
+                    )
+                    await operation(
+                        session, authorization=auth, materialization_id=row.id,
+                        attempt_id=attempt.id, lease_epoch=attempt.lease_epoch,
+                        now=NOW + timedelta(seconds=12),
+                        **({"allowed_states": ("claimed", "running")} if surface == "lease" else {}),
+                    )
+            assert marker in getattr(session, pending)
+            if pending != "deleted":
+                await session.commit()
+
+
+@pytest.mark.parametrize("surface", ["plan", "lease"])
+@pytest.mark.parametrize("target", ["parent", "attempt"])
+async def test_builder_refresh_never_discards_pending_authority(
+    registry_authority_session, surface, target
+):
+    async with registry_authority_session() as session:
+        auth, _, _, _, _, row, attempt = await _claimed_attempt(session)
+        changed = row if target == "parent" else attempt
+        # Benign, unconstrained fields show a lost caller edit, not a semantic
+        # authorization failure caused by deliberate identity corruption.
+        field = "failure_message" if target == "parent" else "created_at"
+        value = "pending diagnostic" if target == "parent" else NOW - timedelta(days=1)
+        setattr(changed, field, value)
+        operation = (
+            get_session_materialization_build_plan if surface == "plan"
+            else lock_session_materialization_lease
+        )
+        with session.no_autoflush, pytest.raises(
+            TaskImageSessionMaterializationConflictError, match="unflushed"
+        ):
+            await operation(
+                session, authorization=auth, materialization_id=row.id,
+                attempt_id=attempt.id, lease_epoch=attempt.lease_epoch,
+                now=NOW + timedelta(seconds=12),
+                **({"allowed_states": ("claimed", "running")} if surface == "lease" else {}),
+            )
+        assert getattr(changed, field) == value and changed in session.dirty
 
 
 @pytest.mark.parametrize("replay", [False, True])
