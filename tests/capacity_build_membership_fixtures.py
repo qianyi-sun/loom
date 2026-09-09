@@ -112,6 +112,28 @@ def build_request(preparation, execution, *, owner=88010, revision=0):
         expected_revision=revision, command=PersonalBuildCommandV2(projection=projection, acknowledgement=acknowledgement))
 
 
+def application_request(preparation, execution, *, owner=88010, revision=0):
+    from loom_capacity_manager.typed_membership_commands import PersonalApplicationCommandV2
+    from tests.capacity_fixtures import development_projection
+
+    projection = development_projection(expected_configuration_epoch=execution.configuration_epoch,
+        subject_id=UUID(int=owner + 6000), subject_incarnation=UUID(int=owner + 7000),
+        owner_id=UUID(int=owner), environment_name=f"owner-{owner}",
+        demand_reporter_incarnation=UUID(int=owner + 8000)).model_copy(update={
+            "operation_id": UUID(int=owner + 9000), "demand_reporter_token_sha256": f"{owner + 8000:064x}",
+        })
+    acknowledgement = SubjectExecutionAcknowledgementV2(subject_id=projection.subject_id,
+        subject_incarnation=projection.subject_incarnation, configuration_generation=projection.configuration_generation,
+        deployment_generation=projection.deployment_generation,
+        candidate=CandidateBindingV2(algorithm="source-sha256", identity=projection.candidate_sha256,
+            publication_sha256=projection.candidate_publication_sha256),
+        reporter_incarnation=projection.demand_reporter_incarnation,
+        protected_admission_sha256=projection.protected_admission_sha256,
+        legacy_writer_high_water=0, acknowledgement_sha256="e" * 64)
+    return PersonalMembershipMutationV2(execution=execution, namespace_id=preparation.personal_membership.namespace_id,
+        expected_revision=revision, command=PersonalApplicationCommandV2(projection=projection, acknowledgement=acknowledgement))
+
+
 async def staged_build_event(session, management, preparation, fleet, request, *, previous_head="0" * 64, previous=None, previous_request=None, idempotency_key=None):
     from loom_capacity_manager.build_generation_store import stage_build_generation_evidence
     from loom_capacity_manager.membership_digest import canonical_membership_event_head
@@ -120,10 +142,15 @@ async def staged_build_event(session, management, preparation, fleet, request, *
     from loom_capacity_manager.store import _derive_owner_account
     from loom_capacity_manager.typed_membership_commands import (
         PersonalMembershipResultV2,
+        derive_application_member,
         derive_build_member,
     )
-    member = derive_build_member(request, preparation, fleet)
-    await stage_build_generation_evidence(session, request, member, preparation, fleet, previous=previous, previous_request=previous_request)
+    if isinstance(request.command, PersonalBuildCommandV2):
+        member = derive_build_member(request, preparation, fleet)
+        await stage_build_generation_evidence(session, request, member, preparation, fleet, previous=previous, previous_request=previous_request)
+    else:
+        member = derive_application_member(request, preparation, fleet)
+        await CapacityMembershipStore(management)._persist_generation_evidence(session, request.command.projection, member.configuration, previous)
     rows = (await session.scalars(select(CapacitySubject).where(CapacitySubject.configuration_epoch == preparation.configuration_epoch))).all()
     await CapacityMembershipStore(management)._materialize_subject(session, preparation.configuration_epoch,
         member.configuration, _derive_owner_account(fleet, member.owner_id), rows)

@@ -47,6 +47,12 @@ def _events():
     return import_module("loom_capacity_manager.typed_membership_events")
 
 
+def test_typed_event_rejects_resealed_zero_idempotency_identity():
+    value, _request, _result, row = event_row(key=UUID(int=0))
+    with pytest.raises(ValueError):
+        _events().validate_typed_membership_event(row, value.preparation, value.fleet)
+
+
 @pytest.mark.parametrize("build", (False, True))
 def test_exact_typed_event_row_is_bound_to_its_original_request(build):
     value, request, result, row = event_row(build=build)
