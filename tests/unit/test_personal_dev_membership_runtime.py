@@ -12,15 +12,18 @@ import pytest
 import yaml
 
 from loom.personal_dev_capacity import personal_dev_capacity_projection
+from loom.personal_dev_capacity_identity import capacity_runtime_database_url
 from loom.personal_dev_capacity_runtime import (
     CapacityDatabaseInstallation,
     KubectlPersonalDevCapacityInstaller,
     PersonalDevCapacityRuntimeConfig,
     protected_capacity_database_admission_digest,
 )
+from loom.personal_dev_incarnation_storage import (
+    PersonalDevStorageBindingV1,
+    personal_dev_storage_secret_data,
+)
 from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelopeV1
-from loom.personal_dev_capacity_identity import capacity_runtime_database_url
-from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1, personal_dev_storage_secret_data
 from loom_capacity_agent.client import DemandReporterTLSFiles
 from loom_capacity_agent.contracts import AgentPoolCapabilityV1
 from loom_capacity_manager.contracts import canonical_digest

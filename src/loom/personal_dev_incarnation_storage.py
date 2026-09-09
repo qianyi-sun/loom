@@ -115,6 +115,16 @@ def personal_dev_storage_annotations(identity: DevInstanceIdentity) -> dict[str,
     }
 
 
+def personal_dev_storage_secret_data(identity: DevInstanceIdentity) -> dict[str, bytes]:
+    identity = validate_personal_dev_storage_identity(identity)
+    if identity.storage_binding is None:
+        return {}
+    return {
+        "storage-binding.json": canonical_bytes(identity.storage_binding),
+        "storage-binding.sha256": canonical_digest(identity.storage_binding).encode(),
+    }
+
+
 def resolve_personal_dev_storage_identity(claim: PersonalDevReconciliationClaim) -> DevInstanceIdentity:
     """Resolve a current, owner-consistent claim without inferring layout from mode.
 

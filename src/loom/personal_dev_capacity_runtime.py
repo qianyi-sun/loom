@@ -27,7 +27,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.dev_instance import DevInstanceIdentity, derive_identity
+from loom.dev_instance import DevInstanceIdentity
 from loom.dev_instance_runtime import KubectlClient, fixture_database_url
 from loom.personal_dev_capacity import (
     CapacityManagerPersonalDevProjector,
@@ -45,6 +45,12 @@ from loom.personal_dev_capacity_identity import (
     capacity_role_names as _role_names,
 )
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_incarnation_storage import (
+    PersonalDevStorageBindingV1,
+    personal_dev_storage_secret_data,
+    resolve_personal_dev_storage_identity,
+    validate_personal_dev_storage_identity,
+)
 from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipEnvelopeV1,
     PersonalDevMembershipObservationV1,
@@ -108,6 +114,15 @@ _K8S_LABEL_NAME_RE = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])
 
 class PersonalDevCapacityInstallationError(RuntimeError):
     """Trusted local capacity installation could not be converged exactly."""
+
+
+def _assert_storage_secret(identity: DevInstanceIdentity, data: dict[str, bytes]) -> None:
+    expected = personal_dev_storage_secret_data(identity)
+    if (
+        (not expected and {"storage-binding.json", "storage-binding.sha256"} & data.keys())
+        or any(data.get(key) != value for key, value in expected.items())
+    ):
+        raise PersonalDevCapacityInstallationError("protected credential storage binding is invalid")
 
 
 def _sha256_json(value: object) -> str:
@@ -1563,6 +1578,9 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         claim: PersonalDevReconciliationClaim,
         identity: DevInstanceIdentity,
     ) -> CapacityDatabaseCredentials:
+        if identity.storage_binding is not None:
+            if await self._kubectl.read_storage_namespace(identity) is None:
+                raise PersonalDevCapacityInstallationError("protected storage namespace is unavailable")
         runtime_secret = await self._kubectl.read_secret_optional(
             identity.namespace,
             PROTECTED_WORKER_RUNTIME_SECRET_NAME,
@@ -1571,6 +1589,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             raise PersonalDevCapacityInstallationError(
                 "protected worker runtime credential is unavailable"
             )
+        _assert_storage_secret(identity, runtime_secret)
         try:
             runtime_password = capacity_runtime_database_password(
                 _decode_secret_text(runtime_secret, "database-url"),
@@ -1592,6 +1611,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             )
         if existing is None:
             return _new_credentials(runtime_password=runtime_password)
+        _assert_storage_secret(identity, existing)
         try:
             subject_incarnation = UUID(_decode_secret_text(existing, "subject-incarnation"))
             operation_id = UUID(_decode_secret_text(existing, "operation-id"))
@@ -1664,6 +1684,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             "loom.dev/trust-domain": "capacity-credential-seed",
         }
         data = {
+            **personal_dev_storage_secret_data(identity),
             "agent-password": credentials.agent_password.encode("ascii"),
             "observer-password": credentials.observer_password.encode("ascii"),
             "operation-id": str(claim.operation.id).encode("ascii"),
@@ -1701,6 +1722,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             _CREDENTIALS_SECRET_NAME,
         )
         expected = {
+            **personal_dev_storage_secret_data(identity),
             "agent-password": credentials.agent_password.encode("ascii"),
             "observer-password": credentials.observer_password.encode("ascii"),
             "operation-id": str(claim.operation.id).encode("ascii"),
@@ -1720,6 +1742,9 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         installation: PersonalDevCapacityInstallation,
         identity: DevInstanceIdentity,
     ) -> None:
+        if identity.storage_binding is not None:
+            if await self._kubectl.read_storage_namespace(identity) is None:
+                raise PersonalDevCapacityInstallationError("protected storage namespace is unavailable")
         seed = await self._kubectl.read_secret_optional(
             identity.namespace,
             _CREDENTIALS_SECRET_NAME,
@@ -1733,6 +1758,8 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             raise PersonalDevCapacityInstallationError(
                 "protected capacity credential installation is unavailable"
             )
+        for data in (seed, runtime, protected_runtime):
+            _assert_storage_secret(identity, data)
         try:
             seed_subject_incarnation = UUID(_decode_secret_text(seed, "subject-incarnation"))
             seed_operation_id = UUID(_decode_secret_text(seed, "operation-id"))
@@ -1840,6 +1867,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         }
         configuration_bytes = canonical_bytes(configuration)
         secret_data = {
+            **personal_dev_storage_secret_data(identity),
             "ca.pem": tls["ca.pem"],
             "certificate.pem": tls["certificate.pem"],
             "database-url": database.agent_database_url.encode("utf-8"),
@@ -2139,7 +2167,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         self,
         claim: PersonalDevReconciliationClaim,
     ) -> PersonalDevCapacityInstallation:
-        identity = derive_identity(claim.operation.environment_name)
+        identity = resolve_personal_dev_storage_identity(claim)
         credentials = await self._credentials(claim, identity)
         await self._persist_credentials(claim, identity, credentials)
         configuration = self._configuration(claim, credentials)
@@ -2214,7 +2242,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
 
         if not isinstance(installation, PersonalDevCapacityInstallation):
             raise TypeError("personal-dev capacity installation is invalid")
-        identity = derive_identity(claim.operation.environment_name)
+        identity = resolve_personal_dev_storage_identity(claim)
         await self._assert_installed_credentials(claim, installation, identity)
         await self._kubectl.wait_deployment(identity.namespace, _DEPLOYMENT_NAME)
         await self._assert_installed_credentials(claim, installation, identity)
@@ -2226,7 +2254,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             from loom.personal_dev_membership_cleanup import validated_membership_destroy
 
             validated_membership_destroy(claim, checkpoints=("release_verified",))
-        await self._database.seal(derive_identity(claim.operation.environment_name))
+        await self._database.seal(resolve_personal_dev_storage_identity(claim))
 
     async def destroy(self, claim: PersonalDevReconciliationClaim) -> None:
         if claim.operation.kind != "destroy":
@@ -2235,7 +2263,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             from loom.personal_dev_membership_cleanup import validated_membership_destroy
 
             validated_membership_destroy(claim, checkpoints=("namespace_deleted",))
-        await self._database.destroy(derive_identity(claim.operation.environment_name))
+        await self._database.destroy(resolve_personal_dev_storage_identity(claim))
 
 
 class PersonalDevCapacityStatusReader:
@@ -2260,9 +2288,25 @@ class PersonalDevCapacityStatusReader:
         subject_id: UUID,
         subject_incarnation: UUID,
         deployment_generation: int,
+        storage_binding: PersonalDevStorageBindingV1 | None = None,
     ) -> PersonalDevCapacityAvailability:
         """Fail closed: only matching active manager+guard evidence is available."""
 
+        identity = None
+        if storage_binding is not None:
+            try:
+                identity = validate_personal_dev_storage_identity(storage_binding.identity)
+                if (
+                    storage_binding.layout != "incarnation-v1"
+                    or identity.namespace != namespace or identity.database != database
+                    or storage_binding.subject_id != subject_id
+                    or storage_binding.subject_incarnation != subject_incarnation
+                ):
+                    raise ValueError("status storage coordinates differ")
+                if await self._kubectl.read_storage_namespace(identity) is None:
+                    raise ValueError("status storage namespace is unavailable")
+            except Exception:
+                return PersonalDevCapacityAvailability("waiting", False, False)
         try:
             manager = await self._projector.subject_status(
                 subject_id=subject_id,
@@ -2281,6 +2325,10 @@ class PersonalDevCapacityStatusReader:
             seed = await self._kubectl.read_secret_optional(namespace, _CREDENTIALS_SECRET_NAME)
             if seed is None:
                 raise ValueError("observer credential seed is missing")
+            if identity is not None:
+                _assert_storage_secret(identity, seed)
+            elif {"storage-binding.json", "storage-binding.sha256"} & seed.keys():
+                raise ValueError("bound observer credential requires explicit storage binding")
             if UUID(_decode_secret_text(seed, "subject-incarnation")) != subject_incarnation:
                 raise ValueError("observer credential identity changed")
             password = _opaque_credential(
@@ -2289,6 +2337,7 @@ class PersonalDevCapacityStatusReader:
             # Role naming is bound to the immutable namespace stem, rather
             # than an API display name. The provisioner stores that namespace.
             observer = (
+                _role_names(identity)[4] if identity is not None else
                 "loom_cap_" + namespace.removeprefix("loom-dev-").replace("-", "_") + "_observer"
             )
             url = _retarget_database_url(

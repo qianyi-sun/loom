@@ -19,11 +19,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.dev_instance import DevInstanceIdentity, derive_identity
+from loom.dev_instance import DevInstanceIdentity
 from loom.dev_instance_runtime import fixture_database_url
 from loom.personal_dev_capacity import PersonalDevCapacityInstallation
 from loom.personal_dev_capacity_identity import capacity_role_names
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_incarnation_storage import resolve_personal_dev_storage_identity
 from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipEnvelopeV1,
     PersonalDevMembershipObservationV1,
@@ -428,7 +429,7 @@ class PersonalDevMembershipObserver:
                 target=claim.operation.operation_epoch,
             ) if retirement else ()
         )
-        identity = derive_identity(claim.operation.environment_name)
+        identity = resolve_personal_dev_storage_identity(claim)
         seed = await runtime._kubectl.read_secret_optional(
             identity.namespace, _CREDENTIALS_SECRET_NAME
         )
@@ -665,7 +666,7 @@ class PersonalDevMembershipObserver:
             claim, checkpoint, self.installer._membership_execution, observed_at
         )
         secret = await self.installer._kubectl.read_secret_optional(
-            derive_identity(claim.operation.environment_name).namespace, _SECRET_NAME
+            resolve_personal_dev_storage_identity(claim).namespace, _SECRET_NAME
         )
         if secret is None:
             raise ValueError("retained membership agent is unavailable")
@@ -696,7 +697,7 @@ class PersonalDevMembershipObserver:
             or projection.operation_kind != operation.kind
         ):
             raise ValueError("membership verification differs from persisted operation")
-        identity = derive_identity(operation.environment_name)
+        identity = resolve_personal_dev_storage_identity(claim)
         secret = await self.installer._kubectl.read_secret_optional(
             identity.namespace, _SECRET_NAME
         )

@@ -495,12 +495,14 @@ async def _enriched_response(request: Request, record: DevInstanceRecord) -> Dev
     if reader is None:
         return _response(record, PersonalDevCapacityAvailability("waiting", True, False))
     try:
+        storage = {} if record.storage_binding is None else {"storage_binding": record.storage_binding}
         availability = await reader.read(
             namespace=record.capacity_namespace,
             database=record.capacity_database,
             subject_id=record.subject_id,
             subject_incarnation=record.subject_incarnation,
             deployment_generation=record.deployment_generation,
+            **storage,
         )
     except Exception:
         availability = PersonalDevCapacityAvailability("waiting", True, False)
@@ -508,7 +510,7 @@ async def _enriched_response(request: Request, record: DevInstanceRecord) -> Dev
 
 
 def _record_identity(record: DevInstanceRecord | PersonalDevEnvironmentRecord) -> DevInstanceIdentity:
-    if isinstance(record, PersonalDevEnvironmentRecord) and record.storage_binding is not None:
+    if record.storage_binding is not None:
         return record.storage_binding.identity
     return derive_identity(record.name)
 

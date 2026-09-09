@@ -51,7 +51,6 @@ from loom.personal_dev_environment import (
 )
 from loom.personal_dev_incarnation_storage import (
     PersonalDevStorageBindingV1,
-    parse_personal_dev_storage_binding,
 )
 from loom.personal_dev_membership_checkpoint import (
     PersonalDevMembershipEnvelopeV1,
@@ -63,6 +62,7 @@ from loom.personal_dev_membership_successor import (
     parse_membership_successor_binding,
     validate_membership_successor,
 )
+from loom.personal_dev_storage_records import personal_dev_storage_record as _storage_record
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMembershipResponseV1,
@@ -272,26 +272,6 @@ def _membership_checkpoint_from_jsonb(value: object) -> PersonalMembershipCheckp
     return PersonalMembershipCheckpointV1.model_validate_json(
         json.dumps(value, sort_keys=True, separators=(",", ":"))
     )
-
-
-def _storage_record(row: DevInstance | DevLifecycleOperation) -> PersonalDevStorageBindingV1 | None:
-    if row.storage_binding is None:
-        if row.storage_binding_sha256 is not None:
-            raise ValueError("personal storage binding is incomplete")
-        return None
-    binding = parse_personal_dev_storage_binding(
-        json.dumps(row.storage_binding, sort_keys=True, separators=(",", ":")).encode("ascii"),
-        expected_sha256=row.storage_binding_sha256 or "",
-    )
-    name = row.name if isinstance(row, DevInstance) else row.environment_name
-    if (
-        binding.environment_name != name or binding.subject_id != row.subject_id
-        or binding.subject_incarnation != row.subject_incarnation
-        or binding.owner_user_id != row.owner_user_id or binding.owner_team_id != row.owner_team_id
-        or binding.layout != "incarnation-v1"
-    ):
-        raise ValueError("personal storage binding differs from durable ownership")
-    return binding
 
 
 def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:

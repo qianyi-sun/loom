@@ -337,10 +337,25 @@ cannot count as successful cleanup. Disposable Kubernetes integration exercises
 real raw-DELETE transport, stale-UID rejection, bootstrap rejection and partial
 Secret recovery; no live cluster is used by these tests.
 
-These contracts do not enable storage provisioning. Remaining capacity installer
-and status propagation, full lifecycle acceptance and
-allowlisted data transfer remain required before selecting the new layout in the
-live service or lifting the retained-data recreation interlock.
+Capacity installation, verification, sealing, cleanup and membership retirement
+resolve the same persisted claim binding. The capacity credential seed and agent
+Secrets carry its canonical JSON and digest; bound reads verify namespace and
+Secret provenance before using credentials. Owner GET/list records preserve the
+binding, and capacity status validates namespace/database/subject coordinates
+before selecting the incarnation-specific observer role. The legacy provisioner
+rejects bound records before side effects, including public/queued reservation
+entrypoints. Generic reservations refresh the ORM view under the row lock and
+reject bound storage before changing lifecycle state, even when an older session
+cached the previous legacy layout. A disposable PostgreSQL test migrates
+three independently provisioned databases and proves full-length role names,
+cross-owner/incarnation connection denial and retry isolation. Repeated sealing
+retains application bytes but denies old logins; repeated final cleanup leaves
+new-incarnation and other-owner databases and credentials intact.
+
+These contracts do not enable the new layout in the live service. Full lifecycle
+acceptance, stale namespace-child-write fencing and allowlisted data transfer
+remain required before selecting it or lifting retained-data recreation's
+interlock.
 
 The separate active acceptance binding pins the entire V3 preparation, exact
 execution authority and a finite reviewed window; it cannot reinterpret old
