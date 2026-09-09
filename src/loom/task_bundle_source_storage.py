@@ -115,13 +115,19 @@ class TaskBundleInventoryCursorV1(BaseModel):
         "loom.task-bundle-inventory-cursor.v1"
     )
     intent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    key_marker: str = Field(min_length=1, max_length=1024)
+    key_marker: str = Field(min_length=1, max_length=4096)
     version_marker: str = Field(min_length=1, max_length=1024)
 
     @field_validator("key_marker")
     @classmethod
     def _key(cls, value: str) -> str:
-        return TaskBundleObjectIntentV1._key(value)
+        # MinIO appends an opaque cache token to NextKeyMarker. This is a
+        # continuation value, never an object key, path or read/delete authority.
+        if len(value.encode("utf-8")) > 4096 or any(
+            ord(char) < 32 or ord(char) == 127 for char in value
+        ):
+            raise ValueError("source inventory cursor marker is invalid")
+        return value
 
     @field_validator("version_marker")
     @classmethod
@@ -231,10 +237,7 @@ class S3TaskBundleVersionInventory:
         necessary, including for retired intents and after observed_end.
         """
         fingerprint = hashlib.sha256(rfc8785.dumps(intent.model_dump(mode="json"))).hexdigest()
-        if cursor is not None and (
-            cursor.intent_sha256 != fingerprint
-            or not cursor.key_marker.startswith(intent.object_key)
-        ):
+        if cursor is not None and cursor.intent_sha256 != fingerprint:
             raise ValueError("source inventory cursor differs from intent")
         if intent.size_bytes > self._max_read_bytes:
             raise ValueError("source inventory budget cannot hold one object")
@@ -271,17 +274,15 @@ class S3TaskBundleVersionInventory:
         continuation = None
         if page.get("IsTruncated") is True:
             key_marker, version_marker = page.get("NextKeyMarker"), page.get("NextVersionIdMarker")
-            if (
-                type(key_marker) is not str
-                or type(version_marker) is not str
-                or (key_marker, version_marker) not in seen
-            ):
+            if not entries or type(key_marker) is not str or type(version_marker) is not str:
                 raise ValueError("source inventory pagination is invalid")
             continuation = TaskBundleInventoryCursorV1(
                 intent_sha256=fingerprint,
                 key_marker=key_marker,
                 version_marker=version_marker,
             )
+            if continuation == cursor:
+                raise ValueError("source inventory pagination did not progress")
         elif page.get("IsTruncated") is not False:
             raise ValueError("source inventory pagination is invalid")
         results: list[ObjectWriteResult] = []

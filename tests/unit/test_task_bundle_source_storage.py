@@ -221,3 +221,29 @@ def test_inventory_continuation_cannot_cross_intent_boundaries(changes):
     with pytest.raises(ValueError, match="cursor"):
         reader.scan_batch(another, cursor=first.continuation)
     assert len(client.heads) == before
+
+
+def test_inventory_preserves_opaque_marker_without_using_it_as_object_authority():
+    intent = _intent()
+    client = _Inventory(intent)
+    client.versions = {"v1": (b"abc", intent.metadata), "v2": (b"abc", intent.metadata)}
+    original = client.list_object_versions
+    opaque = intent.object_key + "[minio_cache:v2,return:]"
+    requests = []
+
+    def list_versions(**kwargs):
+        requests.append(kwargs)
+        page = original(**kwargs)
+        if page["IsTruncated"]:
+            page["NextKeyMarker"] = opaque
+        return page
+
+    client.list_object_versions = list_versions
+    reader = _module().S3TaskBundleVersionInventory(client, max_versions=1)
+    first = reader.scan_batch(intent)
+    assert first.continuation.key_marker == opaque
+    second = reader.scan_batch(intent, cursor=first.continuation)
+    assert second.observed_end and second.versions[0].version_id == "v2"
+    assert requests[1]["KeyMarker"] == opaque
+    assert all(request["Prefix"] == intent.object_key for request in requests)
+    assert all(request["Key"] == intent.object_key for request in client.heads + client.reads)

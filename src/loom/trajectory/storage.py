@@ -891,10 +891,11 @@ class MinioObjectStore:
     ) -> ObjectWriteResult:
         """Optionally bind a durable intent to every immutable version written.
 
-        Requiring versioning checks Enabled before EACH physical retry, then
+        Requiring versioning checks Enabled before each application retry, then
         rejects missing/null receipts. It does not cancel already accepted writes
-        on timeout or revoke external versioning authority. Callers must journal
-        intents before I/O and reconcile late/unknown versions after errors.
+        on timeout or revoke external versioning authority. SDK-internal retries
+        carry the same metadata but do not repeat that preflight. Callers must
+        journal intents before I/O and reconcile late/unknown versions after errors.
         """
         frozen_metadata = _object_user_metadata(metadata)
 
