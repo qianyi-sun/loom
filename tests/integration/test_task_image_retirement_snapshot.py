@@ -242,8 +242,9 @@ async def test_preparation_rejects_overflow_before_bulk_validation(
 
 
 @pytest.mark.parametrize("phase", ["prepare", "recheck"])
+@pytest.mark.parametrize("defect", ["disabled", "conditional", "column_subset"])
 async def test_inventory_requires_active_credential_immutability_guard(
-    registry_authority_session, registry_issuer, phase
+    registry_authority_session, registry_issuer, phase, defect
 ):
     module = snapshot_module()
     factory = registry_authority_session
@@ -253,10 +254,27 @@ async def test_inventory_requires_active_credential_immutability_guard(
     )
     # DB-owner fault injection in this disposable migrated database only.
     async with factory() as writer:
-        await writer.execute(text(
-            "ALTER TABLE public.task_image_registry_credentials DISABLE TRIGGER "
-            "task_image_registry_credentials_preserve"
-        ))
+        if defect == "disabled":
+            await writer.execute(text(
+                "ALTER TABLE public.task_image_registry_credentials DISABLE TRIGGER "
+                "task_image_registry_credentials_preserve"
+            ))
+        else:
+            await writer.execute(text(
+                "DROP TRIGGER task_image_registry_credentials_preserve "
+                "ON public.task_image_registry_credentials"
+            ))
+            event_clause = (
+                "UPDATE OF response_public_json" if defect == "column_subset" else "UPDATE"
+            )
+            when_clause = "WHEN (false)" if defect == "conditional" else ""
+            await writer.execute(text(
+                "CREATE TRIGGER task_image_registry_credentials_preserve "
+                f"BEFORE {event_clause} OR DELETE OR TRUNCATE "
+                "ON public.task_image_registry_credentials "
+                f"FOR EACH STATEMENT {when_clause} "
+                "EXECUTE FUNCTION public.task_image_registry_preserve_audit()"
+            ))
         await writer.commit()
     with pytest.raises(module.RetirementInventoryUnavailableError):
         if phase == "prepare":
