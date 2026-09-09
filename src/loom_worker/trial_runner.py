@@ -24,6 +24,7 @@ from loom.models.result import FailureReason, TrialResult, TrialState
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.terminal_result_semantics import aggregate_reward_scalar
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
@@ -44,9 +45,7 @@ from loom_worker.worker_health import WorkerUnhealthyError
 
 logger = logging.getLogger(__name__)
 
-_TERMINAL_TRIAL_STATES = frozenset(
-    {TrialState.SUCCEEDED, TrialState.FAILED, TrialState.CANCELLED}
-)
+_TERMINAL_TRIAL_STATES = frozenset({TrialState.SUCCEEDED, TrialState.FAILED, TrialState.CANCELLED})
 _TERMINAL_TRIAL_STATE_VALUES = frozenset(state.value for state in _TERMINAL_TRIAL_STATES)
 
 
@@ -510,17 +509,9 @@ class LocalTrialRunner:
 
 def _build_result_payload(result: TrialResult) -> dict[str, object]:
     payload: dict[str, object] = result.model_dump(mode="json")
-    payload["aggregate_reward"] = _aggregate_reward_scalar(result.reward)
+    payload["aggregate_reward"] = aggregate_reward_scalar(result.reward)
     payload.setdefault("cost_usd", 0.0)
     return payload
-
-
-def _aggregate_reward_scalar(reward: dict[str, float] | None) -> float | None:
-    if not reward:
-        return None
-    if len(reward) == 1:
-        return float(next(iter(reward.values())))
-    return sum(float(v) for v in reward.values()) / len(reward)
 
 
 def _build_trajectory_index(result: TrialResult) -> dict[str, object]:

@@ -1103,8 +1103,13 @@ represented team/user on the batch for product ownership, but usage and billing
 are attributed to the real acting admin/user. The represented user/team sees
 the run in monitor views and can use normal owner actions such as detail,
 debug, rerun, cancel, and artifact download. Admin usage views can request
-per-batch drilldown; token-only or self-deployed calls show token totals with
-`cost_status=not_applicable` instead of a fabricated dollar amount. Failed
+per-batch drilldown; explicitly token-only calls show token totals with
+`cost_status=not_applicable` instead of a fabricated dollar amount. Calls recorded
+without a price card, including historical `local-server-no-card` calls, show
+`pricing_mode=price-unknown`, no estimated dollar amount, and unavailable pricing
+confidence. Their recorded calls and tokens remain visible; a stored zero cost
+does not establish that the provider was free. A real price card with zero rates
+still counts as priced. Failed
 upstream provider attempts show as `pricing_mode=failed-upstream` and
 `cost_status=failed_upstream`, so they remain inspectable without being counted
 as priced provider usage. Usage views also show `usage_estimate_confidence`:

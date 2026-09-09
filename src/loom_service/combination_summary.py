@@ -16,6 +16,9 @@ from loom_llm_gateway.rate_card import (
     COST_META_SOURCE_KEY,
 )
 from loom_service.usage_accounting import (
+    cost_meta_filter as _cost_meta_filter,
+)
+from loom_service.usage_accounting import (
     empty_usage_projection,
     summarize_usage_counts,
     usage_status_filter,
@@ -114,10 +117,6 @@ class _UsageAccumulator:
         )
         out.pop("total_cost_usd", None)
         return out
-
-
-def _cost_meta_filter(key: str, value: str) -> Any:
-    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
 
 
 def _price_unknown_call_filter() -> Any:

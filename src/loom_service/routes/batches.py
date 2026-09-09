@@ -126,6 +126,9 @@ from loom_service.usage_accounting import (
     summarize_usage_counts,
     usage_status_filter,
 )
+from loom_service.usage_accounting import (
+    cost_meta_filter as _cost_meta_filter,
+)
 from loom_service.worker_backends import (
     compatible_cold_start_pool_names,
     get_active_backends,
@@ -1719,10 +1722,6 @@ def _price_unknown_call_filter() -> Any:
     return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
         COST_META_SOURCE_KEY, "unpriced"
     )
-
-
-def _cost_meta_filter(key: str, value: str) -> Any:
-    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
 
 
 def _cost_source_counts(row: Any) -> dict[str, int]:

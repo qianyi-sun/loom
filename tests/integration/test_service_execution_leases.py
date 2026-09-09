@@ -63,6 +63,7 @@ from loom.execution_contract import (
 from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
+    ExecutionRuntimeResultV1,
     ProcessPhaseV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
@@ -2886,9 +2887,15 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
 
 
 @pytest.mark.parametrize("source_task_id", [None, "nebius-acceptance/canonical-output"])
+@pytest.mark.parametrize(
+    ("rewards", "aggregate_reward"),
+    [({"artifact_complete": 1.0}, 1.0), ({"passed": 0.0}, 0.0), ({"a": 0.0, "b": 1.0}, 0.5)],
+)
 async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     postgres_url: str,
     source_task_id: str | None,
+    rewards: dict[str, float],
+    aggregate_reward: float,
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -2921,9 +2928,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 if source_task_id is not None
                 else None
             )
-            trial_id, target = await _seed_ready_trial(
-                session, now=now, task_id=catalog_task_id
-            )
+            trial_id, target = await _seed_ready_trial(session, now=now, task_id=catalog_task_id)
             trial = await session.get(Trial, trial_id)
             task = None if trial is None else await session.get(Task, trial.task_id)
             assert trial is not None and task is not None
@@ -3041,7 +3046,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                     "calls": [trace_usage],
                 }
             ),
-            "verifier/output.json": b'{"rewards":{"passed":1.0}}',
+            "verifier/output.json": canonical_document({"rewards": rewards}),
         }
         result_document = _runtime_result_payload(lease, started_at=now)
         result_document.update(
@@ -3054,7 +3059,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 }
                 for declaration in runtime_contract.output_declarations
             ],
-            verifier_rewards={"passed": 1.0},
+            verifier_rewards=rewards,
         )
         result_payload = canonical_document(result_document)
         repository = SqlArtifactCommitRepository(
@@ -3144,6 +3149,17 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
             assert trial.state == "materializing"
+            assert trial.result is not None
+            assert trial.result["aggregate_reward"] == aggregate_reward
+            assert trial.result["reward"] == rewards
+            assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
+                result_document
+            ).model_dump(mode="json")
+            projected_result = dict(trial.result)
+            assert not await finalize_committed_service_execution(
+                session, lease_id=current.id, observed_at=now + timedelta(seconds=5)
+            )
+            assert trial.result == projected_result
             current.desired_state = "deleted"
             current.observed_state = "deleted"
             current.cleanup_state = "complete"
@@ -3186,9 +3202,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current is not None
             assert current.source_cleanup_state == "retained"
             assert current.source_cleanup_attempts == 1
-            assert current.source_cleanup_error_message == (
-                "temporary source object-store outage"
-            )
+            assert current.source_cleanup_error_message == ("temporary source object-store outage")
             current.source_retain_until = now
             await session.commit()
         assert await materializer.cleanup_source_once()
@@ -3215,8 +3229,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 (
                     await session.execute(
                         select(DataLifecycleObject).where(
-                            DataLifecycleObject.authority_id
-                            == artifact.lifecycle_authority_id
+                            DataLifecycleObject.authority_id == artifact.lifecycle_authority_id
                         )
                     )
                 ).scalars()
@@ -3231,6 +3244,10 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current.source_cleanup_state == "complete"
             assert current.source_cleanup_attempts == 2
             assert trial.state == "succeeded"
+            assert trial.result == projected_result
+            from loom_service.routes.batches import _rollup_from_trials
+
+            assert _rollup_from_trials([trial]) == aggregate_reward
             assert trial.trajectory_index is not None
             assert artifact.lifecycle_authority_id is not None
             assert len(lifecycle_objects) == len(artifact.storage["files"]) + 5
@@ -3257,8 +3274,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 "source/_artifact_manifest.json",
             ]
             assert all(
-                (item["bucket"], item["key"]) in canonical_store.objects
-                for item in source_evidence
+                (item["bucket"], item["key"]) in canonical_store.objects for item in source_evidence
             )
             answer = next(
                 item for item in storage_files if item["relative_path"] == "artifacts/answer.txt"
@@ -3269,20 +3285,53 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 "s3://trajectories/"
             )
             atif_key = trial.trajectory_index["atif_uri"].removeprefix("s3://trajectories/")
-            assert b'"kind":"llm_call"' in canonical_store.objects[
-                ("trajectories", trajectory_key)
-            ]
-            assert json.loads(canonical_store.objects[("trajectories", atif_key)])[
-                "schema_version"
-            ] == "1.7"
-            assert json.loads(canonical_store.objects[("trajectories", atif_key)])[
-                "metadata"
-            ]["task_id"] == trial.task_id
+            assert b'"kind":"llm_call"' in canonical_store.objects[("trajectories", trajectory_key)]
+            assert (
+                json.loads(canonical_store.objects[("trajectories", atif_key)])["schema_version"]
+                == "1.7"
+            )
+            assert (
+                json.loads(canonical_store.objects[("trajectories", atif_key)])["metadata"][
+                    "task_id"
+                ]
+                == trial.task_id
+            )
             source_prefix = f"service-executions/{trial.team_id}/{lease.id}/1/output/"
             assert not any(
                 bucket == "artifacts" and key.startswith(source_prefix)
                 for bucket, key in store.objects
             )
+        # Exercise the ordinary list API against the actual persisted result.
+        # Authentication is supplied as this fixture's team; no external service runs.
+        import httpx
+
+        from loom_service.dependencies import authed_session
+        from loom_service.routes.trials import router as trials_router
+
+        app = FastAPI()
+        app.include_router(trials_router, prefix="/api/v1")
+
+        async def fixture_session():  # type: ignore[no-untyped-def]
+            async with sessions() as session:
+                yield (
+                    session,
+                    AuthContext(
+                        token_hash=b"local-reward-projection",
+                        type="team",
+                        scopes=["read:own"],
+                        team_id=lease.team_id,
+                        expires_at=None,
+                    ),
+                )
+
+        app.dependency_overrides[authed_session] = fixture_session
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/trials")
+        assert response.status_code == 200, response.text
+        item = next(item for item in response.json()["items"] if item["id"] == str(trial_id))
+        assert item["aggregate_reward"] == aggregate_reward
     finally:
         await engine.dispose()
 

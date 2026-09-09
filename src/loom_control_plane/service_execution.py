@@ -42,6 +42,7 @@ from loom.execution_runtime_contract import (
     validate_runtime_plan_requirements,
 )
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
+from loom.terminal_result_semantics import aggregate_reward_scalar
 from loom_control_plane.execution_admission import (
     ExecutionAdmissionBlockedError,
     ExecutionAdmissionIdentity,
@@ -1595,6 +1596,7 @@ async def finalize_committed_service_execution(
         "schema_version": "loom.service-execution-trial-result.v1",
         "runtime_result": runtime_result.model_dump(mode="json"),
         "reward": runtime_result.verifier_rewards,
+        "aggregate_reward": aggregate_reward_scalar(runtime_result.verifier_rewards),
         "output_manifest_sha256": lease.output_manifest_sha256,
         "output_marker_sha256": lease.output_marker_sha256,
     }
