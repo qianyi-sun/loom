@@ -132,7 +132,10 @@ def test_legacy_application_event_hash_preimage_is_unchanged():
 
 
 def _next_build_row(first, *, operation="capacity", reincarnation=None, **changes):
-    from loom_capacity_manager.typed_membership_commands import derive_build_member, parse_typed_membership_mutation
+    from loom_capacity_manager.typed_membership_commands import (
+        derive_build_member,
+        parse_typed_membership_mutation,
+    )
     value, _request, _result, row = event_row(revision=first.revision + 1, previous=first.head_sha256,
         operation_id=UUID(int=780 + first.revision), key=UUID(int=790 + first.revision))
     request = parse_typed_membership_mutation(json.dumps(first.request_payload))
@@ -228,3 +231,26 @@ def test_build_recreation_structure_binds_its_own_predecessor_event(wrong_head):
     else:
         # This only proves event structure. Actual release facts remain a mandatory store check.
         assert len(_events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)) == 3
+        fourth = _next_build_row(third, reincarnation=evidence)
+        assert len(_events().validate_typed_membership_event_prefix((first, second, third, fourth), value.preparation, value.fleet, execution_epoch=42)) == 4
+
+
+@pytest.mark.parametrize("changes", (
+    {"configuration_generation": 1, "operation_epoch": 1},
+    {"subject_incarnation": UUID(int=999)},
+))
+def test_build_history_rejects_nonmonotonic_or_changed_incarnation(changes):
+    value, _request, _result, first = event_row()
+    second = _next_build_row(first, **changes)
+    with pytest.raises(ValueError):
+        _events().validate_typed_membership_event_prefix((first, second), value.preparation, value.fleet, execution_epoch=42)
+
+
+def test_build_update_cannot_reuse_a_previously_rotated_reporter_token():
+    value, _request, _result, first = event_row()
+    second = _next_build_row(first, operation="update", deployment_generation=2,
+        demand_reporter_incarnation=UUID(int=990), demand_reporter_token_sha256="a" * 64)
+    third = _next_build_row(second, operation="update", deployment_generation=3,
+        demand_reporter_incarnation=UUID(int=991), demand_reporter_token_sha256="f" * 64)
+    with pytest.raises(ValueError):
+        _events().validate_typed_membership_event_prefix((first, second, third), value.preparation, value.fleet, execution_epoch=42)

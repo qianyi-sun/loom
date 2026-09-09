@@ -675,9 +675,12 @@ result and endpoint formats remain unchanged.
 The successor event reader checks typed request/result semantics against every
 indexed event column, the pinned delegate, request digest and original head
 preimage. Its mixed-purpose prefix check enforces consecutive revision/head and
-operation/idempotency-key uniqueness. This is not yet the durable history reader:
-it does not prove lifecycle transitions, retained reporter credentials, actual
-predecessor release, latest-head currentness or SQL insertion authority. The old
+operation/idempotency-key uniqueness. Build history additionally checks service
+generation monotonicity, reporter/token rotation versus retention, same-purpose
+identity and the selected predecessor event for recreation. This is not yet the
+durable history reader: it does not authenticate materialized reporter credentials,
+application lifecycle/base adoption, actual predecessor release, latest-head
+currentness or SQL insertion authority. The old
 application event preimage is retained byte-for-byte, including its original
 request format; old history is not translated into typed commands.
 
