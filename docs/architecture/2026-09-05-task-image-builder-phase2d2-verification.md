@@ -272,6 +272,25 @@ continues to fail closed when none is configured. Encrypted replay bypasses the
 provider, and secret persistence/transaction commit follow its final clock check;
 this patch does not establish response-time freshness across those boundaries.
 
+The CPU-only S3 presigner now signs exact public-origin path-style
+`/bucket/key` GET capabilities from an explicit immutable credential snapshot.
+It owns the signing timestamp once and derives the SigV4 duration from that
+timestamp to the absolute deadline. It reuses botocore's S3 canonicalization
+and HMAC without invoking the base debug logging of canonical queries/signatures
+or changing process-global signing state. Temporary tokens require known expiry
+covering the whole requested window; static credentials have no ambient-provider
+fallback. Targets, UTF-8 key length and final URL size are bounded.
+
+An isolated pinned MinIO fixture verifies these signatures over trusted TLS,
+including spaces, plus signs, percent signs, Unicode and literal `%2F` in keys.
+Changed bucket/key/method/Host-port/signature and expired or wrong-secret
+requests are rejected by the actual server. This establishes the signing
+primitive, not an S3 backend or IAM policy: test credentials are disposable and
+the current provider still expects bucket-host paths. Production wiring must
+compose explicit path-style validation, bounded asynchronous listing/parsing,
+owned credentials and unlocked I/O followed by fresh database admission. No
+storage network work should retain the heartbeat/renewal authority locks.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
