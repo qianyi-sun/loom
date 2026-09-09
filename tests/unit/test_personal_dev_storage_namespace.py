@@ -6,10 +6,16 @@ import pytest
 
 from loom.dev_instance_manifest import dev_instance_manifest_documents
 from loom.dev_instance_runtime import CommandResult, DevInstanceRuntimeError, KubectlClient
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_dev_instance_runtime import _manifest_config
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
-from tests.unit.test_personal_dev_storage_vault import _ANN_JSON, _ANN_SHA, _Cluster, _PASSWORD, _vault
-from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from tests.unit.test_personal_dev_storage_vault import (
+    _ANN_JSON,
+    _ANN_SHA,
+    _PASSWORD,
+    _Cluster,
+    _vault,
+)
 
 
 def test_every_bound_namespace_manifest_retains_storage_annotations():
