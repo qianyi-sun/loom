@@ -653,49 +653,85 @@ async def capacity_session(
             await outer.rollback()
 
 
+@pytest.fixture(scope="session")
+def migration_template_postgres_url(postgres_url: str) -> Iterator[str]:
+    """Migrate an independent clean template once, then close it to clients."""
+
+    yield from _isolated_migration_database(
+        postgres_url, template_name="template0", prepare_template=True
+    )
+
+
 @pytest.fixture
-def isolated_migration_postgres_url(postgres_url: str) -> Iterator[str]:
-    """Provide a clean database for tests that traverse Alembic history.
+def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Iterator[str]:
+    """Provide a fresh head-schema database for tests traversing Alembic history.
 
     The integration suite normally shares one head-schema database. Historical
     migration tests must not downgrade that database: current lifecycle rows
     deliberately make migration 0069 fail closed, and a partial downgrade can
     poison every later test in the shard. Each caller instead gets a fresh
-    database on the session Postgres server, upgraded to head before use.
+    clone of an independently migrated, connection-disabled template. Test
+    mutations never touch the template or another caller's database; migration
+    tests still run their own upgrade/downgrade operations in that clone.
     """
+
+    template_name = make_url(migration_template_postgres_url).database
+    assert template_name is not None
+    yield from _isolated_migration_database(
+        migration_template_postgres_url, template_name=template_name, prepare_template=False
+    )
+
+
+def _isolated_migration_database(
+    postgres_url: str, *, template_name: str, prepare_template: bool
+) -> Iterator[str]:
+    """Own exactly one disposable database, including failed setup cleanup."""
+
     source_url = make_url(postgres_url)
-    database_name = f"loom_migration_{uuid4().hex}"
+    kind = "template_" if prepare_template else ""
+    database_name = f"loom_migration_{kind}{uuid4().hex}"
     admin_url = source_url.set(database="postgres")
     admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
-    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
-    repo_root = Path(__file__).resolve().parents[2]
+    preparer = admin_engine.dialect.identifier_preparer
+    quoted_database = preparer.quote(database_name)
+    quoted_template = preparer.quote(template_name)
+    created = False
 
     try:
         with admin_engine.connect() as conn:
             conn.exec_driver_sql(
-                f"CREATE DATABASE {quoted_database} TEMPLATE template0",
+                f"CREATE DATABASE {quoted_database} TEMPLATE {quoted_template}",
             )
+            created = True
 
         isolated_url = source_url.set(database=database_name).render_as_string(
             hide_password=False,
         )
-        cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
-        cfg.set_main_option("script_location", str(repo_root / "migrations"))
-        cfg.set_main_option("sqlalchemy.url", isolated_url)
-        command.upgrade(cfg, "head")
+        if prepare_template:
+            repo_root = Path(__file__).resolve().parents[2]
+            cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
+            cfg.set_main_option("script_location", str(repo_root / "migrations"))
+            cfg.set_main_option("sqlalchemy.url", isolated_url)
+            command.upgrade(cfg, "head")
+            with admin_engine.connect() as conn:
+                conn.exec_driver_sql(f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false")
         yield isolated_url
     finally:
         try:
-            with admin_engine.connect() as conn:
-                conn.execute(
-                    text(
-                        "SELECT pg_terminate_backend(pid) "
-                        "FROM pg_stat_activity "
-                        "WHERE datname = :database_name AND pid <> pg_backend_pid()",
-                    ),
-                    {"database_name": database_name},
-                )
-                conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+            if created:
+                with admin_engine.connect() as conn:
+                    conn.exec_driver_sql(
+                        f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false"
+                    )
+                    conn.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) "
+                            "FROM pg_stat_activity "
+                            "WHERE datname = :database_name AND pid <> pg_backend_pid()",
+                        ),
+                        {"database_name": database_name},
+                    )
+                    conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
         finally:
             admin_engine.dispose()
 
