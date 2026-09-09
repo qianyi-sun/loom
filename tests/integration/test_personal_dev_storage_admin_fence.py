@@ -14,9 +14,11 @@ from loom.personal_dev_capacity_runtime import (
     PersonalDevCapacityInstallationError,
     PsycopgPersonalDevCapacityDatabase,
     _new_credentials,
+    _role_names,
 )
 from loom.personal_dev_storage_admin_fence import (
     PersonalDevStorageRetiredError,
+    fence_storage_target_transaction,
     storage_admin_connection,
 )
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
@@ -119,6 +121,110 @@ async def test_seal_waits_for_actual_capacity_target_admin_transaction(admin_url
             with pytest.raises(PersonalDevCapacityInstallationError):
                 await writer
             await retirement
+    finally:
+        resume.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("boundary", ("retired", "missing", "drift", "isolation", "database", "no-transaction"))
+async def test_target_guard_rejects_invalid_authority_before_effects(admin_url, boundary):
+    identity = _bound_claim().operation.storage_binding.identity
+    await _provision(admin_url, identity)
+    name = sql.Identifier(f"ld_fence_{identity.storage_incarnation.hex}")
+    if boundary == "retired":
+        await PsycopgPersonalDevCapacityDatabase(admin_url).seal(identity)
+    elif boundary in {"missing", "drift"}:
+        async with await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as admin:
+            statement = "DROP ROLE {}" if boundary == "missing" else "COMMENT ON ROLE {} IS 'foreign'"
+            await admin.execute(sql.SQL(statement).format(name))
+    target_url = make_url(admin_url).set(database=identity.database).render_as_string(hide_password=False)
+    async with await psycopg.AsyncConnection.connect(admin_url if boundary == "database" else target_url) as target:
+        if boundary == "no-transaction":
+            with pytest.raises(PersonalDevStorageRetiredError, match="active transaction"):
+                await fence_storage_target_transaction(target, identity)
+            return
+        if boundary == "isolation":
+            await target.set_isolation_level(psycopg.IsolationLevel.REPEATABLE_READ)
+        with pytest.raises(PersonalDevStorageRetiredError):
+            async with target.transaction():
+                await fence_storage_target_transaction(target, identity)
+                pytest.fail("invalid authority permitted target effects")
+
+
+async def test_migrator_restriction_preserves_active_and_retired_decisions(admin_url):
+    identity = _bound_claim().operation.storage_binding.identity
+    database = PsycopgPersonalDevCapacityDatabase(admin_url)
+    owner, migrator, *_ = _role_names(identity)
+    await database._seal_migrator(identity, owner=owner, migrator=migrator)
+    await _provision(admin_url, identity)
+    await database.seal(identity)
+    await database._seal_migrator(identity, owner=owner, migrator=migrator)
+    with pytest.raises(DevInstanceRuntimeError):
+        await _provision(admin_url, identity)
+
+
+async def test_target_waiting_on_retirement_reads_post_lock_marker(admin_url, monkeypatch):
+    identity = _bound_claim().operation.storage_binding.identity
+    await _provision(admin_url, identity)
+    paused, resume = asyncio.Event(), asyncio.Event()
+    original = psycopg.AsyncConnection.execute
+    retire_pid = None
+
+    async def pause_retirement(self, query, *args, **kwargs):
+        nonlocal retire_pid
+        result = await original(self, query, *args, **kwargs)
+        rendered = query.as_string(self) if isinstance(query, sql.Composable) else query
+        if str(rendered).startswith("COMMENT ON ROLE") and '"state":"retired"' in str(rendered):
+            retire_pid = self.info.backend_pid
+            paused.set()
+            await resume.wait()
+        return result
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "execute", pause_retirement)
+
+    async def retire():
+        async with storage_admin_connection(admin_url, identity, action="retire"):
+            pass
+
+    retirement = asyncio.create_task(retire())
+    tasks = [retirement]
+    target_url = make_url(admin_url).set(database=identity.database).render_as_string(hide_password=False)
+    try:
+        async with asyncio.timeout(25):
+            await paused.wait()
+            async with (
+                await psycopg.AsyncConnection.connect(target_url) as target,
+                await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as observer,
+            ):
+                async def write():
+                    async with target.transaction():
+                        await fence_storage_target_transaction(target, identity)
+                        pytest.fail("waiting target adopted a pre-lock active snapshot")
+
+                writer = asyncio.create_task(write())
+                tasks.append(writer)
+                try:
+                    while True:
+                        blocked = await observer.execute("SELECT %s = ANY(pg_blocking_pids(%s))",
+                            (retire_pid, target.info.backend_pid))
+                        if await blocked.fetchone() == (True,):
+                            break
+                        if writer.done():
+                            await writer
+                        await asyncio.sleep(0.01)
+                    resume.set()
+                    await retirement
+                    with pytest.raises(PersonalDevStorageRetiredError, match="permanently retired"):
+                        await writer
+                finally:
+                    # Cancel a blocked query before its connection context
+                    # attempts rollback; otherwise failure cleanup can wait on itself.
+                    if not writer.done():
+                        writer.cancel()
+                    await asyncio.gather(writer, return_exceptions=True)
     finally:
         resume.set()
         for task in tasks:
