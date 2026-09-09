@@ -2777,7 +2777,10 @@ def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration
         "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
         "AND capacity_database IS NOT NULL "
         "AND capacity_namespace = 'loom-dev-' || name "
-        "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
+        "AND capacity_database = CASE WHEN storage_binding IS NULL "
+        "THEN 'loom_dev_' || replace(name, '-', '_') "
+        "ELSE 'ld_' || replace(name, '-', '_') || '_' || "
+        "replace(subject_incarnation::text, '-', '') END)"
     )
     model_checks = {
         constraint.name: str(constraint.sqltext)
@@ -2810,6 +2813,9 @@ def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration
     assert "capacity_database is not null" in normalized_database_sql
     assert "capacity_namespace = ('loom-dev-'::text || name)" in normalized_database_sql
     assert (
-        "capacity_database = ('loom_dev_'::text || replace(name, '-'::text, '_'::text))"
+        "capacity_database = case when storage_binding is null "
+        "then 'loom_dev_'::text || replace(name, '-'::text, '_'::text) "
+        "else (('ld_'::text || replace(name, '-'::text, '_'::text)) || '_'::text) "
+        "|| replace(subject_incarnation::text, '-'::text, ''::text) end"
         in normalized_database_sql
-    )
+    ), normalized_database_sql
