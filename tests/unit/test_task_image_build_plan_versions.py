@@ -3,12 +3,14 @@
 import hashlib
 import importlib
 import json
+from uuid import uuid4
 
 import pytest
 import rfc8785
 
 from loom.task_image_build_plan import TaskImageBuildPlanV1
-from tests.unit.test_task_image_bundle_capability import _FakeBundleBackend, _plan, _provider
+from tests.unit.test_task_image_build_plan import _authorization, _row
+from tests.unit.test_task_image_bundle_capability import NOW, _FakeBundleBackend, _plan, _provider
 
 
 def _module():
@@ -34,6 +36,13 @@ def test_versioned_parser_retains_exact_v1_serialization_and_hash():
     assert "bundle_content_manifest_sha256" not in parsed.model_dump()
     assert parsed.content_manifest_digest == ""
     assert hashlib.sha256(rfc8785.dumps(parsed.model_dump(mode="json"))).digest() == hashlib.sha256(rfc8785.dumps(historical.model_dump(mode="json"))).digest()
+
+
+def test_v1_wire_bytes_match_pre_versioning_golden():
+    # Captured by executing the actual ee48fa807 V1 module against this fixture,
+    # not generated from the refactored schema during the test.
+    plan = _module().derive_task_image_build_plan(_row(), _authorization())
+    assert hashlib.sha256(plan.model_dump_json().encode()).hexdigest() == "69bea33d92e1024072f8bc5b7d82a410737dfb22a2fbc127014b3d130513665b"
 
 
 def test_v2_carries_registered_digest_without_changing_common_plan_fields():
@@ -79,5 +88,19 @@ def test_v1_bundle_provider_cannot_issue_weaker_capability_for_v2_plan():
     plan = _module().parse_task_image_build_plan(json.dumps(strong_payload()))
     backend = _FakeBundleBackend(())
     with pytest.raises(RuntimeError):
-        _provider(backend).issue(plan, now=plan.authorization_expires_at)
+        _provider(backend).issue(plan, now=NOW)
     assert not backend.list_bounds and not backend.presign_expiries
+
+
+def test_claim_response_preserves_nested_v2_plan_without_downcasting():
+    from loom_task_image_authority.http_contracts import TaskImageMaterializationClaimResponseV1
+
+    plan = _module().parse_task_image_build_plan(json.dumps(strong_payload()))
+    response = TaskImageMaterializationClaimResponseV1(
+        claim_id=uuid4(), materialization_id=plan.materialization_id, attempt_id=uuid4(),
+        lease_epoch=1, state="claimed", deterministic_failure_count=0,
+        lease_expires_at=plan.authorization_expires_at, plan=plan,
+    )
+    restored = TaskImageMaterializationClaimResponseV1.model_validate_json(response.model_dump_json())
+    assert restored.plan == plan
+    assert restored.plan.content_manifest_digest == "6" * 64

@@ -205,6 +205,20 @@ def test_retained_v2_plan_rejects_manifest_identity_collapse(corruption):
         derive(row, attempt, [credential_row(plan)])
 
 
+@pytest.mark.parametrize("strong", [False, True])
+def test_stored_claim_and_registry_readers_preserve_versioned_plan(strong):
+    from loom_task_image_authority.materializations import _stored_attempt_claim_plan
+    from loom_task_image_authority.registry_credentials import _stored_claim_component
+
+    row, attempt, plan = strong_fixture() if strong else fixture()
+    authorization = _authorization(grant_id=plan.grant_id, session_id=plan.session_id, session_generation=plan.session_generation)
+    assert _stored_attempt_claim_plan(attempt, authorization=authorization, materialization_id=row.id) == plan
+    assert _stored_claim_component(attempt, row, authorization=authorization, component="task") == plan
+    row.bundle_content_manifest_sha256 = "7" * 64
+    with pytest.raises(RuntimeError):
+        _stored_claim_component(attempt, row, authorization=authorization, component="task")
+
+
 def test_historical_registry_identity_rotation_preserves_inventory():
     materialization, attempt, plan = fixture()
     first = credential_row(plan)
