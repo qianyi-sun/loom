@@ -540,6 +540,16 @@ acceptance, stale namespace-child-write fencing and allowlisted data transfer
 remain required before selecting it or lifting retained-data recreation's
 interlock.
 
+The initial retained-transfer binding is a pure, canonical lineage record. It
+requires the same environment, subject and owner/team, a distinct incarnation,
+a later distinct destination operation, and the predecessor release digest.
+All three bucket mappings derive from the two complete incarnation bindings;
+paths cannot be supplied independently. Legacy-name adoption is rejected.
+Parsing checks bounded bytes and the exact canonical digest, including nested
+binding validation. This record is not a transfer capability or proof of release:
+management must authenticate and persist its relationship to the source destroy
+and current successor operation. It does not lift the recreation interlock.
+
 The separate active acceptance binding pins the entire V3 preparation, exact
 execution authority and a finite reviewed window; it cannot reinterpret old
 zero-capacity acceptance or operational certificates. The service loop accepts
