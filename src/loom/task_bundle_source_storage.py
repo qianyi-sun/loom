@@ -9,10 +9,12 @@ intents for reconciliation. This module does not enable source registration.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
 
+import rfc8785
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -105,6 +107,39 @@ def _absent(error: ClientError) -> bool:
     }
 
 
+class TaskBundleInventoryCursorV1(BaseModel):
+    """Persist with the receipts from this batch, bound to the whole intent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["loom.task-bundle-inventory-cursor.v1"] = (
+        "loom.task-bundle-inventory-cursor.v1"
+    )
+    intent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    key_marker: str = Field(min_length=1, max_length=1024)
+    version_marker: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("key_marker")
+    @classmethod
+    def _key(cls, value: str) -> str:
+        return TaskBundleObjectIntentV1._key(value)
+
+    @field_validator("version_marker")
+    @classmethod
+    def _version_marker(cls, value: str) -> str:
+        return _version(value)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskBundleVersionBatch:
+    versions: tuple[ObjectWriteResult, ...]
+    continuation: TaskBundleInventoryCursorV1 | None
+
+    @property
+    def observed_end(self) -> bool:
+        """End of this observation only; retain and periodically rescan intents."""
+        return self.continuation is None
+
+
 class S3TaskBundleVersionInventory:
     """Bounded exact-key reconciliation, including non-current retry versions.
 
@@ -119,10 +154,15 @@ class S3TaskBundleVersionInventory:
         self,
         client: Any,
         *,
-        max_versions: int = 4096,
+        max_versions: int = 1000,
         max_read_bytes: int = MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
     ) -> None:
-        if not 1 <= max_versions <= 16384 or not 1 <= max_read_bytes <= 2**30:
+        if (
+            type(max_versions) is not int
+            or not 1 <= max_versions <= 1000
+            or type(max_read_bytes) is not int
+            or not 1 <= max_read_bytes <= 2**30
+        ):
             raise ValueError("source inventory limits are invalid")
         self._client = client
         self._max_versions = max_versions
@@ -176,55 +216,83 @@ class S3TaskBundleVersionInventory:
             body.close()
         return ObjectWriteResult(uri=intent.uri, version_id=version)
 
-    def scan(self, intent: TaskBundleObjectIntentV1) -> tuple[ObjectWriteResult, ...]:
+    def scan_batch(
+        self,
+        intent: TaskBundleObjectIntentV1,
+        *,
+        cursor: TaskBundleInventoryCursorV1 | None = None,
+    ) -> TaskBundleVersionBatch:
+        """Return bounded verified progress, including an empty foreign-only batch.
+
+        Consumers must durably journal the receipts and cursor atomically before
+        advancing. Do not delete a page's marker versions until reaching its end:
+        the provider may require them to resume listing. Concurrent writes/deletes
+        can change inventory during pagination; periodic fresh scans remain
+        necessary, including for retired intents and after observed_end.
+        """
+        fingerprint = hashlib.sha256(rfc8785.dumps(intent.model_dump(mode="json"))).hexdigest()
+        if cursor is not None and (
+            cursor.intent_sha256 != fingerprint
+            or not cursor.key_marker.startswith(intent.object_key)
+        ):
+            raise ValueError("source inventory cursor differs from intent")
+        if intent.size_bytes > self._max_read_bytes:
+            raise ValueError("source inventory budget cannot hold one object")
+        # Limit at the S3 page boundary, assuming every listed entry requires a
+        # complete own-version read. Never discard valid progress at a hard quota.
+        maximum = (
+            min(self._max_versions, self._max_read_bytes // intent.size_bytes)
+            if intent.size_bytes
+            else self._max_versions
+        )
         if self._client.get_bucket_versioning(Bucket=intent.bucket).get("Status") != "Enabled":
             raise ValueError("source inventory requires Enabled bucket versioning")
-        cursor: tuple[str, str] | None = None
-        seen_cursors: set[tuple[str, str]] = set()
-        seen_versions: set[str] = set()
-        results: list[ObjectWriteResult] = []
-        examined, read_bytes = 0, 0
-        for _ in range(32):
-            params: dict[str, Any] = dict(
-                Bucket=intent.bucket, Prefix=intent.object_key, MaxKeys=1000
-            )
-            if cursor is not None:
-                params.update(KeyMarker=cursor[0], VersionIdMarker=cursor[1])
-            page = self._client.list_object_versions(**params)
-            for item in (*page.get("Versions", ()), *page.get("DeleteMarkers", ())):
-                examined += 1
-                if examined > self._max_versions:
-                    raise ValueError("source inventory version limit exceeded")
-                if item.get("Key") != intent.object_key:
-                    continue
-                version = _version(item.get("VersionId"))
-                if version in seen_versions:
-                    raise ValueError("source inventory repeated an object version")
-                seen_versions.add(version)
-            for item in page.get("Versions", ()):
-                if item.get("Key") != intent.object_key:
-                    continue
-                result = self._read_own_version(
-                    intent,
-                    _version(item.get("VersionId")),
-                    remaining_bytes=self._max_read_bytes - read_bytes,
-                )
-                if result is not None:
-                    results.append(result)
-                    read_bytes += intent.size_bytes
-            if page.get("IsTruncated") is False:
-                return tuple(results)
+        params: dict[str, Any] = dict(
+            Bucket=intent.bucket, Prefix=intent.object_key, MaxKeys=maximum
+        )
+        if cursor is not None:
+            params.update(KeyMarker=cursor.key_marker, VersionIdMarker=cursor.version_marker)
+        page = self._client.list_object_versions(**params)
+        entries = (*page.get("Versions", ()), *page.get("DeleteMarkers", ()))
+        if len(entries) > maximum:
+            raise ValueError("source inventory exceeded requested page limit")
+        seen: set[tuple[str, str]] = set()
+        for item in entries:
+            key = item.get("Key")
+            if type(key) is not str or not key.startswith(intent.object_key):
+                raise ValueError("source inventory returned a foreign key")
+            version = _version(item.get("VersionId"))
+            identity = (key, version)
+            if identity in seen or (
+                cursor is not None and identity == (cursor.key_marker, cursor.version_marker)
+            ):
+                raise ValueError("source inventory pagination repeated an object version")
+            seen.add(identity)
+        continuation = None
+        if page.get("IsTruncated") is True:
             key_marker, version_marker = page.get("NextKeyMarker"), page.get("NextVersionIdMarker")
             if (
-                page.get("IsTruncated") is not True
-                or type(key_marker) is not str
-                or not key_marker.startswith(intent.object_key)
+                type(key_marker) is not str
                 or type(version_marker) is not str
-                or not version_marker
+                or (key_marker, version_marker) not in seen
             ):
                 raise ValueError("source inventory pagination is invalid")
-            cursor = (key_marker, version_marker)
-            if cursor in seen_cursors:
-                raise ValueError("source inventory pagination did not progress")
-            seen_cursors.add(cursor)
-        raise ValueError("source inventory pagination limit exceeded")
+            continuation = TaskBundleInventoryCursorV1(
+                intent_sha256=fingerprint,
+                key_marker=key_marker,
+                version_marker=version_marker,
+            )
+        elif page.get("IsTruncated") is not False:
+            raise ValueError("source inventory pagination is invalid")
+        results: list[ObjectWriteResult] = []
+        read_bytes = 0
+        for item in page.get("Versions", ()):
+            if item["Key"] != intent.object_key:
+                continue
+            result = self._read_own_version(
+                intent, item["VersionId"], remaining_bytes=self._max_read_bytes - read_bytes
+            )
+            if result is not None:
+                results.append(result)
+                read_bytes += intent.size_bytes
+        return TaskBundleVersionBatch(versions=tuple(results), continuation=continuation)
