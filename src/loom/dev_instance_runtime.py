@@ -58,6 +58,14 @@ class DevInstanceRuntimeError(RuntimeError):
     """Bounded runtime failure safe to persist and surface."""
 
 
+class WorkloadStatusConflict(DevInstanceRuntimeError):
+    """A failed workload CAS observed only same-object status/version progress."""
+
+
+class KubernetesResourceVersionConflict(DevInstanceRuntimeError):
+    """Kubectl reported its canonical resource-version conflict diagnostic."""
+
+
 @dataclass(frozen=True, slots=True)
 class CommandResult:
     stdout: str
