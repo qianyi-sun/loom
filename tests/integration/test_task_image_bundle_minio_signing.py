@@ -348,3 +348,47 @@ async def test_actual_minio_verifies_exact_registered_manifest(minio_tls, tmp_pa
         else:
             with pytest.raises(RuntimeError):
                 await request
+
+
+@pytest.mark.parametrize("change", ["none", "missing_data", "extra_data", "sidecar_size"])
+async def test_verified_upload_and_real_minio_inventory_match_registered_manifest(minio_tls, tmp_path, change):
+    from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+    from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
+    from loom_benchmark_tool.upload import upload_task_dir
+    from loom_task_image_authority.bundle_s3_backend import MinioTaskImageBundleBackend, S3InventoryLimits
+
+    (tmp_path / "Dockerfile").write_bytes(f"FROM scratch\n# {change}\n".encode())
+    script = tmp_path / "run +%😀.sh"
+    script.write_bytes(b"#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    manifest = capture_task_image_bundle_manifest(tmp_path)
+    prefix = f"registered/{manifest.digest}/"
+
+    class FixtureWriter:
+        # Only adapt ObjectStore's write call to the fixture's explicitly trusted
+        # SDK. Upload/capture and all authority-side signing/TLS/listing are real.
+        async def put_object(self, *, bucket, key, body):
+            return minio_tls[3].put_object(Bucket=bucket, Key=key, Body=body)["ETag"]
+
+    assert await upload_task_dir(store=FixtureWriter(), bucket="loom-bundles", prefix=prefix, task_dir=tmp_path, content_manifest=manifest) == 2
+    if change == "missing_data":
+        minio_tls[3].delete_object(Bucket="loom-bundles", Key=prefix + "Dockerfile")
+    elif change == "extra_data":
+        minio_tls[3].put_object(Bucket="loom-bundles", Key=prefix + "unexpected", Body=b"")
+    elif change == "sidecar_size":
+        minio_tls[3].put_object(Bucket="loom-bundles", Key=prefix + BUNDLE_FILE_METADATA_NAME, Body=b"bad")
+    async with MinioTaskImageBundleBackend(
+        origin=minio_tls[0], bucket="loom-bundles", region="us-east-1",
+        credentials=minio_tls[1], ca_file=minio_tls[4], limits=S3InventoryLimits(page_size=1),
+    ) as backend:
+        request = backend.get_verified_bundle_manifest(
+            bucket="loom-bundles", prefix=prefix, expected_sha256=manifest.digest,
+            task_checksum=manifest.task_checksum, bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256,
+            maximum_objects=2, maximum_bytes=sum(item.size_bytes for item in manifest.files),
+            expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60),
+        )
+        if change == "none":
+            assert await request == manifest
+        else:
+            with pytest.raises(RuntimeError):
+                await request

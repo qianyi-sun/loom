@@ -202,6 +202,17 @@ async def test_zero_byte_objects_are_valid_but_empty_inventory_is_not(monkeypatc
         await _list(backend)
 
 
+async def test_full_last_page_can_require_empty_terminal_page(monkeypatch):
+    # MinIO can report truncated on a full page even when the next page is empty.
+    # Reaching the object limit is not proof of overflow or inventory completion.
+    reader = _Reader()
+    reader.pages = [lambda q: _page(q, next_token="terminal"), lambda q: _page(q, keys=())]
+    backend, _ = _backend(monkeypatch, reader=reader)
+    assert len(await _list(backend, maximum_objects=1)) == 1
+    assert len(reader.requests) == 2
+    assert parse_qs(urlsplit(reader.requests[-1][0]).query)["max-keys"] == ["1"]
+
+
 async def test_backend_close_disables_listing_and_signing(monkeypatch):
     backend, reader = _backend(monkeypatch)
     await backend.aclose()
@@ -511,12 +522,25 @@ async def test_verified_forward_wall_clock_shrinks_next_phase_deadline(monkeypat
 
 async def test_verified_clock_regression_between_phases_is_not_reset(monkeypatch, manifest):
     observed = [NOW]
+    advanced_reads = 0
+
+    def clock():
+        nonlocal advanced_reads
+        current = observed[0]
+        if current == NOW + timedelta(seconds=10):
+            advanced_reads += 1
+            if advanced_reads == 2:
+                # After the last manifest checkpoint, before the first list
+                # checkpoint. A new per-operation clock history would miss it.
+                observed[0] = NOW + timedelta(seconds=5)
+        return current
+
     reader = _VerifiedReader(manifest)
     reader.on_fetch = lambda: observed.__setitem__(0, NOW + timedelta(seconds=10))
-    reader.on_list = lambda: observed.__setitem__(0, NOW + timedelta(seconds=5))
-    backend, _ = _backend(monkeypatch, reader=reader, clock=lambda: observed[0])
+    backend, _ = _backend(monkeypatch, reader=reader, clock=clock)
     with pytest.raises(RuntimeError):
         await _verified(backend, manifest)
+    assert not reader.list_requests
 
 
 async def test_verified_manifest_and_inventory_share_total_timeout_and_cancellation(monkeypatch, manifest):
