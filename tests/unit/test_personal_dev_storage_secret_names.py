@@ -24,7 +24,9 @@ def test_secret_names_preserve_legacy_and_use_full_bound_incarnation(purpose):
     assert resolve(derive_identity(first.name), purpose) == purpose
     assert resolve(first, purpose) == f"{purpose}-{binding.subject_incarnation.hex}"
     assert resolve(first, purpose) != resolve(successor, purpose)
-    assert 1 <= len(resolve(first, purpose)) <= 63
+    # Secret names use the 253-character DNS-subdomain bound, not the
+    # 63-character label/volume-name bound. Logical volume names stay stable.
+    assert 1 <= len(resolve(first, purpose)) <= 253
     assert first.namespace == successor.namespace == f"loom-dev-{first.name}"
 
 
