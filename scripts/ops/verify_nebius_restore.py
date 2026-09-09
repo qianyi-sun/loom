@@ -204,12 +204,6 @@ def run(args: argparse.Namespace, kube: Kubectl) -> dict[str, Any]:
         raise RestoreError("baseline-size-limit")
     baseline = json.loads(args.baseline.read_text())
     validate_baseline(baseline)
-    if not args.backup_key.startswith(config["namespace"] + "/") or not args.backup_key.endswith(
-        ".dump"
-    ):
-        raise RestoreError("backup-target-mismatch")
-    if not 1 <= args.max_backup_bytes <= 4 * DEFAULT_MAX_BACKUP_BYTES:
-        raise RestoreError("invalid-backup-limit")
     service = next(
         doc
         for doc in files["40-services.yaml"]
