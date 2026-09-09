@@ -8,7 +8,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID, uuid4
@@ -44,6 +44,7 @@ from loom_task_image_authority.bundle_capability import (
     TaskImageBundleCapabilityError,
     TaskImageBundleCapabilityProvider,
 )
+from loom_task_image_authority.bundle_runtime import configured_bundle_provider
 from loom_task_image_authority.config import (
     TaskImageAuthoritySettings,
     TaskImageSecretStoreKeyring,
@@ -429,6 +430,8 @@ def create_app(
 ) -> FastAPI:
     """Create the independent projection service; it owns no Slurm client."""
 
+    if bundle_capability_provider is not None and settings.bundle_backend != "disabled":
+        raise ValueError("native and injected bundle providers cannot be combined")
     resolved_verifier = verifier or TaskImagePrincipalVerifier.from_file(settings.principals_file)
     resolved_now = now_factory or (lambda: datetime.now(UTC))
     resolved_challenge_nonce = challenge_nonce_factory or uuid4
@@ -445,33 +448,52 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        nonlocal resolved_bundle_capability_provider
+        resolved_bundle_capability_provider = bundle_capability_provider
         app.state.ready = False
         app.state.engine = None
         app.state.session_factory = None
         app.state.keyring = None
+        resources = AsyncExitStack()
+
+        async def close_owned_resources() -> None:
+            try:
+                await resources.aclose()
+            finally:
+                resolved_engine = cast(AsyncEngine | None, app.state.engine)
+                if resolved_engine is not None:
+                    await resolved_engine.dispose()
+                    app.state.engine = None
+
         try:
-            database_url = read_owner_only_secret(settings.db_url_file)
-            keyring = load_secret_store_keyring(settings.secret_store_keyring_file)
-            engine = create_async_engine(database_url, isolation_level="SERIALIZABLE")
-            app.state.engine = engine
-            await assert_schema_at_head(
-                engine,
-                db_url_env_var="LOOM_TASK_IMAGE_AUTHORITY_DB_URL",
-            )
-            app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
-            app.state.keyring = keyring
-            app.state.ready = True
-            metrics.ready.set(1)
-        except Exception:
-            metrics.ready.set(0)
-        try:
+            try:
+                database_url = read_owner_only_secret(settings.db_url_file)
+                keyring = load_secret_store_keyring(settings.secret_store_keyring_file)
+                if bundle_capability_provider is None:
+                    resolved_bundle_capability_provider = await resources.enter_async_context(
+                        configured_bundle_provider(settings, clock=resolved_now),
+                    )
+                engine = create_async_engine(database_url, isolation_level="SERIALIZABLE")
+                app.state.engine = engine
+                await assert_schema_at_head(
+                    engine,
+                    db_url_env_var="LOOM_TASK_IMAGE_AUTHORITY_DB_URL",
+                )
+                app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+                app.state.keyring = keyring
+                app.state.ready = True
+                metrics.ready.set(1)
+            except Exception:
+                app.state.ready = False
+                metrics.ready.set(0)
+                resolved_bundle_capability_provider = bundle_capability_provider
+                await close_owned_resources()
             yield
         finally:
             app.state.ready = False
             metrics.ready.set(0)
-            resolved_engine = cast(AsyncEngine | None, app.state.engine)
-            if resolved_engine is not None:
-                await resolved_engine.dispose()
+            resolved_bundle_capability_provider = bundle_capability_provider
+            await close_owned_resources()
 
     app = FastAPI(
         title="Loom Task-Image Authority",

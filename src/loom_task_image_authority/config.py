@@ -57,6 +57,10 @@ class TaskImageAuthoritySettings(BaseSettings):
     port: int = Field(default=8445, ge=1, le=65535)
     request_rate_limit_per_second: int = Field(default=64, ge=1, le=10_000)
     request_concurrency_limit: int = Field(default=32, ge=1, le=1024)
+    bundle_backend: Literal["disabled", "minio"] = "disabled"
+    bundle_region: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    bundle_credentials_file: Path | None = None
+    bundle_reader_ca_file: Path | None = None
     bundle_public_https_origin: str | None = Field(default=None, max_length=2048)
     bundle_expected_bucket: str | None = Field(
         default=None,
@@ -119,6 +123,14 @@ class TaskImageAuthoritySettings(BaseSettings):
     def _bundle_configuration_is_complete_and_safe(
         self,
     ) -> TaskImageAuthoritySettings:
+        native = (self.bundle_region, self.bundle_credentials_file, self.bundle_reader_ca_file)
+        if self.bundle_backend == "minio":
+            if any(value is None for value in (*native, self.bundle_public_https_origin, self.bundle_expected_bucket)):
+                raise ValueError("native bundle configuration must be complete")
+            assert self.bundle_public_https_origin is not None
+            _validate_https_origin(self.bundle_public_https_origin, label="native bundle origin")
+        elif any(value is not None for value in native):
+            raise ValueError("native bundle configuration requires the minio backend")
         if (self.bundle_public_https_origin is None) != (self.bundle_expected_bucket is None):
             raise ValueError("bundle capability configuration must be all present or absent")
         if self.bundle_public_https_origin is not None:

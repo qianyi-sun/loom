@@ -264,9 +264,8 @@ This permits valid signing after request start without extending authorization.
 Deterministic tests cover elapsed listing/signing time, expiry during I/O and
 response construction, backward/future clocks, exact deadline matching, and
 subsecond rounding. The composed fixture retains an actual advancing signing
-clock. These are provider-contract checks: the backend and async provider below
-still require production settings/lifespan wiring. A production
-adapter must compose the timestamp/deadline contract and bounded network I/O;
+clock. These are provider-contract checks: the configured runtime described below
+composes the timestamp/deadline contract and bounded network I/O;
 test backends and post-call clock checks are not that evidence. The provider
 continues to fail closed when none is configured. The HTTP composition described
 below also validates encrypted replays and checks freshness across persistence,
@@ -322,9 +321,9 @@ wire input, trust failures, queue/deadline/cancellation behavior and orphaned
 connection disposal; the pinned MinIO integration exercises production signing,
 reader and XML parser together across paginated responses.
 
-This is a transport primitive, not production adapter activation. Path-style
-consumer validation and explicit credential/settings/lifespan deployment wiring
-remain required; the HTTP route now supports the unlocked async composition below.
+This is a transport primitive, not production activation. Path-style consumer
+alignment and deployment credential provisioning remain required; the HTTP route
+and configured runtime support the unlocked async composition below.
 
 The native MinIO backend now owns the reader and an explicit static signing
 identity. It rejects ambient or session-token credentials and returns only
@@ -374,6 +373,53 @@ changes during actual row-lock waits and persistence/response expiry. Actual SQL
 constraint faults verify conflict mapping and rollback; they are not a full
 cross-grant concurrent HTTP test. The synchronous injected-provider compatibility
 path also runs outside HTTP transactions, but is not production async I/O evidence.
+
+### Configured bundle runtime
+
+The service entrypoint constructs the native provider only when
+`LOOM_TASK_IMAGE_AUTHORITY_BUNDLE_BACKEND=minio`. The default is `disabled`;
+origin/bucket settings alone do not enable issuance. MinIO mode requires all of
+these authority-prefixed settings:
+
+| Suffix after `LOOM_TASK_IMAGE_AUTHORITY_` | Required value |
+| --- | --- |
+| `BUNDLE_PUBLIC_HTTPS_ORIGIN` | Canonical origin-only HTTPS URL, with exact public port if needed |
+| `BUNDLE_EXPECTED_BUCKET` | Exact approved bundle bucket |
+| `BUNDLE_REGION` | Explicit signing region |
+| `BUNDLE_CREDENTIALS_FILE` | Stable owner-only regular file, owned by the service UID with mode 0600 |
+| `BUNDLE_READER_CA_FILE` | Explicit trusted CA for that endpoint |
+
+The credential file is bounded to 16 KiB and contains exactly `schema_version`
+(integer 1), `access_key` and `secret_key`. Duplicate fields, extra fields,
+temporary tokens, invalid keys, symlinks and permissive credential-file modes are
+rejected without returning their content. No ambient AWS identity or region is
+used. The identity is read once per lifespan; rotation requires a service restart.
+It stays in the authority process, never in a builder allocation.
+
+The native backend always selects path-style URLs and the existing bounded
+transport/inventory defaults: 256 entries/page, 16 pages, 16 MiB total listing XML,
+a 30-second inventory deadline, four simultaneous reads, five-second connect/idle
+limits, and 32 KiB headers/4 MiB body/8 MiB wire limits per page. Existing
+`BUNDLE_MAXIMUM_OBJECTS`, `BUNDLE_MAXIMUM_BYTES` and `BUNDLE_URL_EXPIRY_SECONDS`
+further bound each capability; grant/session/lease expiry can shorten its lifetime
+and I/O time budgets.
+
+Lifespan startup validates configuration and credentials, constructs the owned
+backend, and checks the database before advertising service readiness. Invalid
+configured startup stays unready. Failed/cancelled startup and normal shutdown
+close the backend and dispose the database engine; a later lifespan creates a
+fresh backend. Schema-check failure releases resources immediately, rather than
+retaining an idle pool while serving unready. Injected compatibility providers remain caller-owned and cannot
+be combined with native mode. Readiness establishes local construction/schema
+validity, not remote credential usability or native builder activation.
+
+Maintained tests separately exercise configured runtime issuance and exact GETs
+against pinned TLS MinIO, and historical-clock HTTP/SQL lifecycle composition
+with only the storage wire response substituted. They do not establish a complete
+HTTP-to-native-Go download. Deployment still needs the approved native identity,
+bucket policy and owned credential-file copies: Kubernetes Secret projections
+are not automatically suitable owner-only regular files. No deployment manifest
+has been enabled by adding these settings.
 
 Native downloader alignment is also still required: the production Go
 `DownloadBundle` currently accepts a different `schema`/`files` capability than
