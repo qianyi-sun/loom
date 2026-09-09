@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from loom.db.schema import (
     TaskImageBuildSessionGeneration,
@@ -137,6 +137,20 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
         pytest.skip("LOOM_GO_V2_TEST_BINARY not configured")
     helper = Path(helper_value)
     assert helper.is_file()
+    observed_publication_modes = set()
+
+    def trace_publication(name):
+        original = getattr(authority_api, name)
+
+        async def call(session, **values):
+            assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
+            observed_publication_modes.add(name)
+            return await original(session, **values)
+
+        return call
+
+    for name in ("submit_publication_job", "lock_publication_input", "read_publication_job"):
+        monkeypatch.setattr(authority_api, name, trace_publication(name))
     now = datetime.now(UTC)
     monkeypatch.setattr(projection, "NOW", now - timedelta(seconds=10))
     reader, root, _ = _graph(arch="arm64")
@@ -345,6 +359,9 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
                     with pytest.raises(expected_error):
                         await asyncio.wait_for(verifying, 10)
                 assert any(path.endswith("publication-poll") for _, path, _ in authority.operations)
+                assert "submit_publication_job" in observed_publication_modes
+                if condition != "revoke-during-signing":
+                    assert "read_publication_job" in observed_publication_modes
                 releases = [
                     code for _, path, code in authority.operations if path.endswith("/release")
                 ]
