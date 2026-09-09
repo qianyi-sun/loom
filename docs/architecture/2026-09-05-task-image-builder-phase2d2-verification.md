@@ -431,6 +431,50 @@ trusted TLS configuration, deadline/session bindings and authenticated content
 metadata together; do not remove the downloader's integrity checks to accept an
 incomplete capability.
 
+### Registration-bound bundle content
+
+The legacy mode sidecar is not a per-file content manifest. The existing task
+checksum also cannot replace those checks: its delimiter-only stream can hash
+different distributions of bytes across the same file paths identically. A
+maintained regression constructs such inputs with equal mode metadata. Phase 1's
+checksum algorithm is retained for compatibility, not promoted to stronger native
+content authority.
+
+The new `loom.task-image-bundle-content.v1` contract binds sorted data-file paths,
+individual SHA-256 hashes, byte sizes and portable `0644`/`0755` modes, together
+with the legacy task checksum and mode-sidecar digest. Its bytes use RFC8785;
+the mode sidecar retains its distinct Python sorted/ASCII-escaped JSON encoding.
+The parser requires the expected manifest digest, exact canonical bytes, bounded
+file/path/byte counts, no file/directory conflicts and consistent mode provenance.
+Content-manifest and mode-sidecar bytes each have a separate 4 MiB ceiling.
+
+Trusted capture walks a current-UID-owned regular tree using descriptor-relative
+no-follow operations. It refuses symlinks, hardlinks and special files, bounds
+tree traversal and file reads, and checks file/directory identities before and
+after capture. The upload path can explicitly accept this captured manifest: it
+rechecks the complete source before writes, then opens and verifies each exact
+file after preceding asynchronous operations. The immutable verified bytes are
+passed directly to storage. Drift fails without publishing a new manifest; any
+already-written objects remain incomplete, non-authoritative artifacts.
+
+Manifest-aware upload requires a content-digest-bound data prefix. It writes the
+new manifest last at `loom-bundle-manifests/v1/sha256/<digest>.json`, outside the
+data prefix, while keeping the old mode sidecar inside it. Thus legacy prefix
+downloads retain the same authored files, checksums and executable modes. These
+checks establish bytes supplied to storage, not remote storage immutability or
+native download acceptance. A manifest object may already exist from a different
+prefix; its existence is not a successful-publication receipt for this prefix.
+Registration must require the complete upload to succeed before binding provenance.
+
+Producer orchestration has not yet been switched to this stronger contract.
+Registration provenance, native materialization identity, publication/retention
+bindings, capability metadata and the real Go downloader must change together.
+In particular, the current task/checksum/architecture key and uniqueness rule
+would reuse legacy rows even when a stronger source manifest differs. Do not
+silently upgrade an existing ready image or infer manifest authority from mutable
+stored objects. Native admission must remain closed until those bindings and
+the real producer-to-downloader path are verified.
+
 ## Statement and signer
 
 Use schema `loom.task-image-publication/v1`, RFC 8785 bytes and Ed25519 over
