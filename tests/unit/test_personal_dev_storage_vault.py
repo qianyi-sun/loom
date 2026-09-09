@@ -10,8 +10,12 @@ import yaml
 
 from loom.dev_instance import derive_identity
 from loom.dev_instance_runtime import (
-    CommandResult, DevInstanceRuntimeError, KubectlClient,
-    KubectlMinioTenantProvisioner, KubectlSecretVault, instance_database_url,
+    CommandResult,
+    DevInstanceRuntimeError,
+    KubectlClient,
+    KubectlMinioTenantProvisioner,
+    KubectlSecretVault,
+    instance_database_url,
 )
 from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
@@ -163,3 +167,28 @@ async def test_new_incarnation_gets_disjoint_cache_values_after_old_namespace_is
     assert await vault.database_password(new_identity) == "c" * 32
     assert await vault.admin_token(new_identity) != old_token
     assert (await vault.object_credentials(new_identity))[0] != binding.object_store_identity[0]
+
+
+@pytest.mark.parametrize("method", ("database_password", "admin_token", "object_credentials", "store"))
+async def test_legacy_vault_cannot_reinterpret_bound_secrets(method):
+    cluster = _Cluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    await _vault(cluster).store(identity, _PASSWORD)
+    with pytest.raises(DevInstanceRuntimeError):
+        await getattr(_vault(cluster), method)(derive_identity(identity.name), *([_PASSWORD] if method == "store" else []))
+
+
+async def test_namespace_creation_race_never_attaches_binding_to_concurrent_namespace():
+    class RacingCluster(_Cluster):
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            if "create" in argv:
+                self.namespace = {"metadata": {"name": "loom-dev-alice", "uid": "concurrent"}}
+                raise DevInstanceRuntimeError("namespace already exists")
+            return await super().run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+    cluster = RacingCluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    with pytest.raises(DevInstanceRuntimeError):
+        await _vault(cluster).store(identity, _PASSWORD)
+    assert cluster.secrets == {}
+    assert "annotations" not in cluster.namespace["metadata"]
