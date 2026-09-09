@@ -377,13 +377,13 @@ def _strip_protected_worker_runtime_bootstrap(
         "command": [
             "/bin/sh",
             "-euc",
-            "install -d -m 0700 /run/loom/protected-worker-runtime; "
-            "chmod 0700 /run/loom/protected-worker-runtime; "
-            "chmod g-s /run/loom/protected-worker-runtime; "
+            "install -d -m 0700 /run/loom/protected-worker-runtime-volume/private; "
+            "chmod 0700 /run/loom/protected-worker-runtime-volume/private; "
+            "chmod g-s /run/loom/protected-worker-runtime-volume/private; "
             "exec python -m loom.personal_dev_secret_init "
             "--profile staging-protected-worker-runtime "
             "--source /var/run/loom/protected-worker-runtime-projected "
-            "--destination /run/loom/protected-worker-runtime/files",
+            "--destination /run/loom/protected-worker-runtime-volume/private/files",
         ],
         "image": expected_image,
         "name": "protected-worker-runtime-init",
@@ -405,7 +405,7 @@ def _strip_protected_worker_runtime_bootstrap(
                 "readOnly": True,
             },
             {
-                "mountPath": "/run/loom/protected-worker-runtime",
+                "mountPath": "/run/loom/protected-worker-runtime-volume",
                 "name": "protected-worker-runtime",
             },
         ],
@@ -417,6 +417,7 @@ def _strip_protected_worker_runtime_bootstrap(
     expected_mount = {
         "mountPath": "/run/loom/protected-worker-runtime",
         "name": "protected-worker-runtime",
+        "subPath": "private",
         "readOnly": True,
     }
     expected_volumes = [

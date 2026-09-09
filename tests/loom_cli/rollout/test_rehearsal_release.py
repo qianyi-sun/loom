@@ -396,6 +396,9 @@ def _contains_null_mapping_field(value: object) -> bool:
         "drifted-env",
         "missing-mount",
         "drifted-mount",
+        "missing-private-subpath",
+        "drifted-private-subpath",
+        "drifted-init-volume-root",
         "missing-projected-volume",
         "drifted-projected-volume",
         "missing-memory-volume",
@@ -447,6 +450,20 @@ def test_release_artifact_rejects_partial_or_drifted_protected_runtime_bootstrap
         next(
             item for item in container["volumeMounts"] if item["name"] == "protected-worker-runtime"
         )["readOnly"] = False
+    elif mutation in {"missing-private-subpath", "drifted-private-subpath"}:
+        mount = next(
+            item for item in container["volumeMounts"] if item["name"] == "protected-worker-runtime"
+        )
+        if mutation == "missing-private-subpath":
+            mount.pop("subPath")
+        else:
+            mount["subPath"] = "other"
+    elif mutation == "drifted-init-volume-root":
+        next(
+            item
+            for item in pod["initContainers"][0]["volumeMounts"]
+            if item["name"] == "protected-worker-runtime"
+        )["mountPath"] = "/run/loom/protected-worker-runtime"
     elif mutation == "missing-projected-volume":
         pod["volumes"] = [
             item for item in pod["volumes"] if item["name"] != "protected-worker-runtime-projected"

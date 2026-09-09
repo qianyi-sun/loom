@@ -157,6 +157,7 @@ def test_protected_candidate_mounts_runtime_database_only_in_control_plane() -> 
         {
             "name": "protected-worker-runtime",
             "mountPath": "/run/loom/protected-worker-runtime",
+            "subPath": "private",
             "readOnly": True,
         },
     ]
@@ -173,7 +174,7 @@ def test_protected_candidate_mounts_runtime_database_only_in_control_plane() -> 
         },
         {
             "name": "protected-worker-runtime",
-            "mountPath": "/run/loom/protected-worker-runtime",
+            "mountPath": "/run/loom/protected-worker-runtime-volume",
         },
     ]
     volumes = {item["name"]: item for item in pod["volumes"]}

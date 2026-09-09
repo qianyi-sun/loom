@@ -598,13 +598,13 @@ def dev_instance_manifest_documents(
                 "command": [
                     "/bin/sh",
                     "-euc",
-                    "install -d -m 0700 /run/loom/protected-worker-runtime; "
-                    "chmod 0700 /run/loom/protected-worker-runtime; "
-                    "chmod g-s /run/loom/protected-worker-runtime; "
+                    "install -d -m 0700 /run/loom/protected-worker-runtime-volume/private; "
+                    "chmod 0700 /run/loom/protected-worker-runtime-volume/private; "
+                    "chmod g-s /run/loom/protected-worker-runtime-volume/private; "
                     "exec python -m loom.personal_dev_secret_init "
                     "--profile protected-worker-runtime "
                     "--source /var/run/loom/protected-worker-runtime-projected "
-                    "--destination /run/loom/protected-worker-runtime/files",
+                    "--destination /run/loom/protected-worker-runtime-volume/private/files",
                 ],
                 "resources": {
                     "requests": {"cpu": "10m", "memory": "16Mi"},
@@ -625,7 +625,7 @@ def dev_instance_manifest_documents(
                     },
                     {
                         "name": "protected-worker-runtime",
-                        "mountPath": "/run/loom/protected-worker-runtime",
+                        "mountPath": "/run/loom/protected-worker-runtime-volume",
                     },
                 ],
             }
@@ -634,6 +634,7 @@ def dev_instance_manifest_documents(
             {
                 "name": "protected-worker-runtime",
                 "mountPath": "/run/loom/protected-worker-runtime",
+                "subPath": "private",
                 "readOnly": True,
             }
         ]

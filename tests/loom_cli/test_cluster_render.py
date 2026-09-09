@@ -1172,6 +1172,7 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
     assert {
         "name": "protected-worker-runtime",
         "mountPath": "/run/loom/protected-worker-runtime",
+        "subPath": "private",
         "readOnly": True,
     } in container["volumeMounts"]
 
@@ -1198,7 +1199,7 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
         },
         {
             "name": "protected-worker-runtime",
-            "mountPath": "/run/loom/protected-worker-runtime",
+            "mountPath": "/run/loom/protected-worker-runtime-volume",
         },
     ]
 

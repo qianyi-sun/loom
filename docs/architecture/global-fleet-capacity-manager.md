@@ -412,6 +412,17 @@ prepared runtime directory, read-only. A held projected-generation descriptor
 and pre-install rebinding check prevent a Kubernetes `..data` rotation from
 mixing credential generations.
 
+The staging and personal-candidate control planes prepare their separate
+protected worker-runtime credential with the same non-root restrictions. The
+init container mounts the memory-backed volume at
+`/run/loom/protected-worker-runtime-volume` and creates an owner-owned `private`
+child, mode `0700` with inherited setgid removed. It does not chmod the
+Kubernetes-owned, fsGroup-writable volume root. The control plane mounts only
+that child through read-only `subPath: private` at
+`/run/loom/protected-worker-runtime`, preserving the `files/database-url` and
+staging `files/ca.crt` consumer paths. Secret-copy ownership and exact-mode
+validation remain mandatory; no root init or extra capability is required.
+
 When an execution policy is rendered, the same immutable manager image also
 runs a byte-transparent TCP router pinned to OLDLAB1. It binds only
 `192.168.50.103:31443` and forwards to the still-ClusterIP-only manager Service;
