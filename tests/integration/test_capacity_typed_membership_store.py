@@ -281,3 +281,29 @@ async def test_typed_store_replay_rejects_retained_json_type_aliases(capacity_se
     await capacity_session.flush()
     with pytest.raises(ConfigurationConflictError):
         await _apply(capacity_session, request)
+
+
+@pytest.mark.parametrize("scope", ("fleet", "subject"))
+async def test_typed_store_refreshes_retained_base_and_fleet_documents(isolated_capacity_postgres_url, scope):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_capacity_manager.models import CapacityConfigGeneration
+
+    engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as reader:
+            async with reader.begin():
+                _management, preparation, _fleet, execution = await typed_sql_execution(reader)
+                request = build_request(preparation, execution)
+                await _apply(reader, request)
+                retained = (await reader.scalars(select(CapacityConfigGeneration).where(CapacityConfigGeneration.scope == scope))).first()
+                retained_id = retained.id
+            async with sessions() as writer, writer.begin():
+                row = await writer.get(CapacityConfigGeneration, retained_id)
+                row.payload = row.payload | {"schema_version": 99}
+            assert retained.payload["schema_version"] == 1
+            with pytest.raises(ConfigurationConflictError):
+                await _apply(reader, request)
+    finally:
+        await engine.dispose()
