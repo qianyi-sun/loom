@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 _MAX_BINDING_BYTES = 16 * 1024
 STORAGE_BINDING_ANNOTATION = "loom.dev/storage-binding"
 STORAGE_BINDING_SHA_ANNOTATION = "loom.dev/storage-binding-sha256"
+_SECRET_PURPOSES = frozenset({
+    "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime",
+    "loom-capacity-agent", "loom-capacity-agent-credentials",
+})
 
 
 class PersonalDevStorageBindingV1(StrictV1Model):
@@ -113,6 +117,16 @@ def personal_dev_storage_annotations(identity: DevInstanceIdentity) -> dict[str,
         STORAGE_BINDING_ANNOTATION: canonical_bytes(identity.storage_binding).decode(),
         STORAGE_BINDING_SHA_ANNOTATION: canonical_digest(identity.storage_binding),
     }
+
+
+def personal_dev_secret_name(identity: DevInstanceIdentity, purpose: str) -> str:
+    """Resolve a fixed credential purpose without aliasing a previous incarnation."""
+    identity = validate_personal_dev_storage_identity(identity)
+    if purpose not in _SECRET_PURPOSES:
+        raise ValueError("unknown personal development Secret purpose")
+    if identity.storage_binding is None:
+        return purpose
+    return f"{purpose}-{identity.storage_binding.subject_incarnation.hex}"
 
 
 def personal_dev_storage_secret_data(identity: DevInstanceIdentity) -> dict[str, bytes]:
