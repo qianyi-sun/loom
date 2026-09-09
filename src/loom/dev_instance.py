@@ -5,6 +5,9 @@ shared fleet with staging/production. Every environment's identity
 (namespace, database, buckets, route, worker pool, provider namespace) is a
 **pure, non-overridable function of its ``name``** — the core guardrail, so an
 instance can never be pointed at another instance's or a base env's resources.
+The separate incarnation-storage binding derives fresh physical storage while
+preserving name-bound namespaces and routes. Legacy ``derive_identity`` itself
+does not opt deployments into that explicitly persisted storage layout.
 
 This module is the single source of truth for that derivation and for the
 create-time guardrail check. It has no I/O: the guarded provisioning endpoint
@@ -18,6 +21,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from uuid import UUID
 
 # ── Envelope defaults (operator-tunable via control-plane config) ────────────
 #: Runtime ceiling enforced by the one global development-fleet autoscaler.
@@ -80,6 +84,7 @@ class DevInstanceIdentity:
     route_path: str  # /dev-<name>  (interim path route)
     worker_pool: str  # dev-<name>
     provider_connection_namespace: str  # dev-<name>
+    storage_incarnation: UUID | None = None  # Explicit opt-in; legacy storage stays name-bound.
 
 
 @dataclass(frozen=True)

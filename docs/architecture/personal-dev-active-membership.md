@@ -285,6 +285,16 @@ incarnation-specific storage and allowlisted application-data transfer, not reus
 of the predecessor's protected authority. This retained-data successor path must
 be completed before enabling recreation.
 
+The pure `PersonalDevStorageBindingV1` contract distinguishes historical
+`legacy-name-v1` storage from explicit `incarnation-v1` storage. The new layout
+derives database/roles/buckets and object-store identities from the name plus
+full subject incarnation, retaining stable namespaces and routes. Short purpose
+suffixes keep every PostgreSQL and bucket name within 63 bytes. Bindings pin
+owner user/team and subject identities; resource paths are never caller overrides.
+This contract alone does not provision storage: durable lifecycle/activation
+propagation, credential fencing and allowlisted data transfer remain required
+before selecting the new layout or lifting the recreation interlock.
+
 The separate active acceptance binding pins the entire V3 preparation, exact
 execution authority and a finite reviewed window; it cannot reinterpret old
 zero-capacity acceptance or operational certificates. The service loop accepts

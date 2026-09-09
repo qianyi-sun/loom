@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy.engine import make_url
 
-from loom.dev_instance import DevInstanceIdentity
+from loom.dev_instance import DevInstanceIdentity, validate_name
 
 PROTECTED_WORKER_RUNTIME_SECRET_NAME = "loom-protected-worker-runtime"
 
@@ -15,6 +17,16 @@ class CapacityRuntimeCredentialError(ValueError):
 
 def capacity_role_names(identity: DevInstanceIdentity) -> tuple[str, str, str, str, str, str]:
     slug = identity.name.replace("-", "_")
+    incarnation = identity.storage_incarnation
+    if incarnation is not None:
+        validate_name(identity.name)
+        if not isinstance(incarnation, UUID) or incarnation.int == 0:
+            raise CapacityRuntimeCredentialError("protected storage incarnation is invalid")
+        prefix = f"lc_{slug}_{incarnation.hex}"
+        return (
+            f"{prefix}_o", f"{prefix}_m", f"{prefix}_a",
+            f"{prefix}_x", f"{prefix}_b", f"{prefix}_r",
+        )
     return (
         f"loom_cap_{slug}_owner",
         f"loom_cap_{slug}_migrator",
