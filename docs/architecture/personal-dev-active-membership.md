@@ -721,7 +721,7 @@ Persisted typed-history reads now verify these roots and installation records
 even at revision zero, without consulting mutable shadow projection rows for
 origin authority. Current materialization reuses the immutable base reader;
 managed application overlays replace the base exactly once after authenticated
-lifecycle validation. Static-base takeover and recreation remain rejected.
+lifecycle validation. Static-base takeover and durable recreation remain rejected.
 The pure typed event validator now checks an adopted application's first
 update/capacity/destroy against that pinned base, without inventing a create
 event. It preserves identity and non-deployment service evidence, requires update
@@ -729,6 +729,13 @@ to advance deployment and rotate reporting, and reserves base names, tokens and
 installation operation IDs. The transaction and SQL guard additionally verify
 the original retained installation and reporter state; passing this pure
 validator alone grants no adoption.
+
+Pure application recreation validation now mirrors build history: the successor
+must have a fresh incarnation/reporter, restart service generations at one, and
+bind its certificate to the exact disabled predecessor event and first immutable
+origin. Later mutations must retain that certificate. These structural checks
+do not authenticate release facts; durable typed recreation remains closed until
+the transactional release-ledger reader and SQL guard enforce the transition.
 
 The retained application reader exposes installation-only validation separately
 from reporter validation. Historical installation reads still verify exact

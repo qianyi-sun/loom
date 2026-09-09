@@ -156,19 +156,18 @@ def _build_transition(
 def _application_transition(
     request: PersonalMembershipMutationV2, member: PersonalApplicationMemberV1,
     prior: tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent] | None,
-    used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
+    origin: SubjectConfigurationV1, used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
     base: ManagedApplicationOriginV1 | None = None,
 ) -> None:
     """Authenticate lifecycle from a real prior event or pinned managed origin."""
     assert isinstance(request.command, PersonalApplicationCommandV2)
     projection, subject = request.command.projection, member.configuration
     fresh_reporter = subject.demand_reporter_incarnation not in reporters and projection.demand_reporter_token_sha256 not in tokens
-    if member.reincarnation is not None:
-        raise ValueError("typed application recreation requires authenticated release")
     if prior is None and base is None:
         if (
             projection.operation_kind != "create" or subject.subject_incarnation in used_incarnations
             or subject.candidate_generation != 1 or subject.deployment_generation != 1 or not fresh_reporter
+            or member.reincarnation is not None
         ):
             raise ValueError("initial application membership requires a fresh service identity")
         return
@@ -184,11 +183,30 @@ def _application_transition(
         old_owner = old_result.member.owner_id
     if (
         member.owner_id != old_owner or subject.display_name != old.display_name
-        or subject.subject_incarnation != old.subject_incarnation
         or subject.configuration_generation <= old.configuration_generation
-        or old.lifecycle_state == "disabled" or projection.operation_kind == "create"
     ):
         raise ValueError("application membership historical identity or lifecycle changed")
+    if old.lifecycle_state == "disabled" and projection.operation_kind == "create":
+        evidence = member.reincarnation
+        reference = ConfigurationGenerationRefV1(scope="subject", subject_id=origin.subject_id,
+            subject_incarnation=origin.subject_incarnation, generation=origin.configuration_generation,
+            digest=canonical_digest(origin))
+        if (
+            prior is None or evidence is None or evidence.origin != reference
+            or subject.subject_incarnation in used_incarnations or not fresh_reporter
+            or subject.candidate_generation != 1 or subject.deployment_generation != 1
+            or evidence.predecessor != old or evidence.predecessor_revision != prior[2].revision
+            or evidence.predecessor_head_sha256 != prior[2].head_sha256
+            or evidence.admission_revision != member.revision
+        ):
+            raise ValueError("application membership predecessor event changed")
+        return  # Durable admission must separately authenticate the release ledger.
+    if (
+        old.lifecycle_state == "disabled" or projection.operation_kind == "create"
+        or subject.subject_incarnation != old.subject_incarnation
+        or member.reincarnation != (None if prior is None else prior[1].member.reincarnation)
+    ):
+        raise ValueError("application membership requires a released fresh reincarnation")
     if projection.operation_kind == "update":
         if (
             subject.deployment_generation <= old.deployment_generation
@@ -232,7 +250,7 @@ unique indexes also enforce their uniqueness across other execution epochs.
     keys: set[UUID] = set()
     prior_members: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent]] = {}
     names = {origin.configuration.display_name: origin.configuration.subject_id for origin in bases.values()}
-    origins: dict[UUID, SubjectConfigurationV1] = {}
+    origins: dict[UUID, SubjectConfigurationV1] = {identity: base.configuration for identity, base in bases.items()}
     used_incarnations = {item.subject_incarnation for item in preparation.subject_acknowledgements}
     base_ids = set(preparation.personal_membership.managed_base_subject_ids) | {item.subject_id for item in preparation.subject_acknowledgements}
     reporters = {item.reporter_incarnation for item in preparation.subject_acknowledgements}
@@ -260,7 +278,7 @@ unique indexes also enforce their uniqueness across other execution epochs.
         else:
             if subject.subject_id in base_ids and subject.subject_id not in bases:
                 raise ValueError("application base adoption requires authenticated original provenance")
-            _application_transition(request, member, prior, used_incarnations, reporters, tokens, bases.get(subject.subject_id))
+            _application_transition(request, member, prior, origin, used_incarnations, reporters, tokens, bases.get(subject.subject_id))
         prior_members[subject.subject_id] = (request, result, row)
         used_incarnations.add(subject.subject_incarnation)
         reporters.add(subject.demand_reporter_incarnation)
