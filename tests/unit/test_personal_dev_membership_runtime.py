@@ -22,6 +22,7 @@ from loom.personal_dev_capacity_runtime import (
 )
 from loom.personal_dev_incarnation_storage import (
     PersonalDevStorageBindingV1,
+    personal_dev_secret_name,
     personal_dev_storage_secret_data,
 )
 from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelopeV1
@@ -71,7 +72,7 @@ def _bind_storage(claim, installer):
     claim = replace(claim, operation=replace(op, storage_binding=binding),
                     environment=replace(claim.environment, storage_binding=binding))
     installer._kubectl.storage_identity = binding.identity
-    installer._kubectl.secrets["loom-protected-worker-runtime"] = {
+    installer._kubectl.secrets[personal_dev_secret_name(binding.identity, "loom-protected-worker-runtime")] = {
         **personal_dev_storage_secret_data(binding.identity),
         "database-url": capacity_runtime_database_url(_RUNTIME_DATABASE_URL, binding.identity, "r" * 48).encode(),
     }
@@ -190,6 +191,7 @@ class _Kubectl:
         for document in yaml.safe_load_all(payload):
             name = document["metadata"]["name"]
             if document["kind"] == "Secret":
+                assert not hasattr(self, "storage_identity"), "bound credentials require staged writes"
                 self.secrets[name] = {
                     key: base64.b64decode(value) for key, value in document["data"].items()
                 }
