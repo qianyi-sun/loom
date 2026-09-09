@@ -51,23 +51,40 @@ func TestRegisteredManifestRejectsUnsafeOrAmbiguousDescriptors(t *testing.T) {
 			files := registeredManifestVector()
 			checksum := strings.Repeat("4", 64)
 			switch kind {
-			case "empty": files = nil
-			case "sidecar": files[0].RelativePath = ".loom-bundle-files.v1.json"
-			case "relative": files[0].RelativePath = "../escape"
-			case "backslash": files[0].RelativePath = `a\u2028`
-			case "control": files[0].RelativePath = "a\n"
-			case "del": files[0].RelativePath = "a\x7f"
-			case "invalid_utf8": files[0].RelativePath = "a\xff"
-			case "long_utf8": files[0].RelativePath = strings.Repeat("é", 513)
-			case "mode": files[0].Mode = "04755"
-			case "hash": files[0].SHA256 = strings.Repeat("0", 64)
-			case "negative_size": files[0].SizeBytes = -1
-			case "byte_limit": files[0].SizeBytes = maxTaskImageBuildBundleBytes
-			case "count_limit": files = make([]RegisteredBundleObject, 2001)
-			case "duplicate": files[1] = files[0]
-			case "order": files[0], files[1] = files[1], files[0]
-			case "file_directory": files[0].RelativePath, files[1].RelativePath = "a", "a/b"
-			case "checksum": checksum = strings.Repeat("0", 64)
+			case "empty":
+				files = nil
+			case "sidecar":
+				files[0].RelativePath = ".loom-bundle-files.v1.json"
+			case "relative":
+				files[0].RelativePath = "../escape"
+			case "backslash":
+				files[0].RelativePath = `a\u2028`
+			case "control":
+				files[0].RelativePath = "a\n"
+			case "del":
+				files[0].RelativePath = "a\x7f"
+			case "invalid_utf8":
+				files[0].RelativePath = "a\xff"
+			case "long_utf8":
+				files[0].RelativePath = strings.Repeat("é", 513)
+			case "mode":
+				files[0].Mode = "04755"
+			case "hash":
+				files[0].SHA256 = strings.Repeat("0", 64)
+			case "negative_size":
+				files[0].SizeBytes = -1
+			case "byte_limit":
+				files[0].SizeBytes = maxTaskImageBuildBundleBytes
+			case "count_limit":
+				files = make([]RegisteredBundleObject, 2001)
+			case "duplicate":
+				files[1] = files[0]
+			case "order":
+				files[0], files[1] = files[1], files[0]
+			case "file_directory":
+				files[0].RelativePath, files[1].RelativePath = "a", "a/b"
+			case "checksum":
+				checksum = strings.Repeat("0", 64)
 			}
 			if _, _, err := registeredBundleManifest(files, checksum); err == nil {
 				t.Fatal("accepted invalid descriptors")

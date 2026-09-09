@@ -2,10 +2,13 @@
 
 import asyncio
 import ipaddress
+import json
 import os
 import ssl
+import subprocess
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
@@ -438,3 +441,63 @@ async def test_verified_upload_and_real_minio_inventory_match_registered_manifes
                 assert response.status_code == 200
                 assert len(response.content) == item.size_bytes
                 assert hashlib.sha256(response.content).hexdigest() == item.sha256
+
+
+async def test_verified_upload_authority_capability_and_real_go_downloader(minio_tls, tmp_path):
+    from loom.task_image_build_plan import TaskImageBuildPlanV2
+    from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+    from loom_benchmark_tool.upload import upload_task_dir
+    from loom_task_image_authority.bundle_capability import AsyncTaskImageBundleCapabilityProvider
+    from loom_task_image_authority.bundle_s3_backend import MinioTaskImageBundleBackend
+    from tests.unit.test_task_image_bundle_capability import _plan
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "environment").mkdir()
+    (source / "environment/Dockerfile").write_bytes(b"FROM scratch\n")
+    script = source / 'café +%<"\u2028\u2029😀.sh'
+    script.write_bytes(b"#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    manifest = capture_task_image_bundle_manifest(source)
+    prefix = f"native-go/{manifest.digest}/"
+
+    class FixtureWriter:
+        async def put_object(self, *, bucket, key, body):
+            return minio_tls[3].put_object(Bucket=bucket, Key=key, Body=body)["ETag"]
+
+    assert await upload_task_dir(store=FixtureWriter(), bucket="loom-bundles", prefix=prefix, task_dir=source, content_manifest=manifest) == 2
+    now = datetime.now(UTC)
+    plan = TaskImageBuildPlanV2.model_validate(dict(
+        _plan().model_dump(), schema_version="loom.task-image-build-plan.v2", bundle_prefix=prefix,
+        bundle_content_manifest_sha256=manifest.digest, task_checksum=manifest.task_checksum,
+        bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256, authorization_expires_at=now + timedelta(minutes=10),
+    ))
+    async with MinioTaskImageBundleBackend(origin=minio_tls[0], bucket=plan.bundle_bucket, region="us-east-1", credentials=minio_tls[1], ca_file=minio_tls[4]) as backend:
+        provider = AsyncTaskImageBundleCapabilityProvider(
+            backend=backend, public_https_origin=minio_tls[0], expected_bucket=plan.bundle_bucket,
+            maximum_objects=2, maximum_bytes=1024, url_expiry_seconds=600, addressing_style="path",
+        )
+        capability = await provider.issue(plan, now=now)
+    capability_path = tmp_path / "capability.json"
+    capability_path.write_text(capability.model_dump_json())
+    capability_path.chmod(0o600)
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps(dict(
+        Plan=dict(GrantID=str(plan.grant_id), MaterializationID=str(plan.materialization_id), TaskChecksum=plan.task_checksum,
+                  ManifestSHA256=plan.bundle_content_manifest_sha256, MetadataSHA256=plan.bundle_file_metadata_sha256,
+                  Bucket=plan.bundle_bucket, Prefix=plan.bundle_prefix, FileLimit=plan.bundle_file_limit, ByteLimit=plan.bundle_byte_limit),
+        Session=dict(SessionID=str(plan.session_id), Generation=plan.session_generation, ExpiresAt=plan.authorization_expires_at.isoformat()),
+        Origin=minio_tls[0], CAFile=str(minio_tls[4]), CapabilityFile=str(capability_path),
+    )))
+    repo = Path(__file__).resolve().parents[2]
+    result = subprocess.run([
+        "docker", "run", "--rm", "--network", "host", "--user", f"{os.getuid()}:{os.getgid()}",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "-v", f"{repo}:/src:ro", "-v", f"{tmp_path}:{tmp_path}:ro", "-v", f"{minio_tls[4]}:{minio_tls[4]}:ro",
+        "-e", "GOCACHE=/tmp/native-go-cache", "-e", "GOMODCACHE=/tmp/native-go-mod",
+        "-e", f"LOOM_REGISTERED_BUNDLE_FIXTURE={fixture}", "-w", "/src",
+        "golang@sha256:95db116434e3f21a2a15600ffc7169bf380c6bfd021b154d106fcb346721c277",
+        "go", "test", "./cmd/loom-task-image-builder-supervisor", "-run", "^TestRegisteredBundleExternalMinIO$", "-count=1", "-timeout=30s", "-v",
+    ], cwd=repo, capture_output=True, text=True, timeout=100, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--- PASS: TestRegisteredBundleExternalMinIO" in result.stdout

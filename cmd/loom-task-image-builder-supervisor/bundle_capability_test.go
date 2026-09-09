@@ -15,7 +15,9 @@ func registeredCapabilityFixture(t *testing.T) (registeredBundleWire, Registered
 	now := time.Date(2026, 9, 9, 14, 0, 0, 0, time.UTC)
 	files := registeredManifestVector()
 	manifest, metadata, err := registeredBundleManifest(files, strings.Repeat("4", 64))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	plan := RegisteredBundlePlan{
 		GrantID: uuidWithTail(101), MaterializationID: uuidWithTail(102), TaskChecksum: strings.Repeat("4", 64),
 		ManifestSHA256: fmt.Sprintf("%x", sha256.Sum256(manifest)), MetadataSHA256: fmt.Sprintf("%x", sha256.Sum256(metadata)),
@@ -33,7 +35,7 @@ func registeredCapabilityFixture(t *testing.T) (registeredBundleWire, Registered
 		SchemaVersion: "loom.task-image-bundle-capability.v2", CapabilityID: uuidWithTail(104),
 		GrantID: plan.GrantID, MaterializationID: plan.MaterializationID, SessionID: session.SessionID, SessionGeneration: session.Generation,
 		TaskChecksum: plan.TaskChecksum, MetadataSHA256: plan.MetadataSHA256, ManifestSHA256: plan.ManifestSHA256,
-		FileCount: len(files), TotalBytes: 6, IssuedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(40*time.Second).Format(time.RFC3339), Objects: files,
+		FileCount: len(files), TotalBytes: 6, IssuedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(40 * time.Second).Format(time.RFC3339), Objects: files,
 	}
 	return wire, plan, session, trust, now
 }
@@ -42,12 +44,16 @@ func TestRegisteredCapabilityBindsFrozenPlanCurrentSessionAndExactSignedTargets(
 	wire, plan, session, trust, now := registeredCapabilityFixture(t)
 	payload, _ := json.Marshal(wire)
 	got, err := parseRegisteredBundleCapability(payload, plan, session, trust, now)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.ExpiresAt != now.Add(40*time.Second) || len(got.Objects) != 4 || got.ManifestSHA256 != plan.ManifestSHA256 {
 		t.Fatal("registered capability binding lost")
 	}
 	for i := range wire.Objects {
-		if got.Objects[i] != wire.Objects[i] { t.Fatal("signed target or descriptor rewritten") }
+		if got.Objects[i] != wire.Objects[i] {
+			t.Fatal("signed target or descriptor rewritten")
+		}
 	}
 }
 
@@ -56,46 +62,84 @@ func TestRegisteredCapabilityRejectsTamperingBeforeDownload(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			wire, plan, session, trust, now := registeredCapabilityFixture(t)
 			switch kind {
-			case "schema": wire.SchemaVersion = "unknown"
-			case "grant": wire.GrantID = uuidWithTail(999)
-			case "materialization": wire.MaterializationID = uuidWithTail(999)
-			case "session": session.SessionID = uuidWithTail(999)
-			case "generation": session.Generation++
-			case "manifest": wire.ManifestSHA256 = strings.Repeat("6", 64)
-			case "metadata": wire.MetadataSHA256 = strings.Repeat("6", 64)
-			case "checksum": wire.TaskChecksum = strings.Repeat("6", 64)
-			case "hash": wire.Objects[0].SHA256 = strings.Repeat("6", 64)
-			case "mode": wire.Objects[0].Mode = "0755"
-			case "path": wire.Objects[0].RelativePath = "a-changed"
-			case "size": wire.Objects[0].SizeBytes = 1; wire.TotalBytes++
-			case "count": wire.FileCount--
-			case "total": wire.TotalBytes++
-			case "expired": now = now.Add(40*time.Second)
-			case "future": wire.IssuedAt = now.Add(time.Second).Format(time.RFC3339)
-			case "long_lifetime": wire.IssuedAt = now.Add(-901*time.Second).Format(time.RFC3339)
-			case "session_expiry": session.ExpiresAt = now.Add(39*time.Second)
-			case "origin": trust.Origin = "https://other.example"
-			case "bucket": trust.Bucket = "other-bundles"
-			case "prefix": plan.Prefix = "other/" + plan.ManifestSHA256 + "/"
-			case "url_path": wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "/loom-bundles/", "/other-bundles/", 1)
-			case "url_origin": wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "objects.example", "other.example", 1)
-			case "userinfo": wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "https://", "https://user:secret@", 1)
-			case "fragment": wire.Objects[0].URL += "#secret"
-			case "url_deadline": wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "Expires=40", "Expires=41", 1)
-			case "url_future": wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "T140000Z", "T140001Z", 1)
-			case "url_duplicate_query": wire.Objects[0].URL += "&X-Amz-Expires=40"
-			case "url_size": wire.Objects[0].URL += "&large=" + strings.Repeat("a", 4096)
-			case "quota": plan.FileLimit = 3
-			case "bytes": plan.ByteLimit = 5
-			case "downgrade": wire.SchemaVersion = "loom.task-image-bundle-capability.v1"
+			case "schema":
+				wire.SchemaVersion = "unknown"
+			case "grant":
+				wire.GrantID = uuidWithTail(999)
+			case "materialization":
+				wire.MaterializationID = uuidWithTail(999)
+			case "session":
+				session.SessionID = uuidWithTail(999)
+			case "generation":
+				session.Generation++
+			case "manifest":
+				wire.ManifestSHA256 = strings.Repeat("6", 64)
+			case "metadata":
+				wire.MetadataSHA256 = strings.Repeat("6", 64)
+			case "checksum":
+				wire.TaskChecksum = strings.Repeat("6", 64)
+			case "hash":
+				wire.Objects[0].SHA256 = strings.Repeat("6", 64)
+			case "mode":
+				wire.Objects[0].Mode = "0755"
+			case "path":
+				wire.Objects[0].RelativePath = "a-changed"
+			case "size":
+				wire.Objects[0].SizeBytes = 1
+				wire.TotalBytes++
+			case "count":
+				wire.FileCount--
+			case "total":
+				wire.TotalBytes++
+			case "expired":
+				now = now.Add(40 * time.Second)
+			case "future":
+				wire.IssuedAt = now.Add(time.Second).Format(time.RFC3339)
+			case "long_lifetime":
+				wire.IssuedAt = now.Add(-901 * time.Second).Format(time.RFC3339)
+			case "session_expiry":
+				session.ExpiresAt = now.Add(39 * time.Second)
+			case "origin":
+				trust.Origin = "https://other.example"
+			case "bucket":
+				trust.Bucket = "other-bundles"
+			case "prefix":
+				plan.Prefix = "other/" + plan.ManifestSHA256 + "/"
+			case "url_path":
+				wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "/loom-bundles/", "/other-bundles/", 1)
+			case "url_origin":
+				wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "objects.example", "other.example", 1)
+			case "userinfo":
+				wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "https://", "https://user:secret@", 1)
+			case "fragment":
+				wire.Objects[0].URL += "#secret"
+			case "url_deadline":
+				wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "Expires=40", "Expires=41", 1)
+			case "url_future":
+				wire.Objects[0].URL = strings.Replace(wire.Objects[0].URL, "T140000Z", "T140001Z", 1)
+			case "url_duplicate_query":
+				wire.Objects[0].URL += "&X-Amz-Expires=40"
+			case "url_size":
+				wire.Objects[0].URL += "&large=" + strings.Repeat("a", 4096)
+			case "quota":
+				plan.FileLimit = 3
+			case "bytes":
+				plan.ByteLimit = 5
+			case "downgrade":
+				wire.SchemaVersion = "loom.task-image-bundle-capability.v1"
 			}
 			payload, _ := json.Marshal(wire)
 			switch kind {
-			case "duplicate_json": payload = append([]byte(`{"total_bytes":6,`), payload[1:]...)
-			case "missing_size": payload = []byte(strings.Replace(string(payload), `"size_bytes":0,`, "", 1))
-			case "null_size": payload = []byte(strings.Replace(string(payload), `"size_bytes":0`, `"size_bytes":null`, 1))
-			case "missing_total": payload = []byte(strings.Replace(string(payload), `"total_bytes":6,`, "", 1))
-			case "oversized": payload = append(payload, []byte(strings.Repeat(" ", 8*1024*1024))...)
+			case "duplicate_json":
+				payload = append([]byte(`{"total_bytes":6,`), payload[1:]...)
+			case "missing_size":
+				payload = []byte(strings.Replace(string(payload), `"size_bytes":0,`, "", 1))
+			case "null_size":
+				payload = []byte(strings.Replace(string(payload), `"size_bytes":0`, `"size_bytes":null`, 1))
+			case "missing_total":
+				payload = []byte(strings.Replace(string(payload), `"total_bytes":6,`, "", 1))
+			case "oversized":
+				payload = append(payload, []byte(strings.Repeat(" ", 8*1024*1024))...)
 			}
 			if _, err := parseRegisteredBundleCapability(payload, plan, session, trust, now); err == nil {
 				t.Fatal("accepted invalid native capability")
@@ -103,5 +147,38 @@ func TestRegisteredCapabilityRejectsTamperingBeforeDownload(t *testing.T) {
 				t.Fatal("capability rejection leaked signed target")
 			}
 		})
+	}
+}
+
+func TestRegisteredCapabilityRejectsLoneSurrogatesWithoutRejectingReplacementCharacter(t *testing.T) {
+	wire, plan, session, trust, now := registeredCapabilityFixture(t)
+	wire.Objects = wire.Objects[:1]
+	wire.Objects[0].RelativePath = "\ufffd"
+	manifest, metadata, err := registeredBundleManifest(wire.Objects, plan.TaskChecksum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ManifestSHA256, plan.MetadataSHA256 = fmt.Sprintf("%x", sha256.Sum256(manifest)), fmt.Sprintf("%x", sha256.Sum256(metadata))
+	plan.Prefix = "registered/" + plan.ManifestSHA256 + "/"
+	wire.ManifestSHA256, wire.MetadataSHA256, wire.TotalBytes, wire.FileCount = plan.ManifestSHA256, plan.MetadataSHA256, 0, 1
+	location, _ := url.Parse(wire.Objects[0].URL)
+	location.Path, location.RawPath = "/"+plan.Bucket+"/"+plan.Prefix+"\ufffd", ""
+	wire.Objects[0].URL = location.String()
+	payload, _ := json.Marshal(wire)
+	if _, err := parseRegisteredBundleCapability(payload, plan, session, trust, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, escape := range []string{`\ud800`, `\udc00`, `\ud800\u0061`, `\ud800\ud800`} {
+		changed := []byte(strings.Replace(string(payload), "\ufffd", escape, 1))
+		if _, err := parseRegisteredBundleCapability(changed, plan, session, trust, now); err == nil {
+			t.Fatal("accepted lone surrogate as registered replacement character")
+		}
+	}
+	// Valid paired escapes must retain the Python/Go vector's astral filename.
+	wire, plan, session, trust, now = registeredCapabilityFixture(t)
+	payload, _ = json.Marshal(wire)
+	payload = []byte(strings.Replace(string(payload), "😀", `\ud83d\ude00`, 1))
+	if _, err := parseRegisteredBundleCapability(payload, plan, session, trust, now); err != nil {
+		t.Fatal(err)
 	}
 }
