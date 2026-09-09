@@ -440,6 +440,29 @@ maintenance composition. Claim replay shares materialization-before-attempt
 locking with publication: its initial identity lookup is non-authoritative,
 and both rows are freshly reloaded and revalidated after acquiring the locks.
 
+Inventory preparation now uses an owned, READ COMMITTED read-only transaction to
+load every credential generation for one attempt, with an explicit overflow bound. It loads
+only the fields needed by public validation, not secret-store references. The
+connection closes before CPU-heavy validation runs. The resulting immutable
+evidence retains all parent/attempt identity inputs and the full bounded plan.
+A separate recheck uses fresh SQL for those exact identities and counts at most
+the prepared credential count plus one. Under active immutable-audit guards,
+unchanged cardinality proves that no credential was appended; a mismatch requires
+releasing the entire fence and preparing again outside it. Both phases reject
+disabled, conditional or column-specific credential immutability guards, or
+non-origin replication mode. Schema administration remains trusted across the
+interval between them.
+
+Isolation is set on the checked-out connection before starting the owned session
+transaction: inherited engine hooks can override derived-engine options. Tests
+inspect PostgreSQL's actual isolation and read-only settings, including callers
+configured for REPEATABLE READ or AUTOCOMMIT.
+
+The recheck helper requires its future caller to own the catalog/parent/attempt
+fence and transaction deadlines. It does not acquire locks, inspect references,
+retire an attempt, or make later raw database INSERT safe. Prepared evidence is
+internal data, never a caller-supplied retirement authorization.
+
 The unpublished publication migration adds database immutability for retained
 credentials and candidates, including rows issued before the upgrade. Statement
 triggers reject UPDATE, DELETE and TRUNCATE, including no-op updates; issuance
@@ -447,7 +470,7 @@ and read-only replay remain available. This protects the first-credential/no-
 candidate inventory gap without changing published migration `0131` or rewriting
 historical evidence. Application validation remains necessary; database-owner
 fault injection is not prevented by triggers that such an owner can disable.
-Retirement transactions still must load the complete inventory under their
+Retirement transactions still must establish the complete inventory under their
 shared fence and separately prove references and registry quiescence.
 
 Attempt retention now has a restrictive attempt foreign key and a durable
