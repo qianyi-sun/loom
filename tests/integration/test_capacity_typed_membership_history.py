@@ -27,7 +27,7 @@ from loom_capacity_manager.store import (
     WriterFence,
 )
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
-from tests.capacity_build_membership_fixtures import build_request, typed_sql_execution
+from tests.capacity_build_membership_fixtures import application_request, build_request, typed_sql_execution
 from tests.integration.test_capacity_typed_membership_store import _apply, _transition
 
 
@@ -47,6 +47,33 @@ async def test_typed_history_empty_and_two_owner_prefixes(capacity_session):
     assert historical.members == (first.member,)
     assert historical.head_sha256 == first.head_sha256
     assert await store.snapshot(capacity_session, execution.execution_epoch, through_revision=0) == empty
+
+
+@pytest.mark.parametrize("application", (False, True))
+@pytest.mark.parametrize("changed", ("generation", "token", "state"))
+async def test_typed_historical_evidence_does_not_claim_mutable_reporter_currentness(capacity_session, application, changed):
+    management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    store = CapacityTypedMembershipStore()
+    request = (application_request if application else build_request)(preparation, execution)
+    await store.apply(capacity_session, request, actor="build-management", idempotency_key=UUID(int=92008))
+    original = await store.snapshot(capacity_session, execution.execution_epoch)
+    subject = original.members[0].configuration
+    statements = {
+        "generation": "configuration_generation=99", "token": "token_sha256=repeat('f',64)", "state": "state='fenced'",
+    }
+    await capacity_session.execute(text(f"UPDATE capacity_demand_reporters SET {statements[changed]} WHERE reporter_incarnation=:reporter"), {"reporter": subject.demand_reporter_incarnation})
+    # This is immutable historical evidence only, independent of whether the
+    # mutable tip was advanced legitimately or corrupted. Current paths below
+    # must reject it without separately authenticated current reporter evidence.
+    assert await store.snapshot(capacity_session, execution.execution_epoch) == original
+    epoch = await capacity_session.get(CapacityExecutionEpoch, execution.execution_epoch)
+    with pytest.raises(ConfigurationConflictError):
+        await store.verify_snapshot_materialization(capacity_session, epoch, original)
+    with pytest.raises(ConfigurationConflictError):
+        await management.load_allocation_input(capacity_session,
+            WriterFence(authority_incarnation=execution.authority_incarnation, writer_epoch=execution.writer_epoch))
+    with pytest.raises(ConfigurationConflictError):
+        await store.apply(capacity_session, request, actor="build-management", idempotency_key=UUID(int=92008))
 
 
 @pytest.mark.parametrize("revision", (-1, True, 0.0, 1, "0"))
