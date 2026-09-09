@@ -393,6 +393,11 @@ class PersonalDevDeployClient:
                 identity != anchor or any(operation_body.get(key) != operation_receipt.get(key) for key in (
                     "deployment_generation", "kind", "expected_operation_epoch", "membership_continuation_kind",
                 ))
+                or (operation_receipt.get("state") == "superseded" and any(
+                    operation_body.get(key) != operation_receipt.get(key) for key in (
+                        "state", "checkpoint", "membership_successor_operation_id",
+                    )
+                ))
             ):
                 raise PersonalDevDeployError("personal-dev operation differs from the apply receipt")
             if predecessor_id is not None and (

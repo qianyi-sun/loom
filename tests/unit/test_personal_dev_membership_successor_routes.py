@@ -7,9 +7,9 @@ import pytest
 from fastapi import HTTPException, Response
 
 from loom.personal_dev_environment import PersonalDevApplyReservation
-from loom_service.routes.dev_instances import _personal_operation_response
 from loom_service.routes.dev_instances import (
     PersonalDevEnvironmentApplyPayload,
+    _personal_operation_response,
     apply_personal_dev_environment,
 )
 from tests.unit.test_dev_instance_routes import _OWNER, _Store, _ctx, _request

@@ -777,9 +777,16 @@ async def apply_personal_dev_environment(
             detail="personal-dev environment apply failed before external activation",
         ) from None
     if reservation.operation.state == "superseded":
-        operation = await _personal_authority(request, session).get_operation(reservation.operation.id)
-        if operation is None:
-            raise HTTPException(status_code=503, detail="personal-dev recovery lineage is unavailable")
+        try:
+            operation = await _personal_authority(request, session).get_operation(reservation.operation.id)
+            if operation is None:
+                raise RuntimeError("retained recovery operation is missing")
+        except Exception:
+            logger.exception("personal_dev_recovery_status_unavailable", extra={"dev_instance_name": name})
+            raise HTTPException(
+                status_code=503,
+                detail="personal-dev apply was retained; recovery status is temporarily unavailable",
+            ) from None
         reservation = replace(reservation, operation=operation)
     response.status_code = 200 if reservation.operation.state == "succeeded" else 202
     return _personal_apply_response(reservation)
