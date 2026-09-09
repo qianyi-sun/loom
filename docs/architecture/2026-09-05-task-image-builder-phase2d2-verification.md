@@ -264,9 +264,9 @@ This permits valid signing after request start without extending authorization.
 Deterministic tests cover elapsed listing/signing time, expiry during I/O and
 response construction, backward/future clocks, exact deadline matching, and
 subsecond rounding. The composed fixture retains an actual advancing signing
-clock. These are provider-contract checks: the branch still has no production
-object-store backend or entrypoint wiring for bundle capabilities. A production
-adapter must implement the timestamp/deadline contract and bounded network I/O;
+clock. These are provider-contract checks: the backend primitives below are not
+yet connected to this provider or the service entrypoint. A production
+adapter must compose the timestamp/deadline contract and bounded network I/O;
 test backends and post-call clock checks are not that evidence. The provider
 continues to fail closed when none is configured. Encrypted replay bypasses the
 provider, and secret persistence/transaction commit follow its final clock check;
@@ -322,11 +322,24 @@ wire input, trust failures, queue/deadline/cancellation behavior and orphaned
 connection disposal; the pinned MinIO integration exercises production signing,
 reader and XML parser together across paginated responses.
 
-This is a transport primitive, not production adapter activation. Cross-page
-object/token/byte budgets and absolute wall-clock authorization remain the
-inventory owner's responsibility. Provider/API async composition, unlocked I/O
+This is a transport primitive, not production adapter activation. Provider/API
+async composition, unlocked I/O
 with fresh database re-admission, path-style consumer validation and explicit
 credential/settings/lifespan deployment wiring remain required.
+
+The native MinIO backend now owns the reader and an explicit static signing
+identity. It rejects ambient or session-token credentials and returns only
+complete, nonempty inventories. Across pages it bounds object count and bytes,
+total XML bytes, page count, lexical key progression and continuation-token
+cycles. Raw network bytes are bounded by the page-count ceiling multiplied by
+the reader's per-page wire ceiling. One monotonic operation deadline includes all
+pages and signing; advancing wall time can shorten, never reset, that deadline.
+Every signing/read/parse boundary checks authorization expiry and clock regression.
+Closing the backend closes the owned reader and disables both listing and signing.
+The pinned TLS MinIO tests exercise exact complete inventories and subsequent
+GETs, as well as rejection of missing or excessive inventories. These do not
+prove immutable source provenance, retained metadata integrity, unlocked database
+admission, or a configured live service.
 
 ## Statement and signer
 
