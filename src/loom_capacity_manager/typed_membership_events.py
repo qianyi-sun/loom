@@ -59,6 +59,7 @@ def validate_typed_membership_event(
     configuration = member.configuration
     if (
         result.replayed
+        or not isinstance(row.idempotency_key, UUID) or row.idempotency_key.int == 0
         or row.actor != preparation.personal_membership.management_principal_id
         or row.execution_epoch != execution.execution_epoch
         or row.execution_manifest_sha256 != execution.execution_manifest_sha256

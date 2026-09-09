@@ -2,8 +2,8 @@
 
 The caller supplies an already authenticated management principal. This store
 checks its pinned delegation against current durable authority, never a caller
-preparation/fleet. Pending build creation, update, capacity and teardown are
-supported; recreation, typed applications and executable V4 admission remain closed.
+preparation/fleet. Fresh application and pending-build lifecycle are supported;
+managed-base adoption, recreation and executable V4 admission remain closed.
 """
 
 from __future__ import annotations
@@ -15,6 +15,9 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.application_generation_store import (
+    require_application_generation_evidence,
+)
 from loom_capacity_manager.build_generation_store import (
     _require_staged_facts,
     _require_values,
@@ -38,6 +41,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionAuthorityV2,
     canonical_executable_digest,
 )
+from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.membership_store import (
     CapacityMembershipStore,
@@ -64,9 +68,11 @@ from loom_capacity_manager.store import (
     _write_transaction,
 )
 from loom_capacity_manager.typed_membership_commands import (
+    PersonalApplicationCommandV2,
     PersonalBuildCommandV2,
     PersonalMembershipMutationV2,
     PersonalMembershipResultV2,
+    derive_application_member,
     derive_build_member,
     parse_typed_membership_mutation,
 )
@@ -142,18 +148,28 @@ async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _T
         results = validate_typed_membership_event_prefix(events, preparation, fleet, execution_epoch=execution_epoch)
         latest: dict[UUID, PersonalMembershipResultV2] = {}
         latest_requests: dict[UUID, PersonalMembershipMutationV2] = {}
-        reporters: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1]] = {}
+        reporters: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1 | PersonalApplicationMemberV1]] = {}
+        application_origins: dict[tuple[UUID, int], PersonalMembershipMutationV2] = {}
         for event, result in zip(events, results, strict=True):
             original = parse_typed_membership_mutation(json.dumps(event.request_payload))
-            if not isinstance(result.member, PersonalBuildMemberV1) or result.member.reincarnation is not None:
+            if result.member.reincarnation is not None:
                 raise ConfigurationConflictError("typed membership history lifecycle is not yet admitted")
+            if isinstance(original.command, PersonalApplicationCommandV2) and original.command.projection.operation_kind in {"create", "update"}:
+                application_origins[(event.subject_id, event.deployment_generation)] = original
             latest[event.subject_id] = result
             latest_requests[event.subject_id] = original
             reporters[event.reporter_incarnation] = (original, result.member)
         for reporter_id, (original, member) in reporters.items():
             current_reporter = latest[member.configuration.subject_id].member.configuration.demand_reporter_incarnation
-            await _require_staged_facts(session, original, member, preparation,
-                reporter_state="current" if reporter_id == current_reporter else "fenced")
+            if isinstance(member, PersonalBuildMemberV1):
+                await _require_staged_facts(session, original, member, preparation,
+                    reporter_state="current" if reporter_id == current_reporter else "fenced")
+            else:
+                origin = application_origins.get((member.configuration.subject_id, member.configuration.deployment_generation))
+                if origin is None or not isinstance(origin.command, PersonalApplicationCommandV2) or not isinstance(original.command, PersonalApplicationCommandV2):
+                    raise ConfigurationConflictError("typed application installation origin is unavailable")
+                await require_application_generation_evidence(session, member, original.command.projection, origin.command.projection,
+                    reporter_state="current" if reporter_id == current_reporter else "fenced")
         return _TypedHistory(epoch, preparation, fleet, events, results, latest, latest_requests)
     except ValueError as exc:
         raise ConfigurationConflictError("typed membership historical evidence is invalid") from exc
@@ -229,7 +245,7 @@ async def _validated_materialization(
 
 
 class CapacityTypedMembershipStore:
-    """Append exact pending build services under one SERIALIZABLE authority lock."""
+    """Append exact typed services under one SERIALIZABLE authority lock."""
 
     async def snapshot(
         self, session: AsyncSession, epoch: CapacityExecutionEpoch | int, *, through_revision: int | None = None,
@@ -248,12 +264,17 @@ class CapacityTypedMembershipStore:
     async def apply_build(
         self, session: AsyncSession, request: PersonalMembershipMutationV2, *, actor: str, idempotency_key: UUID,
     ) -> PersonalMembershipResultV2:
+        if not isinstance(request.command, PersonalBuildCommandV2):
+            raise ConfigurationConflictError("build membership requires a build command")
+        return await self.apply(session, request, actor=actor, idempotency_key=idempotency_key)
+
+    async def apply(
+        self, session: AsyncSession, request: PersonalMembershipMutationV2, *, actor: str, idempotency_key: UUID,
+    ) -> PersonalMembershipResultV2:
         try:
             request = parse_typed_membership_mutation(canonical_bytes(request))
             if not isinstance(idempotency_key, UUID) or idempotency_key.int == 0:
                 raise ValueError("typed membership idempotency identity must be nonzero")
-            if not isinstance(request.command, PersonalBuildCommandV2):
-                raise ConfigurationConflictError("typed application lifecycle is not yet admitted")
             async with _write_transaction(session):
                 return await self._apply_locked(session, request, actor=actor, idempotency_key=idempotency_key)
         except ValueError as exc:
@@ -285,7 +306,8 @@ class CapacityTypedMembershipStore:
             raise ExecutionConflictError("typed membership execution fence changed")
         history = await _load_typed_history(session, epoch.execution_epoch)
         fleet = history.fleet
-        member = derive_build_member(request, preparation, fleet)
+        member = (derive_build_member(request, preparation, fleet) if isinstance(request.command, PersonalBuildCommandV2)
+            else derive_application_member(request, preparation, fleet))
         account = _derive_owner_account(fleet, member.owner_id)
         projection = request.command.projection
         digest = canonical_digest(request)
@@ -312,10 +334,10 @@ class CapacityTypedMembershipStore:
         subject = member.configuration
         previous_result = latest.get(subject.subject_id)
         previous = previous_result.member if previous_result is not None else None
-        if previous is not None and not isinstance(previous, PersonalBuildMemberV1):
-            raise ConfigurationConflictError("typed build cannot replace an application")
+        if previous is not None and previous.purpose != member.purpose:
+            raise ConfigurationConflictError("typed membership cannot change subject purpose")
         if previous is not None and projection.operation_kind == "create":
-            raise ConfigurationConflictError("typed build recreation requires authenticated release and is not yet admitted")
+            raise ConfigurationConflictError("typed membership recreation requires authenticated release and is not yet admitted")
         if previous is None:
             conflict = (await session.scalars(select(CapacitySubject.id).where(or_(
                 CapacitySubject.subject_id == subject.subject_id,
@@ -347,8 +369,17 @@ class CapacityTypedMembershipStore:
             configuration_generation=subject.configuration_generation, deployment_generation=subject.deployment_generation,
             reporter_incarnation=subject.demand_reporter_incarnation)
         validate_typed_membership_event_prefix((*events, event), preparation, fleet, execution_epoch=epoch.execution_epoch)
-        await stage_build_generation_evidence(session, request, member, preparation, fleet,
-            previous=previous, previous_request=latest_requests.get(subject.subject_id))
+        if isinstance(member, PersonalBuildMemberV1):
+            assert previous is None or isinstance(previous, PersonalBuildMemberV1)
+            await stage_build_generation_evidence(session, request, member, preparation, fleet,
+                previous=previous, previous_request=latest_requests.get(subject.subject_id))
+        else:
+            assert isinstance(request.command, PersonalApplicationCommandV2)
+            assert previous is None or isinstance(previous, PersonalApplicationMemberV1)
+            application_store = CapacityMembershipStore(CapacityManagementStore())
+            if projection.operation_kind in {"create", "update"}:
+                await application_store._require_unused_reporter(session, request.command.projection)
+            await application_store._persist_generation_evidence(session, request.command.projection, subject, previous)
         await CapacityMembershipStore(CapacityManagementStore())._materialize_subject(session, epoch.configuration_epoch, subject, account, rows)
         await session.flush()
         session.add(event)

@@ -257,6 +257,35 @@ validation here cannot prove predecessor cleanup or a historical release set.
     return member
 
 
+def derive_application_member(
+    request: PersonalMembershipMutationV2, preparation: ExecutionPreparationV4, fleet: FleetManifestV1,
+    *, reincarnation: PersonalReincarnationEvidenceV1 | None = None,
+) -> PersonalApplicationMemberV1:
+    """Derive a typed application from pinned policy, not mutable materialization."""
+    request, preparation, fleet, owner = _checked_context(request, preparation, fleet)
+    if not isinstance(request.command, PersonalApplicationCommandV2):
+        raise ValueError("application derivation requires an application command")
+    projection, ack = request.command.projection, request.command.acknowledgement
+    configuration = _derive_development_subject(fleet, projection)
+    template = fleet.development_subject_template
+    assert template is not None
+    _validate_personal_configuration(configuration, projection.owner_id, template, owner)
+    if (
+        ack.candidate.algorithm != "source-sha256" or ack.candidate.identity != projection.candidate_sha256
+        or ack.candidate.publication_sha256 != projection.candidate_publication_sha256
+        or ack.protected_admission_sha256 != projection.protected_admission_sha256
+        or (reincarnation is not None and (
+            reincarnation.namespace_id != request.namespace_id
+            or reincarnation.execution_manifest_sha256 != request.execution.execution_manifest_sha256
+        ))
+    ):
+        raise ValueError("application command acknowledgement or reincarnation differs from projection")
+    return PersonalApplicationMemberV1(
+        revision=checked_add(request.expected_revision, 1), owner_id=projection.owner_id,
+        configuration=configuration, acknowledgement=ack, reincarnation=reincarnation,
+    )
+
+
 def validate_typed_membership_result(
     request: PersonalMembershipMutationV2, result: PersonalMembershipResultV2,
     preparation: ExecutionPreparationV4, fleet: FleetManifestV1,
@@ -267,7 +296,7 @@ The caller separately authenticates the head, replay identity, reincarnation and
 all retained generation evidence. In particular, accepting replayed=True here
 does not itself establish an idempotent retry.
 """
-    request, preparation, fleet, owner = _checked_context(request, preparation, fleet)
+    request, preparation, fleet, _owner = _checked_context(request, preparation, fleet)
     result = parse_typed_membership_result(canonical_bytes(result))
     if result.revision != checked_add(request.expected_revision, 1):
         raise ValueError("typed membership result does not advance requested revision")
@@ -281,20 +310,6 @@ does not itself establish an idempotent retry.
     if isinstance(request.command, PersonalBuildCommandV2):
         expected = derive_build_member(request, preparation, fleet, reincarnation=result.member.reincarnation)
     else:
-        projection, ack = request.command.projection, request.command.acknowledgement
-        configuration = _derive_development_subject(fleet, projection)
-        template = fleet.development_subject_template
-        assert template is not None  # _checked_context proves template presence.
-        _validate_personal_configuration(configuration, projection.owner_id, template, owner)
-        if (
-            ack.candidate.algorithm != "source-sha256" or ack.candidate.identity != projection.candidate_sha256
-            or ack.candidate.publication_sha256 != projection.candidate_publication_sha256
-            or ack.protected_admission_sha256 != projection.protected_admission_sha256
-        ):
-            raise ValueError("application command acknowledgement differs from projection")
-        expected = PersonalApplicationMemberV1(
-            revision=result.revision, owner_id=projection.owner_id, configuration=configuration,
-            acknowledgement=ack, reincarnation=result.member.reincarnation,
-        )
+        expected = derive_application_member(request, preparation, fleet, reincarnation=result.member.reincarnation)
     if result.member != expected:
         raise ValueError("typed membership result differs from derived command")

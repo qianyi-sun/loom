@@ -704,10 +704,10 @@ remain `pending`: publication and membership acknowledgement alone do not prove
 the management admission runtime is installed and executable. They contain no
 synthetic application-agent installation or application activation evidence.
 
-Migration `capacity_0018` adds the SQL boundary for pending build-service lifecycle events.
+Migration `capacity_0018` adds the SQL boundary for typed service lifecycle events.
 It retains the original V1 application insertion function and dispatches other
-wire versions to a separate, private, fixed-search-path guard. Only V2 build
-`create`, `update`, `capacity`, and `destroy` commands under an exact active V4 authority
+wire versions to a separate, private, fixed-search-path guard. V2 fresh application
+and build `create`, `update`, `capacity`, and `destroy` commands under an exact active V4 authority
 are accepted. The guard
 checks the complete command/result and original event hash, deterministic UUID5
 identity, operator runtime/profile bindings, pending generation evidence, current
@@ -716,8 +716,13 @@ It rejects retained identity/name collisions, reused operation or idempotency
 keys, and noninteger numeric fields. Updates must advance deployment and rotate
 the reporter; all retired reporters retain their exact fenced credentials and
 generation. Capacity changes and teardown retain deployment, reporter and token.
-This is not build execution admission. Typed application commands and recreation
-remain blocked pending their durable history/release consumers.
+Application candidate generation advances with deployment and retains the original
+installation attestation across capacity changes and teardown. Build deployments
+remain pending; application records require exact ready installation evidence.
+Names and digest fields require JSON strings, not SQL stringification of numbers
+or booleans. Application source/publication digests and operation/idempotency
+identities must be nonzero. This is not build execution admission. Managed-base
+adoption and recreation remain blocked pending their origin/release consumers.
 
 SQL UUID5 uses the standard `uuid-ossp` extension at its existing schema, or
 installs it in a new private `capacity_build_extensions` schema if absent.
@@ -726,8 +731,9 @@ refuses retained V4 epochs or typed history; otherwise it restores the original
 application trigger and removes its own helpers, preserving the extension and
 schema for unrelated dependents.
 
-`CapacityTypedMembershipStore.apply_build` now owns the pending-build lifecycle
-transaction. It resolves the pinned management delegation, preparation and fleet
+`CapacityTypedMembershipStore.apply` owns the combined fresh-application and
+pending-build lifecycle transaction; `apply_build` remains a build-only wrapper.
+It resolves the pinned management delegation, preparation and fleet
 from current database authority under a SERIALIZABLE authority-first lock. Before
 insertion or replay it validates the full typed event prefix, retained generation
 facts, immutable base configuration, and indexed subject/account materialization.
@@ -742,8 +748,9 @@ each reporter, including reporters fenced by a later update. Destroy disables ne
 subject capacity but retains the current reporter/token and demand high-water for
 cleanup; it does not certify physical release or erase charges. Earlier receipts
 remain replayable after update or destroy. This internal transaction is not yet
-exposed as runtime admission; recreation and typed application handling remain
-separate unfinished work.
+exposed as runtime admission; managed-base adoption and recreation remain
+separate unfinished work. Applications and builds share revision/replay identities,
+owner live-subject limits and the same serializable transaction retry behavior.
 
 Typed membership snapshots now read the exact persisted execution manifest,
 fleet, full event chain and retained generation evidence. Historical prefixes

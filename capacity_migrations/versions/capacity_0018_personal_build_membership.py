@@ -40,6 +40,11 @@ def _install_initial_build_guard() -> None:
       old_member jsonb;
       old_projection jsonb;
       mutation_kind text;
+      member_purpose text;
+      expected_projection jsonb;
+      origin_projection jsonb;
+      expected_candidate jsonb;
+      expected_deployment jsonb;
       service_candidate_generation bigint;
       preparation jsonb;
       fleet jsonb;
@@ -84,8 +89,9 @@ def _install_initial_build_guard() -> None:
       -- The existing application trigger remains unchanged and handles V1 only.
       -- Fail closed on every unsupported version/purpose/lifecycle operation.
       mutation_kind := NEW.request_payload #>> '{command,projection,operation_kind}';
+      member_purpose := NEW.request_payload #>> '{command,purpose}';
       IF NEW.request_payload -> 'schema_version' IS DISTINCT FROM '2'::jsonb
-         OR NEW.request_payload #>> '{command,purpose}' IS DISTINCT FROM 'personal-build-worker'
+         OR member_purpose IS NULL OR member_purpose NOT IN ('personal-build-worker','personal-application')
          OR mutation_kind IS NULL OR mutation_kind NOT IN ('create','update','capacity','destroy') THEN
         RAISE EXCEPTION 'typed membership lifecycle is not admitted' USING ERRCODE = '23514';
       END IF;
@@ -152,6 +158,9 @@ def _install_initial_build_guard() -> None:
         RAISE EXCEPTION 'typed build candidate generation is invalid' USING ERRCODE = '23514';
       END IF;
       service_candidate_generation := (projection ->> 'candidate_generation')::bigint;
+      IF member_purpose='personal-application' THEN
+        template := fleet -> 'development_subject_template';
+      END IF;
       member := NEW.result_payload -> 'member';
       config := member -> 'configuration';
       ack := NEW.request_payload #> '{command,acknowledgement}';
@@ -175,36 +184,83 @@ def _install_initial_build_guard() -> None:
         'candidate_generation',service_candidate_generation,'deployment_generation',NEW.deployment_generation,
         'configuration_generation',NEW.configuration_generation,
         'demand_reporter_incarnation',NEW.reporter_incarnation::text,'profiles',template -> 'profiles');
-      IF NEW.subject_id IS DISTINCT FROM public.capacity_personal_build_subject_id(NEW.namespace_id,NEW.owner_id)
+      expected_projection := jsonb_build_object(
+        'schema_version',1,'owner_id',NEW.owner_id::text,'subject_incarnation',NEW.subject_incarnation::text,
+        'operation_kind',mutation_kind,'operation_id',NEW.operation_id::text,'operation_epoch',NEW.configuration_generation,
+        'configuration_generation',NEW.configuration_generation,'candidate_generation',service_candidate_generation,'deployment_generation',NEW.deployment_generation,
+        'demand_reporter_incarnation',NEW.reporter_incarnation::text,
+        'demand_reporter_token_sha256',projection -> 'demand_reporter_token_sha256','max_slots',projection -> 'max_slots');
+      candidate := template -> 'runtime_candidate';
+      IF member_purpose='personal-application' THEN
+        expected_projection := expected_projection || jsonb_build_object(
+          'expected_configuration_epoch',epoch_record.configuration_epoch,'subject_id',NEW.subject_id::text,
+          'environment_name',projection -> 'environment_name','min_slots',projection -> 'min_slots',
+          'candidate_sha256',projection -> 'candidate_sha256','candidate_publication_sha256',projection -> 'candidate_publication_sha256',
+          'local_activation_sha256',projection -> 'local_activation_sha256','protected_admission_sha256',projection -> 'protected_admission_sha256',
+          'capacity_agent_installation_sha256',projection -> 'capacity_agent_installation_sha256',
+          'supported_architectures','["arm64","x86_64"]'::jsonb,'supported_pool_ids','["gb10","oldlab"]'::jsonb,
+          'protocol_versions',projection -> 'protocol_versions');
+        expected_config := expected_config || jsonb_build_object(
+          'display_name','dev-' || (projection ->> 'environment_name'),
+          'min_slots',CASE WHEN mutation_kind='destroy' THEN '0'::jsonb ELSE projection -> 'min_slots' END,
+          'rollout_surge_slots',template -> 'rollout_surge_slots');
+        candidate := jsonb_build_object('schema_version',2,'algorithm','source-sha256',
+          'identity',projection -> 'candidate_sha256','publication_sha256',projection -> 'candidate_publication_sha256');
+        IF service_candidate_generation<>NEW.deployment_generation
+           OR jsonb_typeof(projection -> 'environment_name') IS DISTINCT FROM 'string'
+           OR coalesce((projection ->> 'environment_name') ~ '^[a-z]([-a-z0-9]{0,18}[a-z0-9])?$',false) IS NOT TRUE
+           OR projection ->> 'environment_name' IN ('dev','development','staging','production','prod','local','loom','shared')
+           OR jsonb_typeof(projection -> 'min_slots') IS DISTINCT FROM 'number'
+           OR coalesce((projection ->> 'min_slots') ~ '^(0|[1-9][0-9]*)$',false) IS NOT TRUE
+           OR (projection ->> 'min_slots')::numeric > (projection ->> 'max_slots')::numeric
+           OR EXISTS (SELECT 1 FROM unnest(ARRAY['candidate_sha256','candidate_publication_sha256','local_activation_sha256',
+                'protected_admission_sha256','capacity_agent_installation_sha256']) field
+                WHERE jsonb_typeof(projection -> field) IS DISTINCT FROM 'string'
+                  OR coalesce((projection ->> field) ~ '^[0-9a-f]{64}$',false) IS NOT TRUE)
+           OR projection ->> 'candidate_sha256'=repeat('0',64)
+           OR projection ->> 'candidate_publication_sha256'=repeat('0',64)
+           OR jsonb_typeof(projection -> 'protocol_versions') IS DISTINCT FROM 'object'
+           OR projection #>> '{protocol_versions,capacity-agent}' IS DISTINCT FROM 'v1'
+           OR projection #>> '{protocol_versions,claim-guard}' IS DISTINCT FROM 'v1'
+           OR projection #>> '{protocol_versions,control-plane-worker}' IS DISTINCT FROM 'v1'
+           OR EXISTS (SELECT 1 FROM jsonb_each(projection -> 'protocol_versions') p
+                WHERE p.key !~ '^[a-z0-9][a-z0-9_.-]{0,127}$' OR jsonb_typeof(p.value) IS DISTINCT FROM 'string'
+                  OR (p.value #>> '{}') !~ '^[a-z0-9][a-z0-9_.-]{0,127}$')
+           OR ack -> 'protected_admission_sha256' IS DISTINCT FROM projection -> 'protected_admission_sha256' THEN
+          RAISE EXCEPTION 'typed application source or installation projection changed' USING ERRCODE = '23514';
+        END IF;
+      END IF;
+      IF (member_purpose='personal-build-worker' AND NEW.subject_id IS DISTINCT FROM public.capacity_personal_build_subject_id(NEW.namespace_id,NEW.owner_id))
+         OR NEW.subject_id = '00000000-0000-0000-0000-000000000000'::uuid
+         OR NEW.owner_id = '00000000-0000-0000-0000-000000000000'::uuid
          OR NEW.subject_incarnation = '00000000-0000-0000-0000-000000000000'::uuid
          OR NEW.reporter_incarnation = '00000000-0000-0000-0000-000000000000'::uuid
          OR NEW.operation_id = '00000000-0000-0000-0000-000000000000'::uuid
+         OR NEW.idempotency_key = '00000000-0000-0000-0000-000000000000'::uuid
          OR NEW.request_payload IS DISTINCT FROM jsonb_build_object(
               'schema_version',2,'execution',expected_execution,'namespace_id',NEW.namespace_id::text,
               'expected_revision',NEW.revision-1,'command',jsonb_build_object(
-                'schema_version',2,'purpose','personal-build-worker','projection',projection,'acknowledgement',ack))
-         OR projection IS DISTINCT FROM jsonb_build_object(
-              'schema_version',1,'owner_id',NEW.owner_id::text,'subject_incarnation',NEW.subject_incarnation::text,
-              'operation_kind',mutation_kind,'operation_id',NEW.operation_id::text,'operation_epoch',NEW.configuration_generation,
-              'configuration_generation',NEW.configuration_generation,'candidate_generation',service_candidate_generation,'deployment_generation',NEW.deployment_generation,
-              'demand_reporter_incarnation',NEW.reporter_incarnation::text,
-              'demand_reporter_token_sha256',projection -> 'demand_reporter_token_sha256','max_slots',projection -> 'max_slots')
+                'schema_version',2,'purpose',member_purpose,'projection',projection,'acknowledgement',ack))
+         OR projection IS DISTINCT FROM expected_projection
          OR coalesce((projection ->> 'demand_reporter_token_sha256') ~ '^[0-9a-f]{64}$',false) IS NOT TRUE
+         OR jsonb_typeof(projection -> 'demand_reporter_token_sha256') IS DISTINCT FROM 'string'
          OR projection ->> 'demand_reporter_token_sha256' = repeat('0',64)
          OR coalesce((projection ->> 'max_slots') ~ '^(0|[1-9][0-9]*)$',false) IS NOT TRUE
          OR jsonb_typeof(projection -> 'max_slots') IS DISTINCT FROM 'number'
          OR (projection ->> 'max_slots')::numeric > (template ->> 'max_slots_per_subject')::numeric
          OR config IS DISTINCT FROM expected_config
-         OR member IS DISTINCT FROM jsonb_build_object('schema_version',1,'purpose','personal-build-worker',
+         OR member IS DISTINCT FROM jsonb_build_object('schema_version',1,'purpose',member_purpose,
               'revision',NEW.revision,'owner_id',NEW.owner_id::text,'configuration',expected_config,
               'acknowledgement',ack,'reincarnation',NULL)
          OR ack IS DISTINCT FROM jsonb_build_object('schema_version',2,'subject_id',NEW.subject_id::text,
               'subject_incarnation',NEW.subject_incarnation::text,'configuration_generation',NEW.configuration_generation,
-              'deployment_generation',NEW.deployment_generation,'candidate',template -> 'runtime_candidate','reporter_incarnation',NEW.reporter_incarnation::text,
+              'deployment_generation',NEW.deployment_generation,'candidate',candidate,'reporter_incarnation',NEW.reporter_incarnation::text,
               'protected_admission_sha256',ack -> 'protected_admission_sha256',
               'legacy_writer_high_water',ack -> 'legacy_writer_high_water','acknowledgement_sha256',ack -> 'acknowledgement_sha256')
          OR coalesce((ack ->> 'protected_admission_sha256') ~ '^[0-9a-f]{64}$',false) IS NOT TRUE
          OR coalesce((ack ->> 'acknowledgement_sha256') ~ '^[0-9a-f]{64}$',false) IS NOT TRUE
+         OR jsonb_typeof(ack -> 'protected_admission_sha256') IS DISTINCT FROM 'string'
+         OR jsonb_typeof(ack -> 'acknowledgement_sha256') IS DISTINCT FROM 'string'
          OR coalesce((ack ->> 'legacy_writer_high_water') ~ '^(0|[1-9][0-9]*)$',false) IS NOT TRUE
          OR jsonb_typeof(ack -> 'legacy_writer_high_water') IS DISTINCT FROM 'number'
          OR (ack ->> 'legacy_writer_high_water')::numeric > 9223372036854775807
@@ -238,7 +294,8 @@ def _install_initial_build_guard() -> None:
            OR prior_subject.owner_id IS DISTINCT FROM NEW.owner_id
            OR prior_subject.subject_incarnation IS DISTINCT FROM NEW.subject_incarnation
            OR prior_subject.configuration_generation >= NEW.configuration_generation
-           OR prior_subject.request_payload #>> '{command,purpose}' IS DISTINCT FROM 'personal-build-worker'
+           OR prior_subject.request_payload #>> '{command,purpose}' IS DISTINCT FROM member_purpose
+           OR prior_subject.result_payload #>> '{member,configuration,display_name}' IS DISTINCT FROM expected_config ->> 'display_name'
            OR prior_subject.result_payload #>> '{member,configuration,lifecycle_state}' IS DISTINCT FROM 'active' THEN
           RAISE EXCEPTION 'typed build lifecycle predecessor changed' USING ERRCODE = '23514';
         END IF;
@@ -256,6 +313,12 @@ def _install_initial_build_guard() -> None:
            OR (ack - ARRAY['configuration_generation','acknowledgement_sha256'])
                 IS DISTINCT FROM (old_member -> 'acknowledgement') - ARRAY['configuration_generation','acknowledgement_sha256'] THEN
           RAISE EXCEPTION 'typed build non-deployment credentials must be retained' USING ERRCODE = '23514';
+        END IF;
+        IF member_purpose='personal-application' AND mutation_kind IN ('capacity','destroy')
+           AND NOT public.capacity_personal_build_json_exact(
+             projection - ARRAY['operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots'],
+             old_projection - ARRAY['operation_kind','operation_id','operation_epoch','configuration_generation','min_slots','max_slots']) THEN
+          RAISE EXCEPTION 'typed application must retain complete installation evidence' USING ERRCODE = '23514';
         END IF;
       END IF;
       -- Newly issued reporters must be unused across both purposes and all epochs.
@@ -281,7 +344,9 @@ def _install_initial_build_guard() -> None:
               jsonb_array_elements_text(policy -> 'managed_base_subject_ids') UNION SELECT NEW.subject_id) subjects)
               > (policy ->> 'max_subjects')::bigint
          OR (SELECT count(*) FROM public.capacity_subjects s WHERE s.configuration_epoch=epoch_record.configuration_epoch
-              AND s.account_id=derived_account_id AND s.lifecycle_state <> 'disabled') > (owner_policy ->> 'max_live_subjects')::bigint THEN
+              AND s.account_id=derived_account_id AND s.lifecycle_state <> 'disabled') > (owner_policy ->> 'max_live_subjects')::bigint
+         OR (SELECT coalesce(sum(s.min_slots),0) FROM public.capacity_subjects s WHERE s.configuration_epoch=epoch_record.configuration_epoch
+              AND s.account_id=derived_account_id AND s.lifecycle_state <> 'disabled') > (owner_policy ->> 'min_reservation_slots')::numeric THEN
         RAISE EXCEPTION 'typed build identity or membership bound changed' USING ERRCODE = '23514';
       END IF;
       -- Full materialization, including indexed fields, must agree with the event.
@@ -297,13 +362,10 @@ def _install_initial_build_guard() -> None:
       IF NOT public.capacity_personal_build_json_exact(retained,(owner_policy - 'schema_version') || jsonb_build_object('max_builds',0,'max_artifact_bytes',0)) THEN
         RAISE EXCEPTION 'typed build owner materialization changed' USING ERRCODE = '23514';
       END IF;
-      candidate := template -> 'runtime_candidate';
-      runtime_digest := encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(candidate),'UTF8')),'hex');
+      runtime_digest := CASE WHEN member_purpose='personal-application' THEN projection ->> 'candidate_sha256'
+        ELSE encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(candidate),'UTF8')),'hex') END;
       template_digest := encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(template),'UTF8')),'hex');
-      SELECT to_jsonb(c) - ARRAY['id','subject_id','subject_incarnation','candidate_generation'] INTO retained
-        FROM public.capacity_candidates c WHERE c.subject_id=NEW.subject_id AND c.subject_incarnation=NEW.subject_incarnation
-          AND c.candidate_generation=service_candidate_generation;
-      IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object('candidate_digest',runtime_digest,
+      expected_candidate := jsonb_build_object('candidate_digest',runtime_digest,
           'candidate_identity_algorithm',candidate -> 'algorithm','candidate_identity',candidate -> 'identity',
           'source_payload',jsonb_build_object('publication_sha256',candidate -> 'publication_sha256'),
           'artifact_payload',jsonb_build_object('runtime_candidate',candidate),
@@ -311,16 +373,51 @@ def _install_initial_build_guard() -> None:
           'launcher_payload',jsonb_build_object('purpose','personal-build-worker','trusted_fleet_release_sha256',epoch_record.trusted_fleet_release_sha256),
           'attestation_payload',jsonb_build_object('build_template_sha256',template_digest),
           'protocol_payload',(SELECT jsonb_object_agg(value ->> 'pool_id',jsonb_build_object(
-            'generation',value -> 'protocol_generation','digest',value -> 'protocol_digest')) FROM jsonb_array_elements(config -> 'profiles')))) THEN
+            'generation',value -> 'protocol_generation','digest',value -> 'protocol_digest')) FROM jsonb_array_elements(config -> 'profiles')));
+      expected_deployment := jsonb_build_object('candidate_digest',runtime_digest,'required_profiles',config -> 'profiles',
+          'readiness_state','pending','lifecycle_state','active','cutover_payload',jsonb_build_object(
+            'purpose','personal-build-worker','runtime_candidate',candidate,'build_template_sha256',template_digest,
+            'protected_admission_sha256',ack -> 'protected_admission_sha256'));
+      IF member_purpose='personal-application' THEN
+        IF mutation_kind IN ('create','update') THEN
+          origin_projection := projection;
+        ELSE
+          SELECT e.request_payload #> '{command,projection}' INTO origin_projection
+            FROM public.capacity_personal_membership_events e WHERE e.execution_epoch=NEW.execution_epoch
+              AND e.subject_id=NEW.subject_id AND e.subject_incarnation=NEW.subject_incarnation
+              AND e.deployment_generation=NEW.deployment_generation
+              AND e.request_payload #>> '{command,purpose}'='personal-application'
+              AND e.request_payload #>> '{command,projection,operation_kind}' IN ('create','update')
+            ORDER BY e.revision DESC LIMIT 1;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'typed application installation origin is unavailable' USING ERRCODE = '23514';
+          END IF;
+        END IF;
+        expected_candidate := jsonb_build_object('candidate_digest',runtime_digest,
+          'candidate_identity_algorithm','source-sha256','candidate_identity',runtime_digest,
+          'source_payload',jsonb_build_object('publication_sha256',projection -> 'candidate_publication_sha256'),
+          'artifact_payload',jsonb_build_object('candidate_sha256',runtime_digest),
+          'architecture_payload',jsonb_build_object('supported_architectures',projection -> 'supported_architectures','supported_pool_ids',projection -> 'supported_pool_ids'),
+          'launcher_payload',jsonb_build_object('local_activation_sha256',projection -> 'local_activation_sha256'),
+          'attestation_payload',jsonb_build_object('operation_id',origin_projection -> 'operation_id',
+            'operation_epoch',origin_projection -> 'operation_epoch','protected_admission_sha256',projection -> 'protected_admission_sha256',
+            'capacity_agent_installation_sha256',projection -> 'capacity_agent_installation_sha256'),
+          'protocol_payload',projection -> 'protocol_versions');
+        expected_deployment := jsonb_build_object('candidate_digest',runtime_digest,'required_profiles',config -> 'profiles',
+          'readiness_state','ready','lifecycle_state','active','cutover_payload',jsonb_build_object(
+            'local_activation_sha256',projection -> 'local_activation_sha256','candidate_publication_sha256',projection -> 'candidate_publication_sha256',
+            'protected_admission_sha256',projection -> 'protected_admission_sha256','capacity_agent_installation_sha256',projection -> 'capacity_agent_installation_sha256'));
+      END IF;
+      SELECT to_jsonb(c) - ARRAY['id','subject_id','subject_incarnation','candidate_generation'] INTO retained
+        FROM public.capacity_candidates c WHERE c.subject_id=NEW.subject_id AND c.subject_incarnation=NEW.subject_incarnation
+          AND c.candidate_generation=service_candidate_generation;
+      IF NOT public.capacity_personal_build_json_exact(retained,expected_candidate) THEN
         RAISE EXCEPTION 'typed build candidate evidence changed' USING ERRCODE = '23514';
       END IF;
       SELECT to_jsonb(d) - ARRAY['id','subject_id','subject_incarnation','deployment_generation'] INTO retained
         FROM public.capacity_deployment_generations d WHERE d.subject_id=NEW.subject_id
           AND d.subject_incarnation=NEW.subject_incarnation AND d.deployment_generation=NEW.deployment_generation;
-      IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object('candidate_digest',runtime_digest,'required_profiles',config -> 'profiles',
-          'readiness_state','pending','lifecycle_state','active','cutover_payload',jsonb_build_object(
-            'purpose','personal-build-worker','runtime_candidate',candidate,'build_template_sha256',template_digest,
-            'protected_admission_sha256',ack -> 'protected_admission_sha256'))) THEN
+      IF NOT public.capacity_personal_build_json_exact(retained,expected_deployment) THEN
         RAISE EXCEPTION 'typed build deployment evidence changed' USING ERRCODE = '23514';
       END IF;
       IF (SELECT count(*) FROM public.capacity_worker_profiles p WHERE p.subject_id=NEW.subject_id
