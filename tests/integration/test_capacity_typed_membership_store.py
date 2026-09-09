@@ -307,3 +307,64 @@ async def test_typed_store_refreshes_retained_base_and_fleet_documents(isolated_
                 await _apply(reader, request)
     finally:
         await engine.dispose()
+
+
+def _transition(request, operation, *, max_slots=1):
+    previous = request.command.projection
+    generation = previous.configuration_generation + 1
+    values = dict(operation_kind=operation, operation_epoch=generation, configuration_generation=generation,
+        operation_id=UUID(int=95000 + generation), max_slots=max_slots)
+    if operation == "update":
+        values.update(deployment_generation=previous.deployment_generation + 1,
+            demand_reporter_incarnation=UUID(int=96000 + generation), demand_reporter_token_sha256=f"{96000 + generation:064x}")
+    projection = previous.model_copy(update=values)
+    acknowledgement = request.command.acknowledgement.model_copy(update={
+        "configuration_generation": generation, "deployment_generation": projection.deployment_generation,
+        "reporter_incarnation": projection.demand_reporter_incarnation,
+    })
+    return request.model_copy(update={"expected_revision": request.expected_revision + 1,
+        "command": request.command.model_copy(update={"projection": projection, "acknowledgement": acknowledgement})})
+
+
+async def test_typed_store_complete_pending_service_lifecycle_keeps_cleanup_evidence(capacity_session):
+    _management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    initial = build_request(preparation, execution)
+    created = await _apply(capacity_session, initial)
+    updated_request = _transition(initial, "update")
+    updated = await _apply(capacity_session, updated_request, key=92001)
+    subject_id = created.member.configuration.subject_id
+    reporters = list((await capacity_session.scalars(select(CapacityDemandReporter).where(CapacityDemandReporter.subject_id == subject_id))).all())
+    assert {row.reporter_incarnation: row.state for row in reporters} == {
+        initial.command.projection.demand_reporter_incarnation: "fenced",
+        updated_request.command.projection.demand_reporter_incarnation: "current",
+    }
+    current = next(row for row in reporters if row.state == "current")
+    current.high_water = 7
+    await capacity_session.flush()
+    capacity_request = _transition(updated_request, "capacity", max_slots=0)
+    resized = await _apply(capacity_session, capacity_request, key=92002)
+    destroy_request = _transition(capacity_request, "destroy")
+    destroyed = await _apply(capacity_session, destroy_request, key=92003)
+    assert [result.revision for result in (created, updated, resized, destroyed)] == [1, 2, 3, 4]
+    assert destroyed.member.configuration.lifecycle_state == "disabled"
+    assert destroyed.member.configuration.max_slots == 0
+    assert current.high_water == 7 and current.state == "current"
+    assert current.configuration_generation == 4
+    assert current.token_sha256 == updated_request.command.projection.demand_reporter_token_sha256
+    assert await _count(capacity_session, CapacityCandidate, subject_id) == 1
+    assert await _count(capacity_session, CapacityDeploymentGeneration, subject_id) == 2
+    assert (await _apply(capacity_session, initial)) == created.model_copy(update={"replayed": True})
+    assert (await _apply(capacity_session, updated_request, key=92001)) == updated.model_copy(update={"replayed": True})
+    assert (await _apply(capacity_session, destroy_request, key=92003)) == destroyed.model_copy(update={"replayed": True})
+
+
+@pytest.mark.parametrize("operation", ("update", "capacity", "destroy"))
+async def test_typed_store_cannot_mutate_destroyed_service(capacity_session, operation):
+    _management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    initial = build_request(preparation, execution)
+    await _apply(capacity_session, initial)
+    destroy = _transition(initial, "destroy")
+    await _apply(capacity_session, destroy, key=92001)
+    with pytest.raises(ConfigurationConflictError):
+        await _apply(capacity_session, _transition(destroy, operation), key=92002)
+    assert await _count(capacity_session, CapacityPersonalMembershipEvent, initial.command.acknowledgement.subject_id) == 2
