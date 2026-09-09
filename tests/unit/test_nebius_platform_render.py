@@ -650,6 +650,15 @@ def test_regional_object_renaming_preserves_published_images_and_settings(
         assert pod["serviceAccountName"] == target_id + "-" + role
         assert template["metadata"]["labels"]["app.kubernetes.io/name"] == target_id + "-" + role
         if kind == "Deployment":
+            affinity = pod["affinity"]["podAntiAffinity"][
+                "preferredDuringSchedulingIgnoredDuringExecution"
+            ]
+            assert (
+                affinity[0]["podAffinityTerm"]["labelSelector"]["matchLabels"][
+                    "app.kubernetes.io/name"
+                ]
+                == target_id + "-actuator"
+            )
             assert all(
                 template["metadata"]["labels"][key] == value
                 for key, value in doc["spec"]["selector"]["matchLabels"].items()

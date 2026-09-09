@@ -609,7 +609,7 @@ scale-down acceptance. Each region's optional `execution_resource_quota` map
 applies only to that remote namespace; the primary namespace's override is not
 silently copied to remote pools.
 
-Regional process names are rewritten only in Kubernetes metadata, Pod labels/selectors,
+Regional process names are rewritten only in Kubernetes metadata, Pod labels/selectors (including anti-affinity),
 ServiceAccount references and collector ConfigMap/native Secret references. Published
 image references (including collector init containers), configuration values and
 commands retain their original values. The regional processes reuse the existing

@@ -932,6 +932,17 @@ def _regional_documents(
                 template = doc["spec"]["template"]
                 pod = template["spec"]
                 doc["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"] = regional_name
+                anti_affinity = pod.get("affinity", {}).get("podAntiAffinity", {})
+                for preference in anti_affinity.get(
+                    "preferredDuringSchedulingIgnoredDuringExecution", []
+                ):
+                    labels = (
+                        preference["podAffinityTerm"]
+                        .get("labelSelector", {})
+                        .get("matchLabels", {})
+                    )
+                    if labels.get("app.kubernetes.io/name") == name:
+                        labels["app.kubernetes.io/name"] = regional_name
             elif kind == "CronJob":
                 template = doc["spec"]["jobTemplate"]["spec"]["template"]
                 pod = template["spec"]
