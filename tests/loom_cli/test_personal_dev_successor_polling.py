@@ -172,3 +172,37 @@ def test_first_poll_is_bound_to_the_apply_receipt(field, value):
                 min_slots=0, max_slots=2, operation_epoch=1, timeout=1, poll_interval=0.01,
                 operation_receipt=_operation(state="running"),
             )
+
+
+@pytest.mark.parametrize("tamper", ("child", "succeeded"))
+def test_superseded_receipt_cannot_substitute_its_immutable_successor(tamper):
+    original_child, changed_child = str(uuid4()), str(uuid4())
+    receipt = _operation(state="superseded") | {
+        "checkpoint": "membership_successor_created", "membership_successor_operation_id": original_child,
+    }
+    child = _operation(state="succeeded") | {
+        "id": changed_child, "operation_epoch": 2, "expected_operation_epoch": 1,
+        "membership_predecessor_operation_id": _OPERATION_ID, "membership_continuation_kind": "create",
+        "kind": "update", "deployment_generation": 2, "attempt_id": str(uuid4()), "idempotency_key": str(uuid4()),
+    }
+
+    def handler(request):
+        if request.url.path.endswith("/operations/" + _OPERATION_ID):
+            return httpx.Response(200, json=(
+                receipt | {"membership_successor_operation_id": changed_child}
+                if tamper == "child" else _operation(state="succeeded")
+            ))
+        if request.url.path.endswith("/operations/" + changed_child):
+            return httpx.Response(200, json=child)
+        return httpx.Response(200, json=_environment(status="ready", epoch=2 if tamper == "child" else 1) | {
+            "operation_id": changed_child if tamper == "child" else _OPERATION_ID,
+            "deployment_generation": 2 if tamper == "child" else 1,
+        })
+
+    with httpx.Client(base_url="https://loom.example", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PersonalDevDeployError):
+            PersonalDevDeployClient(client).wait_ready(
+                "alice", operation_id=_OPERATION_ID, candidate_sha=_CANDIDATE_SHA,
+                min_slots=0, max_slots=2, operation_epoch=1, timeout=1, poll_interval=0.01,
+                operation_receipt=receipt,
+            )
