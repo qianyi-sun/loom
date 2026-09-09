@@ -451,8 +451,10 @@ the prepared credential count plus one. Under active immutable-audit guards,
 unchanged cardinality proves that no credential was appended; a mismatch requires
 releasing the entire fence and preparing again outside it. Both phases reject
 disabled, conditional or column-specific credential immutability guards, or
-non-origin replication mode. Schema administration remains trusted across the
-interval between them.
+non-origin replication mode. They also require the permanent INSERT guard below:
+an enabled, unconditional, nondeferrable AFTER ROW INSERT trigger bound to the
+VOLATILE definer function with its fixed search-path and row-security settings.
+Schema administration remains trusted across the interval between them.
 
 Isolation is set on the checked-out connection before starting the owned session
 transaction: inherited engine hooks can override derived-engine options. Tests
@@ -461,8 +463,8 @@ configured for REPEATABLE READ or AUTOCOMMIT.
 
 The recheck helper requires its caller to own the catalog/parent/attempt
 fence and transaction deadlines. It does not acquire locks, inspect references,
-retire an attempt, or make later raw database INSERT safe. Prepared evidence is
-internal data, never a caller-supplied retirement authorization.
+retire an attempt, or independently make later raw database INSERT safe. Prepared
+evidence is internal data, never a caller-supplied retirement authorization.
 
 The unpublished publication migration adds database immutability for retained
 credentials and candidates, including rows issued before the upgrade. Statement
@@ -474,6 +476,29 @@ fault injection is not prevented by triggers that such an owner can disable.
 The owned retirement transaction establishes the complete inventory under its
 shared fence. Execution-start references and registry quiescence remain separate
 activation requirements.
+
+An immediate AFTER INSERT row trigger permanently rejects credential rows for a
+retired attempt, including raw SQL outside normal issuance. It checks the final
+row identity after BEFORE-trigger transformations. Its exact attempt KEY SHARE
+lock conflicts with retirement's FOR UPDATE fence without adding earlier
+materialization, grant or session locks. A separate subsequent marker SELECT in
+the VOLATILE function obtains a fresh READ COMMITTED snapshot after any wait:
+retirement commit rejects the insertion; retirement rollback permits it. An
+INSERT winner holds its attempt lock until transaction end, making retirement
+fail NOWAIT and retry inventory preparation. One rejected row rolls back the
+entire multirow statement.
+
+Credential INSERT explicitly requires READ COMMITTED. REPEATABLE READ and
+SERIALIZABLE fail closed because locking an unchanged attempt cannot refresh an
+old snapshot of its separate retirement marker. Read-only credential replay is
+unaffected. A narrow SECURITY DEFINER function uses fully qualified tables,
+`search_path=pg_catalog` and `row_security=off`; PUBLIC execution is revoked.
+Restricted callers cannot hide retirement through search-path or RLS policies.
+An owner itself subject to RLS fails closed rather than silently missing rows;
+trusted schema/replication administration remains outside this protection.
+Inactive downgrade removes this trigger/function before the retirement table.
+This fence prevents new database credential audit rows, not registry requests
+using previously issued bearer tokens or clock-based token revival.
 
 Attempt retention now has a restrictive attempt foreign key and a durable
 observation record. Observation time cannot regress or move to another attempt.
@@ -537,10 +562,10 @@ cryptographic receipt replay remains independently implemented and unchanged.
 The retirement entrypoint is deliberately not wired to a collector or runtime API.
 Terminal verifier reservations can still add execution uses without reopening
 a Trial or taking this fence, so the terminal-state invariant below is not a
-substitute for rootless execution-start admission. Permanent raw credential
+substitute for rootless execution-start admission. Permanent registry-request
 ingress denial, source lifecycle, authenticated offline maintenance, writer
 quiescence and clock-revival protection remain requirements before deletion or
-activation.
+activation, even with the database credential INSERT fence in place.
 
 The same unpublished migration prevents a terminal Trial from becoming
 nonterminal through UPDATE, including changes made by BEFORE triggers. Its
