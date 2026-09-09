@@ -1114,6 +1114,44 @@ taskset generation cleanup currently follows Task sources rather than image
 prerequisites. These unresolved source-lifecycle boundaries are not cleared by
 the registration tests or by a queued materialization alone.
 
+### Strong-source preparation and recoverable writes
+
+`prepare_task_bundle_registration` captures the content manifest, reads the exact
+verified `task.toml` bytes, and records the relationship between authored and
+catalog IDs without rewriting authored files. It preserves explicit architecture
+choices; optional runtime fallback promotion reads the captured Dockerfile.
+Parsed configuration and Dockerfile text each have a 1 MiB ceiling before the
+verified full-byte read. The persisted `task_config_document` is a copied canonical
+JSON view: set-valued network policies are sorted, while ordered steps/commands
+remain ordered. Re-serializing its model view is not the persistence contract.
+Cross-process hash-seed tests protect the normalized config fingerprint.
+
+The source-storage primitives reuse `ObjectWriteResult` and add optional bounded
+user metadata and required versioning to the existing object-store write API.
+Legacy calls keep their existing requests and unversioned behavior. Strong writes
+require an Enabled preflight and a non-null immutable version receipt. Metadata
+is copied before asynchronous I/O; application and SDK retries carry the same
+intent identity. A preflight cannot prevent an external versioning-policy change
+or prove that an earlier timed-out request has stopped.
+
+Each intended write therefore needs a **committed durable intent before storage
+I/O**. Recovery lists only that intent's expected key prefix, reads exact versions
+at the exact expected key, and verifies intent metadata, size and SHA-256. Equal
+bytes from another intent do not establish ownership. `scan_batch` returns a
+bounded verified batch and an intent-bound continuation for atomic journal
+checkpointing. It preserves opaque MinIO continuation values without treating
+them as object-key authority. An empty batch or observed end does not authorize
+forgetting a tombstone: late versions require periodic fresh reconciliation.
+Consumers must finish pagination before deleting its continuation-marker versions.
+
+Disposable TLS MinIO tests cover disabled/suspended versioning, a delayed first
+PUT arriving after its retry was deleted and an identical new publication was
+created, exact-version cleanup preserving that new publication, and resumable
+inventory across foreign versions and delete markers. These are storage-boundary
+tests, not durable lifecycle or activation acceptance. The source-incarnation and
+reference journal, its retirement/admission locks, producer composition and V2
+claim switching remain required; these helpers enable none of those defaults.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency

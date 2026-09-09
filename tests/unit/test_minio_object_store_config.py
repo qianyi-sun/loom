@@ -86,6 +86,41 @@ async def test_put_rejects_invalid_intent_metadata_before_io(metadata):
     assert client.calls == []
 
 
+async def test_strong_write_rechecks_versioning_on_retry_with_the_same_intent_metadata():
+    from botocore.exceptions import ConnectionClosedError
+
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    first, second = _IntentWriteClient(), _IntentWriteClient(status="Suspended")
+    attempts = []
+
+    def fail_write(**kwargs):
+        attempts.append(kwargs)
+        raise ConnectionClosedError(endpoint_url="http://disposable-invalid")
+
+    first.put_object = fail_write
+    store._client = first
+    store._build_client = lambda: second
+    with pytest.raises(ValueError, match="versioning"):
+        await store.put_object_with_metadata(bucket="sources", key="task/file", body=b"abc",
+            metadata={"loom-source-write-id": "intent-1"}, require_versioning=True)
+    assert attempts[0]["Metadata"] == {"loom-source-write-id": "intent-1"}
+    assert [name for name, _ in second.calls] == ["versioning"]
+
+
+@pytest.mark.parametrize("backend", ["fake", "local"])
+async def test_nonversioned_backends_refuse_strong_write_without_creating_objects(backend, tmp_path):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_cli.local_object_store import LocalDiskObjectStore
+
+    store = FakeObjectStore() if backend == "fake" else LocalDiskObjectStore(root=tmp_path)
+    with pytest.raises(ValueError, match="versioning"):
+        await store.put_object_with_metadata(bucket="sources", key="task/file", body=b"abc", require_versioning=True)
+    if backend == "fake":
+        assert store.objects == {}
+    else:
+        assert list(tmp_path.iterdir()) == []
+
+
 def test_minio_object_store_uses_import_safe_s3_client_defaults() -> None:
     store = MinioObjectStore(
         endpoint_url="http://127.0.0.1:9000",
