@@ -503,6 +503,26 @@ by MinIO still require separate treatment. Adoption must drain older unguarded
 writers; the guard cannot constrain code that never consults it. The live layout
 remains disabled.
 
+Bound MinIO tenants no longer remove/recreate IAM users or detach policy mappings
+during convergence. Their exact bucket-scoped Allow policy is immutable, and
+credential updates/additive attachment preserve any retirement Deny. Retirement
+first creates a permanent `loom-retired-v1-<storage-binding SHA256>` Deny policy,
+then retains or creates the incarnation user, attaches that policy, checks both
+readbacks, and verifies authenticated AccessDenied. A missing user cannot erase
+the policy's retirement decision. Interrupted retirement can resume, including
+retirement before first provisioning; a delayed credential update cannot remove
+the installed denial. Unknown lookup errors, foreign policy authority and altered
+policy bodies fail closed. Credentials continue to travel only through stdin.
+
+These retained IAM records are retirement tombstones, not object data. Bucket
+purge and retained-data transfer remain separate operations; the tombstones must
+not be removed by ordinary cleanup. New request denial does not cancel an S3
+request authorized before retirement. Controlled adoption must drain older
+remove/recreate scripts, which do not implement this protocol. The pinned-MinIO
+tests verify actual IAM denial, concurrent Allow attachment, delayed credential
+updates, missing-user replay and continued administrator access to retained data.
+They do not establish an in-flight-request drain or authorize live rollout.
+
 These contracts do not enable the new layout in the live service. Full lifecycle
 acceptance, stale namespace-child-write fencing and allowlisted data transfer
 remain required before selecting it or lifting retained-data recreation's

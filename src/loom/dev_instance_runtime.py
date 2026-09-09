@@ -1221,6 +1221,11 @@ class KubectlMinioTenantProvisioner:
         }
 
     async def converge(self, identity: DevInstanceIdentity) -> None:
+        if identity.storage_binding is not None:
+            from loom.personal_dev_minio_retirement import converge_bound_tenant
+
+            await converge_bound_tenant(self, identity)
+            return
         expected_access, policy_name = self._names(identity)
         access_key, secret_key = await self.vault.object_credentials(identity)
         if access_key != expected_access:
@@ -1259,6 +1264,11 @@ class KubectlMinioTenantProvisioner:
         )
 
     async def delete(self, identity: DevInstanceIdentity) -> None:
+        if identity.storage_binding is not None:
+            from loom.personal_dev_minio_retirement import retire_bound_tenant
+
+            await retire_bound_tenant(self, identity)
+            return
         access_key, policy_name = self._names(identity)
         quoted_access = shlex.quote(access_key)
         quoted_policy = shlex.quote(policy_name)
