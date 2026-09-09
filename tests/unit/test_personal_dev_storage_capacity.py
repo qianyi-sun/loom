@@ -8,11 +8,14 @@ from uuid import uuid4
 import pytest
 
 from loom.dev_instance_runtime import KubectlClient
-from loom.personal_dev_capacity_runtime import KubectlPersonalDevCapacityInstaller, PersonalDevCapacityInstallationError
+from loom.personal_dev_capacity_runtime import (
+    KubectlPersonalDevCapacityInstaller,
+    PersonalDevCapacityInstallationError,
+)
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_personal_dev_reconciler import _installation
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
-from tests.unit.test_personal_dev_storage_vault import _Cluster, _PASSWORD, _vault
+from tests.unit.test_personal_dev_storage_vault import _PASSWORD, _Cluster, _vault
 
 
 @pytest.mark.parametrize("method", ("converge", "verify_publishing", "seal", "destroy"))
@@ -70,8 +73,8 @@ async def test_capacity_credentials_and_seed_pin_full_storage_binding(secret_nam
 
 @pytest.mark.parametrize("tamper", (None, "database", "namespace", "subject_id", "subject_incarnation", "secret"))
 async def test_status_uses_bound_observer_role_and_fences_mixed_coordinates(monkeypatch, tamper):
-    from loom.personal_dev_capacity_runtime import PersonalDevCapacityStatusReader
     from loom.personal_dev_capacity_identity import capacity_role_names
+    from loom.personal_dev_capacity_runtime import PersonalDevCapacityStatusReader
 
     claim = _bound_claim()
     identity = claim.operation.storage_binding.identity
@@ -152,3 +155,15 @@ def test_generic_owner_store_preserves_and_validates_bound_storage():
     row.storage_binding_sha256 = "0" * 64
     with pytest.raises(ValueError, match="storage"):
         _record(row)
+
+
+@pytest.mark.parametrize("method", ("converge_create", "converge_destroy"))
+async def test_legacy_provisioner_cannot_operate_bound_record(method):
+    from loom.dev_instance_provisioner import DevInstanceConflictError
+    from tests.unit.test_dev_instance_provisioner import _FakeStore, _Recorder, _access, _provisioner, _record
+
+    recorder = _Recorder()
+    record = replace(_record("alice"), storage_binding=_bound_claim().operation.storage_binding)
+    with pytest.raises(DevInstanceConflictError, match="personal"):
+        await getattr(_provisioner(_FakeStore(), recorder), method)(record, **({"access": _access()} if method == "converge_create" else {}))
+    assert recorder.calls == []
