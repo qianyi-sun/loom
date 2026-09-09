@@ -251,7 +251,8 @@ async def test_observation_rejects_forged_installed_evidence(installer, corrupti
 
 
 @pytest.mark.asyncio
-async def test_retirement_preserves_credentials_and_stable_installation(installer):
+@pytest.mark.parametrize("candidate_status", ("ready", "failed"))
+async def test_retirement_preserves_credentials_and_stable_installation(installer, candidate_status):
     checkpoint = membership_envelope_values()["expected_checkpoint"]
     claim = _membership_claim()
     installation = await installer.converge(claim)
@@ -274,6 +275,7 @@ async def test_retirement_preserves_credentials_and_stable_installation(installe
         claim,
         operation=operation,
         attempt=replace(claim.attempt, operation_id=operation.id, operation_epoch=2),
+        candidate=replace(claim.candidate, status=candidate_status),
     )
     observation = await installer.observe_membership_retirement(claim, checkpoint, observed_at=_NOW)
     assert observation.acknowledgement.configuration_generation == 2
