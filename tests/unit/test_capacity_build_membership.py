@@ -1,6 +1,8 @@
 """Build membership composes with applications without creating another budget."""
 
 from importlib import import_module
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import pytest
@@ -205,3 +207,49 @@ def test_new_snapshot_rejects_duplicate_build_service_for_owner():
     snapshot = value.membership.model_copy(update={"revision": 3, "members": (*value.membership.members, duplicate)})
     with pytest.raises(ValueError):
         module.PersonalMembershipSnapshotV2.model_validate_json(snapshot.model_dump_json())
+
+
+@pytest.mark.parametrize("policy_version", (2, 3, 4))
+async def test_direct_v4_preparation_is_rejected_before_legacy_validation(policy_version):
+    from loom_capacity_manager.store import CapacityManagementStore, ExecutionConflictError
+    from tests.capacity_execution_fixtures import execution_policy
+    module = import_module("loom_capacity_manager.build_membership_contracts")
+    value = build_membership_input()
+    policy = execution_policy()
+    if policy_version == 3:
+        from loom_capacity_manager.membership_contracts import ExecutionPreparationPolicyV3
+        policy = ExecutionPreparationPolicyV3.model_validate(policy.model_dump(mode="python") | {
+            "schema_version": 3, "personal_membership": value.preparation.personal_membership,
+        })
+    elif policy_version == 4:
+        policy = module.ExecutionPreparationPolicyV4.model_validate(policy.model_dump(mode="python") | {
+            "schema_version": 4, "personal_membership": value.preparation.personal_membership,
+            "personal_builds": value.preparation.personal_builds,
+        })
+    store = CapacityManagementStore(execution_policy=policy)
+    session = AsyncMock()
+    authority = SimpleNamespace(authority_incarnation=value.preparation.authority_incarnation, writer_epoch=value.preparation.expected_writer_epoch)
+    with pytest.raises(ExecutionConflictError, match="unsupported execution preparation schema"):
+        await store._validate_execution_preparation(session, authority, value.preparation)
+    session.execute.assert_not_awaited()
+
+
+async def test_direct_v4_reconciliation_cannot_drop_membership_into_v2_epoch():
+    from loom_capacity_manager.reconciler import _commit_reconciled_epoch
+    from loom_capacity_manager.store import CapacityStoreError
+    value = build_membership_input()
+    shadow = allocate_shadow(value)
+    writer = SimpleNamespace(authority_incarnation=value.fleet.authority_incarnation, writer_epoch=1)
+    session = MagicMock()
+    session.begin.return_value.__aenter__ = AsyncMock()
+    session.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    connection = SimpleNamespace(get_isolation_level=AsyncMock(return_value="SERIALIZABLE"))
+    session.connection = AsyncMock(return_value=connection)
+    query = MagicMock()
+    query.scalar_one_or_none.return_value = SimpleNamespace(authority_incarnation=writer.authority_incarnation, writer_epoch=1)
+    session.execute = AsyncMock(return_value=query)
+    store = SimpleNamespace(load_allocation_input=AsyncMock(return_value=value), execution_authority=AsyncMock())
+    with pytest.raises(CapacityStoreError, match="unsupported executable allocation input schema"):
+        await _commit_reconciled_epoch(session, store, writer, shadow)
+    store.execution_authority.assert_not_awaited()
+    session.add.assert_not_called()
