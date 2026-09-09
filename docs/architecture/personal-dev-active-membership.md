@@ -694,17 +694,20 @@ remain `pending`: publication and membership acknowledgement alone do not prove
 the management admission runtime is installed and executable. They contain no
 synthetic application-agent installation or application activation evidence.
 
-Migration `capacity_0018` adds the SQL boundary for initial build-service events.
+Migration `capacity_0018` adds the SQL boundary for pending build-service lifecycle events.
 It retains the original V1 application insertion function and dispatches other
 wire versions to a separate, private, fixed-search-path guard. Only V2 build
-`create` commands under an exact active V4 authority are accepted. The guard
+`create`, `update`, `capacity`, and `destroy` commands under an exact active V4 authority
+are accepted. The guard
 checks the complete command/result and original event hash, deterministic UUID5
 identity, operator runtime/profile bindings, pending generation evidence, current
 reporter, owner/subject materialization, shared revision and membership limits.
 It rejects retained identity/name collisions, reused operation or idempotency
-keys, and noninteger wire schema versions. This is not build execution admission.
-Typed application commands, later lifecycle transitions and recreation remain
-blocked at this SQL boundary pending their durable history/release consumers.
+keys, and noninteger numeric fields. Updates must advance deployment and rotate
+the reporter; all retired reporters retain their exact fenced credentials and
+generation. Capacity changes and teardown retain deployment, reporter and token.
+This is not build execution admission. Typed application commands and recreation
+remain blocked pending their durable history/release consumers.
 
 SQL UUID5 uses the standard `uuid-ossp` extension at its existing schema, or
 installs it in a new private `capacity_build_extensions` schema if absent.
@@ -713,7 +716,7 @@ refuses retained V4 epochs or typed history; otherwise it restores the original
 application trigger and removes its own helpers, preserving the extension and
 schema for unrelated dependents.
 
-`CapacityTypedMembershipStore.apply_build` now owns the initial pending-build
+`CapacityTypedMembershipStore.apply_build` now owns the pending-build lifecycle
 transaction. It resolves the pinned management delegation, preparation and fleet
 from current database authority under a SERIALIZABLE authority-first lock. Before
 insertion or replay it validates the full typed event prefix, retained generation
@@ -724,11 +727,16 @@ transactions cannot leave duplicate or partial build generations. Staging,
 materialization and the guarded event insert roll back together, including on a
 late SQL rejection. Retained reads refresh ORM objects and compare nested JSON
 canonically, so cached values and integer/boolean/float aliases cannot authenticate
-changed evidence. This internal transaction is not yet exposed as runtime admission;
-later lifecycle and typed application handling remain separate unfinished work.
+changed evidence. Historical generations are validated against the last event for
+each reporter, including reporters fenced by a later update. Destroy disables new
+subject capacity but retains the current reporter/token and demand high-water for
+cleanup; it does not certify physical release or erase charges. Earlier receipts
+remain replayable after update or destroy. This internal transaction is not yet
+exposed as runtime admission; recreation and typed application handling remain
+separate unfinished work.
 
 These new contracts are deliberately not accepted by execution preparation or
-promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
+promotion yet. Direct preparation-store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a
 legacy executable epoch. The shared allocator can exercise pure accounting and
 native routing while the remaining typed admission/execution consumers are built.

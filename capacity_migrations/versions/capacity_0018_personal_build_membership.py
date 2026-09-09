@@ -3,8 +3,8 @@
 Revision ID: capacity_0018
 Revises: capacity_0017
 
-Initial typed build events may be recorded with pending generation evidence.
-V4 executable admission and subsequent lifecycle transitions remain interlocked.
+Typed build lifecycle events may be recorded with pending generation evidence.
+Recreation and V4 executable admission remain interlocked.
 """
 
 from __future__ import annotations
@@ -24,12 +24,23 @@ _EXTENSION_SCHEMA = "capacity_build_extensions"
 
 def _install_initial_build_guard() -> None:
     op.execute("""
+    CREATE FUNCTION public.capacity_personal_build_json_exact(p_left jsonb,p_right jsonb)
+    RETURNS boolean LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
+      SELECT public.capacity_executable_canonical_jsonb_text(p_left)
+        IS NOT DISTINCT FROM public.capacity_executable_canonical_jsonb_text(p_right)
+    $$;
+    REVOKE ALL ON FUNCTION public.capacity_personal_build_json_exact(jsonb,jsonb) FROM PUBLIC;
     CREATE FUNCTION public.capacity_personal_build_initial_insert_guard()
     RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
     DECLARE
       authority_record record;
       epoch_record record;
       previous_record record;
+      prior_subject record;
+      old_member jsonb;
+      old_projection jsonb;
+      mutation_kind text;
+      service_candidate_generation bigint;
       preparation jsonb;
       fleet jsonb;
       policy jsonb;
@@ -72,9 +83,10 @@ def _install_initial_build_guard() -> None:
       END IF;
       -- The existing application trigger remains unchanged and handles V1 only.
       -- Fail closed on every unsupported version/purpose/lifecycle operation.
+      mutation_kind := NEW.request_payload #>> '{command,projection,operation_kind}';
       IF NEW.request_payload -> 'schema_version' IS DISTINCT FROM '2'::jsonb
          OR NEW.request_payload #>> '{command,purpose}' IS DISTINCT FROM 'personal-build-worker'
-         OR NEW.request_payload #>> '{command,projection,operation_kind}' IS DISTINCT FROM 'create' THEN
+         OR mutation_kind IS NULL OR mutation_kind NOT IN ('create','update','capacity','destroy') THEN
         RAISE EXCEPTION 'typed membership lifecycle is not admitted' USING ERRCODE = '23514';
       END IF;
       SELECT a.* INTO authority_record FROM public.capacity_authority_state a
@@ -134,6 +146,12 @@ def _install_initial_build_guard() -> None:
         'executable_new_capacity_ceiling',epoch_record.effective_ceiling,
         'executable_new_capacity_rate_per_minute',epoch_record.effective_rate_per_minute);
       projection := NEW.request_payload #> '{command,projection}';
+      IF jsonb_typeof(projection -> 'candidate_generation') IS DISTINCT FROM 'number'
+         OR coalesce((projection ->> 'candidate_generation') ~ '^[1-9][0-9]*$',false) IS NOT TRUE
+         OR (projection ->> 'candidate_generation')::numeric > 9223372036854775807 THEN
+        RAISE EXCEPTION 'typed build candidate generation is invalid' USING ERRCODE = '23514';
+      END IF;
+      service_candidate_generation := (projection ->> 'candidate_generation')::bigint;
       member := NEW.result_payload -> 'member';
       config := member -> 'configuration';
       ack := NEW.request_payload #> '{command,acknowledgement}';
@@ -149,26 +167,26 @@ def _install_initial_build_guard() -> None:
       expected_config := jsonb_build_object(
         'schema_version',1,'subject_id',NEW.subject_id::text,'subject_incarnation',NEW.subject_incarnation::text,
         'display_name','dev-build-' || owner_hex,'account_id',derived_account_id,'tier_id','development',
-        'min_slots',0,'max_slots',projection -> 'max_slots','rollout_surge_slots',0,
+        'min_slots',0,'max_slots',CASE WHEN mutation_kind='destroy' THEN '0'::jsonb ELSE projection -> 'max_slots' END,'rollout_surge_slots',0,
         'max_pending_slots',template -> 'max_pending_slots_per_subject',
         'max_pending_jobs',template -> 'max_pending_jobs_per_subject',
-        'submission_rate_per_minute',owner_policy -> 'submission_rate_per_minute','lifecycle_state','active',
-        'candidate_generation',1,'deployment_generation',1,
+        'submission_rate_per_minute',owner_policy -> 'submission_rate_per_minute',
+        'lifecycle_state',CASE WHEN mutation_kind='destroy' THEN 'disabled' ELSE 'active' END,
+        'candidate_generation',service_candidate_generation,'deployment_generation',NEW.deployment_generation,
         'configuration_generation',NEW.configuration_generation,
         'demand_reporter_incarnation',NEW.reporter_incarnation::text,'profiles',template -> 'profiles');
       IF NEW.subject_id IS DISTINCT FROM public.capacity_personal_build_subject_id(NEW.namespace_id,NEW.owner_id)
          OR NEW.subject_incarnation = '00000000-0000-0000-0000-000000000000'::uuid
          OR NEW.reporter_incarnation = '00000000-0000-0000-0000-000000000000'::uuid
          OR NEW.operation_id = '00000000-0000-0000-0000-000000000000'::uuid
-         OR NEW.deployment_generation <> 1
          OR NEW.request_payload IS DISTINCT FROM jsonb_build_object(
               'schema_version',2,'execution',expected_execution,'namespace_id',NEW.namespace_id::text,
               'expected_revision',NEW.revision-1,'command',jsonb_build_object(
                 'schema_version',2,'purpose','personal-build-worker','projection',projection,'acknowledgement',ack))
          OR projection IS DISTINCT FROM jsonb_build_object(
               'schema_version',1,'owner_id',NEW.owner_id::text,'subject_incarnation',NEW.subject_incarnation::text,
-              'operation_kind','create','operation_id',NEW.operation_id::text,'operation_epoch',NEW.configuration_generation,
-              'configuration_generation',NEW.configuration_generation,'candidate_generation',1,'deployment_generation',1,
+              'operation_kind',mutation_kind,'operation_id',NEW.operation_id::text,'operation_epoch',NEW.configuration_generation,
+              'configuration_generation',NEW.configuration_generation,'candidate_generation',service_candidate_generation,'deployment_generation',NEW.deployment_generation,
               'demand_reporter_incarnation',NEW.reporter_incarnation::text,
               'demand_reporter_token_sha256',projection -> 'demand_reporter_token_sha256','max_slots',projection -> 'max_slots')
          OR coalesce((projection ->> 'demand_reporter_token_sha256') ~ '^[0-9a-f]{64}$',false) IS NOT TRUE
@@ -182,7 +200,7 @@ def _install_initial_build_guard() -> None:
               'acknowledgement',ack,'reincarnation',NULL)
          OR ack IS DISTINCT FROM jsonb_build_object('schema_version',2,'subject_id',NEW.subject_id::text,
               'subject_incarnation',NEW.subject_incarnation::text,'configuration_generation',NEW.configuration_generation,
-              'deployment_generation',1,'candidate',template -> 'runtime_candidate','reporter_incarnation',NEW.reporter_incarnation::text,
+              'deployment_generation',NEW.deployment_generation,'candidate',template -> 'runtime_candidate','reporter_incarnation',NEW.reporter_incarnation::text,
               'protected_admission_sha256',ack -> 'protected_admission_sha256',
               'legacy_writer_high_water',ack -> 'legacy_writer_high_water','acknowledgement_sha256',ack -> 'acknowledgement_sha256')
          OR coalesce((ack ->> 'protected_admission_sha256') ~ '^[0-9a-f]{64}$',false) IS NOT TRUE
@@ -209,12 +227,48 @@ def _install_initial_build_guard() -> None:
               public.capacity_executable_canonical_jsonb_text(NEW.request_payload),'UTF8')),'hex') THEN
         RAISE EXCEPTION 'typed membership event digest changed' USING ERRCODE = '23514';
       END IF;
-      -- No create may serve as recreation or steal a base/other-purpose identity.
-      IF EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE
-          e.subject_id = NEW.subject_id OR e.subject_incarnation = NEW.subject_incarnation
-          OR e.reporter_incarnation = NEW.reporter_incarnation
+      SELECT e.* INTO prior_subject FROM public.capacity_personal_membership_events e
+        WHERE e.subject_id=NEW.subject_id ORDER BY e.execution_epoch DESC,e.revision DESC LIMIT 1 FOR SHARE;
+      IF mutation_kind='create' THEN
+        IF FOUND OR service_candidate_generation<>1 OR NEW.deployment_generation<>1 THEN
+          RAISE EXCEPTION 'typed build create cannot recreate retained membership' USING ERRCODE = '23514';
+        END IF;
+      ELSE
+        IF NOT FOUND OR prior_subject.execution_epoch IS DISTINCT FROM NEW.execution_epoch
+           OR prior_subject.owner_id IS DISTINCT FROM NEW.owner_id
+           OR prior_subject.subject_incarnation IS DISTINCT FROM NEW.subject_incarnation
+           OR prior_subject.configuration_generation >= NEW.configuration_generation
+           OR prior_subject.request_payload #>> '{command,purpose}' IS DISTINCT FROM 'personal-build-worker'
+           OR prior_subject.result_payload #>> '{member,configuration,lifecycle_state}' IS DISTINCT FROM 'active' THEN
+          RAISE EXCEPTION 'typed build lifecycle predecessor changed' USING ERRCODE = '23514';
+        END IF;
+        old_member := prior_subject.result_payload -> 'member';
+        old_projection := prior_subject.request_payload #> '{command,projection}';
+        IF mutation_kind='update' THEN
+          IF NEW.deployment_generation <= prior_subject.deployment_generation
+             OR service_candidate_generation < (old_projection ->> 'candidate_generation')::bigint THEN
+            RAISE EXCEPTION 'typed build update generations must advance' USING ERRCODE = '23514';
+          END IF;
+        ELSIF NEW.deployment_generation IS DISTINCT FROM prior_subject.deployment_generation
+           OR NEW.reporter_incarnation IS DISTINCT FROM prior_subject.reporter_incarnation
+           OR projection -> 'candidate_generation' IS DISTINCT FROM old_projection -> 'candidate_generation'
+           OR projection -> 'demand_reporter_token_sha256' IS DISTINCT FROM old_projection -> 'demand_reporter_token_sha256'
+           OR (ack - ARRAY['configuration_generation','acknowledgement_sha256'])
+                IS DISTINCT FROM (old_member -> 'acknowledgement') - ARRAY['configuration_generation','acknowledgement_sha256'] THEN
+          RAISE EXCEPTION 'typed build non-deployment credentials must be retained' USING ERRCODE = '23514';
+        END IF;
+      END IF;
+      -- Newly issued reporters must be unused across both purposes and all epochs.
+      IF mutation_kind IN ('create','update') AND EXISTS (
+          SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.reporter_incarnation=NEW.reporter_incarnation
           OR e.request_payload #>> '{command,projection,demand_reporter_token_sha256}' = projection ->> 'demand_reporter_token_sha256'
-          OR e.request_payload #>> '{projection,demand_reporter_token_sha256}' = projection ->> 'demand_reporter_token_sha256')
+          OR e.request_payload #>> '{projection,demand_reporter_token_sha256}' = projection ->> 'demand_reporter_token_sha256') THEN
+        RAISE EXCEPTION 'typed build reporter or credential was already used' USING ERRCODE = '23514';
+      END IF;
+      -- Do not steal a base/other-purpose identity, even from retained history.
+      IF EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE
+            e.subject_id<>NEW.subject_id AND (e.subject_incarnation=NEW.subject_incarnation
+              OR e.result_payload #>> '{member,configuration,display_name}' = expected_config ->> 'display_name'))
          OR EXISTS (SELECT 1 FROM public.capacity_config_generations g WHERE
               g.subject_id = NEW.subject_id OR g.subject_incarnation = NEW.subject_incarnation)
          OR EXISTS (SELECT 1 FROM public.capacity_subjects s WHERE
@@ -232,13 +286,15 @@ def _install_initial_build_guard() -> None:
       END IF;
       -- Full materialization, including indexed fields, must agree with the event.
       SELECT to_jsonb(s) - ARRAY['id','configuration_epoch','payload'] INTO retained FROM public.capacity_subjects s
-        WHERE s.configuration_epoch=epoch_record.configuration_epoch AND s.subject_id=NEW.subject_id AND s.payload=config;
-      IF retained IS DISTINCT FROM config - ARRAY['schema_version','profiles'] THEN
+        WHERE s.configuration_epoch=epoch_record.configuration_epoch AND s.subject_id=NEW.subject_id
+          AND public.capacity_personal_build_json_exact(s.payload,config);
+      IF NOT public.capacity_personal_build_json_exact(retained,config - ARRAY['schema_version','profiles']) THEN
         RAISE EXCEPTION 'typed build subject materialization changed' USING ERRCODE = '23514';
       END IF;
       SELECT to_jsonb(a) - ARRAY['id','configuration_epoch','payload'] INTO retained FROM public.capacity_account_policies a
-        WHERE a.configuration_epoch=epoch_record.configuration_epoch AND a.account_id=derived_account_id AND a.payload=owner_policy;
-      IF retained IS DISTINCT FROM (owner_policy - 'schema_version') || jsonb_build_object('max_builds',0,'max_artifact_bytes',0) THEN
+        WHERE a.configuration_epoch=epoch_record.configuration_epoch AND a.account_id=derived_account_id
+          AND public.capacity_personal_build_json_exact(a.payload,owner_policy);
+      IF NOT public.capacity_personal_build_json_exact(retained,(owner_policy - 'schema_version') || jsonb_build_object('max_builds',0,'max_artifact_bytes',0)) THEN
         RAISE EXCEPTION 'typed build owner materialization changed' USING ERRCODE = '23514';
       END IF;
       candidate := template -> 'runtime_candidate';
@@ -246,8 +302,8 @@ def _install_initial_build_guard() -> None:
       template_digest := encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(template),'UTF8')),'hex');
       SELECT to_jsonb(c) - ARRAY['id','subject_id','subject_incarnation','candidate_generation'] INTO retained
         FROM public.capacity_candidates c WHERE c.subject_id=NEW.subject_id AND c.subject_incarnation=NEW.subject_incarnation
-          AND c.candidate_generation=1;
-      IF retained IS DISTINCT FROM jsonb_build_object('candidate_digest',runtime_digest,
+          AND c.candidate_generation=service_candidate_generation;
+      IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object('candidate_digest',runtime_digest,
           'candidate_identity_algorithm',candidate -> 'algorithm','candidate_identity',candidate -> 'identity',
           'source_payload',jsonb_build_object('publication_sha256',candidate -> 'publication_sha256'),
           'artifact_payload',jsonb_build_object('runtime_candidate',candidate),
@@ -255,40 +311,58 @@ def _install_initial_build_guard() -> None:
           'launcher_payload',jsonb_build_object('purpose','personal-build-worker','trusted_fleet_release_sha256',epoch_record.trusted_fleet_release_sha256),
           'attestation_payload',jsonb_build_object('build_template_sha256',template_digest),
           'protocol_payload',(SELECT jsonb_object_agg(value ->> 'pool_id',jsonb_build_object(
-            'generation',value -> 'protocol_generation','digest',value -> 'protocol_digest')) FROM jsonb_array_elements(config -> 'profiles'))) THEN
+            'generation',value -> 'protocol_generation','digest',value -> 'protocol_digest')) FROM jsonb_array_elements(config -> 'profiles')))) THEN
         RAISE EXCEPTION 'typed build candidate evidence changed' USING ERRCODE = '23514';
       END IF;
       SELECT to_jsonb(d) - ARRAY['id','subject_id','subject_incarnation','deployment_generation'] INTO retained
         FROM public.capacity_deployment_generations d WHERE d.subject_id=NEW.subject_id
-          AND d.subject_incarnation=NEW.subject_incarnation AND d.deployment_generation=1;
-      IF retained IS DISTINCT FROM jsonb_build_object('candidate_digest',runtime_digest,'required_profiles',config -> 'profiles',
+          AND d.subject_incarnation=NEW.subject_incarnation AND d.deployment_generation=NEW.deployment_generation;
+      IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object('candidate_digest',runtime_digest,'required_profiles',config -> 'profiles',
           'readiness_state','pending','lifecycle_state','active','cutover_payload',jsonb_build_object(
             'purpose','personal-build-worker','runtime_candidate',candidate,'build_template_sha256',template_digest,
-            'protected_admission_sha256',ack -> 'protected_admission_sha256')) THEN
+            'protected_admission_sha256',ack -> 'protected_admission_sha256'))) THEN
         RAISE EXCEPTION 'typed build deployment evidence changed' USING ERRCODE = '23514';
       END IF;
       IF (SELECT count(*) FROM public.capacity_worker_profiles p WHERE p.subject_id=NEW.subject_id
-          AND p.subject_incarnation=NEW.subject_incarnation AND p.deployment_generation=1) <> jsonb_array_length(config -> 'profiles') THEN
+          AND p.subject_incarnation=NEW.subject_incarnation AND p.deployment_generation=NEW.deployment_generation) <> jsonb_array_length(config -> 'profiles') THEN
         RAISE EXCEPTION 'typed build profile set changed' USING ERRCODE = '23514';
       END IF;
       FOR profile IN SELECT value FROM jsonb_array_elements(config -> 'profiles') LOOP
         SELECT to_jsonb(p) - ARRAY['id','subject_id','subject_incarnation','deployment_generation'] INTO retained
           FROM public.capacity_worker_profiles p WHERE p.subject_id=NEW.subject_id AND p.subject_incarnation=NEW.subject_incarnation
-            AND p.deployment_generation=1 AND p.pool_id=profile ->> 'pool_id';
-        IF retained IS DISTINCT FROM jsonb_build_object('pool_id',profile -> 'pool_id','pool_generation',profile -> 'pool_generation',
+            AND p.deployment_generation=NEW.deployment_generation AND p.pool_id=profile ->> 'pool_id';
+        IF NOT public.capacity_personal_build_json_exact(retained,jsonb_build_object('pool_id',profile -> 'pool_id','pool_generation',profile -> 'pool_generation',
             'profile_generation',profile -> 'profile_generation','profile_digest',profile -> 'profile_digest',
-            'shape_catalog',profile -> 'worker_shapes','narrowing_constraints',jsonb_build_object('eligible_resource_domains',profile -> 'eligible_resource_domains')) THEN
+            'shape_catalog',profile -> 'worker_shapes','narrowing_constraints',jsonb_build_object('eligible_resource_domains',profile -> 'eligible_resource_domains'))) THEN
           RAISE EXCEPTION 'typed build profile evidence changed' USING ERRCODE = '23514';
         END IF;
       END LOOP;
       IF NOT EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_id=NEW.subject_id
           AND r.subject_incarnation=NEW.subject_incarnation AND r.reporter_incarnation=NEW.reporter_incarnation
-          AND r.configuration_generation=NEW.configuration_generation AND r.deployment_generation=1
-          AND r.state='current' AND r.high_water=0 AND r.last_receipt_time IS NULL AND r.last_digest IS NULL
+          AND r.configuration_generation=NEW.configuration_generation AND r.deployment_generation=NEW.deployment_generation
+          AND r.state='current' AND (mutation_kind IN ('capacity','destroy')
+            OR (r.high_water=0 AND r.last_receipt_time IS NULL AND r.last_digest IS NULL))
           AND r.token_sha256=projection ->> 'demand_reporter_token_sha256')
          OR EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.reporter_incarnation=NEW.reporter_incarnation
               AND (r.subject_id<>NEW.subject_id OR r.subject_incarnation<>NEW.subject_incarnation)) THEN
         RAISE EXCEPTION 'typed build reporter evidence changed' USING ERRCODE = '23514';
+      END IF;
+      IF EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_id=NEW.subject_id
+          AND r.reporter_incarnation<>NEW.reporter_incarnation AND r.state='current')
+         OR EXISTS (
+           SELECT 1 FROM (
+             SELECT DISTINCT ON (e.reporter_incarnation) e.* FROM public.capacity_personal_membership_events e
+               WHERE e.subject_id=NEW.subject_id AND e.execution_epoch=NEW.execution_epoch
+               ORDER BY e.reporter_incarnation,e.revision DESC
+           ) h WHERE h.reporter_incarnation<>NEW.reporter_incarnation AND NOT EXISTS (
+             SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_id=h.subject_id
+               AND r.subject_incarnation=h.subject_incarnation AND r.reporter_incarnation=h.reporter_incarnation
+               AND r.state='fenced' AND r.configuration_generation=h.configuration_generation
+               AND r.deployment_generation=h.deployment_generation
+               AND r.token_sha256=h.request_payload #>> '{command,projection,demand_reporter_token_sha256}'
+           )
+         ) THEN
+        RAISE EXCEPTION 'typed build retired reporter evidence changed' USING ERRCODE = '23514';
       END IF;
       RETURN NEW;
     END $$;
@@ -366,6 +440,7 @@ def downgrade() -> None:
     CREATE TRIGGER capacity_personal_membership_insert_guard BEFORE INSERT ON public.capacity_personal_membership_events
       FOR EACH ROW EXECUTE FUNCTION public.capacity_personal_membership_insert_guard();
     DROP FUNCTION public.capacity_personal_build_initial_insert_guard();
+    DROP FUNCTION public.capacity_personal_build_json_exact(jsonb,jsonb);
     DROP FUNCTION public.capacity_personal_build_subject_id(uuid,uuid);
     """)
     # Keep the standard extension and its schema: other database objects may

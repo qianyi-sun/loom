@@ -2,8 +2,8 @@
 
 The caller supplies an already authenticated management principal. This store
 checks its pinned delegation against current durable authority, never a caller
-preparation/fleet. Initial pending build services are supported; later lifecycle,
-typed application adoption and executable V4 admission remain explicitly closed.
+preparation/fleet. Pending build creation, update, capacity and teardown are
+supported; recreation, typed applications and executable V4 admission remain closed.
 """
 
 from __future__ import annotations
@@ -149,8 +149,8 @@ class CapacityTypedMembershipStore:
             request = parse_typed_membership_mutation(canonical_bytes(request))
             if not isinstance(idempotency_key, UUID) or idempotency_key.int == 0:
                 raise ValueError("typed membership idempotency identity must be nonzero")
-            if not isinstance(request.command, PersonalBuildCommandV2) or request.command.projection.operation_kind != "create":
-                raise ConfigurationConflictError("typed build lifecycle is not yet admitted")
+            if not isinstance(request.command, PersonalBuildCommandV2):
+                raise ConfigurationConflictError("typed application lifecycle is not yet admitted")
             async with _write_transaction(session):
                 return await self._apply_locked(session, request, actor=actor, idempotency_key=idempotency_key)
         except ValueError as exc:
@@ -206,12 +206,19 @@ class CapacityTypedMembershipStore:
         ).order_by(CapacityPersonalMembershipEvent.revision).with_for_update().execution_options(populate_existing=True))).all())
         results = validate_typed_membership_event_prefix(events, preparation, fleet, execution_epoch=epoch.execution_epoch)
         latest: dict[UUID, PersonalMembershipResultV2] = {}
+        latest_requests: dict[UUID, PersonalMembershipMutationV2] = {}
+        reporter_generations: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1]] = {}
         for event, result in zip(events, results, strict=True):
             original = parse_typed_membership_mutation(json.dumps(event.request_payload))
-            if not isinstance(result.member, PersonalBuildMemberV1) or original.command.projection.operation_kind != "create" or result.member.reincarnation is not None:
+            if not isinstance(result.member, PersonalBuildMemberV1) or result.member.reincarnation is not None:
                 raise ConfigurationConflictError("typed membership history lifecycle is not yet admitted")
-            await _require_staged_facts(session, original, result.member, preparation)
             latest[result.member.configuration.subject_id] = result
+            latest_requests[result.member.configuration.subject_id] = original
+            reporter_generations[result.member.configuration.demand_reporter_incarnation] = (original, result.member)
+        for reporter_id, (original, historical_member) in reporter_generations.items():
+            current_reporter = latest[historical_member.configuration.subject_id].member.configuration.demand_reporter_incarnation
+            await _require_staged_facts(session, original, historical_member, preparation,
+                reporter_state="current" if reporter_id == current_reporter else "fenced")
         rows, derived_accounts = await _validated_materialization(session, epoch, fleet, latest)
         if replays:
             replay = next((result for event, result in zip(events, results, strict=True) if event.id == replays[0].id), None)
@@ -222,20 +229,28 @@ class CapacityTypedMembershipStore:
         if request.expected_revision != revision:
             raise PersonalMembershipRevisionConflictError("typed membership revision is stale")
         subject = member.configuration
-        conflict = (await session.scalars(select(CapacitySubject.id).where(or_(
-            CapacitySubject.subject_id == subject.subject_id,
-            CapacitySubject.subject_incarnation == subject.subject_incarnation,
-            CapacitySubject.display_name == subject.display_name,
-        )).limit(1))).first()
-        if conflict is not None:
-            raise ConfigurationConflictError("typed build identity was already used")
+        previous_result = latest.get(subject.subject_id)
+        previous = previous_result.member if previous_result is not None else None
+        if previous is not None and not isinstance(previous, PersonalBuildMemberV1):
+            raise ConfigurationConflictError("typed build cannot replace an application")
+        if previous is not None and projection.operation_kind == "create":
+            raise ConfigurationConflictError("typed build recreation requires authenticated release and is not yet admitted")
+        if previous is None:
+            conflict = (await session.scalars(select(CapacitySubject.id).where(or_(
+                CapacitySubject.subject_id == subject.subject_id,
+                CapacitySubject.subject_incarnation == subject.subject_incarnation,
+                CapacitySubject.display_name == subject.display_name,
+            )).limit(1))).first()
+            if conflict is not None:
+                raise ConfigurationConflictError("typed build identity was already used")
         if len(set(preparation.personal_membership.managed_base_subject_ids) | set(latest) | {subject.subject_id}) > preparation.personal_membership.max_subjects:
             raise ConfigurationConflictError("typed membership exceeds its subject bound")
-        if sum(row.account_id == account.account_id and row.lifecycle_state != "disabled" for row in rows) + 1 > account.max_live_subjects:
+        next_subjects = {row.subject_id: _parse_contract(SubjectConfigurationV1, row.payload) for row in rows} | {subject.subject_id: subject}
+        if sum(item.account_id == account.account_id and item.lifecycle_state != "disabled" for item in next_subjects.values()) > account.max_live_subjects:
             raise ConfigurationConflictError("typed membership owner exceeds max_live_subjects")
         await _require_account(session, epoch.configuration_epoch, account, optional=True)
         derived = {item.account_id: item for item in derived_accounts} | {account.account_id: account}
-        CapacityManagementStore._validate_activation(fleet, (*(_parse_contract(SubjectConfigurationV1, row.payload) for row in rows), subject), tuple(derived.values()))
+        CapacityManagementStore._validate_activation(fleet, tuple(next_subjects.values()), tuple(derived.values()))
         head = canonical_membership_event_head(actor=actor, execution_epoch=epoch.execution_epoch,
             idempotency_key=idempotency_key, operation_id=projection.operation_id,
             previous_sha256=events[-1].head_sha256 if events else "0" * 64, request_digest=digest,
@@ -251,7 +266,8 @@ class CapacityTypedMembershipStore:
             configuration_generation=subject.configuration_generation, deployment_generation=subject.deployment_generation,
             reporter_incarnation=subject.demand_reporter_incarnation)
         validate_typed_membership_event_prefix((*events, event), preparation, fleet, execution_epoch=epoch.execution_epoch)
-        await stage_build_generation_evidence(session, request, member, preparation, fleet)
+        await stage_build_generation_evidence(session, request, member, preparation, fleet,
+            previous=previous, previous_request=latest_requests.get(subject.subject_id))
         await CapacityMembershipStore(CapacityManagementStore())._materialize_subject(session, epoch.configuration_epoch, subject, account, rows)
         await session.flush()
         session.add(event)

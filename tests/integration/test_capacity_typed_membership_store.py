@@ -368,3 +368,24 @@ async def test_typed_store_cannot_mutate_destroyed_service(capacity_session, ope
     with pytest.raises(ConfigurationConflictError):
         await _apply(capacity_session, _transition(destroy, operation), key=92002)
     assert await _count(capacity_session, CapacityPersonalMembershipEvent, initial.command.acknowledgement.subject_id) == 2
+
+
+async def test_typed_store_rotation_preserves_last_preupdate_reporter_generation(capacity_session):
+    _management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    initial = build_request(preparation, execution)
+    await _apply(capacity_session, initial)
+    capacity = _transition(initial, "capacity")
+    await _apply(capacity_session, capacity, key=92001)
+    update = _transition(capacity, "update")
+    update = update.model_copy(update={"command": update.command.model_copy(update={
+        "projection": update.command.projection.model_copy(update={"candidate_generation": 2}),
+    })})
+    await _apply(capacity_session, update, key=92002)
+    destroyed = await _apply(capacity_session, _transition(update, "destroy"), key=92003)
+    old = (await capacity_session.scalars(select(CapacityDemandReporter).where(
+        CapacityDemandReporter.reporter_incarnation == initial.command.projection.demand_reporter_incarnation,
+    ))).one()
+    assert old.state == "fenced" and old.configuration_generation == 2
+    assert destroyed.member.configuration.candidate_generation == 2
+    assert await _count(capacity_session, CapacityCandidate, destroyed.member.configuration.subject_id) == 2
+    assert (await _apply(capacity_session, capacity, key=92001)).replayed

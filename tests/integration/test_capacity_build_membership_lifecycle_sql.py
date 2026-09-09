@@ -142,3 +142,20 @@ async def test_sql_lifecycle_rejects_retained_json_numeric_aliases(capacity_sess
             capacity_session.add(row)
             await capacity_session.flush()
     assert error.value.orig.sqlstate == "23514"
+
+
+async def test_sql_build_canonical_comparator_is_private_and_null_exact(capacity_session):
+    from sqlalchemy import text
+
+    row = (await capacity_session.execute(text(
+        "SELECT prosecdef,proconfig,EXISTS (SELECT 1 FROM aclexplode(coalesce(proacl,acldefault('f',proowner))) "
+        "WHERE grantee=0 AND privilege_type='EXECUTE') FROM pg_proc "
+        "WHERE oid='public.capacity_personal_build_json_exact(jsonb,jsonb)'::regprocedure"
+    ))).one()
+    assert not row[0] and "search_path=pg_catalog" in row[1] and not row[2]
+    assert (await capacity_session.execute(text(
+        "SELECT public.capacity_personal_build_json_exact(NULL,NULL), "
+        "public.capacity_personal_build_json_exact(NULL,'{}'::jsonb), "
+        "public.capacity_personal_build_json_exact('1'::jsonb,'1.0'::jsonb), "
+        "public.capacity_personal_build_json_exact('1'::jsonb,'true'::jsonb)"
+    ))).one() == (True, False, False, False)

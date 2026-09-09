@@ -10,7 +10,7 @@ separate authenticated convergence. Application installation fields are not used
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,7 +83,7 @@ def _require_values(row: object | None, expected: dict[str, Any], *, label: str)
 
 async def _require_staged_facts(
     session: AsyncSession, request: PersonalMembershipMutationV2,
-    member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4,
+    member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4, *, reporter_state: Literal["current", "fenced"] = "current",
 ) -> None:
     subject = member.configuration
     candidate = (await session.scalars(select(CapacityCandidate).where(
@@ -105,7 +105,7 @@ async def _require_staged_facts(
     ).execution_options(populate_existing=True))).one_or_none()
     _require_values(reporter, {
         "configuration_generation": subject.configuration_generation,
-        "deployment_generation": subject.deployment_generation, "state": "current",
+        "deployment_generation": subject.deployment_generation, "state": reporter_state,
         "token_sha256": request.command.projection.demand_reporter_token_sha256,
     }, label="reporter")
     profiles = (await session.scalars(select(CapacityWorkerProfile).where(
