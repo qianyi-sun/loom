@@ -184,7 +184,9 @@ def test_architecture_promotion_rejects_dockerfile_changed_after_capture(tmp_pat
 
 @pytest.mark.parametrize("name", ["task.toml", "Dockerfile"])
 def test_registration_bounds_parsed_text_before_allocating_verified_payload(
-    tmp_path, monkeypatch, name,
+    tmp_path,
+    monkeypatch,
+    name,
 ):
     root = _bundle(tmp_path)
     module = _module()
@@ -203,7 +205,9 @@ def test_registration_bounds_parsed_text_before_allocating_verified_payload(
     monkeypatch.setattr(module, "read_verified_task_image_bundle_file", observe_read)
     with pytest.raises(ValueError, match="text size limit"):
         module.prepare_task_bundle_registration(
-            root, task_id="bench/local-id", promote_runtime_architecture=True,
+            root,
+            task_id="bench/local-id",
+            promote_runtime_architecture=True,
         )
     assert oversized_reads == []
 
@@ -211,13 +215,17 @@ def test_registration_bounds_parsed_text_before_allocating_verified_payload(
 def test_registration_config_and_digest_are_stable_across_process_hash_seeds(tmp_path):
     root = _bundle(tmp_path)
     path = root / "task.toml"
-    path.write_text(path.read_text().replace(
-        '[environment]',
-        '[environment]\nnetwork_policies_supported = ["no-network", "public", "allowlist"]',
-    ).replace(
-        'schema_version = "1"',
-        'schema_version = "1"\nrequired_agent_capabilities = ["zeta", "alpha", "beta"]',
-    ))
+    path.write_text(
+        path.read_text()
+        .replace(
+            "[environment]",
+            '[environment]\nnetwork_policies_supported = ["no-network", "public", "allowlist"]',
+        )
+        .replace(
+            'schema_version = "1"',
+            'schema_version = "1"\nrequired_agent_capabilities = ["zeta", "alpha", "beta"]',
+        )
+    )
     script = """
 import json, sys
 from pathlib import Path
@@ -226,14 +234,24 @@ value = prepare_task_bundle_registration(Path(sys.argv[1]), task_id='bench/local
 config = getattr(value, 'task_config_document', value.task_config.model_dump(mode='json'))
 print(json.dumps([value.source_provenance, config], sort_keys=True))
 """
-    snapshots = [subprocess.run(
-        [sys.executable, "-c", script, str(root)],
-        env={"PYTHONHASHSEED": str(seed)},
-        check=True, text=True, capture_output=True, timeout=30,
-    ).stdout for seed in (1, 2, 3)]
+    snapshots = [
+        subprocess.run(
+            [sys.executable, "-c", script, str(root)],
+            env={"PYTHONHASHSEED": str(seed)},
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+        for seed in (1, 2, 3)
+    ]
     assert len(set(snapshots)) == 1
     provenance, config = json.loads(snapshots[0])
-    assert config["environment"]["network_policies_supported"] == ["allowlist", "no-network", "public"]
+    assert config["environment"]["network_policies_supported"] == [
+        "allowlist",
+        "no-network",
+        "public",
+    ]
     assert config["required_agent_capabilities"] == ["alpha", "beta", "zeta"]
     assert provenance["bundle_task_identity"]["registered_config_sha256"] == (
         hashlib.sha256(rfc8785.dumps(config)).hexdigest()

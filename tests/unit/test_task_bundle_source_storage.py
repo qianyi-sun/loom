@@ -15,8 +15,13 @@ def _module():
 
 
 def _intent(**changes):
-    values = dict(id=uuid4(), bucket="sources", object_key="registered/task.toml",
-                  content_sha256=hashlib.sha256(b"abc").hexdigest(), size_bytes=3)
+    values = dict(
+        id=uuid4(),
+        bucket="sources",
+        object_key="registered/task.toml",
+        content_sha256=hashlib.sha256(b"abc").hexdigest(),
+        size_bytes=3,
+    )
     values.update(changes)
     return _module().TaskBundleObjectIntentV1(**values)
 
@@ -33,8 +38,13 @@ class _Inventory:
         return {"Status": "Enabled"}
 
     def list_object_versions(self, **kwargs):
-        return {"Versions": [dict(Key=self.intent.object_key, VersionId=version, Size=len(body))
-                             for version, (body, _) in self.versions.items()], "IsTruncated": False}
+        return {
+            "Versions": [
+                dict(Key=self.intent.object_key, VersionId=version, Size=len(body))
+                for version, (body, _) in self.versions.items()
+            ],
+            "IsTruncated": False,
+        }
 
     def head_object(self, **kwargs):
         self.heads.append(kwargs)
@@ -46,14 +56,19 @@ class _Inventory:
         body, metadata = self.versions[kwargs["VersionId"]]
         stream = io.BytesIO(body)
         self.streams.append(stream)
-        return dict(VersionId=kwargs["VersionId"], ContentLength=len(body), Metadata=metadata, Body=stream)
+        return dict(
+            VersionId=kwargs["VersionId"], ContentLength=len(body), Metadata=metadata, Body=stream
+        )
 
 
 def test_inventory_verifies_every_own_version_and_excludes_identical_foreign_write():
     intent = _intent()
     client = _Inventory(intent)
-    client.versions = {"ours-1": (b"abc", intent.metadata), "ours-2": (b"abc", intent.metadata),
-                       "theirs": (b"abc", {**intent.metadata, "loom-source-write-id": str(uuid4())})}
+    client.versions = {
+        "ours-1": (b"abc", intent.metadata),
+        "ours-2": (b"abc", intent.metadata),
+        "theirs": (b"abc", {**intent.metadata, "loom-source-write-id": str(uuid4())}),
+    }
     versions = _module().S3TaskBundleVersionInventory(client).scan(intent)
     assert {item.version_id for item in versions} == {"ours-1", "ours-2"}
     assert all(item.uri == "s3://sources/registered/task.toml" for item in versions)
@@ -89,8 +104,12 @@ def test_inventory_rejects_unbounded_or_nonprogressing_pagination():
 
     def list_versions(**kwargs):
         calls.append(kwargs)
-        return dict(IsTruncated=True, NextKeyMarker=intent.object_key,
-                    NextVersionIdMarker="same-version", Versions=[])
+        return dict(
+            IsTruncated=True,
+            NextKeyMarker=intent.object_key,
+            NextVersionIdMarker="same-version",
+            Versions=[],
+        )
 
     client.list_object_versions = list_versions
     with pytest.raises(ValueError, match="pagination"):
@@ -115,12 +134,27 @@ async def test_write_verifies_intended_bytes_before_storage_and_checks_exact_rec
     assert calls == []
     with pytest.raises(ValueError, match="receipt"):
         await _module().write_task_bundle_source_object(Store(), intent, b"abc")
-    assert calls == [dict(bucket="sources", key=intent.object_key, body=b"abc",
-                          metadata=intent.metadata, require_versioning=True)]
+    assert calls == [
+        dict(
+            bucket="sources",
+            key=intent.object_key,
+            body=b"abc",
+            metadata=intent.metadata,
+            require_versioning=True,
+        )
+    ]
 
 
-@pytest.mark.parametrize("changes", [dict(object_key="../x"), dict(object_key=""),
-    dict(bucket="sources/path"), dict(content_sha256="sha256:" + "a" * 64), dict(size_bytes=-1)])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        dict(object_key="../x"),
+        dict(object_key=""),
+        dict(bucket="sources/path"),
+        dict(content_sha256="sha256:" + "a" * 64),
+        dict(size_bytes=-1),
+    ],
+)
 def test_intent_rejects_invalid_persisted_descriptor(changes):
     with pytest.raises(ValueError):
         _intent(**changes)
