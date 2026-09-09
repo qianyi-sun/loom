@@ -61,7 +61,10 @@ from loom.personal_dev_membership_runtime import (
     observe_database,
     validate_membership_observation_context,
 )
-from loom.personal_dev_storage_admin_fence import storage_admin_connection
+from loom.personal_dev_storage_admin_fence import (
+    fence_storage_target_transaction,
+    storage_admin_connection,
+)
 from loom.personal_dev_storage_secret_write import read_storage_secret_data, write_storage_secret
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.client import (
@@ -641,6 +644,8 @@ class PsycopgPersonalDevCapacityDatabase:
                 database_admin_url.replace("postgresql+psycopg://", "postgresql://", 1)
             ) as connection:
                 async with connection.transaction():
+                    if not self._transient_role_admin:
+                        await fence_storage_target_transaction(connection, identity)
                     if self._transient_role_admin:
                         await connection.execute(
                             sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(identity.db_role))
@@ -1026,10 +1031,10 @@ class PsycopgPersonalDevCapacityDatabase:
             return
 
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._connect_url,
-                autocommit=True,
-            ) as connection:
+            # Error/cancellation compensation can race full retirement. Keep
+            # its revocations on the same administrative serialization domain,
+            # without retiring a still-active incarnation or reopening a retired one.
+            async with storage_admin_connection(self._admin_url, identity, action="restrict") as connection:
                 roles_result = await connection.execute(
                     "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
                     ([owner, migrator],),

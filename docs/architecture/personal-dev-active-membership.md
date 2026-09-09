@@ -496,12 +496,24 @@ storage, including retirement before first provisioning. Failed retirement can
 resume without clearing the marker. Bound sealing waits for protected-role
 backend termination and rejects an incomplete result.
 
-This is a cluster-DDL fence, not a transaction around operations on other
-database connections, a MinIO request fence, or proof of concurrent-owner
-acceptance. Target-database administrative work and requests already authorized
-by MinIO still require separate treatment. Adoption must drain older unguarded
-writers; the guard cannot constrain code that never consults it. The live layout
-remains disabled.
+The privileged capacity target-database transaction takes `FOR SHARE` on that
+permanent shared-catalog guard row before any effects or role switch. Retirement
+takes `FOR UPDATE` on the same row before committing its marker, so it waits for
+the actual target transaction to commit or roll back. Lock acquisition and marker
+validation use separate READ COMMITTED statements: COMMENT changes a different
+catalog, and a snapshot acquired before waiting must not authorize later work.
+Absent, altered, retired, wrong-database or incompatible-isolation guards fail
+closed. Migration-error/cancellation revocations use the maintenance session
+lock too, without changing an active guard to retired or reopening a retired one.
+
+The migrator subprocess, executor-surface/registration transactions, transient
+migrator administration and owner bootstrap use incarnation-specific restricted
+login roles instead; NOLOGIN and verified backend termination drain those roles.
+The row lock is not a proxy lock around their separate connections or MinIO
+requests. Requests already authorized by MinIO still require separate treatment.
+Adoption must drain older unguarded writers; the guard cannot constrain code that
+never consults it. These tests are not concurrent-owner acceptance, and the live
+layout remains disabled.
 
 Bound MinIO tenants no longer remove/recreate IAM users or detach policy mappings
 during convergence. Their exact bucket-scoped Allow policy is immutable, and

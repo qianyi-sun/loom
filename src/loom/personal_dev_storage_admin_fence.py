@@ -1,6 +1,6 @@
-"""Permanent incarnation retirement for same-backend PostgreSQL cluster DDL.
+"""Permanent retirement for PostgreSQL cluster DDL and guarded target transactions.
 
-This lock does not cover work on another connection or an external service.
+Each guarded backend fences its own effects; no lock covers an external service.
 """
 
 from __future__ import annotations
@@ -52,8 +52,56 @@ async def _read_guard(connection: psycopg.AsyncConnection[Any], name: str) -> tu
     return None if row is None else tuple(row)
 
 
+async def _validated_guard(
+    connection: psycopg.AsyncConnection[Any], name: str, identity: DevInstanceIdentity,
+) -> tuple[Any, ...]:
+    row = await _read_guard(connection, name)
+    if row is None:
+        raise PersonalDevStorageRetiredError("storage retirement guard is unavailable")
+    memberships = await connection.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid = %s OR member = %s)",
+        (row[0], row[0]),
+    )
+    if row[1:11] != (False, False, False, False, False, False, False, True, True, True) or (
+        await memberships.fetchone()
+    ) != (False,) or row[12] != -1 or row[11] not in {_comment(identity, "active"), _comment(identity, "retired")}:
+        raise PersonalDevStorageRetiredError("storage retirement guard is not authentic")
+    return row
+
+
+async def fence_storage_target_transaction(
+    connection: psycopg.AsyncConnection[Any], identity: DevInstanceIdentity,
+) -> None:
+    """Fence the actual privileged target transaction, never a proxy backend.
+
+    Call before effects or SET ROLE, inside a READ COMMITTED transaction. The
+    shared-catalog row lock lasts until that transaction commits or rolls back.
+    Restricted migrator sessions instead rely on NOLOGIN plus verified drain.
+    """
+    if identity.storage_binding is None:
+        if identity.storage_incarnation is not None:
+            raise PersonalDevStorageRetiredError("storage administration requires its complete binding")
+        return
+    validate_personal_dev_storage_identity(identity)
+    if connection.info.transaction_status != psycopg.pq.TransactionStatus.INTRANS:
+        raise PersonalDevStorageRetiredError("storage target guard requires an active transaction")
+    observed = await connection.execute("SELECT current_database(), current_setting('transaction_isolation')")
+    if await observed.fetchone() != (identity.database, "read committed"):
+        raise PersonalDevStorageRetiredError("storage target transaction database or isolation is invalid")
+    assert identity.storage_incarnation is not None
+    name = f"ld_fence_{identity.storage_incarnation.hex}"
+    async with asyncio.timeout(30):
+        await connection.execute("SELECT oid FROM pg_catalog.pg_authid WHERE rolname = %s FOR SHARE", (name,))
+    # Lock and read must be separate statements: COMMENT updates pg_shdescription,
+    # and a snapshot obtained before a lock wait could otherwise see active.
+    row = await _validated_guard(connection, name, identity)
+    if row[11] != _comment(identity, "active"):
+        raise PersonalDevStorageRetiredError("storage incarnation is permanently retired")
+
+
 async def _guard(
     connection: psycopg.AsyncConnection[Any], identity: DevInstanceIdentity, *, retire: bool,
+    allow_retired: bool = False,
 ) -> None:
     assert identity.storage_incarnation is not None
     name = f"ld_fence_{identity.storage_incarnation.hex}"
@@ -65,6 +113,9 @@ async def _guard(
     # The session lock deliberately outlives these transactions: CREATE/DROP
     # DATABASE must run in autocommit, on this same protected backend.
     async with connection.transaction():
+        await connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        async with asyncio.timeout(30):
+            await connection.execute("SELECT oid FROM pg_catalog.pg_authid WHERE rolname = %s FOR UPDATE", (name,))
         row = await _read_guard(connection, name)
         if row is None:
             await connection.execute(sql.SQL(
@@ -74,18 +125,8 @@ async def _guard(
             await connection.execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(
                 sql.Identifier(name), sql.Literal(_comment(identity, "retired" if retire else "active")),
             ))
-            row = await _read_guard(connection, name)
-        if row is None:
-            raise PersonalDevStorageRetiredError("storage retirement guard is unavailable")
-        memberships = await connection.execute(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members "
-            "WHERE roleid = %s OR member = %s)", (row[0], row[0]),
-        )
-        if row[1:11] != (False, False, False, False, False, False, False, True, True, True) or (
-            await memberships.fetchone()
-        ) != (False,) or row[12] != -1 or row[11] not in {_comment(identity, "active"), _comment(identity, "retired")}:
-            raise PersonalDevStorageRetiredError("storage retirement guard is not authentic")
-        if row[11] == _comment(identity, "retired") and not retire:
+        row = await _validated_guard(connection, name, identity)
+        if row[11] == _comment(identity, "retired") and not (retire or allow_retired):
             raise PersonalDevStorageRetiredError("storage incarnation is permanently retired")
         if retire and row[11] != _comment(identity, "retired"):
             await connection.execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(
@@ -97,7 +138,7 @@ async def _guard(
 
 @asynccontextmanager
 async def storage_admin_connection(
-    admin_url: str, identity: DevInstanceIdentity, *, action: Literal["provision", "retire", "cleanup"],
+    admin_url: str, identity: DevInstanceIdentity, *, action: Literal["provision", "retire", "cleanup", "restrict"],
 ) -> AsyncIterator[psycopg.AsyncConnection[Any]]:
     if identity.storage_incarnation is not None and identity.storage_binding is None:
         raise PersonalDevStorageRetiredError("storage administration requires its complete binding")
@@ -111,7 +152,7 @@ async def storage_admin_connection(
             database = await connection.execute("SELECT pg_catalog.current_database()")
             if await database.fetchone() != ("postgres",):
                 raise PersonalDevStorageRetiredError("storage administration is not on the maintenance database")
-            await _guard(connection, identity, retire=action != "provision")
+            await _guard(connection, identity, retire=action in {"retire", "cleanup"}, allow_retired=action == "restrict")
         yield connection
     # Closing this connection releases its session lock only with its backend;
     # never hand the lock to a caller that executes cluster DDL elsewhere.
