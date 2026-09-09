@@ -280,6 +280,7 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
     [
         "scripts/ops/deploy_nebius_platform.py",
         "scripts/ops/nebius_registry_auth.py",
+        "scripts/ops/verify_nebius_restore.py",
         "deploy/nebius/integration.platform.json.example",
     ],
 )

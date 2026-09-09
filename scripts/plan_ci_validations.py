@@ -78,6 +78,7 @@ NEBIUS_PLATFORM_EXACT = {
     "scripts/ops/deploy_nebius_platform.py",
     "scripts/ops/nebius_registry_auth.py",
     "scripts/ops/render_nebius_platform.py",
+    "scripts/ops/verify_nebius_restore.py",
 }
 NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 
