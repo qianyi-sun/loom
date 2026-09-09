@@ -35,6 +35,47 @@ async def _provision(url, identity):
     )
 
 
+async def test_guard_catalog_row_lock_serializes_across_databases(admin_url):
+    identity = _bound_claim().operation.storage_binding.identity
+    await _provision(admin_url, identity)
+    name = f"ld_fence_{identity.storage_incarnation.hex}"
+    target_url = make_url(admin_url).set(database=identity.database).render_as_string(hide_password=False)
+    maintenance_url = make_url(admin_url).set(database="postgres").render_as_string(hide_password=False)
+    async with (
+        await psycopg.AsyncConnection.connect(target_url) as target,
+        await psycopg.AsyncConnection.connect(maintenance_url) as maintenance,
+        await psycopg.AsyncConnection.connect(admin_url, autocommit=True) as observer,
+    ):
+        await target.execute("SELECT oid FROM pg_catalog.pg_authid WHERE rolname = %s FOR SHARE", (name,))
+
+        async def retire():
+            # Separate statements are essential: COMMENT changes a different
+            # shared catalog, so a snapshot acquired before waiting is stale.
+            await maintenance.execute("SELECT oid FROM pg_catalog.pg_authid WHERE rolname = %s FOR UPDATE", (name,))
+            await maintenance.execute(sql.SQL("COMMENT ON ROLE {} IS 'retired-probe'").format(sql.Identifier(name)))
+            await maintenance.commit()
+
+        retirement = asyncio.create_task(retire())
+        try:
+            async with asyncio.timeout(20):
+                while True:
+                    blocked = await observer.execute("SELECT %s = ANY(pg_blocking_pids(%s))",
+                        (target.info.backend_pid, maintenance.info.backend_pid))
+                    if await blocked.fetchone() == (True,):
+                        break
+                    await asyncio.sleep(0.01)
+                assert not retirement.done()
+                await target.commit()
+                await retirement
+                await target.execute("SELECT oid FROM pg_catalog.pg_authid WHERE rolname = %s FOR SHARE", (name,))
+                marker = await target.execute("SELECT shobj_description(oid, 'pg_authid') FROM pg_catalog.pg_authid WHERE rolname = %s", (name,))
+                assert await marker.fetchone() == ("retired-probe",)
+        finally:
+            if not retirement.done():
+                retirement.cancel()
+            await asyncio.gather(retirement, return_exceptions=True)
+
+
 @pytest.mark.parametrize("cleanup", ("seal", "destroy", "fixture"))
 async def test_retirement_before_first_provision_is_permanent(admin_url, cleanup):
     identity = _bound_claim().operation.storage_binding.identity
