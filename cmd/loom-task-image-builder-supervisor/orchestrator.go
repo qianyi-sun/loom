@@ -106,9 +106,18 @@ func (o *Orchestrator) Run(ctx context.Context) (err error) {
 		cleanup:      map[string]int{"descendant_processes": 0, "mounts": 0, "sockets": 0, "open_files": 0},
 	}
 	defer func() {
-		cleanupErr := state.cleanupAll()
-		if finishErr := state.finish(); finishErr != nil {
-			cleanupErr = errors.Join(cleanupErr, finishErr)
+		var cleanupErr error
+		if state.buildUnjoined {
+			// A live consumer still borrows allocation descriptors. Leave those
+			// capabilities to process exit and guarded allocation cleanup.
+			cleanupErr = errCleanupAmbiguous
+		} else {
+			cleanupErr = state.cleanupAll()
+		}
+		if !state.cleanupUnproven {
+			if finishErr := state.finish(); finishErr != nil {
+				cleanupErr = errors.Join(cleanupErr, finishErr)
+			}
 		}
 		state.closeSecrets()
 		if !state.outcomeRecorded {
@@ -216,6 +225,8 @@ func (o *Orchestrator) RecordIdleWait() {
 }
 
 type orchestratorState struct {
+	buildUnjoined   bool
+	cleanupUnproven bool
 	o               *Orchestrator
 	ctx             context.Context
 	clock           Clock
@@ -400,6 +411,7 @@ func (s *orchestratorState) closeExecutor(executor BuildExecutor) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), s.cleanupGrace)
 	defer cancel()
 	if err := executor.Close(cleanupCtx); err != nil {
+		s.cleanupUnproven = true
 		return errors.Join(errCleanupAmbiguous, safeError("cleanup_failed"))
 	}
 	return nil
@@ -422,21 +434,35 @@ type buildResult struct {
 
 var errBuildTimedOut = errors.New("build timed out")
 
-func (s *orchestratorState) buildComponents(lease *LeaseResponse) error {
+func (s *orchestratorState) buildComponents(lease *LeaseResponse) (resultErr error) {
 	leaseTimer := s.clock.NewTimer(durationUntil(s.clock.Now(), heartbeatAt(s.clock.Now(), lease.LeaseExpiresAt)))
-	defer leaseTimer.Stop()
+	defer func() { leaseTimer.Stop() }()
 	renewTimer := s.clock.NewTimer(durationUntil(s.clock.Now(), renewalAt(s.clock.Now(), s.session.ExpiresAt)))
-	defer renewTimer.Stop()
+	defer func() { renewTimer.Stop() }()
 	buildDeadline := s.clock.Now().Add(s.claimData.Plan.BuildTimeout)
 	buildTimer := s.clock.NewTimer(s.claimData.Plan.BuildTimeout)
 	defer buildTimer.Stop()
 	for _, component := range s.claimData.Plan.Components {
 		buildCtx, cancelBuild := context.WithCancelCause(s.ctx)
 		result := make(chan buildResult, 1)
+		joined := make(chan struct{})
+		executor := s.executor
 		go func(component BuildComponent) {
-			built, err := s.executor.Build(buildCtx, component)
+			defer close(joined)
+			built, err := executor.Build(buildCtx, component)
 			result <- buildResult{component: component, result: built, err: err}
 		}(component)
+		defer func() {
+			cancelBuild(nil)
+			timer := time.NewTimer(s.cleanupGrace)
+			defer timer.Stop()
+			select {
+			case <-joined:
+			case <-timer.C:
+				s.buildUnjoined, s.cleanupUnproven = true, true
+				resultErr = errors.Join(resultErr, errCleanupAmbiguous)
+			}
+		}()
 		for {
 			select {
 			case <-s.ctx.Done():
