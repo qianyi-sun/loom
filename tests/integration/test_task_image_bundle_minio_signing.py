@@ -7,6 +7,7 @@ import ssl
 import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from uuid import UUID
 
 import boto3
 import docker
@@ -270,3 +271,45 @@ async def test_actual_minio_backend_rejects_incomplete_or_excessive_inventory(mi
             options.update(changes)
             with pytest.raises(RuntimeError):
                 await backend.list_objects(**options)
+
+
+@pytest.mark.parametrize("prefix,expected_keys", [("revision/", KEYS), ("revision space+/", (FORM_PREFIX_KEY,))])
+async def test_actual_minio_async_provider_returns_only_exact_object_capabilities(minio_tls, prefix, expected_keys):
+    from loom.task_image_build_plan import TaskImageBuildComponentV1, TaskImageBuildPlanV1
+    from loom_task_image_authority.bundle_capability import AsyncTaskImageBundleCapabilityProvider
+    from loom_task_image_authority.bundle_s3_backend import (
+        MinioTaskImageBundleBackend,
+        S3InventoryLimits,
+    )
+
+    now = datetime.now(UTC)
+    plan = TaskImageBuildPlanV1(
+        grant_id=UUID("11111111-1111-4111-8111-111111111111"),
+        session_id=UUID("22222222-2222-4222-8222-222222222222"), session_generation=1,
+        materialization_id=UUID("33333333-3333-4333-8333-333333333333"),
+        builder_id="rootless:22222222222242228222222222222222", task_id="fixture/task",
+        task_checksum="4" * 64, cpu_arch="arm64", platform="linux/arm64",
+        bundle_bucket="loom-bundles", bundle_prefix=prefix, bundle_file_metadata_sha256="5" * 64,
+        bundle_file_limit=2000, bundle_byte_limit=536870912, build_timeout_seconds=900.0,
+        authorization_expires_at=now + timedelta(seconds=60),
+        components=(TaskImageBuildComponentV1(name="task", dockerfile_path="environment/Dockerfile", context_path=".", oci_output_path="oci/0000.tar"),),
+    )
+    async with MinioTaskImageBundleBackend(
+        origin=minio_tls[0], bucket="loom-bundles", region="us-east-1",
+        credentials=minio_tls[1], ca_file=minio_tls[4], limits=S3InventoryLimits(page_size=2),
+    ) as backend:
+        provider = AsyncTaskImageBundleCapabilityProvider(
+            backend=backend, public_https_origin=minio_tls[0], expected_bucket="loom-bundles",
+            maximum_objects=2000, maximum_bytes=536870912, url_expiry_seconds=60,
+            addressing_style="path",
+        )
+        capability = await provider.issue(plan, now=now)
+    assert capability.file_count == len(expected_keys)
+    assert capability.total_bytes == len(expected_keys) * len(PAYLOAD)
+    assert capability.expires_at == plan.authorization_expires_at.replace(microsecond=0)
+    assert {prefix + obj.relative_path for obj in capability.objects} == set(expected_keys)
+    for obj in capability.objects:
+        assert "list-type" not in dict(parse_qsl(urlsplit(obj.url).query))
+        response = minio_tls[2].get(obj.url)
+        assert response.status_code == 200
+        assert response.content == PAYLOAD

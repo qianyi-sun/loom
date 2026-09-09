@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Generic, Literal, Protocol, TypeVar
 from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import UUID, uuid4
 
@@ -47,15 +47,7 @@ class TaskImageBundleObject:
     redirect: bool = False
 
 
-class TaskImageBundleBackend(Protocol):
-    def list_objects(
-        self,
-        *,
-        bucket: str,
-        prefix: str,
-        maximum_objects: int,
-    ) -> Sequence[TaskImageBundleObject]: ...
-
+class TaskImageBundlePresigner(Protocol):
     def presign_get(
         self,
         *,
@@ -69,6 +61,22 @@ class TaskImageBundleBackend(Protocol):
         Credentials must also remain usable through the requested deadline.
         """
         ...
+
+
+class TaskImageBundleBackend(TaskImageBundlePresigner, Protocol):
+    def list_objects(
+        self, *, bucket: str, prefix: str, maximum_objects: int,
+    ) -> Sequence[TaskImageBundleObject]: ...
+
+
+class AsyncTaskImageBundleBackend(TaskImageBundlePresigner, Protocol):
+    async def list_objects(
+        self, *, bucket: str, prefix: str, maximum_objects: int,
+        maximum_bytes: int, expires_at: datetime,
+    ) -> Sequence[TaskImageBundleObject]: ...
+
+
+_Backend = TypeVar("_Backend", bound=TaskImageBundlePresigner)
 
 
 def _nonzero_uuid(value: UUID) -> UUID:
@@ -221,13 +229,13 @@ def _bucket(value: str) -> str:
     return value
 
 
-class TaskImageBundleCapabilityProvider:
-    """List one frozen prefix and mint only exact single-object GET URLs."""
+class _TaskImageBundleProviderBase(Generic[_Backend]):
+    """Shared validation/signing; subclasses own sync versus async listing."""
 
     def __init__(
         self,
         *,
-        backend: TaskImageBundleBackend,
+        backend: _Backend,
         public_https_origin: str,
         expected_bucket: str,
         maximum_objects: int,
@@ -236,10 +244,14 @@ class TaskImageBundleCapabilityProvider:
         capability_id_factory: Callable[[], UUID] = uuid4,
         maximum_capability_bytes: int = MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
         clock: Callable[[], datetime] | None = None,
+        addressing_style: Literal["bucket-host", "path"] = "bucket-host",
     ) -> None:
         self._backend = backend
         self._origin = _origin(public_https_origin)
         self._expected_bucket = _bucket(expected_bucket)
+        if addressing_style not in {"bucket-host", "path"}:
+            raise ValueError("bundle addressing style is invalid")
+        self._addressing_style = addressing_style
         if (
             type(maximum_objects) is not int
             or not 0 < maximum_objects <= MAX_TASK_IMAGE_BUILD_BUNDLE_FILES
@@ -282,24 +294,13 @@ class TaskImageBundleCapabilityProvider:
             raise TaskImageBundleCapabilityError("task-image bundle source is not authorized")
         return validated
 
-    def _listed_objects(
+    def _validated_objects(
         self,
         plan: TaskImageBuildPlanV1,
+        listed: Sequence[TaskImageBundleObject],
     ) -> tuple[tuple[str, TaskImageBundleObject], ...]:
         effective_objects = min(plan.bundle_file_limit, self._maximum_objects)
         effective_bytes = min(plan.bundle_byte_limit, self._maximum_bytes)
-        try:
-            listed = tuple(
-                self._backend.list_objects(
-                    bucket=plan.bundle_bucket,
-                    prefix=plan.bundle_prefix,
-                    maximum_objects=effective_objects + 1,
-                )
-            )
-        except Exception:
-            raise TaskImageBundleCapabilityError(
-                "task-image bundle listing is unavailable"
-            ) from None
         if not listed or len(listed) > effective_objects:
             raise TaskImageBundleCapabilityError("task-image bundle exceeds capability limits")
 
@@ -369,7 +370,9 @@ class TaskImageBundleCapabilityProvider:
             or parsed.password is not None
             or parsed.fragment
             or not parsed.query
-            or unquote(parsed.path) != f"/{key}"
+            or unquote(parsed.path) != (
+                f"/{self._expected_bucket}/{key}" if self._addressing_style == "path" else f"/{key}"
+            )
             or any(ord(character) < 0x20 for character in value)
             or len(query_items) != len(query)
             or type(signed_lifetime) is not int
@@ -381,12 +384,12 @@ class TaskImageBundleCapabilityProvider:
             raise TaskImageBundleCapabilityError("task-image bundle presigned URL is invalid")
         return value
 
-    def issue(
+    def _prepare_issue(
         self,
         plan: TaskImageBuildPlanV1,
         *,
         now: datetime,
-    ) -> TaskImageBundleCapabilityV1:
+    ) -> tuple[TaskImageBuildPlanV1, datetime, datetime, datetime]:
         if now.utcoffset() is None:
             raise ValueError("bundle capability issue time must be timezone-aware")
         now = now.astimezone(UTC)
@@ -401,9 +404,12 @@ class TaskImageBundleCapabilityProvider:
         if expires_at <= now:
             raise TaskImageBundleCapabilityError("task-image bundle authorization expired")
         observed_at = self._checked_time(previous=now, expires_at=expires_at)
-        listed = self._listed_objects(plan)
-        observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
+        return plan, now, expires_at, observed_at
 
+    def _finish_issue(
+        self, plan: TaskImageBuildPlanV1, *, now: datetime, expires_at: datetime,
+        observed_at: datetime, listed: tuple[tuple[str, TaskImageBundleObject], ...],
+    ) -> TaskImageBundleCapabilityV1:
         objects: list[TaskImageBundleObjectCapabilityV1] = []
         for relative_path, item in listed:
             observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
@@ -453,10 +459,48 @@ class TaskImageBundleCapabilityProvider:
         return capability
 
 
+class TaskImageBundleCapabilityProvider(_TaskImageBundleProviderBase[TaskImageBundleBackend]):
+    """Synchronous injected-backend compatibility; native adapter requires async."""
+
+    def issue(self, plan: TaskImageBuildPlanV1, *, now: datetime) -> TaskImageBundleCapabilityV1:
+        plan, now, expires_at, observed_at = self._prepare_issue(plan, now=now)
+        try:
+            objects = tuple(self._backend.list_objects(
+                bucket=plan.bundle_bucket, prefix=plan.bundle_prefix,
+                maximum_objects=min(plan.bundle_file_limit, self._maximum_objects) + 1,
+            ))
+        except Exception:
+            raise TaskImageBundleCapabilityError("task-image bundle listing is unavailable") from None
+        listed = self._validated_objects(plan, objects)
+        observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
+        return self._finish_issue(plan, now=now, expires_at=expires_at, observed_at=observed_at, listed=listed)
+
+
+class AsyncTaskImageBundleCapabilityProvider(_TaskImageBundleProviderBase[AsyncTaskImageBundleBackend]):
+    """Await bounded storage I/O; caller must not retain database authority locks."""
+
+    async def issue(self, plan: TaskImageBuildPlanV1, *, now: datetime) -> TaskImageBundleCapabilityV1:
+        plan, now, expires_at, observed_at = self._prepare_issue(plan, now=now)
+        try:
+            objects = await self._backend.list_objects(
+                bucket=plan.bundle_bucket, prefix=plan.bundle_prefix,
+                maximum_objects=min(plan.bundle_file_limit, self._maximum_objects),
+                maximum_bytes=min(plan.bundle_byte_limit, self._maximum_bytes),
+                expires_at=expires_at,
+            )
+        except Exception:
+            raise TaskImageBundleCapabilityError("task-image bundle listing is unavailable") from None
+        listed = self._validated_objects(plan, objects)
+        observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
+        return self._finish_issue(plan, now=now, expires_at=expires_at, observed_at=observed_at, listed=listed)
+
+
 __all__ = [
     "MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES",
     "MAX_TASK_IMAGE_BUNDLE_CAPABILITY_LIFETIME",
     "MAX_TASK_IMAGE_BUNDLE_URL_BYTES",
+    "AsyncTaskImageBundleBackend",
+    "AsyncTaskImageBundleCapabilityProvider",
     "TaskImageBundleBackend",
     "TaskImageBundleCapabilityError",
     "TaskImageBundleCapabilityProvider",
