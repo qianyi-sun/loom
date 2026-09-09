@@ -239,3 +239,15 @@ async def test_partial_bound_secret_write_recovers_without_rotating_persisted_ma
     assert all(cluster.secrets[name] == data for name, data in persisted.items())
     assert await retry.admin_token(identity)
     assert await retry.object_credentials(identity)
+
+
+async def test_partial_recovery_with_mismatched_password_has_no_side_effects():
+    cluster = _Cluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    await _vault(cluster).store(identity, _PASSWORD)
+    del cluster.secrets["loom-admin-secret"]
+    before = list(cluster.writes)
+    with pytest.raises(ValueError, match="password binding changed"):
+        await _vault(cluster).store(identity, "c" * 32)
+    assert cluster.writes == before
+    assert "loom-admin-secret" not in cluster.secrets
