@@ -47,6 +47,43 @@ def _configuration():
     )
 
 
+@pytest.mark.parametrize("starting_generation", (1, 2, 3, 4))
+@pytest.mark.asyncio
+async def test_retirement_advances_only_reviewed_retained_generations(capacity_guard_database, starting_generation):
+    database = capacity_guard_database
+    engine = create_async_engine(database["admin_url"], isolation_level="SERIALIZABLE")
+    owner, agent = database["owner_role"], database["agent_role"]
+    old = _configuration().model_copy(update={"configuration_generation": starting_generation})
+    target = _configuration().model_copy(update={"configuration_generation": 3})
+    try:
+        async with async_sessionmaker(engine)() as session, session.begin():
+            quoted = engine.sync_engine.dialect.identifier_preparer.quote(owner)
+            await session.execute(text(f"SET LOCAL ROLE {quoted}"))
+            guard = CapacityGuardStore(session, expected_owner_role=owner)
+            fence = GuardFenceV1.model_validate({name: getattr(old, name) for name in GuardFenceV1.model_fields})
+            await guard.initialize_disabled_authority(fence)
+            store = CapacityAgentStore(session, expected_owner_role=owner, expected_agent_role=agent)
+            await store.register_agent(_registration(old))
+            await session.execute(text("UPDATE loom_capacity_guard.agent_reporter_state SET high_water = high_water + 1"))
+            if starting_generation == 4:
+                with pytest.raises(ValueError, match="retirement"):
+                    await read_protected_membership(session, owner=owner, agent=agent, configuration=target,
+                                                    retirement_from_generation=(1, 2))
+                assert await guard.read_guard_fence() == fence
+            else:
+                observed = await read_protected_membership(session, owner=owner, agent=agent, configuration=target,
+                                                           retirement_from_generation=(1, 2))
+                assert observed["reporter_high_water"] == 1
+                assert (await guard.read_guard_fence()).configuration_generation == 3
+                assert (await guard.read_guard_fence()).authority_mode == "disabled"
+                audit_count = (await session.execute(text("SELECT count(*) FROM loom_capacity_guard.audit_events"))).scalar_one()
+                assert await read_protected_membership(session, owner=owner, agent=agent, configuration=target,
+                                                       retirement_from_generation=(1, 2)) == observed
+                assert (await session.execute(text("SELECT count(*) FROM loom_capacity_guard.audit_events"))).scalar_one() == audit_count
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_protected_observation_measures_zero_and_retirement_preserves_history(
     capacity_guard_database,
