@@ -6,6 +6,7 @@ import ipaddress
 import ssl
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import pytest_asyncio
@@ -13,6 +14,10 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+
+from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+from loom_task_image_authority.bundle_s3_backend import MinioTaskImageBundleBackend
+from loom_task_image_authority.bundle_s3_signing import S3SigningCredentials
 
 
 def _module():
@@ -264,6 +269,47 @@ async def test_manifest_fetch_rejects_other_targets_before_network(tls_listing, 
         with pytest.raises(RuntimeError):
             await reader.fetch_manifest(url, expected_sha256=digest, deadline=_deadline())
     assert not tls_listing.requests
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_real_manifest_backend_signer_tls_and_parser(tls_listing, tmp_path, corrupt):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "Dockerfile").write_bytes(b"FROM scratch\n")
+    executable = source / "run +%😀.sh"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    manifest = capture_task_image_bundle_manifest(source)
+    payload = manifest.canonical_bytes
+    if corrupt:
+        payload = payload.replace(b"Dockerfile", b"Dockerfild")
+    tls_listing.response = f"HTTP/1.1 200 OK\r\nContent-Length: {len(payload)}\r\n\r\n".encode() + payload
+    now = datetime.now(UTC).replace(microsecond=0)
+    async with MinioTaskImageBundleBackend(
+        origin=tls_listing.origin, bucket="loom-bundles", region="us-east-1",
+        credentials=S3SigningCredentials(access_key="fixture-access", secret_key="private-secret"),
+        ca_file=tls_listing.ca_file, clock=lambda: now,
+    ) as backend:
+        request = backend.get_manifest(
+            bucket="loom-bundles", expected_sha256=manifest.digest,
+            task_checksum=manifest.task_checksum,
+            bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256,
+            expires_at=now + timedelta(seconds=60),
+        )
+        if corrupt:
+            with pytest.raises(RuntimeError):
+                await request
+        else:
+            assert await request == manifest
+    await asyncio.wait_for(tls_listing.closed.wait(), 2)
+    target = tls_listing.requests[0].split(b" ", 2)[1].decode()
+    parsed = urlsplit(target)
+    assert parsed.path == f"/loom-bundles/loom-bundle-manifests/v1/sha256/{manifest.digest}.json"
+    query = parse_qs(parsed.query)
+    assert query["X-Amz-Expires"] == ["60"]
+    assert query["X-Amz-Credential"] == [f"fixture-access/{now:%Y%m%d}/us-east-1/s3/aws4_request"]
+    assert len(query["X-Amz-Signature"][0]) == 64
+    assert len(tls_listing.requests) == 1
 
 
 async def test_cancelled_connect_handoff_aborts_orphaned_writer(tls_listing, monkeypatch):

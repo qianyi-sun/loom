@@ -15,6 +15,11 @@ from loom.task_image_build_plan import (
     MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES,
     MAX_TASK_IMAGE_BUILD_BUNDLE_FILES,
 )
+from loom.task_image_bundle_manifest import (
+    TaskImageBundleContentManifestV1,
+    parse_task_image_bundle_manifest,
+    task_image_bundle_manifest_key,
+)
 from loom_task_image_authority.bundle_capability import (
     TaskImageBundleCapabilityError,
     TaskImageBundleObject,
@@ -143,6 +148,60 @@ class MinioTaskImageBundleBackend:
         )
         observe()
         return result
+
+    async def get_manifest(
+        self, *, bucket: str, expected_sha256: str, task_checksum: str,
+        bundle_file_metadata_sha256: str, expires_at: datetime,
+    ) -> TaskImageBundleContentManifestV1:
+        """Read only the exact registered manifest, never infer source authority.
+
+        This does not certify completion of any bundle prefix. The capability
+        owner must also match its complete inventory and impose a shared outer
+        deadline across these operations, then reauthorize before committing.
+        """
+        self._require_open()
+        try:
+            if bucket != self._bucket or any(
+                type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None or value == "0" * 64
+                for value in (expected_sha256, task_checksum, bundle_file_metadata_sha256)
+            ):
+                raise ValueError("invalid frozen scope")
+            key = task_image_bundle_manifest_key(expected_sha256)
+        except (ValueError, TypeError):
+            raise TaskImageBundleCapabilityError("MinIO manifest scope is invalid") from None
+        previous = self._observe(expires_at)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + min(self._limits.total_timeout_seconds, (expires_at - previous).total_seconds())
+
+        def observe() -> datetime:
+            nonlocal previous
+            previous = self._observe(expires_at, previous)
+            return previous
+
+        try:
+            async with asyncio.timeout_at(deadline) as budget:
+                url = presign_bundle_get(
+                    public_origin=self._origin, bucket=bucket, key=key, region=self._region,
+                    credentials=self._credentials, expires_at=expires_at, clock=observe,
+                )
+                current = observe()
+                deadline = min(deadline, loop.time() + (expires_at - current).total_seconds())
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                budget.reschedule(deadline)
+                payload = await self._reader.fetch_manifest(url, expected_sha256=expected_sha256, deadline=deadline)
+                observe()
+                result = parse_task_image_bundle_manifest(payload, expected_sha256=expected_sha256)
+                if result.task_checksum != task_checksum or result.bundle_file_metadata_sha256 != bundle_file_metadata_sha256:
+                    raise ValueError("manifest differs from frozen provenance")
+                observe()
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                return result
+        except TaskImageBundleCapabilityError:
+            raise
+        except Exception:
+            raise TaskImageBundleCapabilityError("MinIO registered manifest is unavailable or invalid") from None
 
     async def list_objects(
         self, *, bucket: str, prefix: str, maximum_objects: int,

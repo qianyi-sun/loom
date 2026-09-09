@@ -313,3 +313,38 @@ async def test_actual_minio_async_provider_returns_only_exact_object_capabilitie
         response = minio_tls[2].get(obj.url)
         assert response.status_code == 200
         assert response.content == PAYLOAD
+
+
+@pytest.mark.parametrize("state", ["valid", "corrupt", "missing"])
+async def test_actual_minio_verifies_exact_registered_manifest(minio_tls, tmp_path, state):
+    from loom.task_image_bundle_manifest import (
+        capture_task_image_bundle_manifest,
+        task_image_bundle_manifest_key,
+    )
+    from loom_task_image_authority.bundle_s3_backend import MinioTaskImageBundleBackend
+
+    # State-specific captured content gives each case an independent digest key.
+    (tmp_path / "Dockerfile").write_bytes(f"FROM scratch\n# {state}\n".encode())
+    manifest = capture_task_image_bundle_manifest(tmp_path)
+    if state != "missing":
+        payload = manifest.canonical_bytes
+        if state == "corrupt":
+            payload = payload.replace(b"Dockerfile", b"Dockerfild")
+        minio_tls[3].put_object(
+            Bucket="loom-bundles", Key=task_image_bundle_manifest_key(manifest.digest), Body=payload,
+        )
+    async with MinioTaskImageBundleBackend(
+        origin=minio_tls[0], bucket="loom-bundles", region="us-east-1",
+        credentials=minio_tls[1], ca_file=minio_tls[4],
+    ) as backend:
+        request = backend.get_manifest(
+            bucket="loom-bundles", expected_sha256=manifest.digest,
+            task_checksum=manifest.task_checksum,
+            bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256,
+            expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60),
+        )
+        if state == "valid":
+            assert await request == manifest
+        else:
+            with pytest.raises(RuntimeError):
+                await request

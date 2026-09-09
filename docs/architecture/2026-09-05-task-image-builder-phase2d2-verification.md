@@ -466,6 +466,20 @@ native download acceptance. A manifest object may already exist from a different
 prefix; its existence is not a successful-publication receipt for this prefix.
 Registration must require the complete upload to succeed before binding provenance.
 
+The native storage backend can now retrieve that exact registered manifest over
+its configured TLS origin and CA. Its authority-only reader permits only the
+digest-derived reserved object path; the listing entrypoint remains restricted
+to the bucket listing path. Both share the bounded concurrency/shutdown owner,
+wire limits and shrinking absolute deadlines. The manifest read preserves the
+signed request target, checks the registered SHA-256 and canonical encoding,
+and binds the decoded task checksum and mode digest to the supplied frozen
+values. It rechecks authorization after parsing and does not return expired
+results. Tests exercise the actual signer/reader/parser over TLS and pinned
+MinIO, including missing and corrupted objects. This establishes manifest-read
+integrity only: complete data-prefix inventory matching and one shared issuance
+deadline across manifest and inventory reads remain required in the native
+capability owner. Manifest presence is never proof of a completed prefix upload.
+
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention
 bindings, capability metadata and the real Go downloader must change together.

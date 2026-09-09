@@ -1,4 +1,4 @@
-"""One-shot authority-only TLS listing reads with owned cancellation and bounds."""
+"""Authority-only TLS listing/manifest reads with owned cancellation and bounds."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ from urllib.parse import urlsplit
 
 import h11
 
+from loom.task_image_bundle_manifest import (
+    MAX_CONTENT_MANIFEST_BYTES,
+    task_image_bundle_manifest_key,
+)
 from loom_task_image_authority.bundle_capability import (
     MAX_TASK_IMAGE_BUNDLE_URL_BYTES,
     TaskImageBundleCapabilityError,
@@ -48,7 +52,7 @@ _DEFAULT_LIMITS = S3ListingReadLimits()
 
 
 class HTTPSBundleListingReader:
-    """Read one exact bucket's signed listing URLs; never follow redirects.
+    """Read signed listings and exact digest-key manifests; never redirect.
 
     Caller owns signing, absolute authorization and cross-page inventory budgets.
     Each request owns one connection, aborted on every exit (no pool or lingering
@@ -109,6 +113,31 @@ class HTTPSBundleListingReader:
         await asyncio.gather(*requests, return_exceptions=True)
 
     async def fetch(self, url: str, *, deadline: float) -> bytes:
+        return await self._fetch_scoped(
+            url, deadline=deadline, expected_path=f"/{self._bucket}",
+            maximum_body_bytes=self._limits.maximum_body_bytes, accept=b"application/xml",
+        )
+
+    async def fetch_manifest(self, url: str, *, expected_sha256: str, deadline: float) -> bytes:
+        """Transport only: the backend must verify registered canonical bytes.
+
+        No arbitrary object key or capability-selected origin/CA is accepted.
+        Both entrypoints share one concurrency ceiling and shutdown owner.
+        """
+        try:
+            key = task_image_bundle_manifest_key(expected_sha256)
+        except ValueError:
+            raise TaskImageBundleCapabilityError("S3 manifest target is invalid") from None
+        return await self._fetch_scoped(
+            url, deadline=deadline, expected_path=f"/{self._bucket}/{key}",
+            maximum_body_bytes=min(self._limits.maximum_body_bytes, MAX_CONTENT_MANIFEST_BYTES),
+            accept=b"application/json",
+        )
+
+    async def _fetch_scoped(
+        self, url: str, *, deadline: float, expected_path: str,
+        maximum_body_bytes: int, accept: bytes,
+    ) -> bytes:
         try:
             if (
                 self._close_task is not None or type(url) is not str
@@ -120,7 +149,7 @@ class HTTPSBundleListingReader:
             parsed = urlsplit(url)
             if (
                 f"{parsed.scheme}://{parsed.netloc}" != self._origin
-                or parsed.path != f"/{self._bucket}" or not parsed.query or parsed.fragment
+                or parsed.path != expected_path or not parsed.query or parsed.fragment
             ):
                 raise ValueError("unbound target")
             now = asyncio.get_running_loop().time()
@@ -131,6 +160,7 @@ class HTTPSBundleListingReader:
         task = asyncio.create_task(self._fetch(
             parsed.path + "?" + parsed.query,
             min(deadline, now + self._limits.total_timeout_seconds),
+            maximum_body_bytes=maximum_body_bytes, accept=accept,
         ))
         self._requests.add(task)
         task.add_done_callback(self._requests.discard)
@@ -162,7 +192,7 @@ class HTTPSBundleListingReader:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-    def _check_response(self, event: h11.Response) -> None:
+    def _check_response(self, event: h11.Response, *, maximum_body_bytes: int) -> None:
         headers = tuple(event.headers.raw_items())
         if event.status_code != 200 or 2 + sum(len(k) + len(v) + 4 for k, v in headers) > self._limits.maximum_header_bytes:
             raise ValueError("invalid response")
@@ -174,17 +204,17 @@ class HTTPSBundleListingReader:
                 continue
             if name == b"content-encoding" and values[0].lower() != b"identity":
                 raise ValueError("compressed response")
-            if name == b"content-length" and int(values[0]) > self._limits.maximum_body_bytes:
+            if name == b"content-length" and int(values[0]) > maximum_body_bytes:
                 raise ValueError("oversized response")
 
-    async def _fetch(self, target: str, deadline: float) -> bytes:
+    async def _fetch(self, target: str, deadline: float, *, maximum_body_bytes: int, accept: bytes) -> bytes:
         writer: asyncio.StreamWriter | None = None
         try:
             async with asyncio.timeout_at(deadline), self._semaphore:
                 stream, writer = await self._connect()
                 protocol = h11.Connection(h11.CLIENT, max_incomplete_event_size=self._limits.maximum_header_bytes)
                 request = h11.Request(method=b"GET", target=target.encode("ascii"), headers=[
-                    (b"Host", self._host), (b"Accept", b"application/xml"),
+                    (b"Host", self._host), (b"Accept", accept),
                     (b"Accept-Encoding", b"identity"), (b"Connection", b"close"),
                 ])
                 writer.write((protocol.send(request) or b"") + (protocol.send(h11.EndOfMessage()) or b""))
@@ -218,10 +248,10 @@ class HTTPSBundleListingReader:
                     elif isinstance(event, h11.Response):
                         if response_seen or not head_complete:
                             raise ValueError("duplicate response")
-                        self._check_response(event)
+                        self._check_response(event, maximum_body_bytes=maximum_body_bytes)
                         response_seen = True
                     elif isinstance(event, h11.Data):
-                        if not response_seen or len(body) + len(event.data) > self._limits.maximum_body_bytes:
+                        if not response_seen or len(body) + len(event.data) > maximum_body_bytes:
                             raise ValueError("body limit")
                         body.extend(event.data)
                     elif isinstance(event, h11.EndOfMessage):
