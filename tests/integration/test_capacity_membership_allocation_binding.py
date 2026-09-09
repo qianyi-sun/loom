@@ -8,6 +8,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import allocate_shadow
+from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.membership_store import CapacityMembershipStore
 from loom_capacity_manager.models import (
@@ -20,7 +22,7 @@ from loom_capacity_manager.models import (
 from loom_capacity_manager.reconciler import _commit_reconciled_epoch
 from loom_capacity_manager.store import ExecutionConflictError
 from tests.capacity_fixtures import demand_snapshot, pool_observation
-from tests.integration.test_capacity_membership import DELEGATE, _active_v3, _request
+from tests.integration.test_capacity_membership import DELEGATE, _active_v3, _projection, _request
 
 
 @pytest.fixture
@@ -385,3 +387,107 @@ async def test_historical_reporter_rejects_unrecorded_generation(
                 subject_id=request.projection.subject_id,
                 reporter_incarnation=request.acknowledgement.reporter_incarnation,
             )
+
+
+async def test_launch_authority_derives_base_and_member_provenance_from_database(
+    pinned_personal_allocation,
+):
+    module = import_module("loom_capacity_manager.membership_launch_authority")
+    sessions, fixture, active, request, allocation_id = pinned_personal_allocation
+    async with sessions() as session, session.begin():
+        epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, allocation_id)
+        for subject_id, delegated in ((request.projection.subject_id, True), (fixture.request.subject_acknowledgements[0].subject_id, False)):
+            result = await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=subject_id, require_current=True)
+            authority = result.authority
+            assert authority.purpose == "application-worker"
+            assert authority.configuration.subject_id == result.configuration.subject_id == subject_id
+            assert authority.configuration.digest == canonical_digest(result.configuration)
+            assert authority.acknowledgement_sha256 == canonical_executable_digest(result.acknowledgement)
+            assert authority.acknowledgement_sha256 != result.acknowledgement.acknowledgement_sha256
+            if delegated:
+                assert authority.source == "personal-membership"
+                assert authority.membership.owner_id == request.projection.owner_id
+                assert authority.membership.namespace_id == request.namespace_id
+                assert authority.membership.revision == 1
+                assert authority.membership.head_sha256 == allocation.complete_payload["membership"]["head_sha256"]
+                assert result.acknowledgement.candidate == request.acknowledgement.candidate
+            else:
+                assert authority.source == "immutable-base"
+                assert authority.membership is None
+
+
+async def test_launch_authority_preserves_selected_event_after_another_owner_joins(
+    pinned_personal_allocation,
+):
+    module = import_module("loom_capacity_manager.membership_launch_authority")
+    sessions, fixture, active, request, allocation_id = pinned_personal_allocation
+    async with sessions() as session, session.begin():
+        epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, allocation_id)
+        original = await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=True)
+        other = _projection(
+            subject_id=UUID(int=22801), subject_incarnation=UUID(int=22802), owner_id=UUID(int=22803),
+            environment_name="carol", reporter_incarnation=UUID(int=22804), operation_id=UUID(int=22805),
+        )
+        await CapacityMembershipStore(fixture.store).apply(session, _request(active, other, expected_revision=1), actor=DELEGATE, idempotency_key=UUID(int=22806))
+        assert await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=True) == original
+        # A newly sealed allocation contains both events, but this subject still
+        # derives provenance from its own immutable event, not the shared latest head.
+    async with sessions() as session, session.begin():
+        value = await fixture.store.load_allocation_input(session, fixture.writer)
+    async with sessions() as session:
+        new_id, _ = await _commit_reconciled_epoch(session, fixture.store, fixture.writer, allocate_shadow(value))
+    async with sessions() as session, session.begin():
+        epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, new_id)
+        assert allocation.complete_payload["membership"]["revision"] == 2
+        resolved = await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=True)
+        assert resolved == original
+        assert resolved.authority.membership.head_sha256 != allocation.complete_payload["membership"]["head_sha256"]
+
+
+async def test_launch_authority_capacity_supersession_blocks_increase_but_keeps_history(
+    pinned_personal_allocation,
+):
+    module = import_module("loom_capacity_manager.membership_launch_authority")
+    sessions, fixture, active, request, allocation_id = pinned_personal_allocation
+    async with sessions() as session, session.begin():
+        epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, allocation_id)
+        original = await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=True)
+        changed = request.projection.model_copy(update={
+            "operation_kind": "capacity", "operation_epoch": 2, "operation_id": UUID(int=22811),
+            "configuration_generation": 2, "max_slots": 1,
+        })
+        await CapacityMembershipStore(fixture.store).apply(session, _request(active, changed, expected_revision=1), actor=DELEGATE, idempotency_key=UUID(int=22812))
+        with pytest.raises(ExecutionConflictError, match="generation"):
+            await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=True)
+        assert await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=False) == original
+
+
+@pytest.mark.parametrize("tamper", ("purpose", "candidate", "namespace", "owner", "missing_membership"))
+async def test_launch_authority_rejects_forged_allocation_evidence_without_base_fallback(
+    pinned_personal_allocation, tamper,
+):
+    module = import_module("loom_capacity_manager.membership_launch_authority")
+    sessions, _fixture, active, request, allocation_id = pinned_personal_allocation
+    async with sessions() as session, session.begin():
+        epoch = await session.get(CapacityExecutionEpoch, active.execution_epoch)
+        allocation = await session.get(CapacityAllocationEpoch, allocation_id)
+        import copy
+        payload = copy.deepcopy(allocation.complete_payload)
+        membership = payload["membership"]
+        if tamper == "missing_membership":
+            payload.pop("membership")
+            payload["schema_version"] = 2
+        elif tamper == "namespace":
+            membership["namespace_id"] = str(UUID(int=22821))
+        elif tamper == "candidate":
+            membership["members"][0]["acknowledgement"]["candidate"]["publication_sha256"] = "f" * 64
+        else:
+            membership["members"][0]["purpose" if tamper == "purpose" else "owner_id"] = "personal-build-worker" if tamper == "purpose" else str(UUID(int=22822))
+        session.expunge(allocation)
+        allocation.complete_payload = payload
+        with pytest.raises(ExecutionConflictError):
+            await module.resolve_allocation_launch_subject(session, epoch, allocation, subject_id=request.projection.subject_id, require_current=False)
