@@ -203,10 +203,141 @@ def test_new_snapshot_rejects_duplicate_build_service_for_owner():
     value = build_membership_input()
     module = import_module("loom_capacity_manager.build_membership_contracts")
     member = value.membership.members[-1]
-    duplicate = member.model_copy(update={"revision": 3})
+    configuration = member.configuration.model_copy(update={"subject_id": UUID(int=99), "display_name": "different-build-name"})
+    duplicate = member.model_copy(update={
+        "revision": 3, "configuration": configuration,
+        "acknowledgement": member.acknowledgement.model_copy(update={"subject_id": configuration.subject_id}),
+    })
     snapshot = value.membership.model_copy(update={"revision": 3, "members": (*value.membership.members, duplicate)})
     with pytest.raises(ValueError):
         module.PersonalMembershipSnapshotV2.model_validate_json(snapshot.model_dump_json())
+
+
+@pytest.mark.parametrize("field,limit", (("max_slots_per_subject", 5), ("max_pending_slots_per_subject", 5), ("max_pending_jobs_per_subject", 5)))
+def test_build_template_limits_are_checked_even_without_build_members(field, limit):
+    value = build_membership_input()
+    value = value.model_copy(update={
+        "subjects": value.subjects[:-1],
+        "membership": value.membership.model_copy(update={"members": value.membership.members[:-1]}),
+        "preparation": value.preparation.model_copy(update={"personal_builds": value.preparation.personal_builds.model_copy(update={field: limit})}),
+    })
+    with pytest.raises(ValueError, match="shared owner policy"):
+        resolved_subject_references(value)
+
+
+def test_build_profile_architecture_is_checked_against_fleet_domain():
+    from loom_capacity_manager.membership import _validate_build_template
+    value = build_membership_input()
+    pool = value.fleet.pools[0]
+    assert pool.pool_id == "gb10"
+    pool = pool.model_copy(update={"resource_domains": tuple(domain.model_copy(update={"architecture": "x86_64"}) for domain in pool.resource_domains)})
+    pool = pool.model_copy(update={"pool_digest": canonical_digest_excluding(pool, "pool_digest")})
+    profile = value.preparation.personal_builds.profiles[0].model_copy(update={"pool_digest": pool.pool_digest})
+    profile = profile.model_copy(update={"profile_digest": canonical_digest_excluding(profile, "profile_digest")})
+    template = value.preparation.personal_builds.model_copy(update={"profiles": (profile, value.preparation.personal_builds.profiles[1])})
+    fleet = value.fleet.model_copy(update={"pools": (pool, value.fleet.pools[1])})
+    with pytest.raises(ValueError, match="natively placed"):
+        _validate_build_template(template, fleet, value.fleet.account_policies[0])
+
+
+@pytest.mark.parametrize("version", (4.0, "4", True, 3))
+def test_build_preparation_version_is_exact_even_for_unchecked_models(version):
+    value = build_membership_input()
+    with pytest.raises(ValueError):
+        resolved_subject_references(value.model_copy(update={"preparation": value.preparation.model_copy(update={"schema_version": version})}))
+
+
+def test_disabled_build_retains_identity_but_requires_zero_capacity():
+    value = _replace_build(build_membership_input(), lifecycle_state="disabled", max_slots=0)
+    assert len(resolved_subject_references(value)) == 3
+    with pytest.raises(ValueError):
+        resolved_subject_references(_replace_build(value, max_slots=1))
+
+
+@pytest.mark.parametrize("managed", (True, False))
+def test_build_cannot_override_a_managed_or_immutable_base_identity(managed):
+    value = build_membership_input()
+    build_id = value.membership.members[-1].configuration.subject_id
+    base = value.managed_base_subjects[0].model_copy(update={"subject_id": build_id})
+    reference = value.configuration.subjects[0].model_copy(update={"subject_id": build_id, "digest": canonical_digest(base)})
+    policy = value.preparation.personal_membership.model_copy(update={"managed_base_subject_ids": (build_id,) if managed else ()})
+    value = value.model_copy(update={
+        "configuration": value.configuration.model_copy(update={"subjects": (reference,)}),
+        "managed_base_subjects": (base,) if managed else (),
+        "preparation": value.preparation.model_copy(update={"personal_membership": policy}),
+        "subjects": value.subjects[1:],
+    })
+    with pytest.raises(ValueError, match="cannot override an application or immutable base"):
+        resolved_subject_references(value)
+
+
+@pytest.mark.parametrize("managed", (True, False))
+def test_reserved_build_name_cannot_collide_with_a_base_subject(managed):
+    value = build_membership_input()
+    base = value.managed_base_subjects[0].model_copy(update={"display_name": value.membership.members[-1].configuration.display_name})
+    reference = value.configuration.subjects[0].model_copy(update={"digest": canonical_digest(base)})
+    policy = value.preparation.personal_membership.model_copy(update={"managed_base_subject_ids": (base.subject_id,) if managed else ()})
+    value = value.model_copy(update={
+        "configuration": value.configuration.model_copy(update={"subjects": (reference,)}),
+        "managed_base_subjects": (base,) if managed else (),
+        "preparation": value.preparation.model_copy(update={"personal_membership": policy}),
+        "subjects": (value.subjects[0].model_copy(update={"configuration": base}), *value.subjects[1:]),
+    })
+    with pytest.raises(ValueError, match="name is invalid" if managed else "name collides"):
+        resolved_subject_references(value)
+
+
+def _build_successor():
+    from loom_capacity_manager.contracts import ConfigurationGenerationRefV1
+    from loom_capacity_manager.executable_contracts import canonical_executable_digest
+    from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
+    value = build_membership_input()
+    original = value.membership.members[-1].configuration
+    successor = _replace_build(value, subject_incarnation=UUID(int=234), demand_reporter_incarnation=UUID(int=235), configuration_generation=3)
+    evidence = PersonalReincarnationEvidenceV1(
+        namespace_id=value.membership.namespace_id, execution_manifest_sha256=canonical_executable_digest(value.preparation),
+        origin=ConfigurationGenerationRefV1(scope="subject", generation=1, digest=canonical_digest(original), subject_id=original.subject_id, subject_incarnation=original.subject_incarnation),
+        predecessor=original.model_copy(update={"lifecycle_state": "disabled", "max_slots": 0, "configuration_generation": 2}),
+        predecessor_revision=2, predecessor_head_sha256="e" * 64, admission_revision=3,
+        successor_incarnation=UUID(int=234), release_set_sha256="f" * 64,
+    )
+    member = successor.membership.members[-1].model_copy(update={"revision": 3, "reincarnation": evidence})
+    return successor.model_copy(update={"membership": successor.membership.model_copy(update={"revision": 3, "members": (*successor.membership.members[:-1], member)})})
+
+
+def test_build_successor_keeps_stable_service_id_with_new_incarnation():
+    value = _build_successor()
+    refs = resolved_subject_references(value)
+    member = value.membership.members[-1]
+    selected = next(item for item in refs if item.subject_id == member.configuration.subject_id)
+    assert selected.subject_incarnation == UUID(int=234)
+    assert selected.generation == 3
+    assert member.configuration.candidate_generation == member.configuration.deployment_generation == 1
+
+
+@pytest.mark.parametrize("boundary", ("reporter", "incarnation", "account", "namespace", "manifest", "candidate_generation", "deployment_generation"))
+def test_build_successor_rejects_changed_release_provenance_or_identity(boundary):
+    value = _build_successor()
+    member = value.membership.members[-1]
+    evidence = member.reincarnation
+    if boundary in {"reporter", "incarnation", "candidate_generation", "deployment_generation"}:
+        field, changed = {
+            "reporter": ("demand_reporter_incarnation", evidence.predecessor.demand_reporter_incarnation),
+            "incarnation": ("subject_incarnation", evidence.predecessor.subject_incarnation),
+            "candidate_generation": ("candidate_generation", 2), "deployment_generation": ("deployment_generation", 2),
+        }[boundary]
+        value = _replace_build(value, **{field: changed})
+    else:
+        if boundary == "account":
+            evidence = evidence.model_copy(update={"predecessor": evidence.predecessor.model_copy(update={"account_id": "foreign-account"})})
+        elif boundary == "namespace":
+            evidence = evidence.model_copy(update={"namespace_id": UUID(int=999)})
+        else:
+            evidence = evidence.model_copy(update={"execution_manifest_sha256": "1" * 64})
+        member = member.model_copy(update={"reincarnation": evidence})
+        value = value.model_copy(update={"membership": value.membership.model_copy(update={"members": (*value.membership.members[:-1], member)})})
+    with pytest.raises(ValueError):
+        resolved_subject_references(value)
 
 
 @pytest.mark.parametrize("policy_version", (2, 3, 4))

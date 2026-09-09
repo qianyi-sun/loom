@@ -592,6 +592,24 @@ async def test_execution_preparation_is_disabled_without_owner_policy(
         )
 
 
+async def test_direct_build_preparation_cannot_create_legacy_execution_epoch(capacity_session: AsyncSession) -> None:
+    from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
+    from tests.unit.test_capacity_build_membership import build_membership_input
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    proposed = build_membership_input().preparation
+    request = ExecutionPreparationV4.model_validate(fixture.request.model_dump(mode="python") | {
+        "schema_version": 4, "personal_membership": proposed.personal_membership,
+        "personal_builds": proposed.personal_builds,
+    })
+    with pytest.raises(ExecutionConflictError, match="unsupported execution preparation schema"):
+        await fixture.store.prepare_execution_epoch(capacity_session, request, actor="activation-operator", idempotency_key=UUID(int=22880))
+    assert (await capacity_session.execute(select(CapacityExecutionEpoch))).scalars().all() == []
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert authority.execution_state == "shadow"
+    assert authority.executable_new_capacity_ceiling == 0
+
+
 async def test_prepare_rejects_executor_pool_generation_outside_active_fleet(
     capacity_session: AsyncSession,
 ) -> None:

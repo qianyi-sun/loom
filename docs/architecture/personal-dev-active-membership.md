@@ -639,6 +639,30 @@ Application task demand retains its architecture-specific and neutral choices.
 The build-purpose executor paths must be implemented on both pools before that
 purpose is accepted for executable admission.
 
+Pure composition now has explicit V4 preparation contracts, a separate build
+member, a combined application/build membership snapshot and delegated allocator
+input. The build subject ID is deterministically derived from the existing
+namespace, owner and build purpose; its reserved name is `dev-build-<ownerhex>`.
+Both native profiles must have a single non-warm one-node/one-slot shape with
+positive CPU/memory, the matching architecture capability and native fleet-domain
+placement. The member's full runtime candidate must equal the operator template.
+Build minimum and surge slots remain zero in this initial cold-only version.
+Applications retain their configurable minimum, defaulting to zero.
+
+Build members consume the same owner live-subject and capacity limits and the
+same combined membership bound as applications. The build template itself must
+fit the existing owner policy even before any build member exists. Application
+and build configuration cannot overwrite each other's base identities or names.
+Reincarnation retains stable owner/service identity with fresh incarnation and
+reporter identities; its predecessor-release authentication is still a required
+durable-store responsibility, not proved by structural validation.
+
+These new contracts are deliberately not accepted by execution preparation or
+promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
+reconciler rejects the new input rather than dropping its membership into a
+legacy executable epoch. The shared allocator can exercise pure accounting and
+native routing while the remaining typed admission/execution consumers are built.
+
 Management translates source attempts into build-capability demand buckets.
 The existing global allocator and charged intent ledger handle placement and
 fairness. The pool executor routes build intents to a management admission

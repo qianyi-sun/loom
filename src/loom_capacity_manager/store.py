@@ -3460,6 +3460,15 @@ class CapacityManagementStore:
             raise ExecutionPreparationDisabledError(
                 "execution preparation requires owner-configured policy"
             )
+        supported_requests = {ExecutionPreparationV2: 2, ExecutionPreparationV3: 3}
+        supported_policies = {ExecutionPreparationPolicyV2: 2, ExecutionPreparationPolicyV3: 3}
+        if (
+            type(request.schema_version) is not int
+            or supported_requests.get(type(request)) != request.schema_version
+            or type(policy.schema_version) is not int
+            or supported_policies.get(type(policy)) != policy.schema_version
+        ):
+            raise ExecutionConflictError("unsupported execution preparation schema")
         if authority.authority_incarnation != request.authority_incarnation or (
             require_writer_binding and authority.writer_epoch != request.expected_writer_epoch
         ):

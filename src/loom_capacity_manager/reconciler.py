@@ -89,6 +89,14 @@ async def _commit_reconciled_epoch(
             raise StaleWriterError("writer is no longer current")
 
         current_input = await store.load_allocation_input(session, writer)
+        supported_inputs = {AllocationInputV1: 1, DelegatedAllocationInputV2: 2}
+        if (
+            type(current_input.schema_version) is not int
+            or supported_inputs.get(type(current_input)) != current_input.schema_version
+        ):
+            # Future delegated inputs must not be promoted into a legacy epoch
+            # that silently drops their purpose/membership evidence.
+            raise CapacityStoreError("unsupported executable allocation input schema")
         if canonical_digest(current_input) != shadow.input_digest:
             raise StaleAllocationInputError("allocation input changed before commit")
         if current_input.configuration != shadow.configuration:
