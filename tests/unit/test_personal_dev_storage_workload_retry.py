@@ -37,6 +37,23 @@ def test_bound_retry_keeps_immutable_workload_fields_but_updates_attempt_evidenc
     assert checked == {"Job", "Deployment"}
 
 
+def test_bound_migration_retains_job_authority_but_legacy_keeps_ttl():
+    from loom.dev_instance import derive_identity
+
+    bound = _bound_claim().operation.storage_binding.identity
+    config = _immutable_config()
+    config = replace(config, lifecycle_binding=replace(
+        config.lifecycle_binding, subject_id=bound.storage_binding.subject_id,
+        subject_incarnation=bound.storage_incarnation,
+    ))
+    for identity in (bound, derive_identity(bound.name)):
+        job = next(document for document in dev_instance_manifest_documents(identity, config) if document["kind"] == "Job")
+        if identity.storage_binding is not None:
+            assert "ttlSecondsAfterFinished" not in job["spec"]
+        else:
+            assert job["spec"]["ttlSecondsAfterFinished"] == 600
+
+
 @pytest.mark.parametrize("consumer", ("candidate", "capacity"))
 async def test_bound_workload_support_is_installed_before_activation(monkeypatch, consumer):
     from loom.dev_instance_runtime import KubectlCandidateGenerationProvisioner
