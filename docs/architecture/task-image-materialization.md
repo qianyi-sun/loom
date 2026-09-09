@@ -195,6 +195,13 @@ Rootless irreversible retirement still requires its own transactional reference
 proof, including new reference insertion and identity recreation; terminal-update
 monotonicity alone does not authorize deletion.
 
+The inactive rootless implementation also stores immutable per-attempt retirement
+evidence and rejects retired attempts at builder and publication admission. This
+is not yet a running collector: reference eligibility, execution-start fencing
+and offline registry maintenance must be composed before activation. See the
+[Phase 2 verification design](2026-09-05-task-image-builder-phase2d2-verification.md#failure-retention-and-compatibility)
+for the boundary between these guards and deletion authority.
+
 ## Rollout safety
 
 The schema migration backfills materializations and links for existing

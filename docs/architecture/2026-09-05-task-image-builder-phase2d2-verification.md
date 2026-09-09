@@ -450,6 +450,34 @@ fault injection is not prevented by triggers that such an owner can disable.
 Retirement transactions still must load the complete inventory under their
 shared fence and separately prove references and registry quiescence.
 
+Attempt retention now has a restrictive attempt foreign key and a durable
+observation record. Observation time cannot regress or move to another attempt.
+Retirement freezes a bounded inventory and its matching digest; UPDATE, DELETE
+and TRUNCATE cannot discard or rewrite that evidence. Exact no-op replay remains
+permitted. Inactive downgrade refuses any retired record and takes its complete
+table-lock set, including the attempt parent, with NOWAIT before removing guards.
+These storage checks do not certify inventory semantics or retirement eligibility.
+
+Builder claim/input admission, fresh and replayed start/heartbeat, registry
+credential issuance/replay/renewal, candidate admission and atomic publication
+completion now consult fresh retirement state while holding the shared
+materialization fence. Cached unretired observations and an older otherwise-live
+clock cannot bypass retirement. Builder and publication admission reject pending
+retention edits before autoflush; builder admission also rejects pending parent
+and attempt edits before refreshed reads can discard caller-owned state.
+Cleanup-only release/failure operations still require
+their normal identity, session and lease checks; skipping the artifact-retirement
+check does not grant build inputs or publication authority. Historical completion
+receipt replay remains read-only and cannot restore readiness.
+
+The actual reference/eligibility retirement transaction is still pending. These
+admission checks rely on that writer holding the same materialization lock;
+the scalar marker lookup alone is not standalone concurrency authority. Terminal
+verifier reservations can add execution uses without reopening a Trial, so the
+terminal-state invariant below is not a substitute for rootless execution-start
+admission. Offline maintenance, writer quiescence and clock-revival protection
+remain separate requirements before any registry deletion or activation.
+
 The same unpublished migration prevents a terminal Trial from becoming
 nonterminal through UPDATE, including changes made by BEFORE triggers. Its
 row-local AFTER trigger raises a named constraint violation and rolls back the
