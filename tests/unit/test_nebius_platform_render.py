@@ -471,3 +471,235 @@ def test_execution_policy_rejects_beyond_native_node_ceiling(platform_inputs: tu
     config["capacity_policy"]["max_nodes"] = 101
     with pytest.raises(NebiusPlatformError, match="max_nodes"):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.fixture
+def regional_inputs(platform_inputs: tuple) -> tuple:
+    from copy import deepcopy
+
+    config, candidate, profile = platform_inputs
+    regional_example = json.loads(
+        (ROOT / "deploy/nebius/regional.platform.json.example").read_text()
+    )
+    regional = deepcopy(regional_example["regional_execution_targets"][0])
+    for key in ("project_id", "quota_parent_id", "cluster_id", "execution_node_group_id"):
+        regional[key] = config[key] + "-west"
+    regional["kubernetes_api_server"] = "https://api.west.test"
+    regional["execution_price"] = dict(
+        config["execution_price"],
+        region="eu-west1",
+        sku=regional["execution_price"]["sku"],
+        source_version="test-west",
+    )
+    config["public_gateway_ipv4"] = "8.8.4.4"
+    config["regional_execution_targets"] = [regional]
+    return config, candidate, profile
+
+
+def test_regional_manifests_separate_native_roles_from_primary_processes(
+    regional_inputs: tuple,
+) -> None:
+    from loom.nebius_platform_render import build_regional_execution
+
+    config, candidate, profile = regional_inputs
+    target = config["regional_execution_targets"][0]
+    primary = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    remote = build_regional_execution(config, candidate, repo_root=ROOT)[target["target_id"]]
+    assert not {
+        "Deployment",
+        "CronJob",
+        "StatefulSet",
+        "Service",
+        "Secret",
+        "PersistentVolumeClaim",
+    } & {doc["kind"] for doc in remote}
+    assert all(
+        doc["metadata"].get("namespace") in (None, target["execution_namespace"]) for doc in remote
+    )
+    assert all(
+        doc["metadata"].get("namespace") != target["execution_namespace"]
+        for docs in primary.values()
+        for doc in docs
+    )
+    bindings = [doc for doc in remote if doc["kind"] in {"RoleBinding", "ClusterRoleBinding"}]
+    assert {doc["subjects"][0]["name"] for doc in bindings} == set(
+        target["service_account_ids"].values()
+    )
+    assert all(
+        doc["subjects"]
+        == [
+            {
+                "kind": "User",
+                "apiGroup": "rbac.authorization.k8s.io",
+                "name": doc["subjects"][0]["name"],
+            }
+        ]
+        for doc in bindings
+    )
+    gateway_role = next(
+        doc
+        for doc in remote
+        if doc["metadata"]["name"].endswith("gateway-tokenreview") and doc["kind"] == "ClusterRole"
+    )
+    assert gateway_role["rules"] == [
+        {"apiGroups": ["authentication.k8s.io"], "resources": ["tokenreviews"], "verbs": ["create"]}
+    ]
+    collector_role = next(
+        doc for doc in remote if doc["kind"] == "ClusterRole" and doc != gateway_role
+    )
+    assert all(set(rule["verbs"]) <= {"get", "list"} for rule in collector_role["rules"])
+    for role in (
+        doc for doc in remote if doc["kind"] in {"Role", "ClusterRole"} and doc != gateway_role
+    ):
+        assert all(
+            not {"secrets", "tokenreviews", "serviceaccounts/token"} & set(rule["resources"])
+            for rule in role["rules"]
+        )
+    quota = next(doc for doc in remote if doc["kind"] == "ResourceQuota")
+    assert quota["spec"]["hard"]["pods"] == "6400"
+    egress = next(
+        doc
+        for doc in remote
+        if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].endswith("-egress")
+    )
+    assert egress["spec"]["egress"][-1] == {
+        "to": [{"ipBlock": {"cidr": "8.8.4.4/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}],
+    }
+    process_docs = primary["60-execution.yaml"]
+    actuator = next(
+        doc
+        for doc in process_docs
+        if doc["kind"] == "Deployment"
+        and doc["metadata"]["name"] == target["target_id"] + "-actuator"
+    )
+    pod = actuator["spec"]["template"]["spec"]
+    env = {row["name"]: row.get("value") for row in pod["containers"][0]["env"]}
+    assert env["LOOM_EXECUTION_ACTUATOR_NAMESPACE"] == target["execution_namespace"]
+    assert env["LOOM_EXECUTION_ACTUATOR_KUBERNETES_ENDPOINT"] == "https://api.west.test"
+    assert (
+        env["LOOM_EXECUTION_ACTUATOR_CREDENTIAL_BROKER_URL"]
+        == "https://" + config["public_host"] + "/internal/service-execution"
+    )
+    assert env["LOOM_EXECUTION_ACTUATOR_POD_IDENTITY_AUDIENCE"] == "loom-execution"
+    assert pod["nodeSelector"]["loom.nebius/node-role"] == "system"
+    assert any(
+        volume.get("secret", {}).get("secretName") == "loom-execution-actuator-db"
+        for volume in pod["volumes"]
+    )
+    collector = next(
+        doc
+        for doc in process_docs
+        if doc["kind"] == "CronJob"
+        and doc["metadata"]["name"] == target["target_id"] + "-collector"
+    )
+    collector_pod = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    projected = next(
+        volume for volume in collector_pod["volumes"] if volume["name"] == "projected-credentials"
+    )
+    assert (
+        projected["projected"]["sources"][0]["secret"]["name"]
+        == target["target_id"] + "-collector-kubernetes"
+    )
+    collector_env = {row["name"]: row.get("value") for row in collector_pod["containers"][0]["env"]}
+    assert (
+        collector_env["LOOM_EXECUTION_CAPACITY_COLLECTOR_KUBERNETES_ENDPOINT"]
+        == "https://api.west.test"
+    )
+    quota = next(doc for doc in process_docs if doc["kind"] == "ResourceQuota")
+    assert quota["spec"]["hard"]["pods"] == "6406"
+    gateway = next(
+        doc
+        for doc in primary["40-services.yaml"]
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-llm-gateway"
+    )
+    volumes = gateway["spec"]["template"]["spec"]["volumes"]
+    assert any(
+        volume.get("secret", {}).get("secretName") == target["target_id"] + "-gateway-kubernetes"
+        for volume in volumes
+    )
+    catalog = json.loads(primary["10-config-network.yaml"][0]["data"]["catalog.json"])
+    targets = catalog["topology"]["targets"]
+    assert [row["health_role"] for row in targets] == ["primary", "secondary"]
+    assert targets[1]["pod_identity_audience"] == "loom-execution"
+    assert "pod_identity_audience" not in targets[0]
+
+
+def test_regional_public_routes_preserve_exact_model_and_broker_boundaries(
+    regional_inputs: tuple,
+) -> None:
+    from loom.nebius_platform_render import public_tls_config
+
+    config, _, _ = regional_inputs
+    routes = public_tls_config(config)["apps"]["http"]["servers"]["public"]["routes"][0]["handle"][
+        -1
+    ]["routes"]
+    assert routes[0]["match"] == [{"path": ["/internal/service-execution/*"]}]
+    assert routes[1]["match"][0]["method"] == ["POST"]
+    assert "/v1/chat/completions" in routes[1]["match"][0]["path"]
+    assert "/admin/*" in routes[2]["match"][0]["path"]
+    assert routes[2]["handle"] == [{"handler": "static_response", "status_code": 404}]
+    assert routes[3]["match"] == [{"path": ["/api/v1/*"]}]
+    assert routes[0]["handle"][0]["flush_interval"] == -1
+    assert routes[0]["handle"][0]["upstreams"] == [
+        {"dial": f"loom-llm-gateway.{config['namespace']}.svc:9100"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "change", ["missing_ip", "private_ip", "duplicate_identity", "non_eu", "duplicate_cluster"]
+)
+def test_regional_render_rejects_ambiguous_or_unreachable_bindings(
+    regional_inputs: tuple, change: str
+) -> None:
+    config, candidate, profile = regional_inputs
+    target = config["regional_execution_targets"][0]
+    if change == "missing_ip":
+        config.pop("public_gateway_ipv4")
+    elif change == "private_ip":
+        config["public_gateway_ipv4"] = "10.0.0.1"
+    elif change == "duplicate_identity":
+        target["service_account_ids"]["gateway"] = target["service_account_ids"]["actuator"]
+    elif change == "non_eu":
+        target["region"] = "us-central1"
+        target["execution_price"]["region"] = "us-central1"
+    else:
+        target["cluster_scope_id"] = config["cluster_scope_id"]
+    with pytest.raises(NebiusPlatformError):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_regional_cli_requires_separate_cluster_output(
+    regional_inputs: tuple,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.ops import render_nebius_platform as render_cli
+
+    config, candidate, profile = regional_inputs
+    paths = {}
+    for name, value in (
+        ("environment-config", config),
+        ("candidate", candidate),
+        ("runtime-profile", profile),
+        ("trusted-keyring", {}),
+    ):
+        path = tmp_path / (name + ".json")
+        path.write_text(json.dumps(value))
+        paths[name] = path
+    argv = ["render_nebius_platform.py"]
+    for name, path in paths.items():
+        argv.extend(["--" + name, str(path)])
+    argv.extend(["--output", str(tmp_path / "primary")])
+    monkeypatch.setattr("sys.argv", argv)
+    assert render_cli.main() == 1
+    assert "--regional-output" in capsys.readouterr().err
+    assert not (tmp_path / "primary").exists()
+    monkeypatch.setattr("sys.argv", [*argv, "--regional-output", str(tmp_path / "remote")])
+    assert render_cli.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    target = config["regional_execution_targets"][0]
+    assert result["regional_files"] == [target["target_id"] + ".yaml"]
+    assert not (tmp_path / "primary" / result["regional_files"][0]).exists()
+    assert (tmp_path / "remote" / result["regional_files"][0]).is_file()

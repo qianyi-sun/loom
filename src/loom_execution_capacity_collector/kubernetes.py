@@ -7,6 +7,11 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from types import SimpleNamespace
 from typing import Any
 
+from loom.nebius_kubernetes import (
+    NebiusKubernetesConnection,
+    NebiusKubernetesCredentials,
+    create_api_client,
+)
 from loom_execution_capacity_collector.contracts import (
     DaemonSetPlacement,
     KubernetesCapacitySnapshot,
@@ -348,12 +353,23 @@ class InClusterKubernetesCapacityReader:
     def __init__(
         self,
         *,
+        connection: NebiusKubernetesConnection | None = None,
         core_api: Any | None = None,
         apps_api: Any | None = None,
         request_timeout_seconds: float = 15.0,
     ) -> None:
         if not 1.0 <= request_timeout_seconds <= 60.0:
             raise ValueError("Kubernetes request timeout must be between 1 and 60 seconds")
+        self._api_client: Any | None = None
+        self._credentials: NebiusKubernetesCredentials | None = None
+        if connection is not None:
+            if core_api is not None or apps_api is not None:
+                raise ValueError("remote connection cannot be combined with injected clients")
+            from kubernetes import client
+
+            self._api_client, self._credentials = create_api_client(connection)
+            core_api = client.CoreV1Api(self._api_client)
+            apps_api = client.AppsV1Api(self._api_client)
         if core_api is None:
             try:
                 from kubernetes import client, config
@@ -368,6 +384,14 @@ class InClusterKubernetesCapacityReader:
             apps_api = client.AppsV1Api()
         self._apps = apps_api
         self._request_timeout = request_timeout_seconds
+
+    async def close(self) -> None:
+        try:
+            if self._api_client is not None:
+                await asyncio.to_thread(self._api_client.close)
+        finally:
+            if self._credentials is not None:
+                await self._credentials.close()
 
     def _list_all(
         self,

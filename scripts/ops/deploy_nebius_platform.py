@@ -411,15 +411,22 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             )
         run_job("50-configure.yaml")
         apply_file("60-execution.yaml")
-        kube.run(
-            "rollout",
-            "status",
-            "deployment/loom-execution-actuator",
-            "-n",
-            config["execution_namespace"],
-            "--timeout=300s",
-            timeout=340,
-        )
+        for actuator in [
+            "loom-execution-actuator",
+            *[
+                target["target_id"] + "-actuator"
+                for target in config.get("regional_execution_targets", [])
+            ],
+        ]:
+            kube.run(
+                "rollout",
+                "status",
+                "deployment/" + actuator,
+                "-n",
+                config["execution_namespace"],
+                "--timeout=300s",
+                timeout=340,
+            )
         apply_file("70-public.yaml")
         phase("public-load-balancer-ready")
         kube.run(

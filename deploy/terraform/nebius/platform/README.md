@@ -58,3 +58,39 @@ Secrets, signed publication, restore exercises and real
 workload acceptance are separate operations; successful Terraform alone does
 not establish their completion. Do not destroy versioned buckets or retire the
 previous platform until migration/retirement acceptance authorizes it.
+
+
+Optional `regional_execution_targets` entries add execution-only clusters through
+`../modules/regional-execution`. See `../regional-execution.tfvars.json.example`.
+The default empty map creates nothing. Each configured target adds a control
+plane and system/execution node groups, using an existing regional project and
+subnet. Existing-ID mode supplies a regional read-only registry identity and
+creates exactly these three resources. Optional `managed_identities` instead
+requires three distinct SPKI PEM public keys and two existing viewer group IDs;
+omit the existing node-pull ID in that mode. See
+`../regional-execution-managed-identities.tfvars.json.example`. Managed mode adds
+four regional service accounts, three runtime authorized-public-key registrations
+and two memberships (collector observer and node registry-pull), for exactly
+12 creates on a new target. Node groups depend on those memberships and use the
+new regional pull account. No key is registered for node-pull; actuator and
+Gateway receive no cloud group membership. Existing groups must independently
+be verified as viewer-only at the intended tenant/registry scopes. No group or
+access permit is created, and no editor authority is added. Only public key text
+enters Terraform; private keys remain in protected operator files. Output maps
+provide runtime account IDs and authorized-public-key IDs, never credentials. The managed public API requires
+TLS, native IAM authentication and the separate least-privilege Kubernetes RBAC.
+Optional `public_control_plane_cidrs` defaults to an empty source-IP restriction;
+explicit operator CIDRs are preserved. This avoids requiring separate NAT or
+fixed egress infrastructure. Public API activation remains explicit in the
+reviewed cloud plan. No workload public interface, registry, state service or
+VPN is added. The source input remains in this platform state; a cloud plan and
+its prerequisite regional permissions/cost require separate owner review.
+The complete separate-cluster render/operator path is in
+`docs/runbooks/nebius-platform.md` from the repository root.
+
+Regional targets require an explicit `node_platform` from that region's native
+catalog. The EU-west example uses `cpu-d3` with4vcpu-16gb system and16vcpu-64gb
+execution presets; the original EU-north integration remains `cpu-e2`. Terraform
+validates CPU-only intent but cannot prove native inventory or Kubernetes
+version compatibility. Confirm those through the read-only native catalog
+before reviewing an activation plan, and use the matching regional price SKU.

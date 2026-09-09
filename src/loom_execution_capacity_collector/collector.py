@@ -102,17 +102,19 @@ async def collect_capacity_observation(
 
     owns_control_plane = control_plane is None
     owns_provider = provider is None
+    owns_kubernetes = kubernetes is None
     control_plane = control_plane or CapacityControlPlaneClient(
         origin=settings.control_plane_url,
         bearer_token_file=settings.control_plane_bearer_token_file,
         timeout_seconds=settings.request_timeout_seconds,
         attempts=settings.request_attempts,
     )
-    provider = provider or NebiusCapacityReader(settings)
-    kubernetes = kubernetes or InClusterKubernetesCapacityReader(
-        request_timeout_seconds=settings.request_timeout_seconds
-    )
     try:
+        provider = provider or NebiusCapacityReader(settings)
+        kubernetes = kubernetes or InClusterKubernetesCapacityReader(
+            request_timeout_seconds=settings.request_timeout_seconds,
+            connection=settings.kubernetes_connection,
+        )
         policy = await control_plane.fetch_policy(
             target_id=settings.target_id,
             pool_id=settings.pool_id,
@@ -252,7 +254,9 @@ async def collect_capacity_observation(
         )
         return await control_plane.publish(observation)
     finally:
-        if owns_provider:
+        if owns_kubernetes and kubernetes is not None:
+            await kubernetes.close()
+        if owns_provider and provider is not None:
             await provider.close()
         if owns_control_plane:
             await control_plane.close()

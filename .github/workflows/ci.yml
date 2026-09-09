@@ -555,6 +555,9 @@ jobs:
           terraform -chdir=deploy/terraform/nebius/modules/platform test
           terraform -chdir=deploy/terraform/nebius/platform init -backend=false -input=false
           terraform -chdir=deploy/terraform/nebius/platform validate
+          terraform -chdir=deploy/terraform/nebius/modules/regional-execution init -backend=false -input=false
+          terraform -chdir=deploy/terraform/nebius/modules/regional-execution test
+          terraform -chdir=deploy/terraform/nebius/platform test
 
   # Fail closed on all parallel functional checks; no report tooling needed.
   fast-checks:

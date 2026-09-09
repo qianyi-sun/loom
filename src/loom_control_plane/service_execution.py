@@ -13,6 +13,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    ExecutionAdmissionReservation,
+    ExecutionCostReservation,
+    ExecutionProvisioningAuthorization,
     ServiceExecutionClass,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
@@ -381,75 +384,135 @@ def _bind_kubernetes_execution_route(
     requirements_digest: str,
     routing_reason: ExecutionRoutingReason,
     current_time: datetime,
+    allow_target_reselection: bool = False,
 ) -> tuple[ExecutionRoutingDecisionV1, str]:
     """Bind or validate the trial's sole physical execution route."""
 
     if trial.execution_route_json is None:
         if trial.execution_route_pool_name is not None or trial.execution_route_sha256 is not None:
             raise ServiceExecutionConflict("trial execution route is incomplete")
-        decision = ExecutionRoutingDecisionV1(
-            generation=trial.execution_route_generation + 1,
-            requirements_sha256=requirements_digest,
-            selected_pool_id=target.logical_pool_id,
-            selected_adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
-            selected_target_id=target.id,
-            selected_execution_class_id=execution_class_id,
-            reason=routing_reason,
-            decided_at=current_time,
-            candidates=(
-                ExecutionRouteCandidateV1(
-                    logical_pool_id=target.logical_pool_id,
-                    adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
-                    target_id=target.id,
-                    execution_class_id=execution_class_id,
-                    environment=target.environment,
-                    region=target.region,
-                    data_residency=target.data_residency,
-                    enabled=target.desired_state == "active",
-                    healthy=(
-                        target.observed_state == "ready" and target.health_status == "healthy"
-                    ),
-                    draining=False,
-                    configured_slots=0,
-                    active_slots=0,
-                    occupied_slots=0,
-                    pending_slots=0,
-                    assigned_queued_slots=0,
-                    available_slots=0,
-                    capacity_evidence_kind=CapacityEvidenceKind.PREEXISTING_ASSIGNMENT,
-                    capacity_observed_at=target.health_observed_at,
-                ),
-            ),
-        )
-        decision_json = decision.model_dump(mode="json")
-        decision_digest = canonical_digest(decision_json)
-        trial.execution_route_generation = decision.generation
-        trial.execution_route_pool_name = decision.selected_pool_id
-        trial.execution_route_json = decision_json
-        trial.execution_route_sha256 = decision_digest
-        return decision, decision_digest
+    else:
+        try:
+            decision = ExecutionRoutingDecisionV1.model_validate(trial.execution_route_json)
+        except ValueError as exc:
+            raise ServiceExecutionConflict("trial execution route is invalid") from exc
+        decision_digest = canonical_digest(decision.model_dump(mode="json"))
+        if (
+            decision_digest != trial.execution_route_sha256
+            or decision.generation != trial.execution_route_generation
+            or decision.selected_pool_id != trial.execution_route_pool_name
+        ):
+            raise ServiceExecutionConflict("trial execution route identity drift")
+        if decision.requirements_sha256 != requirements_digest:
+            raise ServiceExecutionConflict("trial execution route requirements drift")
+        if (
+            decision.selected_adapter_kind != ExecutionAdapterKind.KUBERNETES_JOB
+            or decision.selected_pool_id != target.logical_pool_id
+            or decision.selected_execution_class_id != execution_class_id
+        ):
+            raise ServiceExecutionConflict("trial is routed to a different execution authority")
+        if decision.selected_target_id == target.id:
+            return decision, decision_digest
+        if not allow_target_reselection:
+            raise ServiceExecutionConflict("trial is routed to a different execution authority")
 
-    try:
-        decision = ExecutionRoutingDecisionV1.model_validate(trial.execution_route_json)
-    except ValueError as exc:
-        raise ServiceExecutionConflict("trial execution route is invalid") from exc
-    decision_digest = canonical_digest(decision.model_dump(mode="json"))
-    if (
-        decision_digest != trial.execution_route_sha256
-        or decision.generation != trial.execution_route_generation
-        or decision.selected_pool_id != trial.execution_route_pool_name
-    ):
-        raise ServiceExecutionConflict("trial execution route identity drift")
-    if decision.requirements_sha256 != requirements_digest:
-        raise ServiceExecutionConflict("trial execution route requirements drift")
-    if (
-        decision.selected_adapter_kind != ExecutionAdapterKind.KUBERNETES_JOB
-        or decision.selected_pool_id != target.logical_pool_id
-        or decision.selected_target_id != target.id
-        or decision.selected_execution_class_id != execution_class_id
-    ):
-        raise ServiceExecutionConflict("trial is routed to a different execution authority")
+    decision = ExecutionRoutingDecisionV1(
+        generation=trial.execution_route_generation + 1,
+        requirements_sha256=requirements_digest,
+        selected_pool_id=target.logical_pool_id,
+        selected_adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
+        selected_target_id=target.id,
+        selected_execution_class_id=execution_class_id,
+        reason=routing_reason,
+        decided_at=current_time,
+        candidates=(
+            ExecutionRouteCandidateV1(
+                logical_pool_id=target.logical_pool_id,
+                adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
+                target_id=target.id,
+                execution_class_id=execution_class_id,
+                environment=target.environment,
+                region=target.region,
+                data_residency=target.data_residency,
+                enabled=target.desired_state == "active",
+                healthy=(target.observed_state == "ready" and target.health_status == "healthy"),
+                draining=False,
+                configured_slots=0,
+                active_slots=0,
+                occupied_slots=0,
+                pending_slots=0,
+                assigned_queued_slots=0,
+                available_slots=0,
+                capacity_evidence_kind=CapacityEvidenceKind.PREEXISTING_ASSIGNMENT,
+                capacity_observed_at=target.health_observed_at,
+            ),
+        ),
+    )
+    decision_json = decision.model_dump(mode="json")
+    decision_digest = canonical_digest(decision_json)
+    trial.execution_route_generation = decision.generation
+    trial.execution_route_pool_name = decision.selected_pool_id
+    trial.execution_route_json = decision_json
+    trial.execution_route_sha256 = decision_digest
     return decision, decision_digest
+
+
+async def _can_reselect_unstarted_execution(
+    session: AsyncSession,
+    *,
+    trial: Trial,
+    previous: ServiceExecutionLease | None,
+    target: ServiceExecutionTarget,
+) -> bool:
+    """A cleaned infrastructure retry may acquire a new physical route."""
+    if (
+        previous is None
+        or previous.execution_role != "attempt"
+        or previous.attempt != trial.attempt_count
+        or previous.revoked_at is None
+        or previous.generation <= previous.resource_generation
+        or previous.desired_state != "deleted"
+        or previous.deleted_at is None
+        or previous.cleanup_state != "complete"
+        or previous.error_code != "unschedulable"
+        or previous.pod_started_at is not None
+        or previous.pod_scheduled_at is not None
+        or previous.node_name is not None
+        or previous.output_commit_state == "committed"
+        or previous.finalized_at is not None
+        or trial.started_at is not None
+        or previous.routing_generation != trial.execution_route_generation
+        or previous.routing_decision_sha256 != trial.execution_route_sha256
+        or previous.selected_pool_id != trial.execution_route_pool_name
+    ):
+        return False
+    old_target = await session.get(ServiceExecutionTarget, previous.target_id)
+    if (
+        old_target is None
+        or old_target.environment != target.environment
+        or old_target.data_residency != target.data_residency
+    ):
+        return False
+    # Cleanup changes desired_state from retry to deleted. The existing command
+    # retains the retry intent; a cancellation must never become a reroute.
+    retry = await session.scalar(
+        select(ServiceExecutionCommand.id).where(
+            ServiceExecutionCommand.lease_id == previous.id,
+            ServiceExecutionCommand.generation == previous.generation,
+            ServiceExecutionCommand.command_type == "retry",
+        )
+    )
+    if retry is None:
+        return False
+    for model, owner in (
+        (ExecutionProvisioningAuthorization, ExecutionProvisioningAuthorization.lease_id),
+        (ExecutionCostReservation, ExecutionCostReservation.lease_id),
+        (ExecutionAdmissionReservation, ExecutionAdmissionReservation.owner_id),
+    ):
+        state = await session.scalar(select(model.state).where(owner == previous.id))
+        if state != "released":
+            return False
+    return True
 
 
 async def reserve_trial_execution(
@@ -514,6 +577,7 @@ async def reserve_trial_execution(
     if trial is None:
         raise ServiceExecutionConflict("trial not found")
     parent_lease: ServiceExecutionLease | None = None
+    previous_lease: ServiceExecutionLease | None = None
     if execution_role == "attempt":
         if parent_lease_id is not None:
             raise ServiceExecutionConflict("attempt execution cannot have a parent lease")
@@ -597,6 +661,15 @@ async def reserve_trial_execution(
     except ValueError as exc:
         raise ServiceExecutionConflict(str(exc)) from exc
 
+    allow_target_reselection = False
+    if (
+        execution_role == "attempt"
+        and previous_lease is not None
+        and previous_lease.target_id != target.id
+    ):
+        allow_target_reselection = await _can_reselect_unstarted_execution(
+            session, trial=trial, previous=previous_lease, target=target
+        )
     routing_decision, routing_decision_digest = _bind_kubernetes_execution_route(
         trial=trial,
         target=target,
@@ -604,6 +677,7 @@ async def reserve_trial_execution(
         requirements_digest=requirements_digest,
         routing_reason=routing_reason,
         current_time=current_time,
+        allow_target_reselection=allow_target_reselection,
     )
     if parent_lease is not None and (
         parent_lease.routing_generation != routing_decision.generation

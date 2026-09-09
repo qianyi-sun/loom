@@ -115,9 +115,10 @@ async def _run() -> None:
     engine = create_async_engine(settings.db_url, pool_pre_ping=True)
     await assert_schema_at_head(engine, db_url_env_var="LOOM_EXECUTION_ACTUATOR_DB_URL")
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = InClusterKubernetesJobApi(connection=settings.kubernetes_connection)
     actuator = ExecutionActuator(
         sessions=sessions,
-        kubernetes=InClusterKubernetesJobApi(),
+        kubernetes=kubernetes,
         target=ExecutionTargetRuntime(
             target_id=settings.target_id,
             namespace=settings.namespace,
@@ -126,6 +127,7 @@ async def _run() -> None:
             tolerations=settings.tolerations,
             service_account_name=settings.service_account_name,
             credential_broker_url=settings.credential_broker_url,
+            pod_identity_audience=settings.pod_identity_audience,
         ),
         controller_id=settings.controller_id,
         command_limit=settings.command_limit,
@@ -159,6 +161,7 @@ async def _run() -> None:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        await kubernetes.close()
         await engine.dispose()
 
 

@@ -1,0 +1,23 @@
+{
+  "regional_execution_targets": {
+    "eu-west1": {
+      "target_id": "nebius-eu-west1-integration",
+      "cluster_scope_id": "nebius-eu-west1-execution",
+      "project_id": "project-REPLACE-EU-WEST1",
+      "subnet_id": "vpcsubnet-REPLACE-EU-WEST1",
+      "region": "eu-west1",
+      "kubernetes_version": "1.33",
+      "service_cidr": "172.27.0.0/16",
+      "public_control_plane_cidrs": [],
+      "execution_max_nodes": 100,
+      "node_platform": "cpu-d3",
+      "managed_identities": {
+        "actuator_public_key": "REPLACE_WITH_ACTUATOR_SPKI_PUBLIC_KEY_PEM",
+        "collector_public_key": "REPLACE_WITH_COLLECTOR_SPKI_PUBLIC_KEY_PEM",
+        "gateway_public_key": "REPLACE_WITH_GATEWAY_SPKI_PUBLIC_KEY_PEM",
+        "collector_viewer_group_id": "group-REPLACE-OBSERVER-VIEWER",
+        "registry_pull_group_id": "group-REPLACE-REGISTRY-VIEWER"
+      }
+    }
+  }
+}

@@ -1,5 +1,9 @@
-from pydantic import Field
+from pathlib import Path
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from loom.nebius_kubernetes import NebiusKubernetesConnection, connection_from_fields
 
 
 class ExecutionActuatorSettings(BaseSettings):
@@ -8,10 +12,28 @@ class ExecutionActuatorSettings(BaseSettings):
         extra="ignore",
     )
 
+    kubernetes_endpoint: str | None = None
+    kubernetes_ca_file: Path | None = None
+    kubernetes_nebius_credentials_file: Path | None = None
+
+    @model_validator(mode="after")
+    def _remote_kubernetes_complete(self) -> "ExecutionActuatorSettings":
+        _ = self.kubernetes_connection
+        return self
+
+    @property
+    def kubernetes_connection(self) -> NebiusKubernetesConnection | None:
+        return connection_from_fields(
+            self.kubernetes_endpoint,
+            self.kubernetes_ca_file,
+            self.kubernetes_nebius_credentials_file,
+        )
+
     db_url: str
     controller_id: str = Field(min_length=1, max_length=120)
     target_id: str = Field(min_length=1, max_length=80)
     namespace: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+    pod_identity_audience: str | None = Field(default=None, min_length=1, max_length=255)
     runtime_class_name: str | None = Field(default=None, min_length=1, max_length=63)
     node_selector: dict[str, str] = Field(default_factory=dict)
     tolerations: tuple[dict[str, str], ...] = ()

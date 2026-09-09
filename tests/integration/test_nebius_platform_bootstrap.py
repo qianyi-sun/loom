@@ -24,7 +24,7 @@ from sqlalchemy.engine import make_url
 from testcontainers.postgres import PostgresContainer
 
 from loom import nebius_platform_bootstrap as bootstrap
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
 
 
 @pytest.fixture(scope="module")
@@ -296,6 +296,34 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             row["enabled"] and row["max_concurrent"] == 7
             for row in api("GET", "execution-admission/status")["policies"]
         )
+        regional_environment, regional_candidate, regional_profile = request.getfixturevalue(
+            "regional_inputs"
+        )
+        regional_files = build_platform(
+            regional_environment,
+            regional_candidate,
+            regional_profile,
+            {},
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+        (tmp_path / "catalog.json").write_text(
+            regional_files["10-config-network.yaml"][0]["data"]["catalog.json"]
+        )
+        bootstrap.configure_platform(
+            regional_environment, config_dir=tmp_path, admin_secret=admin_path
+        )
+        bootstrap.configure_platform(
+            regional_environment, config_dir=tmp_path, admin_secret=admin_path
+        )
+        secondary_id = regional_environment["regional_execution_targets"][0]["target_id"]
+        regional_status = api("GET", "execution-capacity/status")["targets"]
+        assert {row["target_id"] for row in regional_status} == {
+            environment["target_id"],
+            secondary_id,
+        }
+        secondary = next(row for row in regional_status if row["target_id"] == secondary_id)
+        assert secondary["policy"]["max_nodes"] == 100
+        assert secondary["desired_state"] == "active" and secondary["health_status"] == "unknown"
         client.portal.call(engine.dispose)
     with psycopg.connect(platform_database) as connection:
         assert connection.execute(
@@ -303,7 +331,7 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             (environment["target_id"],),
         ).fetchone() == ("active", "unknown")
         assert connection.execute("SELECT count(*) FROM execution_price_snapshots").fetchone() == (
-            1,
+            2,
         )
         assert connection.execute(
             "SELECT enabled FROM execution_target_price_bindings WHERE target_id=%s",

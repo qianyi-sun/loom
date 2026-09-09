@@ -1691,6 +1691,9 @@ dev = [
 modal = [
     { name = "modal" },
 ]
+nebius-gateway = [
+    { name = "nebius" },
+]
 rollout = [
     { name = "loom-benchmark-terminal-bench-2" },
     { name = "loom-benchmarks" },
@@ -1731,6 +1734,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<2.0" },
     { name = "nebius", marker = "extra == 'cluster'", specifier = ">=0.6,<0.7" },
     { name = "nebius", marker = "extra == 'dev'", specifier = ">=0.6,<0.7" },
+    { name = "nebius", marker = "extra == 'nebius-gateway'", specifier = "==0.6.1" },
     { name = "numpy", specifier = ">=2.0,<3.0" },
     { name = "openai", specifier = ">=1.55,<3.0" },
     { name = "pillow", specifier = ">=12.0,<13.0" },
@@ -1759,7 +1763,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.6,<1.0" },
     { name = "zstandard", specifier = ">=0.23,<1.0" },
 ]
-provides-extras = ["modal", "cluster", "rollout", "vllm", "dev"]
+provides-extras = ["nebius-gateway", "modal", "cluster", "rollout", "vllm", "dev"]
 
 [package.metadata.requires-dev]
 ci-coverage = [{ name = "coverage", specifier = ">=7,<8" }]

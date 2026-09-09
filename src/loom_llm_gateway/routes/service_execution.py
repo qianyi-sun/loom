@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.responses import Response, StreamingResponse
 
-from loom.db.schema import ServiceExecutionLease
+from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget
 from loom.pipeline.artifact_commit import ArtifactCommitError
 from loom_control_plane.service_execution_output import (
     ServiceExecutionBrokerError,
@@ -18,6 +18,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputPrepareV1,
     ServiceExecutionPeerV1,
     ServiceExecutionTokenRequestV1,
+    VerifiedExecutionPod,
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
     resolve_service_execution_input,
@@ -33,10 +34,8 @@ ContentSha256Header = Annotated[
 ]
 
 
-def _peer_ip(request: Request) -> str:
-    if request.client is None or not request.client.host:
-        raise HTTPException(status_code=403, detail="workload_peer_unavailable")
-    return request.client.host
+def _peer_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
 
 
 def _peer(lease_id: UUID, generation: int, role: str) -> ServiceExecutionPeerV1:
@@ -57,10 +56,11 @@ def _broker_http(exc: ServiceExecutionBrokerError) -> HTTPException:
         in {
             "workload_identity_not_observed",
             "execution_target_unavailable",
+            "execution_pod_review_unavailable",
         }
         else 409
     )
-    if exc.reason == "peer_ip_invalid":
+    if exc.reason in {"peer_ip_invalid", "execution_pod_identity_invalid"}:
         status = 403
     return HTTPException(status_code=status, detail=exc.reason)
 
@@ -73,24 +73,56 @@ def _artifact_http(exc: ArtifactCommitError) -> HTTPException:
     return HTTPException(status_code=409, detail=exc.reason)
 
 
+async def _verified_pod(
+    request: Request, identity: ServiceExecutionPeerV1
+) -> VerifiedExecutionPod | None:
+    # Release the DB connection before waiting on a regional API or IAM refresh.
+    # Final authorization uses a separate transaction and current lease fences.
+    async with request.app.state.session_factory() as session:
+        lease = await session.get(ServiceExecutionLease, identity.lease_id)
+        target = await session.get(ServiceExecutionTarget, lease.target_id) if lease else None
+        if target is None or not target.spec_json.get("pod_identity_audience"):
+            return None
+        spec = dict(target.spec_json)
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token:
+        raise ServiceExecutionBrokerError("execution_pod_identity_invalid")
+    reviewer = getattr(request.app.state, "execution_pod_reviewer", None)
+    if reviewer is None:
+        raise ServiceExecutionBrokerError("execution_pod_review_unavailable")
+    return cast(
+        VerifiedExecutionPod,
+        await reviewer.review(
+            cluster_scope_id=spec["cluster_scope_id"],
+            namespace=spec["namespace_name"],
+            service_account=spec.get("service_account_name", "loom-execution-attempt"),
+            audience=spec["pod_identity_audience"],
+            token=token,
+        ),
+    )
+
+
 async def _authorize(
     request: Request,
     identity: ServiceExecutionPeerV1,
     *,
     purpose: Literal["token", "input", "output"] = "output",
 ) -> ServiceExecutionLease:
-    async with request.app.state.session_factory() as session:
-        try:
+    try:
+        verified_pod = await _verified_pod(request, identity)
+        async with request.app.state.session_factory() as session:
             lease = await authorize_service_execution_peer(
                 session,
                 peer_ip=_peer_ip(request),
+                verified_pod=verified_pod,
                 identity=identity,
                 purpose=purpose,
             )
             session.expunge(lease)
             return lease
-        except ServiceExecutionBrokerError as exc:
-            raise _broker_http(exc) from exc
+    except ServiceExecutionBrokerError as exc:
+        raise _broker_http(exc) from exc
 
 
 @router.post("/token")
@@ -98,11 +130,13 @@ async def issue_service_execution_token(
     payload: ServiceExecutionTokenRequestV1,
     request: Request,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as session:
-        try:
+    try:
+        verified_pod = await _verified_pod(request, payload)
+        async with request.app.state.session_factory() as session:
             lease = await authorize_service_execution_peer(
                 session,
                 peer_ip=_peer_ip(request),
+                verified_pod=verified_pod,
                 identity=payload,
                 lock=True,
             )
@@ -113,9 +147,8 @@ async def issue_service_execution_token(
                 signing_key=request.app.state.settings.step_jwt_signing_key.get_secret_value(),
             )
             await session.commit()
-        except ServiceExecutionBrokerError as exc:
-            await session.rollback()
-            raise _broker_http(exc) from exc
+    except ServiceExecutionBrokerError as exc:
+        raise _broker_http(exc) from exc
     return {
         "schema_version": "loom.service-execution-token.v1",
         "token": token,
@@ -147,8 +180,7 @@ async def get_service_execution_input_manifest(
         content=resolved.manifest_body,
         media_type="application/json",
         headers={
-            "X-Loom-Content-SHA256": "sha256:"
-            + hashlib.sha256(resolved.manifest_body).hexdigest()
+            "X-Loom-Content-SHA256": "sha256:" + hashlib.sha256(resolved.manifest_body).hexdigest()
         },
     )
 

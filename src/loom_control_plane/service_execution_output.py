@@ -253,30 +253,65 @@ def _validate_runtime_result(
     return result
 
 
+@dataclass(frozen=True)
+class VerifiedExecutionPod:
+    """Gateway-local result of the bound cluster's native TokenReview."""
+
+    cluster_scope_id: str
+    namespace: str
+    service_account: str
+    pod_uid: str
+    audience: str
+
+
 async def authorize_service_execution_peer(
     session: AsyncSession,
     *,
-    peer_ip: str,
+    peer_ip: str | None = None,
+    verified_pod: VerifiedExecutionPod | None = None,
     identity: ServiceExecutionPeerV1,
     now: datetime | None = None,
     lock: bool = False,
     purpose: Literal["token", "input", "output"] = "token",
 ) -> ServiceExecutionLease:
-    """Bind a direct Gateway peer IP to exactly one current observed Pod."""
+    """Bind native Pod identity or the legacy direct peer to the current lease."""
 
-    try:
-        normalized_ip = str(ipaddress.ip_address(peer_ip))
-    except ValueError as exc:
-        raise ServiceExecutionBrokerError("peer_ip_invalid") from exc
-    statement = select(ServiceExecutionLease).where(
-        ServiceExecutionLease.id == identity.lease_id,
-        ServiceExecutionLease.pod_ip == normalized_ip,
+    # Authorize against the current lease even when an internal caller loaded
+    # it earlier in the transaction. Never reuse stale identity-map fences.
+    statement = (
+        select(ServiceExecutionLease)
+        .where(ServiceExecutionLease.id == identity.lease_id)
+        .execution_options(populate_existing=True)
     )
     if lock:
         statement = statement.with_for_update()
     lease = (await session.execute(statement)).scalar_one_or_none()
     if lease is None:
         raise ServiceExecutionBrokerError("workload_identity_not_observed")
+    target = await session.get(ServiceExecutionTarget, lease.target_id, populate_existing=True)
+    audience = target.spec_json.get("pod_identity_audience") if target is not None else None
+    if audience is not None:
+        if lease.pod_uid is None:
+            raise ServiceExecutionBrokerError("workload_identity_not_observed")
+        if (
+            verified_pod is None
+            or target is None
+            or verified_pod.cluster_scope_id != target.spec_json.get("cluster_scope_id")
+            or verified_pod.namespace != lease.namespace_name
+            or verified_pod.namespace != target.spec_json.get("namespace_name")
+            or verified_pod.service_account
+            != target.spec_json.get("service_account_name", "loom-execution-attempt")
+            or verified_pod.audience != audience
+            or verified_pod.pod_uid != lease.pod_uid
+        ):
+            raise ServiceExecutionBrokerError("execution_pod_identity_invalid")
+    else:
+        try:
+            normalized_ip = str(ipaddress.ip_address(peer_ip or ""))
+        except ValueError as exc:
+            raise ServiceExecutionBrokerError("peer_ip_invalid") from exc
+        if str(lease.pod_ip) != normalized_ip:
+            raise ServiceExecutionBrokerError("workload_identity_not_observed")
     current_time = now or datetime.now(UTC)
     resource_identity_matches = (
         lease.resource_generation == identity.generation
@@ -288,6 +323,7 @@ async def authorize_service_execution_peer(
         raise ServiceExecutionBrokerError("execution_generation_fenced")
     if purpose in {"token", "input"} and (
         lease.generation != identity.generation
+        or lease.deadline_at <= current_time
         or lease.revoked_at is not None
         or lease.observed_state not in {"creating", "running", "finalizing"}
     ):
@@ -302,7 +338,6 @@ async def authorize_service_execution_peer(
         )
     ):
         raise ServiceExecutionBrokerError("execution_output_window_closed")
-    target = await session.get(ServiceExecutionTarget, lease.target_id)
     if purpose in {"token", "input"} and (
         target is None
         or target.desired_state != "active"

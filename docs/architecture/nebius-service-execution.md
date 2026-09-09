@@ -397,11 +397,23 @@ topology for the `nebius-cpu` adapter:
 
 Development, staging, and production cannot share a logical target identity,
 namespace, health observation, service identity, policy, or evidence prefix.
-They deliberately share one physical cluster/failure domain. Every binding is
+The default catalog shares one physical cluster/failure domain. Every binding is
 probed independently; a binding becomes ineligible when its observation is
 older than its declared stale threshold. Placement remains environment-local
 and health-first. Queued work does not cross environments or leave EU residency
-to recover capacity, and there is no implicit secondary-region fallback.
+to recover capacity. Regional expansion requires explicit secondary targets; the
+scheduler does not discover or provision arbitrary regions.
+
+The pure-Nebius integration renderer supports additional execution-only EU
+clusters while keeping the platform, database and canonical storage in the
+primary region. A topology has one primary per environment, unique target/health
+identities and isolated namespaces within each physical cluster. The scheduler
+tries fresh compatible targets in primary-first order, using native quota and
+per-node fit inside a savepoint for each admission. A rejected region leaves no
+attempt increment, budget reservation or route behind. Exhaustion leaves queued
+work under the existing bounded retry backoff. See the regional section of
+[the platform runbook](../runbooks/nebius-platform.md) for source configuration
+and separately authorized activation.
 
 These target records are desired logical bindings, not evidence that any
 Nebius project, cluster, node group, runtime class, or capacity exists.
@@ -412,7 +424,7 @@ Migrations `0113` through `0120` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment-local `execution_targets`
-  bound to one shared physical cluster scope;
+  bound to explicit physical cluster scopes;
 - one canonical routing decision and monotonically increasing routing
   generation on each Trial, with the selected pool/reason/digest frozen into
   every Kubernetes lease and its history;
@@ -458,6 +470,18 @@ between this plan, the workload requirements, and the persisted execution
 class. The create outbox and history projection retain the same immutable
 identity; an actuator refuses legacy or malformed leases that have no valid
 runtime plan.
+
+Regional broker authentication uses an explicit native cluster connection and a
+rotating Pod-bound service-account token projected only into the execution
+container. The runtime rereads this token for broker/input/output requests;
+model requests retain the existing step JWT. Gateway uses the lease's target to
+select TokenReview, checks audience, namespace, service account and Pod UID,
+then authorizes the current lease in a fresh database transaction. It holds no
+DB connection while waiting on regional IAM/API calls, and never trusts
+X-Forwarded-For as workload identity. Primary-cluster direct Pod-IP mode remains
+compatible; a secondary target cannot fall back to it. No additional Loom token
+issuer, public database or runtime cloud writer is introduced. Gateway and
+actuator images use the same pinned Nebius SDK as the development lock.
 
 `0115` adds the observed Pod IP and one generation-bound service-execution
 Artifact commit ledger. Gateway maps the direct peer to the immutable Pod UID,

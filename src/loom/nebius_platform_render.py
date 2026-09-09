@@ -11,6 +11,7 @@ import json
 import re
 from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -71,7 +72,16 @@ def validate_environment(config: dict[str, Any]) -> None:
         "capacity_policy",
         "execution_price",
     }
-    if set(config) - {"public_tls_bootstrap", "execution_resource_quota"} != expected:
+    if (
+        set(config)
+        - {
+            "public_tls_bootstrap",
+            "execution_resource_quota",
+            "regional_execution_targets",
+            "public_gateway_ipv4",
+        }
+        != expected
+    ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
@@ -259,6 +269,92 @@ def validate_environment(config: dict[str, Any]) -> None:
         or provider.fragment
     ):
         raise NebiusPlatformError("model provider must be an HTTPS URL without credentials")
+
+    _validate_regions(config)
+
+
+_REGIONAL_FIELDS = {
+    "target_id",
+    "cluster_scope_id",
+    "region",
+    "execution_namespace",
+    "project_id",
+    "quota_parent_id",
+    "cluster_id",
+    "execution_node_group_id",
+    "kubernetes_api_server",
+    "capacity_policy",
+    "execution_price",
+    "service_account_ids",
+}
+
+
+def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    result = dict(config)
+    result.pop("regional_execution_targets", None)
+    result.pop("execution_resource_quota", None)
+    result.update({key: value for key, value in target.items() if key != "service_account_ids"})
+    result["storage_endpoint"] = f"https://storage.{target['region']}.nebius.cloud"
+    return result
+
+
+def _validate_regions(config: dict[str, Any]) -> None:
+    regions = config.get("regional_execution_targets", [])
+    if not isinstance(regions, list):
+        raise NebiusPlatformError("regional_execution_targets must be a list")
+    if regions:
+        try:
+            address = IPv4Address(config.get("public_gateway_ipv4", ""))
+        except ValueError as exc:
+            raise NebiusPlatformError(
+                "regional execution requires public_gateway_ipv4 from the fixed allocation"
+            ) from exc
+        if not address.is_global:
+            raise NebiusPlatformError("public_gateway_ipv4 must be a global IPv4 address")
+    ids, scopes, namespaces = (
+        {config["target_id"]},
+        {config["cluster_scope_id"]},
+        {config["execution_namespace"]},
+    )
+    for target in regions:
+        if (
+            not isinstance(target, dict)
+            or set(target) - {"execution_resource_quota"} != _REGIONAL_FIELDS
+        ):
+            raise NebiusPlatformError("regional execution target has missing or unknown fields")
+        validate_environment(_regional_config(config, target))
+        if not target["region"].startswith("eu-") or target["region"] == config["region"]:
+            raise NebiusPlatformError("regional execution targets require a distinct EU region")
+        if len(target["target_id"]) > 40:
+            raise NebiusPlatformError(
+                "regional target_id must leave room for Kubernetes role suffixes"
+            )
+        for value, seen in (
+            (target["target_id"], ids),
+            (target["cluster_scope_id"], scopes),
+            (target["execution_namespace"], namespaces),
+        ):
+            if value in seen:
+                raise NebiusPlatformError(
+                    "regional target, cluster and namespace identities must be unique"
+                )
+            seen.add(value)
+        identities = target["service_account_ids"]
+        if not isinstance(identities, dict) or set(identities) != {
+            "actuator",
+            "collector",
+            "gateway",
+        }:
+            raise NebiusPlatformError(
+                "regional target needs distinct actuator, collector and gateway service_account_ids"
+            )
+        if len(set(identities.values())) != 3 or any(
+            not isinstance(value, str) or not re.fullmatch(r"serviceaccount-[a-zA-Z0-9_-]+", value)
+            for value in identities.values()
+        ):
+            raise NebiusPlatformError(
+                "regional Kubernetes identities must be distinct native service account IDs"
+            )
 
 
 def _obj(
@@ -589,6 +685,53 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
             },
         },
     }
+    if config.get("regional_execution_targets"):
+        routes = result["apps"]["http"]["servers"]["public"]["routes"][0]["handle"][-1]["routes"]
+        gateway = dict(api_proxy, upstreams=[{"dial": f"loom-llm-gateway.{ns}.svc:9100"}])
+        routes[0:0] = [
+            {
+                "match": [{"path": ["/internal/service-execution/*"]}],
+                "handle": [gateway],
+                "terminal": True,
+            },
+            {
+                "match": [
+                    {
+                        "method": ["POST"],
+                        "path": [
+                            "/openai/v1/chat/completions",
+                            "/openai/v1/responses",
+                            "/anthropic/v1/messages",
+                            "/google/v1beta/models/*",
+                            "/v1/chat/completions",
+                            "/v1/responses",
+                            "/v1/messages",
+                            "/v1beta/models/*",
+                        ],
+                    }
+                ],
+                "handle": [gateway],
+                "terminal": True,
+            },
+            {
+                "match": [
+                    {
+                        "path": [
+                            "/admin",
+                            "/admin/*",
+                            "/internal/*",
+                            "/openai/*",
+                            "/anthropic/*",
+                            "/google/*",
+                            "/v1/*",
+                            "/v1beta/*",
+                        ]
+                    }
+                ],
+                "handle": [{"handler": "static_response", "status_code": 404}],
+                "terminal": True,
+            },
+        ]
     if not config.get("public_tls_bootstrap", False):
         result["apps"]["tls"].pop("certificates")
     return result
@@ -662,6 +805,240 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
     return hard
 
 
+def _execution_documents(
+    config: dict[str, Any], images: dict[str, str], repo_root: Path
+) -> list[dict[str, Any]]:
+    ns, ex = config["namespace"], config["execution_namespace"]
+    # Reuse the existing least-privilege execution pod and collector definitions.
+    execution_docs = []
+    replacements = {
+        "loom-nebius-development": ex,
+        "nebius-eu-north1-development": config["target_id"],
+        ".loom.svc.cluster.local": f".{ns}.svc.cluster.local",
+    }
+    for filename in ("nebius-execution-actuator.yaml", "nebius-capacity-collector.yaml"):
+        docs = list(yaml.safe_load_all((repo_root / "deploy/k8s" / filename).read_text()))
+        for doc in docs:
+            if not doc or doc["kind"] in {"Namespace", "PodDisruptionBudget"}:
+                continue
+            doc = _replace_tree(doc, replacements)
+            if doc["kind"] == "ClusterRole":
+                doc["rules"].append(
+                    {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]}
+                )
+            if doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
+                doc["metadata"]["name"] = ex + "-collector"
+                if doc["kind"] == "ClusterRoleBinding":
+                    doc["roleRef"]["name"] = ex + "-collector"
+            if doc["kind"] == "NetworkPolicy":
+                for rule in doc["spec"].get("egress", []):
+                    for peer in rule.get("to", []):
+                        labels = peer.get("namespaceSelector", {}).get("matchLabels", {})
+                        if labels.get("kubernetes.io/metadata.name") == "loom":
+                            labels["kubernetes.io/metadata.name"] = ns
+            if doc["kind"] == "ConfigMap":
+                for suffix, key in (
+                    ("NEBIUS_PROJECT_ID", "project_id"),
+                    ("NEBIUS_QUOTA_PARENT_ID", "quota_parent_id"),
+                    ("NEBIUS_NODE_GROUP_ID", "execution_node_group_id"),
+                    ("NEBIUS_REGION", "region"),
+                ):
+                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_" + suffix] = config[key]
+            pod = None
+            if doc["kind"] == "Deployment":
+                pod = doc["spec"]["template"]["spec"]
+                _mount_secret(
+                    pod, "db-ca", "loom-execution-actuator-db", "/var/run/loom-db", ca_only=True
+                )
+            elif doc["kind"] == "CronJob":
+                pod = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+            if pod is not None:
+                pod["nodeSelector"] = {
+                    "loom.nebius/node-role": "system",
+                    "loom.nebius/platform": "integration",
+                }
+                pod["tolerations"] = [
+                    {
+                        "key": "loom.nebius/platform",
+                        "operator": "Equal",
+                        "value": "integration",
+                        "effect": "NoSchedule",
+                    }
+                ]
+                for container in pod.get("initContainers", []) + pod["containers"]:
+                    container["image"] = images["execution_actuator"]
+                    for env_row in container.get("env", []):
+                        if env_row["name"] == "LOOM_EXECUTION_ACTUATOR_NODE_SELECTOR":
+                            env_row["value"] = json.dumps(
+                                {
+                                    "loom.nebius/node-role": "integration-execution",
+                                    "loom.nebius/platform": "integration",
+                                }
+                            )
+                        elif env_row["name"] == "LOOM_EXECUTION_ACTUATOR_TOLERATIONS":
+                            env_row["value"] = json.dumps(
+                                [
+                                    {
+                                        "key": "loom.nebius/execution",
+                                        "operator": "Equal",
+                                        "value": "true",
+                                        "effect": "NoSchedule",
+                                    },
+                                    {
+                                        "key": "loom.nebius/platform",
+                                        "operator": "Equal",
+                                        "value": "integration",
+                                        "effect": "NoSchedule",
+                                    },
+                                ]
+                            )
+                pod.setdefault("securityContext", {}).update(
+                    runAsUser=65532, runAsGroup=65532, fsGroup=65532
+                )
+            if doc["kind"] == "ConfigMap":
+                doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR"] = (
+                    "loom.nebius/node-role=integration-execution,loom.nebius/platform=integration"
+                )
+            execution_docs.append(doc)
+    for doc in execution_docs:
+        if doc["kind"] == "ResourceQuota":
+            doc["spec"]["hard"] = _execution_quota(config, execution_docs)
+    return execution_docs
+
+
+def _regional_documents(
+    config: dict[str, Any], target: dict[str, Any], images: dict[str, str], repo_root: Path
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    regional = _regional_config(config, target)
+    primary: list[dict[str, Any]] = []
+    remote = [_namespace(target["execution_namespace"])]
+    ns, tid = config["execution_namespace"], target["target_id"]
+    identities = target["service_account_ids"]
+    for doc in _execution_documents(regional, images, repo_root):
+        kind, name = doc["kind"], doc["metadata"]["name"]
+        if kind in {"Deployment", "CronJob", "ConfigMap"} or (
+            kind == "ServiceAccount" and name != "loom-execution-attempt"
+        ):
+            role = "actuator" if "actuator" in name else "collector"
+            # Give each primary process its own selector, configuration and SA.
+            doc = _replace_tree(
+                doc,
+                {
+                    "loom-execution-actuator": tid + "-actuator",
+                    "loom-execution-capacity-collector": tid + "-collector",
+                },
+            )
+            doc["metadata"]["namespace"] = ns
+            pod = None
+            if kind == "Deployment":
+                pod = doc["spec"]["template"]["spec"]
+                # The central actuator retains the existing database identity.
+                doc = _replace_tree(doc, {tid + "-actuator-db": "loom-execution-actuator-db"})
+                pod = doc["spec"]["template"]["spec"]
+            elif kind == "CronJob":
+                pod = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+                # Reuse the existing CP observe token, with target-specific cloud viewer credentials.
+                for volume in pod["volumes"]:
+                    for source in volume.get("projected", {}).get("sources", []):
+                        secret = source.get("secret", {})
+                        if secret.get("name") == tid + "-collector-control-plane":
+                            secret["name"] = "loom-execution-capacity-collector-control-plane"
+                        elif secret.get("name") == tid + "-collector-nebius":
+                            secret["name"] = tid + "-collector-kubernetes"
+            if pod is not None:
+                _mount_secret(
+                    pod,
+                    "remote-kubernetes",
+                    tid + "-" + role + "-kubernetes",
+                    "/var/run/loom-remote-kubernetes",
+                )
+                pod["volumes"][-1]["secret"]["items"] = [
+                    {"key": name, "path": name} for name in ("ca.crt", "credentials.json")
+                ]
+                prefix = (
+                    "LOOM_EXECUTION_ACTUATOR_"
+                    if role == "actuator"
+                    else "LOOM_EXECUTION_CAPACITY_COLLECTOR_"
+                )
+                container = pod["containers"][0]
+                container.setdefault("env", []).extend(
+                    _env(
+                        {
+                            prefix + "KUBERNETES_ENDPOINT": target["kubernetes_api_server"],
+                            prefix + "KUBERNETES_CA_FILE": "/var/run/loom-remote-kubernetes/ca.crt",
+                            prefix
+                            + "KUBERNETES_NEBIUS_CREDENTIALS_FILE": "/var/run/loom-remote-kubernetes/credentials.json",
+                        }
+                    )
+                )
+                if role == "actuator":
+                    for row in container["env"]:
+                        if row["name"] == prefix + "CREDENTIAL_BROKER_URL":
+                            row["value"] = (
+                                f"https://{config['public_host']}/internal/service-execution"
+                            )
+                    container["env"].extend(
+                        _env({prefix + "POD_IDENTITY_AUDIENCE": "loom-execution"})
+                    )
+            primary.append(doc)
+        elif kind in {"RoleBinding", "ClusterRoleBinding"}:
+            role = "actuator" if kind == "RoleBinding" else "collector"
+            doc["subjects"] = [
+                {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities[role]}
+            ]
+            remote.append(doc)
+        elif kind == "ResourceQuota":
+            doc["spec"]["hard"] = _execution_quota(regional, [])
+            remote.append(doc)
+        elif kind == "NetworkPolicy":
+            # Remote tasks use the public TLS Gateway, never a primary-cluster Pod IP.
+            if name.endswith("-egress"):
+                doc["spec"]["egress"] = [
+                    doc["spec"]["egress"][0],
+                    {
+                        "to": [{"ipBlock": {"cidr": str(config["public_gateway_ipv4"]) + "/32"}}],
+                        "ports": [{"protocol": "TCP", "port": 443}],
+                    },
+                ]
+            remote.append(doc)
+        else:
+            remote.append(doc)
+    gateway_role = _obj(
+        "ClusterRole", tid + "-gateway-tokenreview", None, api="rbac.authorization.k8s.io/v1"
+    )
+    gateway_role["rules"] = [
+        {"apiGroups": ["authentication.k8s.io"], "resources": ["tokenreviews"], "verbs": ["create"]}
+    ]
+    binding = _obj(
+        "ClusterRoleBinding",
+        gateway_role["metadata"]["name"],
+        None,
+        api="rbac.authorization.k8s.io/v1",
+    )
+    binding["roleRef"] = {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": gateway_role["metadata"]["name"],
+    }
+    binding["subjects"] = [
+        {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities["gateway"]}
+    ]
+    remote.extend([gateway_role, binding])
+    return primary, remote
+
+
+def build_regional_execution(
+    config: dict[str, Any], candidate: dict[str, Any], *, repo_root: Path
+) -> dict[str, list[dict[str, Any]]]:
+    """Separate cluster-bound manifests; never add these to primary deploy files."""
+    validate_environment(config)
+    images = {key: value["image_ref"] for key, value in candidate["images"].items()}
+    return {
+        target["target_id"]: _regional_documents(config, target, images, repo_root)[1]
+        for target in config.get("regional_execution_targets", [])
+    }
+
+
 def build_platform(
     config: dict[str, Any],
     candidate: dict[str, Any],
@@ -723,6 +1100,21 @@ def build_platform(
             "targets": [target],
         },
     }
+    for regional in config.get("regional_execution_targets", []):
+        catalog["topology"]["targets"].append(
+            dict(
+                target,
+                target_id=regional["target_id"],
+                cluster_scope_id=regional["cluster_scope_id"],
+                region=regional["region"],
+                failure_domain=regional["cluster_scope_id"],
+                namespace_name=regional["execution_namespace"],
+                health_role="secondary",
+                health_check_id=regional["target_id"],
+                pod_identity_audience="loom-execution",
+                service_account_name="loom-execution-attempt",
+            )
+        )
     cm["data"] = {
         "profile.json": canonical(profile).decode(),
         "keyring.json": canonical(keyring).decode(),
@@ -1003,6 +1395,46 @@ def build_platform(
         _mount_secret(pod, "admin", "loom-admin-secret", "/var/run/loom/admin")
         if component == "gateway":
             pod["terminationGracePeriodSeconds"] = 300
+            connections = {}
+            for regional in config.get("regional_execution_targets", []):
+                tid = regional["target_id"]
+                path = "/var/run/loom-regional-kubernetes/" + tid
+                _mount_secret(pod, tid + "-kubernetes", tid + "-gateway-kubernetes", path)
+                pod["volumes"][-1]["secret"]["items"] = [
+                    {"key": name, "path": name} for name in ("ca.crt", "credentials.json")
+                ]
+                connections[regional["cluster_scope_id"]] = {
+                    "endpoint": regional["kubernetes_api_server"],
+                    "ca_file": path + "/ca.crt",
+                    "credentials_file": path + "/credentials.json",
+                }
+            if connections:
+                cm["data"]["regional-kubernetes.json"] = canonical(connections).decode()
+                pod.setdefault("volumes", []).append(
+                    {
+                        "name": "regional-config",
+                        "configMap": {
+                            "name": "loom-platform-config",
+                            "items": [
+                                {"key": "regional-kubernetes.json", "path": "connections.json"}
+                            ],
+                        },
+                    }
+                )
+                pod["containers"][0].setdefault("volumeMounts", []).append(
+                    {
+                        "name": "regional-config",
+                        "mountPath": "/var/run/loom-regional-config",
+                        "readOnly": True,
+                    }
+                )
+                pod["containers"][0]["env"].extend(
+                    _env(
+                        {
+                            "LOOM_GW_SERVICE_EXECUTION_KUBERNETES_CONFIG_FILE": "/var/run/loom-regional-config/connections.json"
+                        }
+                    )
+                )
         app_docs += [deployment, _service(name, ns, port)]
     web = _deployment(
         "loom-web",
@@ -1085,100 +1517,32 @@ def build_platform(
     app_docs.append(web)
     files["40-services.yaml"] = app_docs
     files["50-configure.yaml"] = [job(f"loom-platform-configure-{short}", "configure")]
-    # Reuse the existing least-privilege execution pod and collector definitions.
-    execution_docs = []
-    replacements = {
-        "loom-nebius-development": ex,
-        "nebius-eu-north1-development": config["target_id"],
-        ".loom.svc.cluster.local": f".{ns}.svc.cluster.local",
-    }
-    for filename in ("nebius-execution-actuator.yaml", "nebius-capacity-collector.yaml"):
-        docs = list(yaml.safe_load_all((repo_root / "deploy/k8s" / filename).read_text()))
-        for doc in docs:
-            if not doc or doc["kind"] in {"Namespace", "PodDisruptionBudget"}:
-                continue
-            doc = _replace_tree(doc, replacements)
-            if doc["kind"] == "ClusterRole":
-                doc["rules"].append(
-                    {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]}
-                )
-            if doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
-                doc["metadata"]["name"] = ex + "-collector"
-                if doc["kind"] == "ClusterRoleBinding":
-                    doc["roleRef"]["name"] = ex + "-collector"
-            if doc["kind"] == "NetworkPolicy":
-                for rule in doc["spec"].get("egress", []):
-                    for peer in rule.get("to", []):
-                        labels = peer.get("namespaceSelector", {}).get("matchLabels", {})
-                        if labels.get("kubernetes.io/metadata.name") == "loom":
-                            labels["kubernetes.io/metadata.name"] = ns
-            if doc["kind"] == "ConfigMap":
-                for suffix, key in (
-                    ("NEBIUS_PROJECT_ID", "project_id"),
-                    ("NEBIUS_QUOTA_PARENT_ID", "quota_parent_id"),
-                    ("NEBIUS_NODE_GROUP_ID", "execution_node_group_id"),
-                    ("NEBIUS_REGION", "region"),
-                ):
-                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_" + suffix] = config[key]
-            pod = None
-            if doc["kind"] == "Deployment":
-                pod = doc["spec"]["template"]["spec"]
-                _mount_secret(
-                    pod, "db-ca", "loom-execution-actuator-db", "/var/run/loom-db", ca_only=True
-                )
-            elif doc["kind"] == "CronJob":
-                pod = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
-            if pod is not None:
-                pod["nodeSelector"] = {
-                    "loom.nebius/node-role": "system",
-                    "loom.nebius/platform": "integration",
+    execution_docs = _execution_documents(config, images, repo_root)
+    for regional in config.get("regional_execution_targets", []):
+        primary_docs, _ = _regional_documents(config, regional, images, repo_root)
+        execution_docs.extend(primary_docs)
+    for document in execution_docs:
+        if document["kind"] == "ResourceQuota":
+            document["spec"]["hard"] = _execution_quota(config, execution_docs)
+    if config.get("regional_execution_targets"):
+        database_policy = next(
+            doc
+            for doc in files["10-config-network.yaml"]
+            if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == "postgres-private"
+        )
+        database_policy["spec"]["ingress"][0]["from"].extend(
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ex}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": regional["target_id"] + "-actuator"
+                        }
+                    },
                 }
-                pod["tolerations"] = [
-                    {
-                        "key": "loom.nebius/platform",
-                        "operator": "Equal",
-                        "value": "integration",
-                        "effect": "NoSchedule",
-                    }
-                ]
-                for container in pod.get("initContainers", []) + pod["containers"]:
-                    container["image"] = images["execution_actuator"]
-                    for env_row in container.get("env", []):
-                        if env_row["name"] == "LOOM_EXECUTION_ACTUATOR_NODE_SELECTOR":
-                            env_row["value"] = json.dumps(
-                                {
-                                    "loom.nebius/node-role": "integration-execution",
-                                    "loom.nebius/platform": "integration",
-                                }
-                            )
-                        elif env_row["name"] == "LOOM_EXECUTION_ACTUATOR_TOLERATIONS":
-                            env_row["value"] = json.dumps(
-                                [
-                                    {
-                                        "key": "loom.nebius/execution",
-                                        "operator": "Equal",
-                                        "value": "true",
-                                        "effect": "NoSchedule",
-                                    },
-                                    {
-                                        "key": "loom.nebius/platform",
-                                        "operator": "Equal",
-                                        "value": "integration",
-                                        "effect": "NoSchedule",
-                                    },
-                                ]
-                            )
-                pod.setdefault("securityContext", {}).update(
-                    runAsUser=65532, runAsGroup=65532, fsGroup=65532
-                )
-            if doc["kind"] == "ConfigMap":
-                doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR"] = (
-                    "loom.nebius/node-role=integration-execution,loom.nebius/platform=integration"
-                )
-            execution_docs.append(doc)
-    for doc in execution_docs:
-        if doc["kind"] == "ResourceQuota":
-            doc["spec"]["hard"] = _execution_quota(config, execution_docs)
+                for regional in config["regional_execution_targets"]
+            ]
+        )
     files["60-execution.yaml"] = execution_docs
     public = _service("loom-web", ns, 443, 8443)
     public["spec"]["type"] = "LoadBalancer"

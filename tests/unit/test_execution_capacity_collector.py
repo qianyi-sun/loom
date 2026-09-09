@@ -1182,3 +1182,17 @@ def test_locked_sdk_native_disk_bytes_preserve_actual_quota_charge() -> None:
     from loom_execution_capacity_collector.nebius import _disk_mib
 
     assert _disk_mib(DiskSpec(size_bytes=80 * 1024**3, type=DiskSpec.DiskType.NETWORK_SSD)) == 81920
+
+
+def test_collector_remote_connection_is_explicit_and_complete(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    assert settings.kubernetes_connection is None
+    values = settings.model_dump()
+    values["kubernetes_endpoint"] = "https://regional-api.example"
+    with pytest.raises(ValueError, match="set together"):
+        ExecutionCapacityCollectorSettings(**values)
+    values["kubernetes_ca_file"] = tmp_path / "remote-ca.crt"
+    values["kubernetes_nebius_credentials_file"] = tmp_path / "remote-credentials.json"
+    remote = ExecutionCapacityCollectorSettings(**values)
+    assert remote.kubernetes_connection.endpoint == "https://regional-api.example"
+    assert remote.kubernetes_connection.credentials_file != remote.nebius_credentials_file

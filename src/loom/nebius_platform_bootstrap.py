@@ -336,54 +336,64 @@ def configure_platform(
 
     catalog = json.loads((config_dir / "catalog.json").read_text())
     observed = request("POST", "/admin/service-execution/catalog", catalog)
-    if observed["target_ids"] != [config["target_id"]]:
+    expected_targets = [
+        config["target_id"],
+        *[target["target_id"] for target in config.get("regional_execution_targets", [])],
+    ]
+    if sorted(observed["target_ids"]) != sorted(expected_targets):
         raise ValueError("catalog readback mismatch")
-    price = request("POST", "/admin/execution-price-snapshots", config["execution_price"])
-    if any(
-        price.get(key) != config["execution_price"][key]
-        for key in ("provider", "region", "sku", "source", "source_version")
-    ):
-        raise ValueError("execution price snapshot readback mismatch")
-    binding = request(
-        "PUT",
-        "/admin/execution-target-price-bindings/" + config["target_id"],
-        {
-            "price_snapshot_id": price["id"],
-            "enabled": True,
-            "reason": "Reviewed independent Nebius integration execution price",
-        },
-    )
-    if (
-        binding.get("price_snapshot_id") != price["id"]
-        or binding.get("target_id") != config["target_id"]
-        or binding.get("enabled") is not True
-    ):
-        raise ValueError("execution price target binding readback mismatch")
-    capacity_status = request("GET", "/admin/execution-capacity/status")
-    existing_policy = next(
-        (
-            row.get("policy")
-            for row in capacity_status["targets"]
-            if row["target_id"] == config["target_id"]
-        ),
-        None,
-    )
-    desired_policy = config["capacity_policy"]
-    retained_operator_policy = bool(
-        existing_policy
-        and any(existing_policy.get(key) != value for key, value in desired_policy.items())
-        and any(
-            existing_policy.get(key) != value for key, value in _HISTORICAL_CAPACITY_POLICY.items()
+    retained_policies = {}
+    for target_config in [config, *config.get("regional_execution_targets", [])]:
+        price = request(
+            "POST", "/admin/execution-price-snapshots", target_config["execution_price"]
         )
-    )
-    if not retained_operator_policy:
-        observed = request(
+        if any(
+            price.get(key) != target_config["execution_price"][key]
+            for key in ("provider", "region", "sku", "source", "source_version")
+        ):
+            raise ValueError("execution price snapshot readback mismatch")
+        binding = request(
             "PUT",
-            "/admin/execution-capacity-policies/" + config["target_id"],
-            desired_policy,
+            "/admin/execution-target-price-bindings/" + target_config["target_id"],
+            {
+                "price_snapshot_id": price["id"],
+                "enabled": True,
+                "reason": "Reviewed independent Nebius integration execution price",
+            },
         )
-        if any(observed.get(key) != value for key, value in desired_policy.items()):
-            raise ValueError("capacity policy readback mismatch")
+        if (
+            binding.get("price_snapshot_id") != price["id"]
+            or binding.get("target_id") != target_config["target_id"]
+            or binding.get("enabled") is not True
+        ):
+            raise ValueError("execution price target binding readback mismatch")
+        capacity_status = request("GET", "/admin/execution-capacity/status")
+        existing_policy = next(
+            (
+                row.get("policy")
+                for row in capacity_status["targets"]
+                if row["target_id"] == target_config["target_id"]
+            ),
+            None,
+        )
+        desired_policy = target_config["capacity_policy"]
+        retained_operator_policy = bool(
+            existing_policy
+            and any(existing_policy.get(key) != value for key, value in desired_policy.items())
+            and any(
+                existing_policy.get(key) != value
+                for key, value in _HISTORICAL_CAPACITY_POLICY.items()
+            )
+        )
+        if not retained_operator_policy:
+            observed = request(
+                "PUT",
+                "/admin/execution-capacity-policies/" + target_config["target_id"],
+                desired_policy,
+            )
+            if any(observed.get(key) != value for key, value in desired_policy.items()):
+                raise ValueError("capacity policy readback mismatch")
+        retained_policies[target_config["target_id"]] = retained_operator_policy
     admission_policies = request("GET", "/admin/execution-admission/status")["policies"]
     for kind, key in (("global", "*"), ("pool", "nebius-cpu")):
         concurrent = config["max_concurrent"]
@@ -421,7 +431,12 @@ def configure_platform(
         json.dumps(
             {
                 "target_id": config["target_id"],
-                "retained_operator_capacity_policy": retained_operator_policy,
+                "retained_operator_capacity_policy": retained_policies[config["target_id"]],
+                "retained_regional_operator_capacity_policies": {
+                    key: value
+                    for key, value in retained_policies.items()
+                    if key != config["target_id"]
+                },
             },
             sort_keys=True,
         )
@@ -432,8 +447,8 @@ def configure_platform(
         database_url(os.environ["LOOM_DB_URL"], config["namespace"])
     ) as connection:
         connection.execute(
-            "UPDATE execution_targets SET desired_state='active', updated_at=now() WHERE id=%s AND desired_state='disabled' AND health_status='unknown'",
-            (config["target_id"],),
+            "UPDATE execution_targets SET desired_state='active', updated_at=now() WHERE id=ANY(%s) AND desired_state='disabled' AND health_status='unknown'",
+            (expected_targets,),
         )
 
 
