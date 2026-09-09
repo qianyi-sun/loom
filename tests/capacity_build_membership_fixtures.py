@@ -194,10 +194,11 @@ def application_request(preparation, execution, *, owner=88010, revision=0):
         expected_revision=revision, command=PersonalApplicationCommandV2(projection=projection, acknowledgement=acknowledgement))
 
 
-def managed_application_request(preparation, execution, *, operation="capacity", revision=0):
+def managed_application_request(preparation, execution, *, operation="capacity", revision=0, subject_id=None):
     from loom_capacity_manager.typed_membership_commands import PersonalApplicationCommandV2
 
-    origin = preparation.managed_application_origins[0]
+    origin = (preparation.managed_application_origins[0] if subject_id is None else
+        next(origin for origin in preparation.managed_application_origins if origin.configuration.subject_id == subject_id))
     old = origin.base_projection
     generation = old.configuration_generation + 1
     fields = dict(expected_configuration_epoch=execution.configuration_epoch,
