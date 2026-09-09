@@ -172,14 +172,79 @@ API endpoint before applying anything. Apply only the generated files:
    initial installs remain resumable.
 
 Only web/API HTTPS is public: the web image's existing SPA listener stays on
-8080, and a namespace-local Nginx listener terminates TLS on 8443, proxies
+8080, and a Caddy sidecar in the same Pod terminates TLS on 8443, proxies
 `/api/v1/` to the service and all other public paths to that SPA listener.
 LoadBalancer 443 maps to 8443. CP, Gateway and PostgreSQL are private services.
 Point `nebius.yylx.world` at the reviewed static public allocation and install a
-valid public certificate before accepting external traffic. No cluster-wide
-ingress controller or certificate CRD is required by this lane. Certificate
-renewal must reconcile the Secret and restart the web deployment; Secret volume
-updates alone do not cause Nginx to reload its TLS context.
+valid public certificate before accepting external traffic. Caddy obtains and
+renews a managed certificate through Let's Encrypt TLS-ALPN-01 over that existing
+TCP 443 path. No port 80, DNS API credential, certificate CRD, additional RBAC or
+cluster-wide ingress controller is needed. The sidecar uses the same published
+web image and runs as UID/GID 101; the ordinary Nginx entrypoint, SPA runtime
+configuration and browser security headers remain unchanged.
+
+The single additional resource is `loom-web-tls`, a 4 GiB `ReadWriteOnce` PVC in
+the platform namespace using the configured native CSI storage class. It stores
+Caddy's account, private keys and managed certificates across restarts. The PVC
+is rendered in `40-services.yaml`, after the mandatory pre-upgrade backup. Keep
+this PVC during rollback or web Deployment replacement. Rolling updates share
+it on the one integration system node; adding more system nodes requires
+reviewing the single-node RWO rollout constraint. The sidecar requests 25m CPU
+and 64 MiB memory, with limits of 500m CPU and 256 MiB memory.
+
+The optional boolean `public_tls_bootstrap` defaults to `false`, the steady
+configuration. A **first installation or the first switch from manual Nginx TLS
+requires two passes** through the existing renderer and deploy command:
+
+1. Set `public_tls_bootstrap=true` and supply a valid public TLS Secret before
+   the first pass. Caddy loads it without certificate-selection tags, preserving
+   initial HTTPS and readiness while it obtains a managed certificate into the
+   PVC. Without a valid bootstrap on an empty PVC, readiness keeps the Pod out
+   of the public Service and the CA cannot reach its TLS-ALPN challenge.
+2. Verify successful managed issuance and its persisted certificate expiry, then
+   set `public_tls_bootstrap=false`, re-render the **same published candidate**
+   and run the existing deploy command again. This configuration change takes
+   a fresh mandatory backup and rolls the Pods. It removes the manual loader
+   and Secret mount; the managed certificate and account remain on the PVC.
+   Keep the old Secret for rollback, but do not leave bootstrap mode enabled.
+
+Bootstrap mode is transitional because CertMagic treats the final encoded
+NotAfter second inclusively while some TLS clients already reject that second.
+Removing the manual loader after issuance avoids relying on expiry-time
+selection. Caddyfile `tls cert key` is also unsuitable: it pins selection to the
+manual certificate even after expiry. Subsequent upgrades use bootstrap=false;
+ordinary renewal and in-memory certificate replacement are native Caddy
+operations and need no Secret synchronization or restart. If TLS storage is
+lost, explicitly repeat the bootstrap sequence using a currently valid
+certificate. An identical final configuration reapply uses the deployer's
+existing idempotence behavior.
+
+HTTPS readiness checks both TLS and the SPA; `default_sni` handles Kubelet's
+numeric Pod-IP probe, while its Host header selects the public route. Kubelet
+skips certificate validation, so readiness alone is not public TLS acceptance.
+
+The web build uses stock Caddy v2.11.4 with Go 1.26.8 and `x/crypto` v0.55.0.
+The dependency override fixes CVE-2026-56854 in the official v2.11.4 binary's
+`x/crypto` v0.52.0; remove it when an upstream Caddy release incorporates the
+fix. The resulting binary is scanned as part of the existing web-image policy.
+See [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https),
+[the upstream selector](https://github.com/caddyserver/certmagic/blob/v0.25.3/handshake.go),
+and [Nebius CSI storage](https://docs.nebius.com/kubernetes/storage/disk-over-csi).
+
+Developer verification uses an explicitly built web image and a disposable
+Pebble CA; it exercises the two-pass bootstrap transition, real TLS-ALPN issuance and renewal,
+restart with the CA unavailable, SPA headers, API forwarding and SSE:
+
+```sh
+docker buildx build --platform linux/amd64 --load -f deploy/Dockerfile.web -t loom-web-tls:test .
+LOOM_NEBIUS_WEB_IMAGE=loom-web-tls:test uv run --extra dev pytest -q -s \
+  tests/integration/test_nebius_public_tls.py
+```
+
+Live acceptance separately checks the published candidate, PVC binding, both
+web-container readiness states, Caddy's successful issuance log and stored
+certificate expiry, and trusted public HTTPS. A still-valid bootstrap certificate
+on the public endpoint alone does not prove managed issuance or renewal.
 
 No worker Deployment, Slurm controller, pipeline orchestrator or family
 orchestrator is installed. This first lane implements the existing CPU Pod
