@@ -177,3 +177,29 @@ def test_architecture_promotion_rejects_dockerfile_changed_after_capture(tmp_pat
             task_id="bench/local-id",
             promote_runtime_architecture=True,
         )
+
+
+@pytest.mark.parametrize("name", ["task.toml", "Dockerfile"])
+def test_registration_bounds_parsed_text_before_allocating_verified_payload(
+    tmp_path, monkeypatch, name,
+):
+    root = _bundle(tmp_path)
+    module = _module()
+    path = root / name
+    original = path.read_bytes()
+    # Valid comment padding: reject size, not TOML syntax or Dockerfile contents.
+    path.write_bytes(original + b"\n#" + b"x" * (1024 * 1024))
+    read = module.read_verified_task_image_bundle_file
+    oversized_reads = []
+
+    def observe_read(directory, entry):
+        if entry.path == name:
+            oversized_reads.append(entry.path)
+        return read(directory, entry)
+
+    monkeypatch.setattr(module, "read_verified_task_image_bundle_file", observe_read)
+    with pytest.raises(ValueError, match="text size limit"):
+        module.prepare_task_bundle_registration(
+            root, task_id="bench/local-id", promote_runtime_architecture=True,
+        )
+    assert oversized_reads == []
