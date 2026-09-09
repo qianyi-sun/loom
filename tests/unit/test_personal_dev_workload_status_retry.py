@@ -5,16 +5,26 @@ import asyncio
 import pytest
 
 from loom.dev_instance_runtime import (
-    AsyncCommandRunner, CommandResult, DevInstanceRuntimeError, KubectlClient,
-    KubernetesResourceVersionConflict, WorkloadStatusConflict,
+    AsyncCommandRunner,
+    CommandResult,
+    DevInstanceRuntimeError,
+    KubectlClient,
+    KubernetesResourceVersionConflictError,
+    WorkloadStatusConflictError,
 )
 from loom.personal_dev_reconciler import PersonalDevEnvironmentReconciler
 from tests.unit.test_personal_dev_reconciler import (
-    _NOW, _Authority, _Executor, _Installer, _Projector, _async_value, _claim,
+    _NOW,
+    _async_value,
+    _Authority,
+    _claim,
+    _Executor,
+    _Installer,
+    _Projector,
 )
 
 
-@pytest.mark.parametrize("failure", (WorkloadStatusConflict, DevInstanceRuntimeError, asyncio.CancelledError))
+@pytest.mark.parametrize("failure", (WorkloadStatusConflictError, DevInstanceRuntimeError, asyncio.CancelledError))
 async def test_status_conflict_does_not_terminalize_or_activate_attempt(failure):
     authority = _Authority(_claim())
 
@@ -66,11 +76,11 @@ async def test_runner_exposes_only_canonical_nonsecret_resource_version_conflict
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
     with pytest.raises(DevInstanceRuntimeError) as raised:
         await AsyncCommandRunner().run(["kubectl", "replace", "-f", "-"])
-    assert isinstance(raised.value, KubernetesResourceVersionConflict) is conflict
+    assert isinstance(raised.value, KubernetesResourceVersionConflictError) is conflict
     assert diagnostic.strip() not in str(raised.value)
 
 
-@pytest.mark.parametrize("mutation", ("status", "denial_status", "spec", "uid", "namespace", "unchanged", "malformed"))
+@pytest.mark.parametrize("mutation", ("status", "denial_status", "spec", "uid", "namespace", "unchanged", "malformed", "cancelled", "timeout"))
 @pytest.mark.parametrize("phase", ("dry_run", "activation"))
 async def test_failed_cas_is_retryable_only_with_conflict_and_status_only_readback(mutation, phase):
     from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
@@ -100,10 +110,12 @@ async def test_failed_cas_is_retryable_only_with_conflict_and_status_only_readba
                         current["metadata"]["uid"] = "different-workload"
                     elif mutation == "namespace":
                         self.namespace["metadata"]["uid"] = "different-namespace"
-                    error = DevInstanceRuntimeError if mutation == "denial_status" else KubernetesResourceVersionConflict
+                    error = DevInstanceRuntimeError if mutation == "denial_status" else KubernetesResourceVersionConflictError
                     raise error("bounded failure")
             if self.failed and mutation == "malformed" and "deployment" in argv:
                 return CommandResult("{}", "")
+            if self.failed and mutation in {"cancelled", "timeout"} and "deployment" in argv:
+                raise asyncio.CancelledError if mutation == "cancelled" else TimeoutError
             return await super().run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
 
     cluster = Cluster()
@@ -112,7 +124,7 @@ async def test_failed_cas_is_retryable_only_with_conflict_and_status_only_readba
     document = {"apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": {"name": "probe", "namespace": identity.namespace},
         "spec": {"replicas": 1, "template": {}}}
-    with pytest.raises(DevInstanceRuntimeError) as raised:
+    with pytest.raises(asyncio.CancelledError if mutation == "cancelled" else DevInstanceRuntimeError) as raised:
         await write_storage_workload(KubectlClient("kubectl", runner=cluster), identity, document, operation_epoch=1)
-    assert isinstance(raised.value, WorkloadStatusConflict) is (mutation == "status")
+    assert isinstance(raised.value, WorkloadStatusConflictError) is (mutation == "status")
     assert cluster.replacements == (1 if phase == "dry_run" else 2)

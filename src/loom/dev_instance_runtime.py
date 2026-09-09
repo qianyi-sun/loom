@@ -58,11 +58,11 @@ class DevInstanceRuntimeError(RuntimeError):
     """Bounded runtime failure safe to persist and surface."""
 
 
-class WorkloadStatusConflict(DevInstanceRuntimeError):
+class WorkloadStatusConflictError(DevInstanceRuntimeError):
     """A failed workload CAS observed only same-object status/version progress."""
 
 
-class KubernetesResourceVersionConflict(DevInstanceRuntimeError):
+class KubernetesResourceVersionConflictError(DevInstanceRuntimeError):
     """Kubectl reported its canonical resource-version conflict diagnostic."""
 
 
@@ -110,6 +110,17 @@ class AsyncCommandRunner:
         if process.returncode != 0:
             # kubectl stderr can contain server URLs and admission details. Keep
             # the public error bounded; protected process logs retain specifics.
+            diagnostic = stderr.decode(errors="replace").strip()
+            if (
+                "\n" not in diagnostic and "\r" not in diagnostic
+                and diagnostic.startswith("Error from server (Conflict): ")
+                and diagnostic.endswith(
+                    ": the object has been modified; please apply your changes to the latest version and try again"
+                )
+            ):
+                # This narrow CLI contract deliberately rejects warnings,
+                # multiline messages and denied requests quoting conflict text.
+                raise KubernetesResourceVersionConflictError("cluster resource version changed")
             raise DevInstanceRuntimeError(
                 f"cluster command failed with exit code {process.returncode}",
             )

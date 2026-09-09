@@ -425,8 +425,28 @@ object-local sequence fence does **not** persist across deletion (including Job
 TTL cleanup): a durable reservation/tombstone or a redesigned retry identity is
 still needed to exclude stale attempts during delete/recreate. Positive helper
 tests with caller retries also do not establish automatic production retry of
-Kubernetes CAS conflicts; generic preparation failures currently fail the
-operation. These are unresolved lifecycle boundaries, not rollout acceptance.
+Kubernetes CAS conflicts. These object-lifetime boundaries remain unresolved and
+are not rollout acceptance.
+
+Candidate preparation now defers one narrowly evidenced failure to normal durable
+lease reclamation: kubectl must report its canonical single-line resource-version
+conflict, and a bounded readback must show the same Namespace UID and exactly the
+same workload authority/spec with only status/bookkeeping and resource-version
+progress. Unknown diagnostics, admission-denial headers (including conflict text),
+changed specs/UIDs/owners and unavailable readback do not qualify. This conservative
+CLI diagnostic contract may fail to recognize a version conflict with warnings or
+a changed kubectl message format; it never treats generic command failure plus
+status progress as sufficient evidence.
+
+The one-shot writer does not retry the mutation. The reconciler stops preparation
+without failing the running attempt or publishing readiness. Once the durable
+lease expires, a fresh claim rechecks current operation/attempt/incarnation and
+reloads owner access and admission before preparing again. Revoked owner access
+still fails preparation; stale lease holders cannot heartbeat after reclamation.
+Ordinary candidate-preparation failures remain terminal. Membership/capacity
+runtime errors already return to their existing lease-based service loop, and do
+not use candidate preparation's owner-access loader. Real Kubernetes and isolated
+PostgreSQL tests exercise these distinct boundaries.
 
 The layout remains disabled. These management-write fences do not fence delayed
 ReplicaSet/Pod writes by Kubernetes controllers, or already-started PostgreSQL

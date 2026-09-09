@@ -14,7 +14,13 @@ from typing import Any
 from uuid import UUID
 
 from loom.dev_instance import DevInstanceIdentity
-from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient
+from loom.dev_instance_runtime import (
+    CommandResult,
+    DevInstanceRuntimeError,
+    KubectlClient,
+    KubernetesResourceVersionConflictError,
+    WorkloadStatusConflictError,
+)
 from loom.personal_dev_incarnation_storage import (
     personal_dev_storage_annotations,
     validate_personal_dev_storage_identity,
@@ -67,6 +73,36 @@ def _authority_body(document: dict[str, Any]) -> dict[str, Any]:
     if document["kind"] == "Deployment":
         metadata.get("annotations", {}).pop("deployment.kubernetes.io/revision", None)
     return body
+
+
+async def _replace_workload(
+    kubectl: KubectlClient, identity: DevInstanceIdentity,
+    observed: dict[str, Any], desired: dict[str, Any], *, dry_run: bool = False,
+) -> CommandResult:
+    try:
+        return await kubectl.runner.run(kubectl._argv(
+            "replace", *(["--dry-run=server", "-o", "json"] if dry_run else []), "-f", "-",
+        ), stdin=_canonical(desired))
+    except KubernetesResourceVersionConflictError:
+        status_only = False
+        try:
+            async with asyncio.timeout(10):
+                namespace = await kubectl.read_storage_namespace(identity)
+                if namespace is not None and kubectl._namespace_uid(namespace) == observed["metadata"]["annotations"][_UID]:
+                    reply = await kubectl.runner.run(kubectl._argv(
+                        "get", _KINDS[observed["kind"]][1], observed["metadata"]["name"],
+                        "--namespace", identity.namespace, "-o", "json",
+                    ))
+                    latest = _object(_decode(reply.stdout))
+                    status_only = (
+                        latest["metadata"]["resourceVersion"] != observed["metadata"]["resourceVersion"]
+                        and _authority_body(latest) == _authority_body(observed)
+                    )
+        except (DevInstanceRuntimeError, KeyError, TypeError, ValueError, AttributeError, TimeoutError):
+            pass  # Unavailable or ambiguous observation cannot authorize a retry.
+        if status_only:
+            raise WorkloadStatusConflictError("workload status advanced during its versioned update") from None
+        raise
 
 
 def _replacement(
@@ -262,10 +298,7 @@ async def write_storage_workload(
     previous = _replacement(observed, final, previous_spec)
     if stored[_PHASE] == "staged":
         previous["spec"] = _inactive(previous["spec"], kind)
-    normalized = await kubectl.runner.run(
-        kubectl._argv("replace", "--dry-run=server", "-f", "-", "-o", "json"),
-        stdin=_canonical(previous),
-    )
+    normalized = await _replace_workload(kubectl, identity, observed, previous, dry_run=True)
     normalized_spec = _object(_decode(normalized.stdout))["spec"]
     if normalized_spec != observed.get("spec"):
         raise DevInstanceRuntimeError("workload persisted template differs from its recorded intent")
@@ -286,4 +319,4 @@ async def write_storage_workload(
         final["metadata"]["annotations"]["deployment.kubernetes.io/revision"] = observed["metadata"]["annotations"]["deployment.kubernetes.io/revision"]
     # PUT cannot create a missing object and UID/RV prevents replacing a newer
     # object. Do not retry conflicts internally with freshly read authority.
-    await kubectl.runner.run(kubectl._argv("replace", "-f", "-"), stdin=_canonical(final))
+    await _replace_workload(kubectl, identity, observed, final)

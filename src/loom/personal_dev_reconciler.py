@@ -259,6 +259,10 @@ class PersonalDevEnvironmentReconciler:
             raise ValueError("lease_seconds must be a positive integer")
 
     async def reconcile_once(self, *, now: datetime) -> bool:
+        # Runtime composition imports this module for the readiness contract;
+        # defer the exception import until both modules have finished loading.
+        from loom.dev_instance_runtime import WorkloadStatusConflictError
+
         loop = asyncio.get_running_loop()
         started = loop.time()
         claim = await self.authority.claim_next_reconciliation(
@@ -477,6 +481,14 @@ class PersonalDevEnvironmentReconciler:
                 preparation.cancel()
                 await asyncio.gather(preparation, return_exceptions=True)
             raise
+        except WorkloadStatusConflictError:
+            if preparation is not None and not preparation.done():
+                preparation.cancel()
+                await asyncio.gather(preparation, return_exceptions=True)
+            # Preserve the running attempt, without publishing readiness or
+            # continuing old authority. The normal durable lease-expiry claim
+            # path reloads current operation/attempt/access/admission for retry.
+            return True
         except Exception:
             if preparation is not None and not preparation.done():
                 preparation.cancel()
