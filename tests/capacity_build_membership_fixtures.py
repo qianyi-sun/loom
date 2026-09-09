@@ -37,6 +37,34 @@ from tests.capacity_execution_fixtures import (
 from tests.capacity_fixtures import fleet_with_development_template
 
 
+def application_origin_payload(configuration, acknowledgement, *, configuration_epoch):
+    """Complete operator-pinned installation fixture, not an inferred DB origin."""
+    from loom_capacity_manager.contracts import DynamicDevelopmentSubjectProjectionV1
+
+    projection = DynamicDevelopmentSubjectProjectionV1(
+        expected_configuration_epoch=configuration_epoch,
+        operation_kind="create", operation_id=UUID(int=777700),
+        operation_epoch=configuration.configuration_generation,
+        environment_name=configuration.display_name.removeprefix("dev-"),
+        subject_id=configuration.subject_id, subject_incarnation=configuration.subject_incarnation,
+        owner_id=UUID(hex=configuration.account_id.removeprefix("dev-owner-")),
+        min_slots=configuration.min_slots, max_slots=configuration.max_slots,
+        candidate_generation=configuration.candidate_generation,
+        candidate_sha256=acknowledgement.candidate.identity,
+        candidate_publication_sha256=acknowledgement.candidate.publication_sha256,
+        deployment_generation=configuration.deployment_generation,
+        configuration_generation=configuration.configuration_generation,
+        demand_reporter_incarnation=configuration.demand_reporter_incarnation,
+        demand_reporter_token_sha256="e" * 64, local_activation_sha256="c" * 64,
+        protected_admission_sha256=acknowledgement.protected_admission_sha256,
+        capacity_agent_installation_sha256="d" * 64,
+        supported_pool_ids=("gb10", "oldlab"), supported_architectures=("arm64", "x86_64"),
+        protocol_versions={"capacity-agent": "v1", "claim-guard": "v1", "control-plane-worker": "v1"},
+    )
+    return dict(configuration=configuration, installation_projection=projection,
+        base_projection=projection, acknowledgement=acknowledgement)
+
+
 async def typed_sql_execution(session, *, max_subjects=8):
     fleet = fleet_with_development_template()
     fixture = await setup_execution(session, execution_policy=execution_policy(), fleet=fleet)
