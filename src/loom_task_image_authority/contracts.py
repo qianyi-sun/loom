@@ -25,7 +25,10 @@ from loom_task_image_authority.config import (
     _validate_https_origin,
     _validate_registry_identity,
 )
-from loom_task_image_authority.registry_token import publication_repository
+from loom_task_image_authority.registry_token import (
+    MAX_REGISTRY_BEARER_TOKEN_BYTES,
+    publication_repository,
+)
 
 MAX_SIGNED_BIGINT = (1 << 63) - 1
 MAX_CONTRACT_BYTES = 64 * 1024
@@ -606,7 +609,7 @@ class TaskImageRegistryCredentialV1(_SecretBearingAuthorityModel):
         str,
         Field(
             min_length=5,
-            max_length=16 * 1024,
+            max_length=MAX_REGISTRY_BEARER_TOKEN_BYTES,
             pattern=r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$",
             repr=False,
         ),

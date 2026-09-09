@@ -33,6 +33,7 @@ _REPOSITORY_RE = re.compile(
 )
 _MAX_TOKEN_LIFETIME = timedelta(seconds=45)
 _MAX_SIGNING_KEY_BYTES = 64 * 1024
+MAX_REGISTRY_BEARER_TOKEN_BYTES = 16 * 1024
 
 
 def publication_repository(
@@ -70,15 +71,17 @@ def _base64url_uint(value: int) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _public_jwk_thumbprint(private_key: rsa.RSAPrivateKey) -> str:
+def _public_jwk(private_key: rsa.RSAPrivateKey) -> dict[str, str]:
     numbers = private_key.public_key().public_numbers()
-    canonical_jwk = rfc8785.dumps(
-        {
-            "e": _base64url_uint(numbers.e),
-            "kty": "RSA",
-            "n": _base64url_uint(numbers.n),
-        }
-    )
+    return {
+        "e": _base64url_uint(numbers.e),
+        "kty": "RSA",
+        "n": _base64url_uint(numbers.n),
+    }
+
+
+def _public_jwk_thumbprint(private_key: rsa.RSAPrivateKey) -> str:
+    canonical_jwk = rfc8785.dumps(_public_jwk(private_key))
     return base64.urlsafe_b64encode(hashlib.sha256(canonical_jwk).digest()).rstrip(
         b"="
     ).decode("ascii")
@@ -265,10 +268,21 @@ class DistributionRegistryTokenIssuer:
             claims,
             self._private_key,
             algorithm="RS256",
-            headers={"kid": self._key_id, "typ": "JWT"},
+            # Distribution 2.8.3 interprets kid-only tokens as libtrust IDs,
+            # not RFC 7638 thumbprints. Its public-JWK path derives that ID
+            # and checks the configured trusted roots before signature use.
+            # Keep Loom's audited kid stable; never include private JWK fields
+            # or an inner kid (which libtrust interprets differently as well).
+            headers={
+                "kid": self._key_id,
+                "typ": "JWT",
+                "jwk": _public_jwk(self._private_key),
+            },
         )
         if type(token) is not str:
             raise RuntimeError("registry token signer returned an invalid result")
+        if len(token.encode("ascii")) > MAX_REGISTRY_BEARER_TOKEN_BYTES:
+            raise TaskImageAuthorityConfigurationError("registry token exceeds the supported limit")
         return IssuedRegistryToken(
             token=token,
             key_id=self._key_id,
@@ -319,6 +333,7 @@ def load_distribution_registry_token_issuer(
 
 
 __all__ = [
+    "MAX_REGISTRY_BEARER_TOKEN_BYTES",
     "DistributionRegistryTokenIssuer",
     "IssuedRegistryToken",
     "load_distribution_registry_token_issuer",

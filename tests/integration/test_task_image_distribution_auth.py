@@ -100,7 +100,7 @@ def token_registry(tmp_path_factory):
                 if time.monotonic() >= deadline:
                     pytest.fail("disposable token registry did not become ready")
                 time.sleep(0.05)
-            yield issuer, http
+            yield issuer, http, private_key
     finally:
         if registry is not None:
             registry.remove(force=True)
@@ -108,11 +108,12 @@ def token_registry(tmp_path_factory):
 
 
 @pytest.mark.parametrize("action", ["push", "pull"])
-def test_production_issuer_token_is_accepted_by_pinned_distribution(token_registry, action):
-    issuer, http = token_registry
+@pytest.mark.parametrize("cpu_arch,component", [("arm64", "task"), ("x86_64", "sidecar:cache")])
+def test_production_issuer_token_is_accepted_by_pinned_distribution(token_registry, action, cpu_arch, component):
+    issuer, http, _private_key = token_registry
     repository = publication_repository(
         purpose="production", shadow_campaign_id=None,
-        cpu_arch="arm64", attempt_id=uuid4(), component="task",
+        cpu_arch=cpu_arch, attempt_id=uuid4(), component=component,
     )
     now = datetime.now(UTC).replace(microsecond=0)
     issue = issuer.issue if action == "push" else issuer.issue_pull
@@ -129,3 +130,48 @@ def test_production_issuer_token_is_accepted_by_pinned_distribution(token_regist
         expected = 404  # Authorized, but this fresh repository has no manifest.
     # Never print the token, request, or headers when reporting auth failures.
     assert response.status_code == expected, response.text
+
+
+@pytest.mark.parametrize("restriction", [
+    "other_repository", "pull_cannot_push", "untrusted_key", "wrong_issuer",
+    "wrong_audience", "expired", "future", "expiry_leeway",
+])
+def test_distribution_enforces_trust_scope_and_token_time(token_registry, restriction):
+    issuer, http, private_key = token_registry
+    repository = publication_repository(
+        purpose="production", shadow_campaign_id=None,
+        cpu_arch="arm64", attempt_id=uuid4(), component="task",
+    )
+    now = datetime.now(UTC).replace(microsecond=0)
+    if restriction == "untrusted_key":
+        issuer = DistributionRegistryTokenIssuer(
+            private_key=rsa.generate_private_key(public_exponent=65537, key_size=3072),
+            registry_origin=issuer.registry_origin, service=issuer.service, issuer=issuer.issuer,
+        )
+    issue = issuer.issue_pull if restriction == "pull_cannot_push" else issuer.issue
+    if restriction in {"wrong_issuer", "wrong_audience"}:
+        # Produce a genuinely signed token, modifying only its declared trust
+        # identity. Never teach the fixture registry to trust caller headers.
+        issuer = DistributionRegistryTokenIssuer(
+            private_key=private_key,
+            registry_origin=issuer.registry_origin,
+            service="other-service" if restriction == "wrong_audience" else issuer.service,
+            issuer="other-issuer" if restriction == "wrong_issuer" else issuer.issuer,
+        )
+        issue = issuer.issue
+    offset = {"expired": -120, "future": 120, "expiry_leeway": -75}.get(restriction, 0)
+    issued_at = now + timedelta(seconds=offset)
+    issued = issue(
+        credential_id=uuid4(), repository=repository,
+        issued_at=issued_at, expires_at=issued_at + timedelta(seconds=45),
+    )
+    if restriction == "other_repository":
+        repository = publication_repository(
+            purpose="production", shadow_campaign_id=None,
+            cpu_arch="arm64", attempt_id=uuid4(), component="task",
+        )
+    response = http.post(
+        f"/v2/{repository}/blobs/uploads/",
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+    assert response.status_code == (202 if restriction == "expiry_leeway" else 401), response.text
