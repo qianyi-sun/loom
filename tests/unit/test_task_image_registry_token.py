@@ -145,10 +145,12 @@ def test_publication_repository_rejects_unavailable_or_noncanonical_inputs(
         publication_repository(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("bits", [3072, 4096])
 def test_loaded_issuer_signs_one_exact_standard_distribution_scope(
     tmp_path: Path,
+    bits: int,
 ) -> None:
-    private_key = _private_key()
+    private_key = _private_key(bits=bits)
     key_path = _owner_only(tmp_path / "registry-signing.pem", _pem(private_key))
     issuer = load_distribution_registry_token_issuer(_settings(tmp_path, key_path))
     repository = publication_repository(
@@ -167,6 +169,7 @@ def test_loaded_issuer_signs_one_exact_standard_distribution_scope(
     )
 
     expected_key_id = _expected_thumbprint(private_key)
+    assert len(issued.token.encode("ascii")) < 4096
     assert issued.key_id == expected_key_id
     assert issued.registry_origin == "https://registry.example:5443"
     assert issued.service == "registry.example"
@@ -302,6 +305,30 @@ def test_issuer_rejects_invalid_identity_repository_or_times(
 
     with pytest.raises((TypeError, ValueError)):
         issuer.issue(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("pull", [False, True])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_issuer_enforces_existing_bearer_size_limit_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pull: bool, overflow: bool,
+) -> None:
+    key_path = _owner_only(tmp_path / "registry-signing.pem", _pem(_private_key()))
+    issuer = load_distribution_registry_token_issuer(_settings(tmp_path, key_path))
+    # Isolate the existing wire ceiling without generating an enormous RSA key.
+    # Real signing/trust is exercised separately by pinned Distribution tests.
+    encoded = "a.b." + "c" * (16 * 1024 - 4 + int(overflow))
+    monkeypatch.setattr(jwt, "encode", lambda *args, **kwargs: encoded)
+    issue = issuer.issue_pull if pull else issuer.issue
+    values = dict(
+        credential_id=CREDENTIAL_ID,
+        repository=f"loom-task-image-attempts/arm64/{ATTEMPT_ID}/task",
+        issued_at=NOW, expires_at=NOW + timedelta(seconds=45),
+    )
+    if overflow:
+        with pytest.raises(TaskImageAuthorityConfigurationError, match=r"token.*limit"):
+            issue(**values)  # type: ignore[arg-type]
+    else:
+        assert issue(**values).token == encoded  # type: ignore[arg-type]
 
 
 def test_issuer_has_no_caller_selected_algorithm_or_claims(tmp_path: Path) -> None:
