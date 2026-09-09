@@ -264,6 +264,12 @@ func (s *orchestratorState) runClaim(claimID string, claimSecret *SecretBuffer) 
 	}
 	s.claimData = claim
 	s.built = nil
+	if claim.RegisteredBundle != nil {
+		// Keep native admission closed until renewable preparation and executor
+		// input ownership are composed. A strong claim must never fall back to V1.
+		s.record(BuildOutcomeTransientFailure, "registered_bundle_unavailable", claim.firstComponent())
+		return safeError("registered_bundle_unavailable")
+	}
 	bundleID, err := newUUID()
 	if err != nil {
 		s.record(BuildOutcomeTransientFailure, "uuid_failed", "")
@@ -714,6 +720,7 @@ type buildClaim struct {
 	LeaseExpiresAt    time.Time
 	LeaseExpiresAtPtr *time.Time
 	Plan              BuildPlan
+	RegisteredBundle  *RegisteredBundlePlan
 }
 
 func (c buildClaim) firstComponent() string {
@@ -759,24 +766,25 @@ type claimWire struct {
 }
 
 type buildPlanWire struct {
-	SchemaVersion            string               `json:"schema_version"`
-	GrantID                  string               `json:"grant_id"`
-	SessionID                string               `json:"session_id"`
-	Generation               int                  `json:"session_generation"`
-	MaterializeID            string               `json:"materialization_id"`
-	BuilderID                string               `json:"builder_id"`
-	TaskID                   string               `json:"task_id"`
-	TaskChecksum             string               `json:"task_checksum"`
-	CPUArch                  string               `json:"cpu_arch"`
-	Platform                 string               `json:"platform"`
-	BundleBucket             string               `json:"bundle_bucket"`
-	BundlePrefix             string               `json:"bundle_prefix"`
-	BundleFileMetadataSHA256 string               `json:"bundle_file_metadata_sha256"`
-	BundleFileLimit          int                  `json:"bundle_file_limit"`
-	BundleByteLimit          int64                `json:"bundle_byte_limit"`
-	BuildTimeoutSeconds      float64              `json:"build_timeout_seconds"`
-	AuthorizationExpiresAt   string               `json:"authorization_expires_at"`
-	Components               []buildComponentWire `json:"components"`
+	SchemaVersion               string               `json:"schema_version"`
+	GrantID                     string               `json:"grant_id"`
+	SessionID                   string               `json:"session_id"`
+	Generation                  int                  `json:"session_generation"`
+	MaterializeID               string               `json:"materialization_id"`
+	BuilderID                   string               `json:"builder_id"`
+	TaskID                      string               `json:"task_id"`
+	TaskChecksum                string               `json:"task_checksum"`
+	CPUArch                     string               `json:"cpu_arch"`
+	Platform                    string               `json:"platform"`
+	BundleBucket                string               `json:"bundle_bucket"`
+	BundlePrefix                string               `json:"bundle_prefix"`
+	BundleFileMetadataSHA256    string               `json:"bundle_file_metadata_sha256"`
+	BundleContentManifestSHA256 string               `json:"bundle_content_manifest_sha256,omitempty"`
+	BundleFileLimit             int                  `json:"bundle_file_limit"`
+	BundleByteLimit             int64                `json:"bundle_byte_limit"`
+	BuildTimeoutSeconds         float64              `json:"build_timeout_seconds"`
+	AuthorizationExpiresAt      string               `json:"authorization_expires_at"`
+	Components                  []buildComponentWire `json:"components"`
 }
 
 type buildComponentWire struct {
@@ -802,6 +810,9 @@ func parseBuildClaim(secret *SecretBuffer, binding claimBinding) (*buildClaim, e
 	if err := expectJSONEOF(decoder); err != nil {
 		return nil, errors.New("claim JSON invalid")
 	}
+	if err := validateRegisteredClaimFields(secret.data, wire); err != nil {
+		return nil, err
+	}
 	if wire.SchemaVersion != "loom.task-image-materialization-claim.v1" ||
 		wire.ClaimID != binding.ClaimID ||
 		!isCanonicalNonZeroUUID(wire.MaterializationID) ||
@@ -826,6 +837,7 @@ func parseBuildClaim(secret *SecretBuffer, binding claimBinding) (*buildClaim, e
 		LeaseExpiresAt:    expires,
 		LeaseExpiresAtPtr: &expires,
 		Plan:              plan,
+		RegisteredBundle:  wire.Plan.registeredBundlePlan(),
 	}, nil
 }
 
@@ -835,7 +847,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 		return BuildPlan{}, err
 	}
 	expectedBuilderID := "rootless:" + strings.ReplaceAll(binding.SessionID, "-", "")
-	if w.SchemaVersion != "loom.task-image-build-plan.v1" ||
+	if (w.SchemaVersion != "loom.task-image-build-plan.v1" && w.SchemaVersion != "loom.task-image-build-plan.v2") ||
 		w.GrantID != binding.GrantID ||
 		w.SessionID != binding.SessionID ||
 		w.Generation != binding.SessionGeneration ||
@@ -858,7 +870,7 @@ func (w buildPlanWire) buildPlan(materializationID string, binding claimBinding)
 		return BuildPlan{}, errors.New("build plan invalid")
 	}
 	authExpires, err := time.Parse(time.RFC3339, w.AuthorizationExpiresAt)
-	if err != nil || authExpires.Before(binding.Now) || authExpires.After(binding.SessionExpiresAt) {
+	if err != nil || !authExpires.After(binding.Now) || authExpires.After(binding.SessionExpiresAt) {
 		return BuildPlan{}, errors.New("build plan authorization invalid")
 	}
 	components := make([]BuildComponent, 0, len(w.Components))

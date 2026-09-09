@@ -45,7 +45,10 @@ func (b *DownloadedRegisteredBundle) Close() error {
 	b.rootFD, b.parentFD = -1, -1
 	// Reuse the pinned-descriptor private-tree cleanup owner. A renamed root
 	// cannot redirect recursive cleanup into its replacement; ambiguity surfaces.
-	return errors.Join(cleanupBuildCapture(parent, root, b.RelativeRoot), syscall.Close(parent))
+	if err := errors.Join(cleanupBuildCapture(parent, root, b.RelativeRoot), syscall.Close(parent)); err != nil {
+		return errors.Join(errCleanupAmbiguous, err)
+	}
+	return nil
 }
 
 func createRegisteredBundleDirectory(jobFD int) (*DownloadedRegisteredBundle, error) {
@@ -68,7 +71,7 @@ func createRegisteredBundleDirectory(jobFD int) (*DownloadedRegisteredBundle, er
 		syscall.Close(parent)
 		// No pinned root: leave cleanup to the allocation owner, never remove an
 		// unproven possibly replaced pathname.
-		return nil, errors.New("registered bundle directory could not be pinned")
+		return nil, errors.Join(errCleanupAmbiguous, errors.New("registered bundle directory could not be pinned"))
 	}
 	bundle := &DownloadedRegisteredBundle{RelativeRoot: name, parentFD: parent, rootFD: root}
 	if err := validateBuildCaptureDirectory(root); err != nil {

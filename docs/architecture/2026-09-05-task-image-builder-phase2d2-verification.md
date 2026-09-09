@@ -543,10 +543,14 @@ FD is kept outside the child-remapping slot; mandatory cgroup launch and readbac
 remain unchanged, without fallback. A real ELF exec test exercises descriptor
 inheritance across directory replacement with only cgroup admission substituted;
 it is not containment certification. Executor tests cover root context and
-sidecar names, plan-slice ownership and exact component-path binding. Callers must
-still cancel/join all builds before closing executor input and removing bytes;
-the existing orchestrator is not yet using this constructor or that full input
-lifecycle. A pathname reconstructed from the allocation directory is not
+sidecar names, plan-slice ownership and exact component-path binding. Executor
+close now cancels its single active build and joins all build-local deferred
+cleanup before releasing input. Concurrent closes serialize cleanup ownership;
+waiters honor cancellation. An unsuccessful join reports ambiguous cleanup and
+retains input for a later retry/allocation cleanup. The orchestration layer must
+still join its build goroutines and must not remove a downloaded tree after
+ambiguous executor close. It is not yet using this constructor or that complete
+input lifecycle. A pathname reconstructed from the allocation directory is not
 equivalent authority. An actual pinned TLS MinIO
 fixture now exercises verified upload → V2 authority issuance → this real Go
 downloader, including executable Unicode paths, without substituting a fake
@@ -567,6 +571,35 @@ unavailable rather than granting capability-selected endpoints or certificates;
 explicit null or incomplete trust rejects configuration. Release assembly still
 needs to install/hash this data member and require configured trust before native
 claims. Configuration parsing alone neither enables claims nor certifies a release.
+
+The Go claim reader now retains the V2 manifest, checksum, mode provenance,
+bucket/prefix and quotas as a separate immutable `RegisteredBundlePlan`. It
+preserves the original builder identity and rejects missing/null strong fields,
+V1 downgrade and invalid component/context bindings. Character limits match the
+Python plan (including astral Unicode): 512 for task ID, 4096 for prefix and
+component paths, plus the 64 KiB encoded plan ceiling. V1 does not gain registered
+content authority. `runClaim` still explicitly rejects V2 before legacy download;
+parser support alone does not open native execution or authority derivation.
+
+Registered preparation now composes actual guard capability issuance and the real
+TLS downloader with a single prebuild liveness owner. A session manager lends at
+most one owned, bounded locked-memory snapshot outside its mutex, so bundle I/O
+does not block heartbeat/renewal. Superseding the original secret does not destroy
+that active copy; returning from its callback destroys it. The captured session
+binds issuance only and never rewrites original claim provenance. Generation drift
+during issuance gets at most three fresh-operation attempts; unchanged-generation
+errors do not retry. Real TLS tests cover successor success, the attempt ceiling,
+unchanged-error rejection and destruction of discarded capabilities.
+
+One ten-minute prebuild ceiling bounds the phase; each issuance has a 45-second
+ceiling and liveness calls have five seconds. Capability/grant/session/lease limits
+remain independent and may expire earlier. Cancellation and failure join fetch
+before input disposal, including success racing cancellation. Clock regression,
+expiry and failed liveness reject acceptance. Cleanup ambiguity remains a distinct
+error without exposing transport secrets. This preparation entrypoint is tested
+but not called by native `runClaim` yet. Production composition still requires
+fresh start admission, end-to-end executor/input cleanup ownership, guard/runtime
+assembly and the remaining publication/execution/capacity activation gates.
 
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention
