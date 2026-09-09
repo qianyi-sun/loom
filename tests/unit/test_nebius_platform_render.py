@@ -22,6 +22,8 @@ def platform_inputs() -> tuple[dict, dict, dict]:
         "cluster_id",
     ):
         config[key] = "test-" + key.replace("_", "-")
+    config["project_id"] = "project-test"
+    config["quota_parent_id"] = "tenant-test"
     config["kubernetes_api_server"] = "https://api.cluster.test"
     config["execution_price"]["vcpu_microusd_per_hour"] = 1000
     for key in ("postgres_image", "backup_image"):
@@ -50,6 +52,13 @@ def platform_inputs() -> tuple[dict, dict, dict]:
         "images": images,
     }
     return config, candidate, profile
+
+
+def test_project_cannot_replace_tenant_quota_parent(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config["quota_parent_id"] = config["project_id"]
+    with pytest.raises(NebiusPlatformError, match=r"quota_parent_id.*tenant"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
 def test_independent_namespace_routing_storage_and_no_secret_material(

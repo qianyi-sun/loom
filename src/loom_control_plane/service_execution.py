@@ -262,7 +262,6 @@ async def persist_execution_catalog(
     """Persist immutable catalog rows, rejecting same-id semantic drift."""
 
     class_json = execution_class.model_dump(mode="json")
-    class_digest = canonical_digest(class_json)
     existing_class = await session.get(ServiceExecutionClass, execution_class.class_id)
     if existing_class is None:
         session.add(
@@ -270,19 +269,18 @@ async def persist_execution_catalog(
                 id=execution_class.class_id,
                 schema_version=execution_class.schema_version,
                 spec_json=class_json,
-                spec_sha256=class_digest,
+                spec_sha256=canonical_digest(class_json),
                 enabled=True,
             )
         )
         await session.flush()
-    elif existing_class.spec_sha256 != class_digest or existing_class.spec_json != class_json:
+    elif ExecutionClassV1.model_validate(existing_class.spec_json) != execution_class:
         raise ServiceExecutionConflict("execution class identity already has different content")
 
     for target in targets:
         if target.execution_class_id != execution_class.class_id:
             raise ServiceExecutionConflict("target binds a different execution class")
         target_json = target.model_dump(mode="json")
-        target_digest = canonical_digest(target_json)
         existing_target = await session.get(ServiceExecutionTarget, target.target_id)
         if existing_target is None:
             session.add(
@@ -292,7 +290,7 @@ async def persist_execution_catalog(
                     execution_class_id=target.execution_class_id,
                     schema_version=target.schema_version,
                     spec_json=target_json,
-                    spec_sha256=target_digest,
+                    spec_sha256=canonical_digest(target_json),
                     environment=target.environment,
                     provider=target.provider,
                     region=target.region,
@@ -303,9 +301,7 @@ async def persist_execution_catalog(
                     health_status="unknown",
                 )
             )
-        elif (
-            existing_target.spec_sha256 != target_digest or existing_target.spec_json != target_json
-        ):
+        elif ExecutionTargetV1.model_validate(existing_target.spec_json) != target:
             raise ServiceExecutionConflict(
                 "execution target identity already has different content"
             )

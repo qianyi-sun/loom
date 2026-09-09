@@ -99,12 +99,13 @@ missing or unsuccessful; manual diagnostics retain a separate check name.
 Converting a PR to draft alone does not trigger CI. A delayed draft snapshot
 from another subscribed event still validates normally.
 
-Concurrency groups include the PR, head SHA and base SHA. Same-candidate events
-may supersede earlier runs; older candidates may finish but cannot cancel a
-different head/base candidate. Labels retain their event-snapshot meaning and
-only add validation to path-inferred work. No event-order cache or check replay
-is used. Revalidating metadata costs runner time, but preserves automatic base
-and selector validation without another admission mechanism.
+Subscribed runs do not automatically cancel one another: an overlapping event
+can otherwise leave an empty cancelled suite with its required check still
+expected. Each run completes its selected validation. Draft opens and pushes
+already validate, so marking Ready does not start another run. Labels retain
+their event-snapshot meaning and only add validation to path-inferred work.
+No event-order cache or check replay is used. Other metadata events still cost
+runner time, preserving automatic base and selector validation.
 
 The Kubernetes lane exercises real disposable Kubernetes API operations and
 execution; system smoke retains the local Compose user flow. Both are

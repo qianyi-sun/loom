@@ -485,20 +485,29 @@ def test_planner_failure_is_never_accepted(result: str) -> None:
 def test_every_subscribed_pr_event_runs_a_real_stable_required_gate() -> None:
     workflow = _workflow(CI_WORKFLOW)
     assert set(_workflow_on(workflow)["pull_request"]["types"]) == {
-        "opened", "synchronize", "reopened", "ready_for_review", "edited", "labeled", "unlabeled",
+        "opened",
+        "synchronize",
+        "reopened",
+        "edited",
+        "labeled",
+        "unlabeled",
     }
     gate = workflow["jobs"]["repository-checks"]
     assert gate["if"] == "always()"
-    assert gate["name"] == "${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || 'repository-checks' }}"
+    assert (
+        gate["name"]
+        == "${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || 'repository-checks' }}"
+    )
     planner = workflow["jobs"]["workflow-plan"]
     assert "if" not in planner
     assert planner["steps"][0]["uses"].startswith("actions/checkout@")
     assert all("if" not in step for step in planner["steps"][:3])
     assert "filtered" not in json.dumps(workflow)
-    group = _normalized_expression(workflow["concurrency"]["group"])
-    assert "github.event.pull_request.head.sha" in group
-    assert "github.event.pull_request.base.sha" in group
-    assert "github.event_name == 'pull_request'" in workflow["concurrency"]["cancel-in-progress"]
+
+
+def test_subscribed_ci_runs_cannot_cancel_another_required_check_suite() -> None:
+    workflow = _workflow(CI_WORKFLOW)
+    assert "concurrency" not in workflow
 
 
 @pytest.mark.parametrize("mode", ["filtered", "", "invalid"])

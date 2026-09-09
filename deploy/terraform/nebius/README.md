@@ -155,3 +155,26 @@ non-secret public half of the capacity-observer key; keep it alongside the
 other protected exact-target inputs. Apply only the reviewed saved plan and
 only after the owner has approved its exact target, resources, maximum hourly
 and monthly cost, cleanup deadline, and residual-cost list.
+
+## Optional public Service allocations
+
+The cluster subnet denies public allocations by default. A public Kubernetes
+Service LoadBalancer needs its fixed allocation's pool to be available in that
+subnet. Once the existing network has the selected public pool attached, set
+`enable_public_service_allocations = true` in the protected foundation stack
+variables to let the subnet inherit those pools. This changes allocation
+eligibility for resources in the shared subnet; it does not automatically
+assign public addresses. Both system and execution node interfaces continue to
+omit `public_ip_address`.
+
+For the existing integration platform, inspect the foundation plan with this
+single opt-in: the expected infrastructure change is the existing target subnet
+`ipv4_public_pools.use_network_pools` from false to true, with no creates,
+deletes, allocation/IP replacement, network change or node-group update.
+Use the original foundation backend and variables, not the independent platform
+state. Review all other drift separately and obtain approval for this shared
+subnet update before applying; do not hide it behind an allocation replacement
+or a guessed LoadBalancer annotation.
+
+See [Nebius LoadBalancer configuration](https://docs.nebius.com/kubernetes/clusters/load-balancer)
+and the [subnet resource schema](https://docs.nebius.com/terraform-provider/reference/resources/vpc_v1_subnet).

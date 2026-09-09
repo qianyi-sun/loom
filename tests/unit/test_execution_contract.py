@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from copy import deepcopy
 from datetime import UTC, datetime
 
@@ -63,6 +67,22 @@ def test_nebius_class_is_provider_neutral_and_admits_exact_cpu_contract() -> Non
     assert decision.reasons == ()
     assert "provider" not in ExecutionClassV1.model_fields
     assert "provider" not in WorkloadRequirementsV1.model_fields
+
+
+def test_execution_class_json_is_stable_across_python_hash_seeds() -> None:
+    script = (
+        "from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1 as value; "
+        "print(value.model_dump_json())"
+    )
+    documents = [
+        subprocess.check_output(
+            [sys.executable, "-c", script], env={**os.environ, "PYTHONHASHSEED": seed}, text=True
+        )
+        for seed in ("0", "5", "8")
+    ]
+    assert len(set(documents)) == 1
+    network_access = json.loads(documents[0])["network_access"]
+    assert network_access == sorted(network_access)
 
 
 def test_provider_binding_lives_on_regional_execution_target() -> None:

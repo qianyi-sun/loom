@@ -9,7 +9,7 @@
   "public_host": "nebius.yylx.world",
   "public_allocation_id": "REPLACE_FROM_TERRAFORM",
   "project_id": "REPLACE_FROM_TERRAFORM",
-  "quota_parent_id": "REPLACE_FROM_TERRAFORM",
+  "quota_parent_id": "REPLACE_WITH_TENANT_ID",
   "execution_node_group_id": "REPLACE_FROM_TERRAFORM",
   "tls_secret_name": "loom-platform-public-tls",
   "db_tls_secret_name": "loom-platform-db-tls",

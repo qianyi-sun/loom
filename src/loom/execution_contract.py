@@ -18,7 +18,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from loom.models.task import TaskConfig
 
@@ -150,6 +150,10 @@ class ExecutionClassV1(_StrictContract):
     permits_host_network: bool
     permits_nested_containers: bool
     permits_host_devices: bool
+
+    @field_serializer("network_access", when_used="json")
+    def _serialize_network_access(self, value: frozenset[NetworkAccess]) -> list[str]:
+        return sorted(item.value for item in value)
 
     @model_validator(mode="after")
     def _forbid_host_escape_capabilities(self) -> ExecutionClassV1:

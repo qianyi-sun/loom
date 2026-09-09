@@ -93,3 +93,9 @@ variable "staging_spool" {
   })
   default = null
 }
+
+variable "enable_public_service_allocations" {
+  description = "Allow public LoadBalancer allocations from the target network pools. Nodes still receive private addresses only."
+  type        = bool
+  default     = false
+}
