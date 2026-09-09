@@ -222,7 +222,7 @@ async def _signed_job(session, issuer, *, worker_lease_seconds=60, binding_chang
     return job, owner, publications, distribution
 
 
-def _sign(job, component, private, key, distribution, binding_changes=None):
+def _sign(job, component, private, key, distribution, binding_changes=None, *, state=None):
     values = job.snapshot.model_dump(
         mode="json", by_alias=True, exclude={"components", "builder_id"}
     )
@@ -241,7 +241,7 @@ def _sign(job, component, private, key, distribution, binding_changes=None):
     statement = prepare_publication_statement(
         unsigned,
         key=key,
-        state=PublicationState(0, 1),
+        state=state or PublicationState(0, 1),
         distribution=distribution,
         signer_now=NOW + timedelta(seconds=14),
     )

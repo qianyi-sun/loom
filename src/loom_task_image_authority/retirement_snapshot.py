@@ -2,7 +2,7 @@
 
 These internal database helpers are neither reference eligibility nor retirement,
 execution-start, maintenance, or deletion authority. No caller-supplied snapshot
-may replace preparation in the eventual owned retirement transaction.
+may replace preparation in the owned retirement transaction.
 """
 
 from __future__ import annotations

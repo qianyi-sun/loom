@@ -7,17 +7,24 @@ from datetime import timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import event, select, text
+from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import Task, TaskImageAttemptRetention, TaskImageMaterialization
-from tests.integration.test_task_image_publication_completion import _complete, _signed_job, completion
+from loom_task_image_authority.materializations import TaskImageSessionMaterializationConflictError
+from tests.integration.test_task_image_publication_completion import (
+    _complete,
+    _signed_job,
+    completion,
+)
 from tests.integration.test_task_image_publication_jobs import _submit
 from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
 )
 from tests.integration.test_task_image_registry_credentials import NOW, _issue_first
-from tests.integration.test_task_image_registry_credentials import registry_issuer as registry_issuer
+from tests.integration.test_task_image_registry_credentials import (
+    registry_issuer as registry_issuer,
+)
 from tests.integration.test_task_image_retirement_snapshot import ORIGIN, _setup
 
 
@@ -29,21 +36,28 @@ def store():
 
 async def observe(factory, attempt_id, instant, **kwargs):
     return await store().observe_or_retire_attempt(
-        factory.kw["bind"], attempt_id=attempt_id, registry_origin=ORIGIN,
-        clock=lambda: instant, **kwargs,
+        factory.kw["bind"],
+        attempt_id=attempt_id,
+        registry_origin=ORIGIN,
+        clock=lambda: instant,
+        **kwargs,
     )
 
 
 @pytest.mark.parametrize("issued", [False, True])
 async def test_abandoned_observation_grace_retirement_and_permanent_replay(
-    registry_authority_session, registry_issuer, issued,
+    registry_authority_session,
+    registry_issuer,
+    issued,
 ):
     factory = registry_authority_session
     _, attempt, options = await _setup(factory, registry_issuer, issued=issued)
     instant = NOW + timedelta(hours=1)
     first = await observe(factory, attempt.id, instant)
     assert first.status == "observing" and first.unreferenced_since == instant
-    assert (await observe(factory, attempt.id, instant + timedelta(hours=24, microseconds=-1))).status == "observing"
+    assert (
+        await observe(factory, attempt.id, instant + timedelta(hours=24, microseconds=-1))
+    ).status == "observing"
     retired = await observe(factory, attempt.id, instant + timedelta(hours=24))
     assert retired.status == "retired" and retired.retired_at == instant + timedelta(hours=24)
     async with factory() as session:
@@ -54,7 +68,7 @@ async def test_abandoned_observation_grace_retirement_and_permanent_replay(
     async with factory() as session:
         row = await session.get(TaskImageAttemptRetention, attempt.id)
         assert (row.observed_at, row.canonical_inventory, row.inventory_sha256) == frozen
-        with pytest.raises(Exception, match="retired"):
+        with pytest.raises(TaskImageSessionMaterializationConflictError, match="retired"):
             await _issue_first(session, **options)
 
 
@@ -76,7 +90,8 @@ async def test_live_build_pin_resets_observed_grace(registry_authority_session, 
 
 
 async def test_job_total_deadline_pins_after_builder_lease_expires(
-    registry_authority_session, registry_issuer,
+    registry_authority_session,
+    registry_issuer,
 ):
     factory = registry_authority_session
     async with factory() as session:
@@ -90,7 +105,9 @@ async def test_job_total_deadline_pins_after_builder_lease_expires(
 
 @pytest.mark.parametrize("catalog_checksum", [None, "matching", "prefixed", "different"])
 async def test_completed_grace_catalog_pin_and_atomic_ready_clear(
-    registry_authority_session, registry_issuer, catalog_checksum,
+    registry_authority_session,
+    registry_issuer,
+    catalog_checksum,
 ):
     factory = registry_authority_session
     async with factory() as session:
@@ -111,18 +128,35 @@ async def test_completed_grace_catalog_pin_and_atomic_ready_clear(
         assert (await observe(factory, attempt_id, instant + timedelta(days=8))).status == "pinned"
         return
     assert first.status == "observing"
-    assert (await observe(factory, attempt_id, instant + timedelta(hours=168, microseconds=-1))).status == "observing"
+    assert (
+        await observe(factory, attempt_id, instant + timedelta(hours=168, microseconds=-1))
+    ).status == "observing"
     assert (await observe(factory, attempt_id, instant + timedelta(hours=168))).status == "retired"
     async with factory() as session:
         current = await session.get(TaskImageMaterialization, row.id)
         assert current.state == "retired" and current.registry_images == {}
         assert current.ready_at is None and current.ready_publication_operation_id is None
-        assert await completion().replay_completed_publication(session, operation_id=receipt.operation_id) == receipt
+        assert (
+            await completion().replay_completed_publication(
+                session, operation_id=receipt.operation_id
+            )
+            == receipt
+        )
 
 
-@pytest.mark.parametrize("table", ["tasks", "task_image_materializations", "task_image_materialization_attempts", "task_image_attempt_retention"])
+@pytest.mark.parametrize(
+    "table",
+    [
+        "tasks",
+        "task_image_materializations",
+        "task_image_materialization_attempts",
+        "task_image_attempt_retention",
+    ],
+)
 async def test_busy_fence_fails_promptly_and_releases_catalog(
-    registry_authority_session, registry_issuer, table,
+    registry_authority_session,
+    registry_issuer,
+    table,
 ):
     factory = registry_authority_session
     _, attempt, _ = await _setup(factory, registry_issuer)
@@ -144,7 +178,9 @@ async def test_busy_fence_fails_promptly_and_releases_catalog(
 
 @pytest.mark.parametrize("isolation", ["REPEATABLE READ", "AUTOCOMMIT"])
 async def test_writer_owns_actual_read_committed_transaction(
-    registry_authority_session, registry_issuer, isolation,
+    registry_authority_session,
+    registry_issuer,
+    isolation,
 ):
     factory = registry_authority_session
     _, attempt, _ = await _setup(factory, registry_issuer)
@@ -153,14 +189,21 @@ async def test_writer_owns_actual_read_committed_transaction(
 
     def capture(connection, cursor, statement, parameters, context, executemany):
         if "LOCK TABLE public.tasks IN SHARE MODE NOWAIT" in statement:
-            observed.append(tuple(connection.exec_driver_sql(
-                "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')"
-            ).one()))
+            observed.append(
+                tuple(
+                    connection.exec_driver_sql(
+                        "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')"
+                    ).one()
+                )
+            )
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
         await store().observe_or_retire_attempt(
-            engine, attempt_id=attempt.id, registry_origin=ORIGIN, clock=lambda: NOW + timedelta(hours=1),
+            engine,
+            attempt_id=attempt.id,
+            registry_origin=ORIGIN,
+            clock=lambda: NOW + timedelta(hours=1),
         )
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
