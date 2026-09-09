@@ -112,6 +112,25 @@ write encrypted credentials. Service and CP retain application DML permissions;
 only the bootstrap/migration job uses the database superuser. Future schema
 changes must update narrower grants alongside their runtime consumers.
 
+The actuator's database grants also cover the existing transaction locks and
+invoker-rights triggers used by its command/reconciliation path:
+
+| Table | Additional actuator privilege | Runtime use |
+| --- | --- | --- |
+| `execution_capacity_policies` | `UPDATE(updated_at)` | `reserve_execution_provisioning` takes a row lock; capacity limits and enablement remain read-only |
+| `execution_admission_policies` | `UPDATE(active_count, counter_updated_at)` | Terminal lease triggers release admission counters |
+| `execution_budget_policies` | `UPDATE(daily_reserved_microusd, monthly_reserved_microusd, updated_at)` | Terminal leases without a started Pod release their reserved budget |
+| `team_quotas` | `SELECT(team_id, in_flight_count)`, `UPDATE(in_flight_count)` | Trial terminal projection decrements its team's active count |
+
+[PostgreSQL row locks require UPDATE on at least one column](https://www.postgresql.org/docs/16/ddl-priv.html).
+The capacity grant permits changing its bookkeeping timestamp, not policy
+identity or settings. Admission and budget grants cover actual counter writes,
+not their ceilings, scopes, enablement or emergency-stop settings. Price
+snapshots, target-price bindings and capacity observations remain read-only.
+No table-wide policy update, new budget policy or privileged database function
+is introduced. Check this restricted-role path when changing its runtime SQL
+or triggers; a superuser-only test does not exercise these grants.
+
 Canonical artifacts/trajectories, transient execution source, and backup storage
 use distinct buckets and identities. Canonical outputs remain durable after
 execution source cleanup; source retention remains 86,400 seconds. Neither
