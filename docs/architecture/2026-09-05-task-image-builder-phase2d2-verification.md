@@ -511,7 +511,39 @@ version. Legacy V1 capabilities cannot satisfy a V2 plan, and the synchronous
 compatibility provider rejects strong plans before storage. Pinned TLS MinIO
 tests exercise verified upload, inventory, V2 issuance and actual signed GETs,
 including Unicode/plus/percent paths. These are authority interoperability tests,
-not evidence for the still-incomplete real Go downloader or native admission.
+not by themselves evidence for native admission.
+
+The native Go V2 reader independently reconstructs those manifest and legacy
+mode bytes. Paired Python/Go vectors cover quotes, HTML-sensitive characters,
+Unicode line separators, BMP/astral ordering and surrogate pairs. It rejects
+malformed UTF-8, escaped lone surrogates, missing/null mandatory fields, changed
+descriptors, identity/session mismatches, foreign origins/paths, expiry, duplicate
+query parameters and V1 downgrade. Go's ordinary JSON encoder is not used as a
+general RFC8785 encoder; a closed-schema encoder covers the manifest's validated
+path/integer domain and preserves the distinct legacy mode encoding.
+
+The new registered downloader consumes that reader and separately supplied TLS
+trust. It preserves complete signed URLs, disables proxy/ambient authorization,
+redirects and automatic decompression, and bounds headers, TLS/dial/header waits,
+socket read idle time and the whole operation deadline. Informational responses
+are rejected. Data is written through no-follow descriptors into a newly owned
+private input directory, separate from allocation runtime/output state. Each
+file must match its registered size/hash and portable mode. Clock and context
+checks surround I/O; filesystem sync cannot be interrupted, so a final post-sync
+check prevents expired acceptance. Failure cleans through the pinned private
+directory descriptor and surfaces ambiguous residual cleanup.
+
+The verified result hands off a duplicate directory descriptor, never a cached
+absolute pathname. A job-directory rename/replacement regression proves that
+acceptance and cleanup stay on the original input, preserving replacement data.
+The eventual executor must pass this descriptor to its context-sending process
+and join that consumer before input cleanup; a pathname reconstructed from the
+allocation directory is not equivalent authority. An actual pinned TLS MinIO
+fixture now exercises verified upload → V2 authority issuance → this real Go
+downloader, including executable Unicode paths, without substituting a fake
+downloader. Config/release-owned CA loading, V2 claim/orchestration, renewable
+prebuild work and descriptor-bound executor handoff remain unintegrated. This
+fixture is data-transfer acceptance, not a rootless native build or activation.
 
 Producer orchestration has not yet been switched to this stronger contract.
 Registration provenance, native materialization identity, publication/retention
@@ -571,9 +603,10 @@ identity. Database consumer tests seed explicit strong receipts; they are not
 evidence that native admission or content download is complete.
 
 Native derivation still rejects strong provenance before changing a lease.
-Manifest-bearing derivation and the real Go downloader are still required;
-inventory matching and V2 capability issuance are implemented but do not open
-that admission boundary. Producer orchestration remains unswitched. Do not infer manifest
+Manifest-bearing derivation and production wiring of the real Go downloader are
+still required; inventory matching, V2 capability issuance and tested native
+data transfer do not open that admission boundary. Producer orchestration remains
+unswitched. Do not infer manifest
 authority from mutable stored objects. Native admission remains closed until the
 complete producer-to-downloader path and remaining activation boundaries are
 verified.
