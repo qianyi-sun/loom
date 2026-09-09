@@ -694,6 +694,19 @@ validate a historically fenced reporter. Managed-base adoption still requires
 its original immutable configuration and durable application provenance; neither
 an acknowledgement nor current materialization can substitute for that origin.
 
+The internal `import_retired_applications` operator helper imports an entire
+application-only typed snapshot into the next immutable configuration. It requires
+real activated/drained/retired evidence, the exact final history, and unchanged
+materialized subjects, accounts and reporters. Existing installation records are
+reused; fresh and updated applications are not passed through shadow installation
+creation again. Static candidates remain bound to their pinned acknowledgements.
+Disabled applications are retained, and any build history is rejected until the
+build successor contract is connected. The helper composes ordinary configuration
+proposals and activation in one transaction; its key identifies that derived
+configuration activation, not a separate import receipt. Replay is historical and
+is unavailable while execution is active. It does not activate V4 execution or
+open a public endpoint.
+
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
 immutable base configuration, original create/update installation projection,
