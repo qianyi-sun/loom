@@ -11,7 +11,11 @@ from loom_capacity_manager.models import (
     CapacityConfigGeneration,
     CapacityDevelopmentProjection,
 )
-from loom_capacity_manager.store import ConfigurationConflictError, WriterFence
+from loom_capacity_manager.store import (
+    ConfigurationConflictError,
+    ExecutionConflictError,
+    WriterFence,
+)
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
 from tests.capacity_build_membership_fixtures import build_request, typed_sql_execution
 from tests.capacity_fixtures import development_projection
@@ -63,3 +67,23 @@ async def test_typed_managed_origin_cannot_be_replaced_by_consistent_mutable_pro
     await capacity_session.execute(text("UPDATE capacity_candidates SET attestation_payload=jsonb_set(attestation_payload,'{operation_id}',to_jsonb(CAST(:operation AS text))) WHERE subject_id=:subject"), {"operation": changed, "subject": origin.configuration.subject_id})
     with pytest.raises(ConfigurationConflictError):
         await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)
+
+
+async def test_typed_current_allocation_checks_unmodified_base_reporter(capacity_session):
+    management, preparation, _fleet, execution = await prepared(capacity_session)
+    subject = preparation.managed_application_origins[0].configuration
+    await capacity_session.execute(text("UPDATE capacity_demand_reporters SET configuration_generation=99 WHERE reporter_incarnation=:reporter"), {"reporter": subject.demand_reporter_incarnation})
+    # Origin and installation history remain intact; current capacity evidence is not.
+    assert (await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)).revision == 0
+    with pytest.raises(ConfigurationConflictError):
+        await management.load_allocation_input(capacity_session,
+            WriterFence(authority_incarnation=execution.authority_incarnation, writer_epoch=execution.writer_epoch))
+
+
+async def test_typed_prepared_epoch_is_not_current_reporter_activation_evidence(capacity_session):
+    management, _preparation, _fleet, execution = await typed_sql_execution(capacity_session,
+        managed_projection=development_projection(expected_configuration_epoch=1), activate=False)
+    assert (await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)).revision == 0
+    with pytest.raises(ExecutionConflictError, match="current activated authority"):
+        await management.load_allocation_input(capacity_session,
+            WriterFence(authority_incarnation=execution.authority_incarnation, writer_epoch=execution.writer_epoch))

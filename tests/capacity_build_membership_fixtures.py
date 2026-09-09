@@ -65,7 +65,7 @@ def application_origin_payload(configuration, acknowledgement, *, configuration_
         base_projection=projection, acknowledgement=acknowledgement)
 
 
-async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None):
+async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None, activate=True):
     fleet = fleet_with_development_template()
     fixture = await setup_execution(session, execution_policy=execution_policy(), fleet=fleet)
     origins = ()
@@ -134,6 +134,8 @@ async def typed_sql_execution(session, *, max_subjects=8, managed_projection=Non
     await session.flush()
     prepared = fixture.store._execution_context(authority, row)
     await register_execution_executors(session, replace(fixture, request=preparation), prepared)
+    if not activate:
+        return fixture.store, preparation, fleet, prepared
     row.state = "active"
     row.effective_ceiling = preparation.requested_ceiling
     row.effective_rate_per_minute = preparation.requested_rate_per_minute

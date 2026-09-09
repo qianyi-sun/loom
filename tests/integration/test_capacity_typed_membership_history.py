@@ -27,7 +27,11 @@ from loom_capacity_manager.store import (
     WriterFence,
 )
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
-from tests.capacity_build_membership_fixtures import application_request, build_request, typed_sql_execution
+from tests.capacity_build_membership_fixtures import (
+    application_request,
+    build_request,
+    typed_sql_execution,
+)
 from tests.integration.test_capacity_typed_membership_store import _apply, _transition
 
 

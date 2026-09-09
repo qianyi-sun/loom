@@ -16,11 +16,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.application_generation_store import (
-    require_application_generation_evidence,
     require_application_installation_evidence,
 )
+from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
 from loom_capacity_manager.build_generation_store import (
-    _require_staged_facts,
+    _require_build_installation_facts,
     _require_values,
     stage_build_generation_evidence,
 )
@@ -33,6 +33,7 @@ from loom_capacity_manager.contracts import (
     AccountPolicyV1,
     ConfigurationGenerationRefV1,
     ConfigurationSnapshotV1,
+    DynamicDevelopmentSubjectProjectionV1,
     FleetManifestV1,
     SubjectConfigurationV1,
     canonical_bytes,
@@ -53,6 +54,7 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityConfigGeneration,
     CapacityConfigurationEpoch,
+    CapacityDemandReporter,
     CapacityExecutionEpoch,
     CapacityPersonalMembershipEvent,
     CapacitySubject,
@@ -90,6 +92,7 @@ class _TypedHistory:
     results: tuple[PersonalMembershipResultV2, ...]
     latest: dict[UUID, PersonalMembershipResultV2]
     latest_requests: dict[UUID, PersonalMembershipMutationV2]
+    reporter_bindings: dict[UUID, tuple[SubjectConfigurationV1, str]]
 
     def snapshot(self, through_revision: int | None = None) -> PersonalMembershipSnapshotV2:
         revision = len(self.events) if through_revision is None else through_revision
@@ -103,12 +106,12 @@ class _TypedHistory:
         )
 
 
-async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _TypedHistory:
-    """Authenticate retained evidence, not current authority or permission to launch.
+async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: int) -> _TypedHistory:
+    """Authenticate immutable history and installation, never reporter currentness.
 
-    Read the whole log even for a historical prefix: reporter rotation is proved
-    by its successor, and the retained reporter represents its last generation.
-    Callers requiring currentness retain authority-first transactional fencing.
+    Read the whole log even for a prefix to authenticate installation origins and
+    lifecycle structure. A later epoch may have advanced mutable reporter rows.
+    Current consumers must use _load_typed_history under their authority fence.
     """
     if type(execution_epoch) is not int or execution_epoch <= 0:
         raise ConfigurationConflictError("typed membership execution epoch is invalid")
@@ -160,30 +163,66 @@ async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _T
         latest: dict[UUID, PersonalMembershipResultV2] = {}
         latest_requests: dict[UUID, PersonalMembershipMutationV2] = {}
         reporters: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1 | PersonalApplicationMemberV1]] = {}
-        application_origins: dict[tuple[UUID, int], PersonalMembershipMutationV2] = {}
+        application_origins: dict[tuple[UUID, int], DynamicDevelopmentSubjectProjectionV1] = {
+            (origin.configuration.subject_id, origin.configuration.deployment_generation): origin.installation_projection
+            for origin in preparation.managed_application_origins
+        }
+        reporter_bindings = {origin.configuration.demand_reporter_incarnation:
+            (origin.configuration, origin.base_projection.demand_reporter_token_sha256)
+            for origin in preparation.managed_application_origins}
         for event, result in zip(events, results, strict=True):
             original = parse_typed_membership_mutation(json.dumps(event.request_payload))
             if result.member.reincarnation is not None:
                 raise ConfigurationConflictError("typed membership history lifecycle is not yet admitted")
             if isinstance(original.command, PersonalApplicationCommandV2) and original.command.projection.operation_kind in {"create", "update"}:
-                application_origins[(event.subject_id, event.deployment_generation)] = original
+                application_origins[(event.subject_id, event.deployment_generation)] = original.command.projection
             latest[event.subject_id] = result
             latest_requests[event.subject_id] = original
             reporters[event.reporter_incarnation] = (original, result.member)
-        for reporter_id, (original, member) in reporters.items():
-            current_reporter = latest[member.configuration.subject_id].member.configuration.demand_reporter_incarnation
+            reporter_bindings[event.reporter_incarnation] = (result.member.configuration, original.command.projection.demand_reporter_token_sha256)
+        for original, member in reporters.values():
             if isinstance(member, PersonalBuildMemberV1):
-                await _require_staged_facts(session, original, member, preparation,
-                    reporter_state="current" if reporter_id == current_reporter else "fenced")
+                await _require_build_installation_facts(session, member, preparation)
             else:
                 origin = application_origins.get((member.configuration.subject_id, member.configuration.deployment_generation))
-                if origin is None or not isinstance(origin.command, PersonalApplicationCommandV2) or not isinstance(original.command, PersonalApplicationCommandV2):
+                if origin is None or not isinstance(original.command, PersonalApplicationCommandV2):
                     raise ConfigurationConflictError("typed application installation origin is unavailable")
-                await require_application_generation_evidence(session, member, original.command.projection, origin.command.projection,
-                    reporter_state="current" if reporter_id == current_reporter else "fenced")
-        return _TypedHistory(epoch, preparation, fleet, events, results, latest, latest_requests)
+                await require_application_installation_evidence(session, ManagedApplicationOriginV1(
+                    configuration=member.configuration, acknowledgement=member.acknowledgement,
+                    base_projection=original.command.projection, installation_projection=origin))
+        return _TypedHistory(epoch, preparation, fleet, events, results, latest, latest_requests, reporter_bindings)
     except ValueError as exc:
         raise ConfigurationConflictError("typed membership historical evidence is invalid") from exc
+
+
+async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _TypedHistory:
+    """Resolve reporting only from the explicitly current activated authority.
+
+    Used by allocation, mutation and current materialization, never by historical
+    snapshot reads. Do not select a tip by largest retained/prepared epoch or
+    recursively infer reporter state from an obsolete epoch's last event.
+    """
+    history = await _load_typed_immutable_history(session, execution_epoch)
+    authority = await session.get(CapacityAuthorityState, 1, populate_existing=True)
+    if authority is None or not isinstance(CapacityManagementStore._execution_context(authority, history.epoch), ExecutionAuthorityV2):
+        raise ExecutionConflictError("typed reporter evidence requires current activated authority")
+    tips = {origin.configuration.subject_id: origin.configuration for origin in history.preparation.managed_application_origins}
+    tips.update({identity: result.member.configuration for identity, result in history.latest.items()})
+    try:
+        for reporter_id, (subject, token) in history.reporter_bindings.items():
+            row = (await session.scalars(select(CapacityDemandReporter).where(
+                CapacityDemandReporter.subject_id == subject.subject_id,
+                CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
+                CapacityDemandReporter.reporter_incarnation == reporter_id,
+            ).execution_options(populate_existing=True))).one_or_none()
+            _require_values(row, {
+                "configuration_generation": subject.configuration_generation,
+                "deployment_generation": subject.deployment_generation, "token_sha256": token,
+                "state": "current" if tips[subject.subject_id].demand_reporter_incarnation == reporter_id else "fenced",
+            }, label="typed reporter")
+    except ValueError as exc:
+        raise ConfigurationConflictError("typed current reporter evidence changed") from exc
+    return history
 
 
 async def _require_account(session: AsyncSession, epoch: int, account: AccountPolicyV1, *, optional: bool = False) -> None:
@@ -270,7 +309,8 @@ class CapacityTypedMembershipStore:
     async def snapshot(
         self, session: AsyncSession, epoch: CapacityExecutionEpoch | int, *, through_revision: int | None = None,
     ) -> PersonalMembershipSnapshotV2:
-        history = await _load_typed_history(session, epoch.execution_epoch if isinstance(epoch, CapacityExecutionEpoch) else epoch)
+        """Return historical evidence only; this never certifies current reporting."""
+        history = await _load_typed_immutable_history(session, epoch.execution_epoch if isinstance(epoch, CapacityExecutionEpoch) else epoch)
         return history.snapshot(through_revision)
 
     async def verify_snapshot_materialization(

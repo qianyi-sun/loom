@@ -81,10 +81,10 @@ def _require_values(row: object | None, expected: dict[str, Any], *, label: str)
             raise ValueError(f"retained build {label} evidence changed")
 
 
-async def _require_staged_facts(
-    session: AsyncSession, request: PersonalMembershipMutationV2,
-    member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4, *, reporter_state: Literal["current", "fenced"] = "current",
+async def _require_build_installation_facts(
+    session: AsyncSession, member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4,
 ) -> None:
+    """Verify retained pending installation, independently of mutable reporting."""
     subject = member.configuration
     candidate = (await session.scalars(select(CapacityCandidate).where(
         CapacityCandidate.subject_id == subject.subject_id,
@@ -98,16 +98,6 @@ async def _require_staged_facts(
         CapacityDeploymentGeneration.deployment_generation == subject.deployment_generation,
     ).execution_options(populate_existing=True))).one_or_none()
     _require_values(deployment, _deployment_values(member, preparation), label="deployment")
-    reporter = (await session.scalars(select(CapacityDemandReporter).where(
-        CapacityDemandReporter.subject_id == subject.subject_id,
-        CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
-        CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,
-    ).execution_options(populate_existing=True))).one_or_none()
-    _require_values(reporter, {
-        "configuration_generation": subject.configuration_generation,
-        "deployment_generation": subject.deployment_generation, "state": reporter_state,
-        "token_sha256": request.command.projection.demand_reporter_token_sha256,
-    }, label="reporter")
     profiles = (await session.scalars(select(CapacityWorkerProfile).where(
         CapacityWorkerProfile.subject_id == subject.subject_id,
         CapacityWorkerProfile.subject_incarnation == subject.subject_incarnation,
@@ -123,6 +113,24 @@ async def _require_staged_facts(
             "shape_catalog": [shape.model_dump(mode="json") for shape in profile.worker_shapes],
             "narrowing_constraints": {"eligible_resource_domains": list(profile.eligible_resource_domains)},
         }, label="worker profile")
+
+
+async def _require_staged_facts(
+    session: AsyncSession, request: PersonalMembershipMutationV2,
+    member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4, *, reporter_state: Literal["current", "fenced"] = "current",
+) -> None:
+    await _require_build_installation_facts(session, member, preparation)
+    subject = member.configuration
+    reporter = (await session.scalars(select(CapacityDemandReporter).where(
+        CapacityDemandReporter.subject_id == subject.subject_id,
+        CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
+        CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,
+    ).execution_options(populate_existing=True))).one_or_none()
+    _require_values(reporter, {
+        "configuration_generation": subject.configuration_generation,
+        "deployment_generation": subject.deployment_generation, "state": reporter_state,
+        "token_sha256": request.command.projection.demand_reporter_token_sha256,
+    }, label="reporter")
 
 
 async def stage_build_generation_evidence(

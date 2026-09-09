@@ -784,6 +784,14 @@ fleet, full event chain and retained generation evidence. Historical prefixes
 remain readable after reporter rotation and teardown; the full chain proves the
 retired reporter's last generation. Current materialization validation separately
 rejects an old snapshot. The mutation transaction reuses this same history reader.
+Historical snapshots authenticate installation and event evidence, not mutable
+reporter currentness. Current allocation, mutation/replay and materialization
+checks additionally resolve the explicitly current activated authority and verify
+every retained reporter against its last current-epoch event or pinned base
+binding. A prepared epoch is not activation evidence. No reader selects authority
+by the largest stored epoch, and historical installation reads do not recursively
+require an obsolete reporter to remain current. A readable historical snapshot
+cannot substitute for these current checks.
 Allocation input loading explicitly returns the typed input with base applications
 and owner build services, reusing the existing demand, pool, reservation, physical
 commitment and fairness readers. Disabled build services and old physical jobs
