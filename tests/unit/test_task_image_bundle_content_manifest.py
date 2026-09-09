@@ -65,7 +65,10 @@ def test_manifest_is_canonical_and_verifies_expected_digest(tmp_path):
 
 @pytest.mark.parametrize("changed", ["content", "size", "mode", "path", "duplicate", "parent_conflict", "unknown", "unsafe_path", "bad_mode", "bad_hash"])
 def test_manifest_rejects_digest_or_structural_mutation(tmp_path, changed):
-    from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest, parse_task_image_bundle_manifest
+    from loom.task_image_bundle_manifest import (
+        capture_task_image_bundle_manifest,
+        parse_task_image_bundle_manifest,
+    )
 
     (tmp_path / "a").write_bytes(b"one")
     manifest = capture_task_image_bundle_manifest(tmp_path)
@@ -114,3 +117,59 @@ def test_capture_refuses_non_owned_regular_tree_entries(tmp_path, kind):
         os.mkfifo(tmp_path / "pipe")
     with pytest.raises(ValueError):
         capture_task_image_bundle_manifest(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["read_mutation", "late_mutation", "count", "bytes", "entries", "depth", "empty", "root_symlink"])
+def test_capture_checks_stability_and_whole_tree_budgets(tmp_path, monkeypatch, kind):
+    import os
+
+    from loom import task_image_bundle_manifest as module
+
+    root = tmp_path / "tree"
+    root.mkdir()
+    if kind != "empty":
+        (root / "a").write_bytes(b"one")
+        (root / "b").write_bytes(b"two")
+    if kind in {"read_mutation", "late_mutation"}:
+        original_read = os.read
+        calls = []
+
+        def read(descriptor, size):
+            payload = original_read(descriptor, size)
+            if payload:
+                calls.append(payload)
+                if len(calls) == (1 if kind == "read_mutation" else 2):
+                    (root / "a").write_bytes(b"mutated")
+            return payload
+
+        monkeypatch.setattr(os, "read", read)
+    elif kind == "count":
+        monkeypatch.setattr(module, "MAX_TASK_IMAGE_BUILD_BUNDLE_FILES", 1)
+    elif kind == "bytes":
+        monkeypatch.setattr(module, "MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES", 5)
+    elif kind == "entries":
+        monkeypatch.setattr(module, "_MAX_TREE_ENTRIES", 1)
+    elif kind == "depth":
+        (root / "nested" / "deeper").mkdir(parents=True)
+        monkeypatch.setattr(module, "_MAX_TREE_DEPTH", 1)
+    elif kind == "root_symlink":
+        link = tmp_path / "alias"
+        link.symlink_to(root, target_is_directory=True)
+        root = link
+    with pytest.raises(ValueError):
+        module.capture_task_image_bundle_manifest(root)
+
+
+def test_legacy_order_and_mode_sidecar_encoding_have_independent_unicode_vectors(tmp_path):
+    from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+
+    names = ("a/file", "a.ext", "astral-😀", "combining-é", "<&>", "private-\ue000")
+    for name in names:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+    manifest = capture_task_image_bundle_manifest(tmp_path)
+    assert manifest.task_checksum == task_checksum(tmp_path)
+    assert manifest.bundle_file_metadata_sha256 == bundle_file_metadata_sha256(tmp_path).removeprefix("sha256:")
+    assert b"\\ud83d\\ude00" in manifest.mode_metadata_bytes
+    assert "😀".encode() in manifest.canonical_bytes
