@@ -110,6 +110,8 @@ async def test_reads_exact_bytes_over_verified_tls_and_closes_connection(tls_lis
     b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nPrivate: data\r\n\r\n",
     b"HTTP/1.1 200 OK\r\nPrivate: " + b"x" * 1024 + b"\r\nContent-Length: 0\r\n\r\n",
     b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx",
+    b"HTTP/1.1 200 " + b"X" * (513 - len(b"HTTP/1.1 200 \r\nContent-Length: 1\r\n\r\n")) + b"\r\nContent-Length: 1\r\n\r\nx",
+    b"HTTP/1.1 200 OK\r\nX:" + b" " * (513 - len(b"HTTP/1.1 200 OK\r\nX:a\r\nContent-Length: 1\r\n\r\n")) + b"a\r\nContent-Length: 1\r\n\r\nx",
 ], ids=lambda _: "unsafe-wire")
 async def test_rejects_unsafe_response_without_echo_or_redirect(tls_listing, response):
     tls_listing.response = response
@@ -165,3 +167,84 @@ async def test_expired_deadline_or_closed_reader_never_opens_connection(tls_list
     with pytest.raises(RuntimeError):
         await reader.fetch(tls_listing.url, deadline=_deadline())
     assert not tls_listing.requests
+
+
+async def test_raw_chunk_framing_counts_toward_total_wire_limit(tls_listing):
+    tls_listing.response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + b"1\r\nx\r\n" * 50 + b"0\r\n\r\n"
+    async with _reader(tls_listing, maximum_wire_bytes=100) as reader:
+        with pytest.raises(RuntimeError):
+            await reader.fetch(tls_listing.url, deadline=_deadline())
+
+
+async def test_valid_chunked_response_and_identity_encoding(tls_listing):
+    tls_listing.response = b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n<xm\r\n3\r\nl/>\r\n0\r\n\r\n"
+    async with _reader(tls_listing) as reader:
+        assert await reader.fetch(tls_listing.url, deadline=_deadline()) == b"<xml/>"
+
+
+async def test_different_origin_is_rejected_before_connection(tls_listing):
+    async with _reader(tls_listing) as reader:
+        with pytest.raises(RuntimeError):
+            await reader.fetch("https://foreign.example/loom-bundles?private=1", deadline=_deadline())
+    assert not tls_listing.requests
+
+
+async def test_tls_certificate_must_match_trusted_ca(tls_listing, monkeypatch):
+    # Loading the system roots instead of the disposable CA cannot validate the
+    # self-signed fixture. Keep hostname checking and CERT_REQUIRED unchanged.
+    def system_roots(context, *args, **kwargs):
+        context.load_default_certs()
+
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", system_roots)
+    async with _reader(tls_listing) as reader:
+        with pytest.raises(RuntimeError):
+            await reader.fetch(tls_listing.url, deadline=_deadline())
+    assert not tls_listing.requests
+
+
+async def test_shutdown_closes_active_and_queued_reads(tls_listing):
+    tls_listing.response = None
+    reader = _reader(tls_listing, maximum_concurrent_reads=1)
+    first = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline()))
+    await asyncio.wait_for(tls_listing.received.wait(), 2)
+    second = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline()))
+    await asyncio.sleep(0)  # Admit the queued coroutine, not a wall-time assumption.
+    await asyncio.gather(reader.aclose(), reader.aclose())
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    await asyncio.wait_for(tls_listing.closed.wait(), 2)
+    assert len(tls_listing.requests) == 1
+
+
+async def test_cancelled_connect_handoff_aborts_orphaned_writer(tls_listing, monkeypatch):
+    entered, cancelled, aborted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def handoff(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            return None, SimpleNamespace(transport=SimpleNamespace(abort=aborted.set))
+
+    monkeypatch.setattr(asyncio, "open_connection", handoff)
+    async with _reader(tls_listing) as reader:
+        request = asyncio.create_task(reader.fetch(tls_listing.url, deadline=_deadline()))
+        await entered.wait()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+    assert cancelled.is_set()
+    await asyncio.wait_for(aborted.wait(), 2)
+
+
+@pytest.mark.parametrize("limits", [
+    {"connect_timeout_seconds": 0.0}, {"idle_timeout_seconds": float("nan")},
+    {"total_timeout_seconds": float("inf")}, {"total_timeout_seconds": 121.0},
+    {"maximum_body_bytes": 4194305}, {"maximum_header_bytes": 65537},
+    {"maximum_wire_bytes": 8388609}, {"maximum_concurrent_reads": True},
+    {"maximum_concurrent_reads": 33},
+])
+def test_limits_are_finite_typed_and_bounded(limits):
+    with pytest.raises(ValueError):
+        _module().S3ListingReadLimits(**limits)
