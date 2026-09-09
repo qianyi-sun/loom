@@ -697,7 +697,7 @@ chmod 0600 "$status_evidence.sha256"
 The successful canonical shape without a prepared native builder is:
 
 ```json
-{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":34,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
+{"blockers":[],"components":[{"name":"cluster-resources","observed":11,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":34,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
 ```
 
 A prepared native-builder profile adds the inert object-store Service and its
@@ -705,7 +705,7 @@ TLS Ingress, so its successful canonical shape differs only in the namespaced
 resource count:
 
 ```json
-{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":36,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
+{"blockers":[],"components":[{"name":"cluster-resources","observed":11,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":36,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
 ```
 
 The namespaced observed count may include retained successful migration
