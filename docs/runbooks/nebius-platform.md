@@ -131,6 +131,15 @@ No table-wide policy update, new budget policy or privileged database function
 is introduced. Check this restricted-role path when changing its runtime SQL
 or triggers; a superuser-only test does not exercise these grants.
 
+Gateway call recording creates or verifies the Trial and event-stream rows in
+`data_lifecycle_authorities`. Its role has `SELECT` and `INSERT` on that table,
+without `UPDATE` or `DELETE`: it may bind a call to its owner, but cannot change
+existing retention, pinning or deletion state. These permissions are installed
+by database bootstrap, including repeat runs. A Gateway 500 during call recording
+can occur **after the upstream model returned successfully**; an empty
+`llm_calls` result then means missing persisted usage, not proof of zero upstream
+calls. Inspect the Gateway exception before retrying a metered request.
+
 Canonical artifacts/trajectories, transient execution source, and backup storage
 use distinct buckets and identities. Canonical outputs remain durable after
 execution source cleanup; source retention remains 86,400 seconds. Neither
