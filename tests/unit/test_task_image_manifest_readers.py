@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from unittest.mock import patch
 from uuid import uuid4
@@ -11,10 +12,40 @@ from loom.task_image_materialization import task_image_materialization_key
 from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_worker import main_loop, task_image_builder
 from loom_worker.runner_pool import RunnerPool
+from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.unit.test_main_loop_cleanup import _FakeCPClient, _FakeSettings, _RunnerDouble
 from tests.unit.test_task_image_builder import _claim, _settings
 from tests.unit.test_task_image_bundle_content_manifest import _legacy_collision
+
+
+def test_replaced_transport_sidecar_rejects_without_unlinking_replacement(tmp_path, monkeypatch):
+    left, _right = _legacy_collision(tmp_path)
+    manifest = capture_task_image_bundle_manifest(left)
+    sidecar = left / BUNDLE_FILE_METADATA_NAME
+    sidecar.write_bytes(manifest.mode_metadata_bytes)
+    original_inode = sidecar.stat().st_ino
+    original_read = os.read
+    changed = False
+
+    def read(descriptor, size):
+        nonlocal changed
+        data = original_read(descriptor, size)
+        if not changed and os.fstat(descriptor).st_ino == original_inode:
+            changed = True
+            sidecar.rename(tmp_path / "previous-sidecar")
+            sidecar.write_bytes(manifest.mode_metadata_bytes)
+        return data
+
+    monkeypatch.setattr(os, "read", read)
+    with pytest.raises(task_image_builder.TaskImageBuildError, match="content manifest"):
+        verified_task_image_cache_identity(
+            left,
+            task_checksum=manifest.task_checksum,
+            source_provenance={"bundle_content_manifest_sha256": manifest.digest},
+        )
+    assert changed
+    assert sidecar.read_bytes() == manifest.mode_metadata_bytes
 
 
 @pytest.mark.parametrize("matching", [False, True])
