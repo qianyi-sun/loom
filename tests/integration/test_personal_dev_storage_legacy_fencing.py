@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.db.schema import DevInstance
 from loom.dev_instance_provisioner import DevInstanceConflictError
 from loom.dev_instance_store import SqlAlchemyDevInstanceStore
 from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
@@ -53,5 +54,43 @@ async def test_legacy_reservation_rejects_failed_bound_environment(
             await session.commit()
         async with sessions() as session:
             assert await SqlAlchemyDevInstanceStore(session).get(request.name) == before
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("action", ("create", "destroy"))
+async def test_legacy_reservation_refreshes_storage_binding_under_lock(
+    isolated_migration_postgres_url, action,
+):
+    from tests.integration.test_personal_dev_storage_recreation import _retired_legacy
+
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        request, access, _ = await _retired_legacy(sessions)
+        async with sessions() as legacy_session:
+            # Keep the ORM entity alive: locking must refresh this old view,
+            # not trust a cached NULL binding after another session opts in.
+            cached = await legacy_session.get(DevInstance, request.name)
+            assert cached.storage_binding is None
+            store = SqlAlchemyDevInstanceStore(legacy_session)
+            requested = replace(await store.get(request.name), operation_id=uuid4(),
+                                candidate_sha="b" * 40)
+            async with sessions() as session:
+                created = await SqlAlchemyPersonalDevEnvironmentAuthority(
+                    session, storage_layout="incarnation-v1",
+                ).apply(request, access_binding=access, now=_NOW)
+            with pytest.raises(DevInstanceConflictError, match="personal"):
+                if action == "create":
+                    await store.claim_create(requested)
+                else:
+                    await store.claim_destroy(
+                        request.name, operation_id=uuid4(), keep_data=False, now=_NOW,
+                    )
+            await legacy_session.commit()
+        async with sessions() as session:
+            after = await SqlAlchemyDevInstanceStore(session).get(request.name)
+            assert after.operation_id == created.operation.id
+            assert after.storage_binding == created.operation.storage_binding
     finally:
         await engine.dispose()
