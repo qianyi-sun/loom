@@ -128,6 +128,51 @@ def test_materialization_key_rejects_malformed_checksum() -> None:
         )
 
 
+def test_manifest_qualified_key_never_reuses_legacy_or_other_content() -> None:
+    values = dict(task_id="benchmark/task-1", task_checksum="a" * 64, cpu_arch="arm64")
+    legacy = task_image_materialization_key(**values)
+    assert task_image_materialization_key(**values, bundle_content_manifest_sha256="") == legacy
+    strong = task_image_materialization_key(**values, bundle_content_manifest_sha256="b" * 64)
+    assert strong != legacy
+    assert strong == task_image_materialization_key(
+        **{**values, "task_checksum": "sha256:" + "a" * 64},
+        bundle_content_manifest_sha256="b" * 64,
+    )
+    alternatives = [
+        {**values, "task_id": "benchmark/task-2", "bundle_content_manifest_sha256": "b" * 64},
+        {**values, "task_checksum": "c" * 64, "bundle_content_manifest_sha256": "b" * 64},
+        {**values, "cpu_arch": "x86_64", "bundle_content_manifest_sha256": "b" * 64},
+        {**values, "bundle_content_manifest_sha256": "c" * 64},
+    ]
+    assert (
+        len({legacy, strong, *(task_image_materialization_key(**item) for item in alternatives)})
+        == 6
+    )
+
+
+@pytest.mark.parametrize(
+    "digest", [None, 1, False, "A" * 64, "sha256:" + "b" * 64, "b" * 63, "b" * 64 + "\n"]
+)
+def test_manifest_key_rejects_noncanonical_digest(digest: object) -> None:
+    with pytest.raises(ValueError, match="bundle_content_manifest_sha256"):
+        task_image_materialization_key(
+            task_id="benchmark/task-1",
+            task_checksum="a" * 64,
+            cpu_arch="arm64",
+            bundle_content_manifest_sha256=digest,  # type: ignore[arg-type]
+        )
+
+
+def test_manifest_key_rejects_embedded_identity_separator() -> None:
+    with pytest.raises(ValueError, match="task_id"):
+        task_image_materialization_key(
+            task_id="benchmark\0task-1",
+            task_checksum="a" * 64,
+            cpu_arch="arm64",
+            bundle_content_manifest_sha256="b" * 64,
+        )
+
+
 def test_execution_grant_requires_exact_snapshot_component_set() -> None:
     with pytest.raises(ValueError, match="registry_images do not match"):
         TaskImageExecutionGrantV1.model_validate(

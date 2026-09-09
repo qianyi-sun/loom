@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from uuid import uuid4
+
+import pytest
+from alembic import command
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import DBAPIError
+
+from loom.db.schema import TaskImageMaterialization
+from tests.integration.test_task_image_registry_credential_migration import _config
+
+TABLE = "task_image_materializations"
+COLUMN = "bundle_content_manifest_sha256"
+CHECKSUM = "a" * 64
+
+
+def _key(digest: str = "") -> str:
+    parts = [
+        "task-image-materialization-v2" if digest else "task-image-materialization-v1",
+        "manifest-identity",
+        CHECKSUM,
+        "arm64",
+    ]
+    if digest:
+        parts.append(digest)
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def _insert(connection, expected_digest: str = "", **changes):
+    values = dict(
+        id=uuid4(),
+        key=_key(expected_digest),
+        checksum=CHECKSUM,
+        digest=expected_digest,
+        provenance=json.dumps({COLUMN: expected_digest} if expected_digest else {}),
+    )
+    values.update(changes)
+    connection.execute(
+        text(f"""
+        INSERT INTO {TABLE}
+          (id, materialization_key, task_id, task_checksum, cpu_arch,
+           task_config, {COLUMN}, task_source_provenance)
+        VALUES (:id, :key, 'manifest-identity', :checksum, 'arm64',
+          '{{}}'::jsonb, :digest, CAST(:provenance AS jsonb))
+    """),
+        values,
+    )
+    return values["id"]
+
+
+def test_manifest_identity_preserves_legacy_and_versions_uniqueness(
+    isolated_migration_postgres_url,
+):
+    config = _config(isolated_migration_postgres_url)
+    command.downgrade(config, "0135")
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        legacy_id = uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"""
+                INSERT INTO {TABLE}
+                  (id, materialization_key, task_id, task_checksum, cpu_arch, task_config)
+                VALUES (:id, :key, 'manifest-identity', :checksum, 'arm64', '{{}}'::jsonb)
+            """),
+                dict(id=legacy_id, key=_key(), checksum=CHECKSUM),
+            )
+        command.upgrade(config, "head")
+        assert {item["name"] for item in inspect(engine).get_columns(TABLE)} == set(
+            TaskImageMaterialization.__table__.columns.keys()
+        )
+        assert COLUMN in TaskImageMaterialization.__table__.columns
+        with engine.begin() as connection:
+            assert connection.execute(
+                text(f"SELECT id, materialization_key, {COLUMN}, state FROM {TABLE}")
+            ).one() == (legacy_id, _key(), "", "queued")
+            _insert(connection, "b" * 64)
+            _insert(connection, "c" * 64)
+            assert connection.scalar(text(f"SELECT count(*) FROM {TABLE}")) == 3
+        # Both the key uniqueness and the four-part natural identity are required.
+        for digest in ("", "b" * 64, "c" * 64):
+            with pytest.raises(DBAPIError):
+                with engine.begin() as connection:
+                    _insert(connection, digest)
+        unique = {
+            item["name"]: item["column_names"]
+            for item in inspect(engine).get_unique_constraints(TABLE)
+        }
+        assert unique["task_image_materializations_task_arch_uidx"] == [
+            "task_id",
+            "task_checksum",
+            "cpu_arch",
+            COLUMN,
+        ]
+        with pytest.raises(DBAPIError, match="manifest-qualified materializations"):
+            command.downgrade(config, "0135")
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0136"
+            assert connection.scalar(text(f"SELECT count(*) FROM {TABLE}")) == 3
+    finally:
+        engine.dispose()
+
+
+def test_manifest_identity_database_binding_and_immutability(isolated_migration_postgres_url):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        assert COLUMN in {item["name"] for item in inspect(engine).get_columns(TABLE)}
+        invalid = [
+            dict(digest=None),
+            dict(digest="B" * 64),
+            dict(digest="b" * 63),
+            dict(digest="sha256:" + "b" * 64),
+            dict(key="d" * 64),
+            *(
+                dict(provenance=json.dumps(value))
+                for value in (
+                    {},
+                    None,
+                    [],
+                    {COLUMN: None},
+                    {COLUMN: ""},
+                    {COLUMN: "c" * 64},
+                    {COLUMN: ["b" * 64]},
+                    {COLUMN: True},
+                )
+            ),
+        ]
+        for changes in invalid:
+            digest = changes.pop("digest", "b" * 64)
+            with pytest.raises(DBAPIError):
+                with engine.begin() as connection:
+                    _insert(connection, "b" * 64, **{**changes, "digest": digest})
+        # The absence of a discriminator is not permission to silently erase stronger provenance.
+        for value in (None, "", "b" * 64):
+            with pytest.raises(DBAPIError):
+                with engine.begin() as connection:
+                    _insert(connection, provenance=json.dumps({COLUMN: value}))
+        with engine.begin() as connection:
+            strong_id = _insert(connection, "b" * 64)
+            legacy_id = _insert(connection)
+        updates = [
+            "id = gen_random_uuid()",
+            "task_id = 'rewritten'",
+            "task_checksum = repeat('d', 64)",
+            "cpu_arch = 'x86_64'",
+            "materialization_key = repeat('d', 64)",
+            "task_config = '{\"changed\":true}'::jsonb",
+            "task_source = 's3://other/source/'",
+            "task_source_provenance = task_source_provenance || '{\"extra\":true}'::jsonb",
+            f"{COLUMN} = '', task_source_provenance = '{{}}'::jsonb, materialization_key = :legacy_key",
+        ]
+        for assignment in updates:
+            with pytest.raises(DBAPIError):
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(f"UPDATE {TABLE} SET {assignment} WHERE id = :id"),
+                        dict(id=strong_id, legacy_key=_key()),
+                    )
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(f"""UPDATE {TABLE} SET
+                    {COLUMN} = repeat('c', 64), materialization_key = :key,
+                    task_source_provenance = jsonb_build_object('{COLUMN}', repeat('c', 64))
+                    WHERE id = :id"""),
+                    dict(id=legacy_id, key=_key("c" * 64)),
+                )
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"UPDATE {TABLE} SET state = 'failed', attempt_count = 1 WHERE id = :id"),
+                dict(id=strong_id),
+            )
+            assert (
+                connection.scalar(
+                    text(f"SELECT state FROM {TABLE} WHERE id = :id"), dict(id=strong_id)
+                )
+                == "failed"
+            )
+            # A BEFORE trigger can rewrite columns not named by the UPDATE. The AFTER
+            # invariant must still inspect the final row, not just UPDATE OF fields.
+            connection.execute(
+                text(f"""
+                CREATE FUNCTION test_rewrite_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN NEW.task_source := 'rewritten'; RETURN NEW; END $$;
+                CREATE TRIGGER test_rewrite_identity BEFORE UPDATE ON {TABLE}
+                FOR EACH ROW EXECUTE FUNCTION test_rewrite_identity();
+            """)
+            )
+        with pytest.raises(DBAPIError, match="identity is immutable"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(f"UPDATE {TABLE} SET attempt_count = 2 WHERE id = :id"), dict(id=strong_id)
+                )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("provenance", [{COLUMN: "b" * 64}, {COLUMN: None}])
+def test_manifest_identity_upgrade_refuses_inferred_authority(
+    isolated_migration_postgres_url, provenance
+):
+    config = _config(isolated_migration_postgres_url)
+    command.downgrade(config, "0135")
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"""INSERT INTO {TABLE}
+                (id, materialization_key, task_id, task_checksum, cpu_arch, task_config, task_source_provenance)
+                VALUES (:id, :key, 'manifest-identity', :checksum, 'arm64', '{{}}'::jsonb, CAST(:provenance AS jsonb))
+            """),
+                dict(id=uuid4(), key=_key(), checksum=CHECKSUM, provenance=json.dumps(provenance)),
+            )
+        with pytest.raises(DBAPIError, match="unexpected content-manifest provenance"):
+            command.upgrade(config, "head")
+        assert COLUMN not in {item["name"] for item in inspect(engine).get_columns(TABLE)}
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0135"
+    finally:
+        engine.dispose()
+
+
+def test_manifest_identity_migration_legacy_roundtrip_and_busy_lock(
+    isolated_migration_postgres_url,
+):
+    config = _config(isolated_migration_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            legacy_id = _insert(connection)
+        for operation, revision in ((command.downgrade, "0135"), (command.upgrade, "head")):
+            with engine.begin() as connection:
+                connection.execute(text(f"SELECT id FROM {TABLE}"))
+                with pytest.raises(DBAPIError, match="could not obtain lock"):
+                    operation(config, revision)
+            operation(config, revision)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(f"SELECT id, materialization_key, {COLUMN} FROM {TABLE}")
+            ).one() == (legacy_id, _key(), "")
+    finally:
+        engine.dispose()
