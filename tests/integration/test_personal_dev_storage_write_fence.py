@@ -70,8 +70,8 @@ async def test_delayed_capacity_seed_cannot_overwrite_recreated_namespace(
     "pause_at", ("before_create", "after_create", "before_replace", "before_replace_absent")
 )
 async def test_secret_two_phase_write_fences_namespace_replacement(
-    disposable_storage_kubectl,
-    pause_at,  # noqa: F811
+    disposable_storage_kubectl,  # noqa: F811
+    pause_at,
 ):
     from loom.personal_dev_storage_secret_write import write_storage_secret
 
@@ -322,13 +322,17 @@ async def test_capacity_seed_cas_loser_stops_before_database_mutation(
     try:
         await asyncio.wait_for(paused.wait(), timeout=15)
         winner = replace(first, reporter_token="w" * 48, reporter_incarnation=uuid4())
-        await installer._persist_credentials(claim, identity, winner)
+        successor = replace(
+            claim,
+            operation=replace(claim.operation, operation_epoch=claim.operation.operation_epoch + 1),
+        )
+        await installer._persist_credentials(successor, identity, winner)
         resume.set()
         with pytest.raises(DevInstanceRuntimeError):
             await asyncio.wait_for(task, timeout=15)
         assert database_calls == []
         assert (
-            await installer._credentials(claim, identity)
+            await installer._credentials(successor, identity)
         ).reporter_token == winner.reporter_token
     finally:
         resume.set()
@@ -403,9 +407,9 @@ async def test_prepared_same_operation_seed_writer_preserves_completed_winner(
     "populated,race", ((False, None), (True, None), (False, "fill"), (False, "replace"))
 )
 async def test_new_incarnation_recovers_only_empty_stale_seed_placeholder(
-    disposable_storage_kubectl,
+    disposable_storage_kubectl,  # noqa: F811
     populated,
-    race,  # noqa: F811
+    race,
 ):
     kubectl = disposable_storage_kubectl
     old = _bound_claim()

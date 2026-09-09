@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 import yaml
 
+from loom.dev_instance_runtime import KubectlClient
 from loom.personal_dev_capacity import personal_dev_capacity_projection
 from loom.personal_dev_capacity_identity import capacity_runtime_database_url
 from loom.personal_dev_capacity_runtime import (
@@ -159,12 +160,20 @@ def test_observation_rejects_stale_or_pending_claim(change):
 
 class _Kubectl:
     def __init__(self):
-        self.secrets = {
-            "loom-protected-worker-runtime": {"database-url": _RUNTIME_DATABASE_URL.encode()}
-        }
+        from tests.unit.test_personal_dev_storage_vault import _Cluster
+
+        self.runner = _Cluster()
+        self.secrets = self.runner.secrets
+        self.secrets["loom-protected-worker-runtime"] = {"database-url": _RUNTIME_DATABASE_URL.encode()}
         self.resources = {}
         self.applies = 0
         self.waits = 0
+
+    @staticmethod
+    def _argv(*parts):
+        return ["kubectl", *parts]
+
+    _namespace_uid = staticmethod(KubectlClient._namespace_uid)
 
     async def read_secret_optional(self, namespace, name):
         return self.secrets.get(name)

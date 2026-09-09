@@ -352,6 +352,31 @@ cross-owner/incarnation connection denial and retry isolation. Repeated sealing
 retains application bytes but denies old logins; repeated final cleanup leaves
 new-incarnation and other-owner databases and credentials intact.
 
+The bound capacity credential seed uses two-phase Secret writes. Management
+creates only an empty, owner-bound placeholder, then verifies the namespace UID
+again after the acknowledged CREATE. Credential-bearing writes use update-only
+PUT with that child object's UID and resource version. Delayed writes therefore
+cannot create a missing Secret or overwrite a replacement UID; a same-object
+concurrent writer loses on its stale resource version and stops before SQL.
+Seed metadata also pins a monotonic operation epoch. A ready seed permits only
+identical credential bytes within that epoch, so an already-prepared retry cannot
+overwrite the winner by obtaining a fresh resource version. Credential rotation
+requires a newer operation. Retries recover persisted
+credentials after a lost final reply rather than rotating them. Only an exactly
+validated empty placeholder from the same logical owner's former namespace may
+be removed during recovery, with both UID and resource-version DELETE
+preconditions. Populated, malformed, foreign-owned or concurrently changed
+objects are never discarded as empty. Disposable Kubernetes tests exercise
+those interleavings at the actual API boundary.
+
+This helper currently protects only the management-only credential seed, which
+Pods do not mount. Vault and agent/runtime Secrets and executable workload writes
+still require incarnation-specific credential names and corresponding consumer
+propagation, followed by UID-fenced staged workload activation. Namespace CEL
+checks alone cannot replace those fences: namespace objects used by admission
+policies come from an informer cache, and a namespace read is not atomic with a
+child write. PostgreSQL external-effect fencing is also a separate boundary.
+
 These contracts do not enable the new layout in the live service. Full lifecycle
 acceptance, stale namespace-child-write fencing and allowlisted data transfer
 remain required before selecting it or lifting retained-data recreation's

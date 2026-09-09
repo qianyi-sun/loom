@@ -7,7 +7,7 @@ import pytest
 from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient
 from loom.personal_dev_capacity_runtime import KubectlPersonalDevCapacityInstaller
 from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
-from loom.personal_dev_storage_secret_write import _stale_placeholder
+from loom.personal_dev_storage_secret_write import _stale_placeholder, write_storage_secret
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 from tests.unit.test_personal_dev_storage_vault import _Cluster, _vault
 
@@ -110,3 +110,33 @@ async def test_prepared_same_operation_writer_cannot_replace_winner_credentials(
     assert retained.agent_password == first.agent_password
     assert retained.observer_password == first.observer_password
     await installer._persist_credentials(claim, identity, retained)
+
+
+@pytest.mark.parametrize("change", ("encoding", "value", "immutable", "new_epoch"))
+async def test_ready_seed_equal_epoch_requires_identical_bytes_and_mutability(change):
+    cluster = _Cluster()
+    identity = _bound_claim().operation.storage_binding.identity
+    await _vault(cluster).store(identity, "b" * 32)
+    kubectl = KubectlClient("kubectl", runner=cluster)
+    original = {
+        "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+        "metadata": {"name": "probe", "namespace": identity.namespace},
+        "data": {"password": "Zmlyc3Q="},
+    }
+    await write_storage_secret(kubectl, identity, original, operation_epoch=1)
+    updated = {**original, "data": {}, "stringData": {"password": "first"}}
+    if change in ("value", "new_epoch"):
+        updated["stringData"] = {"password": "second"}
+    if change == "immutable":
+        updated["immutable"] = True
+    epoch = 2 if change == "new_epoch" else 1
+    before = list(cluster.writes)
+    if change in ("value", "immutable"):
+        with pytest.raises(DevInstanceRuntimeError, match="different data"):
+            await write_storage_secret(kubectl, identity, updated, operation_epoch=epoch)
+        assert cluster.writes == before
+    else:
+        await write_storage_secret(kubectl, identity, updated, operation_epoch=epoch)
+    assert cluster.secrets["probe"] == {
+        "password": b"second" if change == "new_epoch" else b"first"
+    }

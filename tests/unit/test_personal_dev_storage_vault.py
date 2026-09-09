@@ -33,6 +33,9 @@ class _Cluster:
     def __init__(self):
         self.namespace = None
         self.secrets = {}
+        self.secret_metadata = {}
+        self.secret_immutable = {}
+        self.version = 0
         self.writes = []
 
     async def run(self, argv, *, stdin=None, timeout_seconds=120):
@@ -42,7 +45,10 @@ class _Cluster:
                 result = self.namespace or {}
             else:
                 data = self.secrets.get(argv[index + 2])
-                result = {} if data is None else {"data": {
+                name = argv[index + 2]
+                result = {} if data is None else {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                    "metadata": self.secret_metadata.get(name, {}),
+                    "immutable": self.secret_immutable.get(name, False), "data": {
                     key: base64.b64encode(value).decode() for key, value in data.items()
                 }}
             return CommandResult(json.dumps(result), "")
@@ -54,14 +60,26 @@ class _Cluster:
                 self.namespace = document
                 self.namespace["metadata"]["uid"] = "fixture-namespace-uid"
             else:
-                if "create" in argv and document["metadata"]["name"] in self.secrets:
+                name = document["metadata"]["name"]
+                if "create" in argv and name in self.secrets:
                     raise DevInstanceRuntimeError("secret already exists")
+                old = self.secret_metadata.get(name)
+                if "replace" in argv and (name not in self.secrets or old is None or any(
+                    document["metadata"].get(key) != old.get(key) for key in ("uid", "resourceVersion")
+                )):
+                    raise DevInstanceRuntimeError("secret update was superseded")
                 self.secrets[document["metadata"]["name"]] = (
                     {key: value.encode() for key, value in document["stringData"].items()}
                     if "stringData" in document else
                     {key: base64.b64decode(value) for key, value in document["data"].items()}
                 )
-        return CommandResult("{}", "")
+                self.version += 1
+                self.secret_metadata[name] = {**document["metadata"],
+                                              "uid": old["uid"] if old else str(uuid4()),
+                                              "resourceVersion": str(self.version)}
+                self.secret_immutable[name] = document.get("immutable", False)
+                document = {**document, "metadata": self.secret_metadata[name]}
+        return CommandResult(json.dumps(document), "")
 
 
 def _vault(cluster):

@@ -60,6 +60,7 @@ from loom.personal_dev_membership_runtime import (
     observe_database,
     validate_membership_observation_context,
 )
+from loom.personal_dev_storage_secret_write import read_storage_secret_data, write_storage_secret
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
@@ -1599,10 +1600,15 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             raise PersonalDevCapacityInstallationError(
                 "protected worker runtime credential is invalid"
             ) from None
-        existing = await self._kubectl.read_secret_optional(
-            identity.namespace,
-            _CREDENTIALS_SECRET_NAME,
-        )
+        if identity.storage_binding is not None:
+            existing = await read_storage_secret_data(
+                self._kubectl, identity, _CREDENTIALS_SECRET_NAME,
+                operation_epoch=claim.operation.operation_epoch,
+            )
+        else:
+            existing = await self._kubectl.read_secret_optional(
+                identity.namespace, _CREDENTIALS_SECRET_NAME,
+            )
         persisted_seed = existing is not None
         if existing is None:
             existing = await self._kubectl.read_secret_optional(
@@ -1714,9 +1720,14 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         """Durably bind retry credentials before any protected database mutation."""
 
         manifest = self._credential_seed_manifest(claim, identity, credentials)
-        await self._kubectl.apply(
-            yaml.safe_dump_all((manifest,), sort_keys=False, explicit_start=True)
-        )
+        if identity.storage_binding is not None:
+            await write_storage_secret(
+                self._kubectl, identity, manifest, operation_epoch=claim.operation.operation_epoch,
+            )
+        else:
+            await self._kubectl.apply(
+                yaml.safe_dump_all((manifest,), sort_keys=False, explicit_start=True)
+            )
         observed = await self._kubectl.read_secret_optional(
             identity.namespace,
             _CREDENTIALS_SECRET_NAME,
