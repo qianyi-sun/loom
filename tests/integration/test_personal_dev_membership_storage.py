@@ -56,10 +56,12 @@ from tests.unit.test_personal_dev_membership_subject_client import (
 @pytest.mark.parametrize("historical_destroy_receipt", (False, True))
 @pytest.mark.asyncio
 async def test_shadow_ready_migrates_only_after_exact_membership_receipt(
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     historical_destroy_receipt: bool,
 ) -> None:
-    engine = create_async_engine(postgres_url)
+    # This test commits lifecycle rows across independent sessions. Keep those
+    # durable receipts out of the suite's shared database and cleanup fixtures.
+    engine = create_async_engine(isolated_migration_postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     owner_id, team_id, candidate_id = uuid4(), uuid4(), uuid4()
     subject_id, incarnation, previous_operation_id = uuid4(), uuid4(), uuid4()
