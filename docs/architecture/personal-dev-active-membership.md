@@ -657,6 +657,21 @@ Reincarnation retains stable owner/service identity with fresh incarnation and
 reporter identities; its predecessor-release authentication is still a required
 durable-store responsibility, not proved by structural validation.
 
+Typed membership commands now use one execution/namespace/revision fence with
+discriminated application or build-service projections. The build projection
+does not accept a subject ID, account, name, feature-source publication, minimum
+or surge: these are derived from the owner and operator preparation. Service
+configuration generations follow service lifecycle operations; ordinary feature
+build attempts emit demand without changing membership. Service deployment and
+reporter rotation need not change the pinned runtime candidate. Build operation
+and idempotency IDs must be independent of application/feature operation IDs.
+Bounded, duplicate-safe parsing and pure result derivation validate the complete
+configuration and acknowledgement, including reincarnation namespace and manifest
+coordinates. They do not authenticate currentness, an event chain, predecessor
+release, replay, or a build-service installation. Those checks remain required
+in the durable admission and execution consumers. Legacy application request,
+result and endpoint formats remain unchanged.
+
 These new contracts are deliberately not accepted by execution preparation or
 promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a
