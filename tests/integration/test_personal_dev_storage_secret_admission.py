@@ -8,16 +8,22 @@ from uuid import uuid4
 
 import pytest
 
-from loom.dev_instance_runtime import DevInstanceRuntimeError
 from loom.dev_instance_manifest import dev_instance_manifest_documents
+from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlCandidateGenerationProvisioner, KubectlClient, KubectlSecretVault
 from loom.personal_dev_control_plane_render import (
-    _RenderContext,
     _management_namespace_admission,
     _management_resource_admission,
+    _RenderContext,
 )
-from loom.personal_dev_incarnation_storage import personal_dev_secret_name, personal_dev_storage_annotations
-from tests.integration.test_personal_dev_storage_namespace import disposable_storage_kubectl  # noqa: F401
+from loom.personal_dev_incarnation_storage import (
+    personal_dev_secret_name,
+    personal_dev_storage_annotations,
+)
+from tests.integration.test_personal_dev_storage_namespace import (
+    disposable_storage_kubectl,  # noqa: F401
+)
 from tests.unit.test_dev_instance_manifest import _immutable_config
+from tests.unit.test_personal_dev_control_plane_render import _render
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 
@@ -167,3 +173,65 @@ async def test_namespace_admission_rejects_storage_binding_reassignment(
         changed["metadata"]["annotations"] = annotations
         with pytest.raises(DevInstanceRuntimeError):
             await update(changed)
+
+
+async def test_bound_bootstrap_with_real_management_rbac_grants_only_exact_secret_reads(
+    disposable_storage_kubectl, tmp_path,  # noqa: F811
+):
+    kubectl = disposable_storage_kubectl
+    identity = _bound_claim().operation.storage_binding.identity
+    principal = "system:serviceaccount:loom-dev:loom-personal-dev-management"
+    _, _, _, rendered = _render(tmp_path)
+    allowed = {
+        "loom-personal-dev-management-mutation", "loom-personal-dev-managed-namespace",
+        "loom-personal-dev-managed-namespace-bound", "loom-personal-dev-management-namespaces",
+        "loom-personal-dev-management-resources",
+    }
+    for document in rendered:
+        if document["kind"] in {"ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"} and document["metadata"]["name"] in allowed:
+            await kubectl.apply(json.dumps(document))
+    config = _immutable_config()
+    config = replace(config, lifecycle_binding=replace(
+        config.lifecycle_binding, subject_id=identity.storage_binding.subject_id,
+        subject_incarnation=identity.storage_incarnation,
+    ))
+    namespace = dev_instance_manifest_documents(identity, config)[0]
+    await kubectl.apply(json.dumps(namespace))
+
+    class ManagementRunner:
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            return await kubectl.runner.run(
+                [argv[0], f"--as={principal}", *argv[1:]],
+                stdin=stdin, timeout_seconds=timeout_seconds,
+            )
+
+    managed = KubectlClient("kubectl", runner=ManagementRunner())
+    async with asyncio.timeout(15):
+        while True:
+            try:
+                await managed.read_namespace_optional(identity.namespace)
+                break
+            except DevInstanceRuntimeError:
+                await asyncio.sleep(0.1)
+    await KubectlCandidateGenerationProvisioner(managed).bootstrap(identity, config)
+    await KubectlSecretVault(managed, "postgresql://admin:fixture@database.example/postgres", protected_worker_runtime=True).store(identity, "b" * 32)
+    for purpose in ("loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime"):
+        assert await managed.read_secret(identity.namespace, personal_dev_secret_name(identity, purpose))
+        with pytest.raises(DevInstanceRuntimeError):
+            await managed.read_secret_optional(identity.namespace, purpose)
+        with pytest.raises(DevInstanceRuntimeError):
+            await managed.read_secret_optional(identity.namespace, f"{purpose}-{uuid4().hex}")
+
+    role = next(document for document in dev_instance_manifest_documents(identity, config) if document["kind"] == "Role")
+    for widened in (
+        {**role["rules"][0], "resourceNames": ["unrelated-secret"]},
+        {**role["rules"][0], "verbs": ["get", "list"]},
+        {**role["rules"][0], "resources": ["configmaps"]},
+    ):
+        changed = {**role, "rules": [widened]}
+        with pytest.raises(DevInstanceRuntimeError):
+            await managed.apply(json.dumps(changed))
+    other_namespace = "loom-dev-another-owner"
+    await kubectl.apply(json.dumps({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": other_namespace}}))
+    with pytest.raises(DevInstanceRuntimeError):
+        await managed.read_secret_optional(other_namespace, personal_dev_secret_name(identity, "loom-secrets"))
