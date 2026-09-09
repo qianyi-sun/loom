@@ -11,6 +11,10 @@ from uuid import UUID, uuid5
 
 from pydantic import Field, field_validator, model_validator
 
+from loom_capacity_manager.application_origin_contracts import (
+    ManagedApplicationOriginV1,
+    validate_managed_application_origins,
+)
 from loom_capacity_manager.contracts import (
     MAX_SUBJECTS,
     AllocationInputV1,
@@ -109,6 +113,18 @@ class ExecutionPreparationPolicyV4(ExecutionPreparationPolicyV2):
     schema_version: Literal[4] = 4  # type: ignore[assignment]
     personal_membership: PersonalMembershipPolicyV1
     personal_builds: PersonalBuildTemplateV1
+    managed_application_origins: Annotated[tuple[ManagedApplicationOriginV1, ...], Field(max_length=MAX_SUBJECTS)] = ()
+
+    @field_validator("managed_application_origins")
+    @classmethod
+    def _canonical_origins(cls, values: tuple[ManagedApplicationOriginV1, ...]) -> tuple[ManagedApplicationOriginV1, ...]:
+        return tuple(sorted(values, key=lambda item: item.configuration.subject_id.int))
+
+    @model_validator(mode="after")
+    def _managed_origins(self) -> ExecutionPreparationPolicyV4:
+        validate_managed_application_origins(self.managed_application_origins,
+            self.personal_membership.managed_base_subject_ids, self.subject_acknowledgements)
+        return self
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -122,6 +138,19 @@ class ExecutionPreparationV4(ExecutionPreparationV2):
     schema_version: Literal[4] = 4  # type: ignore[assignment]
     personal_membership: PersonalMembershipPolicyV1
     personal_builds: PersonalBuildTemplateV1
+    managed_application_origins: Annotated[tuple[ManagedApplicationOriginV1, ...], Field(max_length=MAX_SUBJECTS)] = ()
+
+    @field_validator("managed_application_origins")
+    @classmethod
+    def _canonical_origins(cls, values: tuple[ManagedApplicationOriginV1, ...]) -> tuple[ManagedApplicationOriginV1, ...]:
+        return ExecutionPreparationPolicyV4._canonical_origins(values)
+
+    @model_validator(mode="after")
+    def _managed_origins(self) -> ExecutionPreparationV4:
+        validate_managed_application_origins(self.managed_application_origins,
+            self.personal_membership.managed_base_subject_ids, self.subject_acknowledgements,
+            configuration_epoch=self.configuration_epoch)
+        return self
 
     @field_validator("schema_version", mode="before")
     @classmethod

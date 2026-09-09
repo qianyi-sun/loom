@@ -228,6 +228,11 @@ def resolved_subject_references(
     base_references = {cast(UUID, item.subject_id): item for item in configuration.subjects}
     managed_ids = set(policy.managed_base_subject_ids)
     managed_base = {item.subject_id: item for item in value.managed_base_subjects}
+    if isinstance(value, DelegatedAllocationInputV3):
+        for origin in value.preparation.managed_application_origins:
+            original = managed_base.get(origin.configuration.subject_id)
+            if original is None or canonical_digest(original) != canonical_digest(origin.configuration):
+                raise _invalid("managed application origin differs from immutable base configuration")
     if set(managed_base) != managed_ids:
         raise _invalid("managed base subject payloads do not exactly cover policy")
     if not managed_ids <= set(base_references):

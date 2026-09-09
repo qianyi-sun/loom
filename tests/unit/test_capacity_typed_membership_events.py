@@ -128,7 +128,11 @@ def test_event_validation_does_not_mutate_persisted_payloads():
 
 def test_legacy_application_event_hash_preimage_is_unchanged():
     _module, value, request = typed_application_mutation()
-    legacy = PersonalApplicationMembershipMutationV1(execution=request.execution, namespace_id=request.namespace_id,
+    # Keep the original hash input fixed as the unrelated V4 fixture evolves.
+    execution = request.execution.model_copy(update={
+        "execution_manifest_sha256": "347f3e8b2c925dc2cf30a70543c00fa87e93c4fa5ca94dab98b3c1159604f429",
+    })
+    legacy = PersonalApplicationMembershipMutationV1(execution=execution, namespace_id=request.namespace_id,
         expected_revision=0, projection=request.command.projection, acknowledgement=request.command.acknowledgement)
     assert canonical_membership_event_head(actor="legacy-delegate", execution_epoch=42,
         idempotency_key=UUID(int=123), operation_id=legacy.projection.operation_id,

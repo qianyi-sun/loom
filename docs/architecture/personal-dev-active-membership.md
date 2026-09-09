@@ -694,6 +694,17 @@ validate a historically fenced reporter. Managed-base adoption still requires
 its original immutable configuration and durable application provenance; neither
 an acknowledgement nor current materialization can substitute for that origin.
 
+V4 preparation and operator policy now pin `managed_application_origins` with
+exact coverage of the managed base identities. Each origin contains the complete
+immutable base configuration, original create/update installation projection,
+last base projection, and full acknowledgement matching the preparation. The
+allocator joins the configuration to its immutable base reference. Historical
+projection input epochs are preserved; a later capacity epoch must not rewrite
+the original installation operation. This is an operator-authenticated origin,
+not a digest reconstructed from mutable database rows. It creates no synthetic
+membership revision. Durable adoption and reporter-currentness resolution remain
+separate requirements before any base mutation or executable V4 admission.
+
 Build-generation persistence now stages the exact native runtime candidate,
 two worker-profile records and the service reporter in the membership transaction.
 Candidate digests hash the complete runtime binding rather than padding a Git

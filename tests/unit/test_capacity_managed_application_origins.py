@@ -24,7 +24,7 @@ def origin(**changes):
 
 
 def parse(value):
-    return type(value).model_validate_json(canonical_bytes(value))
+    return type(value).model_validate_json(value.model_dump_json())
 
 
 def resized_origin(*, cross_epoch=False, destroyed=False):

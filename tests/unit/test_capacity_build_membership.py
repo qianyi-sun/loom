@@ -17,10 +17,17 @@ from loom_capacity_manager.membership_contracts import (
     parse_execution_preparation,
 )
 from tests.capacity_fixtures import allocator_subject
-from tests.unit.test_capacity_membership import OWNER_B, delegated_input_with_new_owner
+from tests.unit.test_capacity_membership import (
+    OWNER_A,
+    OWNER_B,
+    _member,
+    delegated_input_with_new_owner,
+)
 
 
 def build_membership_input():
+    from tests.capacity_build_membership_fixtures import application_origin_payload
+
     module = import_module("loom_capacity_manager.build_membership_contracts")
     base = delegated_input_with_new_owner()
     profiles = []
@@ -40,6 +47,10 @@ def build_membership_input():
     )
     prep = module.ExecutionPreparationV4.model_validate(base.preparation.model_dump(mode="python") | {
         "schema_version": 4, "personal_builds": template,
+        "subject_acknowledgements": (_member(base.managed_base_subjects[0], OWNER_A).acknowledgement,),
+        "managed_application_origins": (application_origin_payload(base.managed_base_subjects[0],
+            _member(base.managed_base_subjects[0], OWNER_A).acknowledgement,
+            configuration_epoch=base.configuration.configuration_epoch),),
     })
     build_input = allocator_subject(93, account_id=f"dev-owner-{OWNER_B.hex}", max_slots=2, pending=(
         ("build-arm", ("gb10",), ("cpu_arch.arm64", "personal-build-worker")),
@@ -256,15 +267,22 @@ def test_disabled_build_retains_identity_but_requires_zero_capacity():
 
 @pytest.mark.parametrize("managed", (True, False))
 def test_build_cannot_override_a_managed_or_immutable_base_identity(managed):
+    from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
+    from tests.capacity_build_membership_fixtures import application_origin_payload
+
     value = build_membership_input()
     build_id = value.membership.members[-1].configuration.subject_id
     base = value.managed_base_subjects[0].model_copy(update={"subject_id": build_id})
     reference = value.configuration.subjects[0].model_copy(update={"subject_id": build_id, "digest": canonical_digest(base)})
     policy = value.preparation.personal_membership.model_copy(update={"managed_base_subject_ids": (build_id,) if managed else ()})
+    ack = _member(base, OWNER_A).acknowledgement
+    origins = (ManagedApplicationOriginV1.model_validate(application_origin_payload(base, ack,
+        configuration_epoch=value.configuration.configuration_epoch)),) if managed else ()
     value = value.model_copy(update={
         "configuration": value.configuration.model_copy(update={"subjects": (reference,)}),
         "managed_base_subjects": (base,) if managed else (),
-        "preparation": value.preparation.model_copy(update={"personal_membership": policy}),
+        "preparation": value.preparation.model_copy(update={"personal_membership": policy,
+            "managed_application_origins": origins, "subject_acknowledgements": (ack,)}),
         "subjects": value.subjects[1:],
     })
     with pytest.raises(ValueError, match="cannot override an application or immutable base"):
@@ -280,10 +298,13 @@ def test_reserved_build_name_cannot_collide_with_a_base_subject(managed):
     value = value.model_copy(update={
         "configuration": value.configuration.model_copy(update={"subjects": (reference,)}),
         "managed_base_subjects": (base,) if managed else (),
-        "preparation": value.preparation.model_copy(update={"personal_membership": policy}),
+        "preparation": value.preparation.model_copy(update={"personal_membership": policy,
+            "managed_application_origins": value.preparation.managed_application_origins if managed else ()}),
         "subjects": (value.subjects[0].model_copy(update={"configuration": base}), *value.subjects[1:]),
     })
-    with pytest.raises(ValueError, match="name is invalid" if managed else "name collides"):
+    # A managed base's pinned origin rejects rebadging before name resolution;
+    # unmanaged static bases still exercise the resolved-name collision boundary.
+    with pytest.raises(ValueError, match="origin differs from immutable base" if managed else "name collides"):
         resolved_subject_references(value)
 
 
@@ -356,6 +377,8 @@ async def test_direct_v4_preparation_is_rejected_before_legacy_validation(policy
         policy = module.ExecutionPreparationPolicyV4.model_validate(policy.model_dump(mode="python") | {
             "schema_version": 4, "personal_membership": value.preparation.personal_membership,
             "personal_builds": value.preparation.personal_builds,
+            "managed_application_origins": value.preparation.managed_application_origins,
+            "subject_acknowledgements": value.preparation.subject_acknowledgements,
         })
     store = CapacityManagementStore(execution_policy=policy)
     session = AsyncMock()
