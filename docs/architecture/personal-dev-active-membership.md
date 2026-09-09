@@ -684,6 +684,16 @@ currentness or SQL insertion authority. The old
 application event preimage is retained byte-for-byte, including its original
 request format; old history is not translated into typed commands.
 
+Build-generation persistence now stages the exact native runtime candidate,
+two worker-profile records and the service reporter in the membership transaction.
+Candidate digests hash the complete runtime binding rather than padding a Git
+SHA. Deployment rotation may reuse the same candidate; capacity and destroy retain
+the reporter token and demand high-water. Retained facts are checked before later
+mutations, and failed staging rolls back its partial writes. These deployments
+remain `pending`: publication and membership acknowledgement alone do not prove
+the management admission runtime is installed and executable. They contain no
+synthetic application-agent installation or application activation evidence.
+
 These new contracts are deliberately not accepted by execution preparation or
 promotion yet. Direct store calls reject V4 as well as wire endpoints, and the
 reconciler rejects the new input rather than dropping its membership into a

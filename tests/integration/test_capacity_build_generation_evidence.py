@@ -6,7 +6,12 @@ from uuid import UUID
 import pytest
 from sqlalchemy import func, select
 
-from loom_capacity_manager.models import CapacityCandidate, CapacityDemandReporter, CapacityDeploymentGeneration, CapacityWorkerProfile
+from loom_capacity_manager.models import (
+    CapacityCandidate,
+    CapacityDemandReporter,
+    CapacityDeploymentGeneration,
+    CapacityWorkerProfile,
+)
 from tests.unit.test_capacity_typed_membership_commands import typed_build_mutation
 
 
@@ -52,7 +57,7 @@ async def test_build_service_rotation_keeps_candidate_and_fences_old_reporter(ca
     await _store().stage_build_generation_evidence(capacity_session, request, first, value.preparation, value.fleet)
     updated = _next(request, operation="update", deployment_generation=2, demand_reporter_incarnation=UUID(int=999), demand_reporter_token_sha256="a" * 64)
     second = module.derive_build_member(updated, value.preparation, value.fleet)
-    await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first)
+    await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first, previous_request=request)
     assert await capacity_session.scalar(select(func.count()).select_from(CapacityCandidate)) == 1
     assert await capacity_session.scalar(select(func.count()).select_from(CapacityDeploymentGeneration)) == 2
     rows = (await capacity_session.scalars(select(CapacityDemandReporter))).all()
@@ -72,7 +77,7 @@ async def test_non_deployment_build_changes_keep_reporter_token_and_high_water(c
     await capacity_session.flush()
     updated = _next(request, operation=operation)
     second = module.derive_build_member(updated, value.preparation, value.fleet)
-    await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first)
+    await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first, previous_request=request)
     assert reporter.high_water == 7
     assert reporter.configuration_generation == 2
     assert reporter.token_sha256 == request.command.projection.demand_reporter_token_sha256
@@ -80,7 +85,7 @@ async def test_non_deployment_build_changes_keep_reporter_token_and_high_water(c
     assert await capacity_session.scalar(select(func.count()).select_from(CapacityDeploymentGeneration)) == 1
 
 
-@pytest.mark.parametrize("tamper", ("candidate", "deployment", "profile", "token", "reporter_generation"))
+@pytest.mark.parametrize("tamper", ("candidate", "deployment", "deployment_ready", "profile", "token", "reporter_generation"))
 async def test_build_generation_transition_rejects_corrupted_retained_facts(capacity_session, tamper):
     module, value, request = typed_build_mutation()
     first = module.derive_build_member(request, value.preparation, value.fleet)
@@ -88,9 +93,12 @@ async def test_build_generation_transition_rejects_corrupted_retained_facts(capa
     if tamper == "candidate":
         row = (await capacity_session.scalars(select(CapacityCandidate))).one()
         row.artifact_payload = {"candidate_sha256": "a" * 64}
-    elif tamper == "deployment":
+    elif tamper in {"deployment", "deployment_ready"}:
         row = (await capacity_session.scalars(select(CapacityDeploymentGeneration))).one()
-        row.cutover_payload = {"purpose": "personal-application"}
+        if tamper == "deployment":
+            row.cutover_payload = {"purpose": "personal-application"}
+        else:
+            row.readiness_state = "ready"
     elif tamper == "profile":
         row = (await capacity_session.scalars(select(CapacityWorkerProfile))).first()
         row.shape_catalog = []
@@ -104,7 +112,7 @@ async def test_build_generation_transition_rejects_corrupted_retained_facts(capa
     updated = _next(request)
     second = module.derive_build_member(updated, value.preparation, value.fleet)
     with pytest.raises(ValueError):
-        await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first)
+        await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first, previous_request=request)
 
 
 async def test_build_generation_staging_participates_in_caller_rollback(capacity_session):
@@ -116,3 +124,27 @@ async def test_build_generation_staging_participates_in_caller_rollback(capacity
             raise RuntimeError("abort enclosing membership transaction")
     for model in (CapacityCandidate, CapacityDemandReporter, CapacityDeploymentGeneration, CapacityWorkerProfile):
         assert await capacity_session.scalar(select(func.count()).select_from(model)) == 0
+
+
+async def test_failed_build_rotation_rolls_back_its_partial_deployment_writes(capacity_session):
+    module, value, request = typed_build_mutation()
+    first = module.derive_build_member(request, value.preparation, value.fleet)
+    await _store().stage_build_generation_evidence(capacity_session, request, first, value.preparation, value.fleet)
+    profile = first.configuration.profiles[0]
+    # A conflicting retained profile forces failure after staging the next deployment.
+    capacity_session.add(CapacityWorkerProfile(
+        subject_id=first.configuration.subject_id, subject_incarnation=first.configuration.subject_incarnation,
+        deployment_generation=2, pool_id=profile.pool_id, pool_generation=profile.pool_generation,
+        profile_generation=profile.profile_generation, profile_digest=profile.profile_digest,
+        shape_catalog=[], narrowing_constraints={"eligible_resource_domains": list(profile.eligible_resource_domains)},
+    ))
+    await capacity_session.flush()
+    updated = _next(request, operation="update", deployment_generation=2, demand_reporter_incarnation=UUID(int=999), demand_reporter_token_sha256="a" * 64)
+    second = module.derive_build_member(updated, value.preparation, value.fleet)
+    from loom_capacity_manager.store import ConfigurationConflictError
+    with pytest.raises(ConfigurationConflictError):
+        await _store().stage_build_generation_evidence(capacity_session, updated, second, value.preparation, value.fleet, previous=first, previous_request=request)
+    assert await capacity_session.scalar(select(func.count()).select_from(CapacityDeploymentGeneration)) == 1
+    reporter = (await capacity_session.scalars(select(CapacityDemandReporter))).one()
+    assert reporter.state == "current"
+    assert reporter.reporter_incarnation == first.configuration.demand_reporter_incarnation
