@@ -108,7 +108,7 @@ def test_installer_has_the_complete_pinned_security_and_smoke_contract() -> None
         "aider-chat==0.86.2",
         "--only-binary=:all:",
         "--no-deps",
-        "aider-chat==0.86.2+loom.1",
+        "aider-chat==0.86.2+loom.2",
         "--no-index",
         "--find-links",
         "litellm==1.84.1",

@@ -64,6 +64,7 @@ GATEWAY_TABLES = (
     "users",
     "secrets",
     "tasks",
+    "data_lifecycle_authorities",
     "admin_audit_events",
     "artifacts",
     "artifact_lineage_edges",
@@ -196,6 +197,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         "tokens",
                         "secrets",
                         "tasks",
+                        "data_lifecycle_authorities",
                         "provider_connections",
                         "provider_connection_shares",
                         "execution_classes",
@@ -215,6 +217,12 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         )
                     )
                     if role == "loom_gateway":
+                        # Call audit lazily creates trial/event authorities and
+                        # verifies existing ones; retention and deletion remain
+                        # owned by lifecycle management.
+                        cursor.execute(
+                            "GRANT INSERT ON data_lifecycle_authorities TO loom_gateway"
+                        )
                         cursor.execute(
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
