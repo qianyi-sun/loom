@@ -307,7 +307,26 @@ The pinned native MinIO fixture encodes spaces as `+` and literal plus signs as
 using both independent SDK and production signatures, preserve space/plus/Unicode/
 literal-percent identities, fetch the parsed keys, and verify rejection of changed
 signed listing parameters. This evidence does not establish cross-page inventory
-immutability, total network budgets, cancellation cleanup or production wiring.
+immutability or production wiring.
+
+A separate one-shot asynchronous TLS reader now consumes these authority-only
+listing URLs for one fixed origin and bucket with an explicit trusted CA. It
+bounds raw response headers before HTTP parsing, total received bytes and body
+bytes; it refuses redirects, informational responses, compression and trailers.
+Each request owns a connection, aborting it on success, failure or cancellation.
+Connection-handoff cleanup retains ownership even when cancellation races with
+the returned socket. Admission and all I/O share the caller's monotonic deadline,
+with finite connect/idle/per-read ceilings and no retry loop. Lifecycle shutdown
+cancels and joins active and queued reads. Actual TLS tests exercise malformed
+wire input, trust failures, queue/deadline/cancellation behavior and orphaned
+connection disposal; the pinned MinIO integration exercises production signing,
+reader and XML parser together across paginated responses.
+
+This is a transport primitive, not production adapter activation. Cross-page
+object/token/byte budgets and absolute wall-clock authorization remain the
+inventory owner's responsibility. Provider/API async composition, unlocked I/O
+with fresh database re-admission, path-style consumer validation and explicit
+credential/settings/lifespan deployment wiring remain required.
 
 ## Statement and signer
 
