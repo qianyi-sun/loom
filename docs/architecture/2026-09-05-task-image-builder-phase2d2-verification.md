@@ -536,13 +536,22 @@ directory descriptor and surfaces ambiguous residual cleanup.
 The verified result hands off a duplicate directory descriptor, never a cached
 absolute pathname. A job-directory rename/replacement regression proves that
 acceptance and cleanup stay on the original input, preserving replacement data.
-The eventual executor must pass this descriptor to its context-sending process
-and join that consumer before input cleanup; a pathname reconstructed from the
-allocation directory is not equivalent authority. An actual pinned TLS MinIO
+The descriptor-aware executor constructor now owns a duplicate input FD and lends
+exactly child FD 3 to `buildctl` for its context/Dockerfile local directories.
+Daemon and readiness launches retain no extra descriptors. The pinned executable
+FD is kept outside the child-remapping slot; mandatory cgroup launch and readback
+remain unchanged, without fallback. A real ELF exec test exercises descriptor
+inheritance across directory replacement with only cgroup admission substituted;
+it is not containment certification. Executor tests cover root context and
+sidecar names, plan-slice ownership and exact component-path binding. Callers must
+still cancel/join all builds before closing executor input and removing bytes;
+the existing orchestrator is not yet using this constructor or that full input
+lifecycle. A pathname reconstructed from the allocation directory is not
+equivalent authority. An actual pinned TLS MinIO
 fixture now exercises verified upload → V2 authority issuance → this real Go
 downloader, including executable Unicode paths, without substituting a fake
-downloader. V2 claim/orchestration, renewable prebuild work and descriptor-bound
-executor handoff remain unintegrated. This
+downloader. V2 claim/orchestration and renewable prebuild work remain unintegrated
+with the descriptor-aware executor. This
 fixture is data-transfer acceptance, not a rootless native build or activation.
 
 The supervisor configuration now accepts optional `bundle` trust with exact

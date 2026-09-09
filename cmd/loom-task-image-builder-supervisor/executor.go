@@ -57,6 +57,8 @@ type Executor struct {
 	buildkitAddress string
 	daemon          *Process
 	started         bool
+	input           *os.File // Owned duplicate; lent only to the context-sending buildctl child.
+	inputRequired   bool
 }
 
 const (
@@ -76,6 +78,14 @@ var (
 	executorLaunchInCgroup         = LaunchInCgroup
 	executorRunBuildctl            = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD int) error {
 		process, err := LaunchInCgroup(ctx, executable, argv, env, cgroupFD)
+		if err != nil {
+			return err
+		}
+		defer process.Close()
+		return process.Wait()
+	}
+	executorRunBuildctlWithContext = func(ctx context.Context, executable ExecutableMember, argv []string, env []string, cgroupFD, inputFD int) error {
+		process, err := LaunchInCgroupWithContext(ctx, executable, argv, env, cgroupFD, inputFD)
 		if err != nil {
 			return err
 		}
@@ -127,6 +137,7 @@ func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Exe
 		return nil, err
 	}
 	address := "unix://" + socketPath
+	plan.Components = append([]BuildComponent(nil), plan.Components...)
 	return &Executor{
 		config:          cfg,
 		capabilities:    caps,
@@ -136,9 +147,36 @@ func NewExecutor(cfg Config, caps *AllocationCapabilities, plan BuildPlan) (*Exe
 	}, nil
 }
 
+// NewExecutorWithContext retains its own descriptor for the already verified,
+// private input tree. The caller owns input content cleanup and must finish all
+// Build calls and Close before removing that content. It never downloads data
+// or treats an arbitrary descriptor as content verification.
+func NewExecutorWithContext(cfg Config, caps *AllocationCapabilities, plan BuildPlan, inputFD int) (*Executor, error) {
+	input, err := duplicatePrivateInputDirectory(inputFD)
+	if err != nil {
+		return nil, err
+	}
+	executor, err := NewExecutor(cfg, caps, plan)
+	if err != nil {
+		input.Close()
+		return nil, err
+	}
+	inputStat, err := input.Stat()
+	jobStat, jobErr := validateDirectoryDescriptor(caps.JobDirectoryFD)
+	if err != nil || jobErr != nil || (inputStat.Sys().(*syscall.Stat_t).Dev == jobStat.Dev && inputStat.Sys().(*syscall.Stat_t).Ino == jobStat.Ino) {
+		input.Close()
+		return nil, errors.New("build input must be separate from runtime state")
+	}
+	executor.input, executor.inputRequired = input, true
+	return executor, nil
+}
+
 func (e *Executor) Start(ctx context.Context) (err error) {
 	if e == nil {
 		return errors.New("executor unavailable")
+	}
+	if e.inputRequired && e.input == nil {
+		return errors.New("executor input closed")
 	}
 	if e.started {
 		return errors.New("executor already started")
@@ -241,8 +279,15 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 	if err := validateBuildComponent(component); err != nil {
 		return BuildResult{}, err
 	}
-	if !e.planContainsComponent(component.Name) {
+	if !e.planContainsComponent(component) {
 		return BuildResult{}, errors.New("build component not in plan")
+	}
+	inputRoot := e.jobRoot
+	if e.inputRequired {
+		if e.input == nil {
+			return BuildResult{}, errors.New("executor input closed")
+		}
+		inputRoot = "/proc/self/fd/3"
 	}
 	outputDir := filepath.Join(e.jobRoot, "oci")
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
@@ -276,8 +321,8 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 		"build",
 		"--no-cache",
 		"--frontend", "dockerfile.v0",
-		"--local", "context=" + filepath.Join(e.jobRoot, component.ContextDir),
-		"--local", "dockerfile=" + filepath.Join(e.jobRoot, filepath.Dir(component.Dockerfile)),
+		"--local", "context=" + filepath.Join(inputRoot, component.ContextDir),
+		"--local", "dockerfile=" + filepath.Join(inputRoot, filepath.Dir(component.Dockerfile)),
 		"--opt", "filename=" + filepath.Base(component.Dockerfile),
 		"--opt", "platform=" + platform,
 		"--opt", "loom.capture-base-resolution=v1",
@@ -286,8 +331,14 @@ func (e *Executor) Build(ctx context.Context, component BuildComponent) (result 
 		"--output", "type=oci,dest=" + outputPath,
 	}
 	env := []string{"LANG=C.UTF-8", "TZ=UTC", "BUILDKIT_HOST=" + e.buildkitAddress}
-	if err := executorRunBuildctl(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD); err != nil {
-		return BuildResult{}, err
+	var buildErr error
+	if e.inputRequired {
+		buildErr = executorRunBuildctlWithContext(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD, int(e.input.Fd()))
+	} else {
+		buildErr = executorRunBuildctl(ctx, e.config.Runtime.Buildctl, argv, env, e.capabilities.BuildEgressFD)
+	}
+	if buildErr != nil {
+		return BuildResult{}, buildErr
 	}
 	output, err := executorValidateOCIOutput(outputPath, platform)
 	if err != nil {
@@ -437,10 +488,19 @@ func cleanupBuildCapture(jobFD, captureFD int, name string) (result error) {
 }
 
 func (e *Executor) Close(ctx context.Context) error {
-	if e == nil || e.daemon == nil {
+	if e == nil {
 		return nil
 	}
-	return e.stopDaemon(ctx)
+	var err error
+	if e.daemon != nil {
+		err = e.stopDaemon(ctx)
+	}
+	if e.input != nil {
+		err = errors.Join(err, e.input.Close())
+		e.input = nil
+	}
+	e.started = false
+	return err
 }
 
 func (e *Executor) waitForBuildkitReady(ctx context.Context) error {
@@ -1002,15 +1062,18 @@ func validateBuildPlan(plan BuildPlan) error {
 }
 
 func validateBuildComponent(component BuildComponent) error {
-	if component.Name == "" {
+	if component.Name == "" || len(component.Name) > 136 {
 		return errors.New("build component name invalid")
 	}
-	for _, r := range component.Name {
-		if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
-			return errors.New("build component name invalid")
+	if !componentPattern.MatchString(component.Name) {
+		// Preserve legacy executor-only names; authority claims use task/sidecar.
+		for _, r := range component.Name {
+			if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
+				return errors.New("build component name invalid")
+			}
 		}
 	}
-	if err := validateRelativeBundlePath(component.ContextDir); err != nil {
+	if err := validateRelativeBundlePath(component.ContextDir); component.ContextDir != "." && err != nil {
 		return err
 	}
 	if err := validateRelativeBundlePath(component.Dockerfile); err != nil {
@@ -1019,9 +1082,9 @@ func validateBuildComponent(component BuildComponent) error {
 	return nil
 }
 
-func (e *Executor) planContainsComponent(name string) bool {
+func (e *Executor) planContainsComponent(expected BuildComponent) bool {
 	for _, component := range e.plan.Components {
-		if component.Name == name {
+		if component == expected {
 			return true
 		}
 	}
