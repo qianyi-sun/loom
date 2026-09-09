@@ -88,3 +88,14 @@ def test_rejects_oversized_signed_url_without_exposing_it():
     )
     with pytest.raises(RuntimeError, match="limit"):
         _sign(credentials=credentials)
+
+
+@pytest.mark.parametrize("changes", [
+    {"access_key": None}, {"secret_key": None}, {"access_key": ""}, {"secret_key": ""},
+    {"access_key": "a\nprivate"}, {"secret_key": "é"}, {"session_token": ""},
+])
+def test_credential_snapshot_requires_real_bounded_secret_fields(changes):
+    values = dict(access_key="access", secret_key="secret")
+    values.update(changes)
+    with pytest.raises(RuntimeError, match="credential"):
+        _module().S3SigningCredentials(**values)
