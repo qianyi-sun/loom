@@ -171,10 +171,16 @@ def test_loaded_issuer_signs_one_exact_standard_distribution_scope(
     assert issued.registry_origin == "https://registry.example:5443"
     assert issued.service == "registry.example"
     assert issued.issuer == "loom-task-image-authority"
+    public = private_key.public_key().public_numbers()
     assert jwt.get_unverified_header(issued.token) == {
         "alg": "RS256",
         "kid": expected_key_id,
         "typ": "JWT",
+        "jwk": {
+            "kty": "RSA",
+            "e": _base64url_uint(public.e),
+            "n": _base64url_uint(public.n),
+        },
     }
     claims = jwt.decode(
         issued.token,
