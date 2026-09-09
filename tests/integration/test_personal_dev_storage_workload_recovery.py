@@ -1,5 +1,6 @@
 """Workload recovery must reject drift and replace only terminal failed jobs."""
 
+import asyncio
 import json
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -7,13 +8,28 @@ from uuid import uuid4
 
 import pytest
 
-from loom.dev_instance_runtime import DevInstanceRuntimeError
+from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient
 from loom.personal_dev_storage_workload_write import write_storage_workload
 from tests.integration.test_personal_dev_storage_namespace import (
     disposable_storage_kubectl,  # noqa: F401
 )
 from tests.integration.test_personal_dev_storage_workload_write import _namespace, _workload
 from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+
+
+async def _reconcile_workload(kubectl, identity, document, *, operation_epoch):
+    # A fresh caller may reconcile again after a rejected CAS; Kubernetes
+    # status controllers legitimately change RV while a workload is staged.
+    # Keep retries here, outside the one-shot writer. Negative tests call the
+    # writer directly so conflicts/tampering cannot be swallowed as success.
+    for attempt in range(5):
+        try:
+            await write_storage_workload(kubectl, identity, document, operation_epoch=operation_epoch)
+            return
+        except DevInstanceRuntimeError:
+            if attempt == 4:
+                raise
+            await asyncio.sleep(0)
 
 
 async def test_job_rejects_tampering_with_api_defaulted_replacement_policy(
@@ -52,7 +68,7 @@ async def test_new_attempt_replaces_failed_job_but_replays_success_without_dupli
         }})))
     retry = deepcopy(document)
     retry["metadata"]["labels"]["loom.dev/attempt"] = str(uuid4())
-    await write_storage_workload(kubectl, identity, retry, operation_epoch=1)
+    await _reconcile_workload(kubectl, identity, retry, operation_epoch=1)
     current = await kubectl.read_resource_json(namespace=identity.namespace, kind="job", name=document["metadata"]["name"])
     assert current["metadata"]["uid"] != old["metadata"]["uid"]
     assert not current.get("status", {}).get("failed")
@@ -65,7 +81,39 @@ async def test_new_attempt_replaces_failed_job_but_replays_success_without_dupli
             ],
         }})))
     retry["metadata"]["labels"]["loom.dev/attempt"] = str(uuid4())
-    await write_storage_workload(kubectl, identity, retry, operation_epoch=1)
+    await _reconcile_workload(kubectl, identity, retry, operation_epoch=1)
     complete = await kubectl.read_resource_json(namespace=identity.namespace, kind="job", name=document["metadata"]["name"])
     assert complete["metadata"]["uid"] == current["metadata"]["uid"]
     assert complete["status"]["succeeded"] == 1
+
+
+@pytest.mark.parametrize("meaningful_change", (False, True))
+async def test_acknowledged_create_allows_status_only_observation_not_new_spec_authority(
+    disposable_storage_kubectl,  # noqa: F811
+    meaningful_change,
+):
+    kubectl = disposable_storage_kubectl
+    identity = _bound_claim().operation.storage_binding.identity
+    await _namespace(kubectl, identity)
+    document = _workload(identity)
+
+    class UpdatedAfterCreate:
+        async def run(self, argv, *, stdin=None, timeout_seconds=120):
+            result = await kubectl.runner.run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+            if "create" in argv:
+                mutation = {"spec": {"replicas": 2}} if meaningful_change else {"status": {"observedGeneration": 98}}
+                await kubectl.runner.run(kubectl._argv("patch", "deployment", document["metadata"]["name"],
+                    "-n", identity.namespace, "--type=merge", *([] if meaningful_change else ["--subresource=status"]),
+                    "-p", json.dumps(mutation)))
+            return result
+
+    writer = KubectlClient("kubectl", runner=UpdatedAfterCreate())
+    if meaningful_change:
+        with pytest.raises(DevInstanceRuntimeError):
+            await write_storage_workload(writer, identity, document, operation_epoch=1)
+        observed = await kubectl.read_resource_json(namespace=identity.namespace, kind="deployment", name=document["metadata"]["name"])
+        assert observed["spec"]["replicas"] == 2
+    else:
+        await write_storage_workload(writer, identity, document, operation_epoch=1)
+        observed = await kubectl.read_resource_json(namespace=identity.namespace, kind="deployment", name=document["metadata"]["name"])
+        assert observed["spec"]["replicas"] == 1
