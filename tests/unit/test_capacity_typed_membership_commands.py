@@ -1,6 +1,7 @@
 """Typed control-owned commands cannot borrow feature-source/application authority."""
 
 from importlib import import_module
+import json
 from uuid import UUID
 
 import pytest
@@ -9,6 +10,7 @@ from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2, canonical_executable_digest
 from loom_capacity_manager.membership_contracts import PersonalApplicationMembershipMutationV1
 from tests.unit.test_capacity_build_membership import build_membership_input
+from tests.capacity_fixtures import development_projection
 
 
 def typed_build_mutation():
@@ -138,3 +140,44 @@ def test_typed_request_wire_version_is_exact(version):
     module, _value, request = typed_build_mutation()
     with pytest.raises(ValueError):
         module.parse_typed_membership_mutation(request.model_copy(update={"schema_version": version}).model_dump_json().encode())
+
+
+def test_application_command_preserves_projection_and_has_one_execution_fence():
+    module, value, request = typed_build_mutation()
+    member = value.membership.members[0]
+    config, ack = member.configuration, member.acknowledgement
+    projection = development_projection(
+        expected_configuration_epoch=request.execution.configuration_epoch,
+        subject_id=config.subject_id, subject_incarnation=config.subject_incarnation,
+        owner_id=member.owner_id, environment_name=config.display_name.removeprefix("dev-"),
+        candidate_sha256=ack.candidate.identity, candidate_publication_sha256=ack.candidate.publication_sha256,
+        protected_admission_sha256=ack.protected_admission_sha256,
+        demand_reporter_incarnation=config.demand_reporter_incarnation,
+    )
+    command = module.PersonalApplicationCommandV2(projection=projection, acknowledgement=ack)
+    request = request.model_copy(update={"command": command, "expected_revision": 0})
+    assert module.parse_typed_membership_mutation(canonical_bytes(request)) == request
+    result = module.PersonalMembershipResultV2(revision=1, head_sha256="e" * 64, member=member, replayed=False)
+    module.validate_typed_membership_result(request, result, value.preparation, value.fleet)
+    command = command.model_copy(update={"projection": projection.model_copy(update={"expected_configuration_epoch": 2})})
+    with pytest.raises(ValueError):
+        module.parse_typed_membership_mutation(request.model_copy(update={"command": command}).model_dump_json())
+
+
+@pytest.mark.parametrize("boundary", ("duplicate", "oversized", "nested_version", "missing_version"))
+def test_typed_parser_rejects_ambiguous_or_unbounded_wire(boundary):
+    module, _value, request = typed_build_mutation()
+    payload = request.model_dump_json()
+    if boundary == "duplicate":
+        payload = '{"expected_revision":999,' + payload[1:]
+    elif boundary == "oversized":
+        payload += " " * (8 * 1024 * 1024)
+    else:
+        value = json.loads(payload)
+        if boundary == "nested_version":
+            value["command"]["acknowledgement"]["schema_version"] = 2.0
+        else:
+            del value["schema_version"]
+        payload = json.dumps(value)
+    with pytest.raises(ValueError):
+        module.parse_typed_membership_mutation(payload)
