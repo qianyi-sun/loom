@@ -61,6 +61,7 @@ from loom.personal_dev_membership_runtime import (
     observe_database,
     validate_membership_observation_context,
 )
+from loom.personal_dev_storage_admin_fence import storage_admin_connection
 from loom.personal_dev_storage_secret_write import read_storage_secret_data, write_storage_secret
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.client import (
@@ -532,10 +533,7 @@ class PsycopgPersonalDevCapacityDatabase:
                     runtime=runtime,
                 )
             else:
-                async with await psycopg.AsyncConnection.connect(
-                    self._connect_url,
-                    autocommit=True,
-                ) as connection:
+                async with storage_admin_connection(self._admin_url, identity, action="provision") as connection:
                     protected_roles = sql.SQL(", ").join(
                         sql.Identifier(role)
                         for role in (owner, migrator, agent, executor, observer, runtime)
@@ -1075,10 +1073,7 @@ class PsycopgPersonalDevCapacityDatabase:
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)
         protected = (owner, migrator, agent, executor, observer, runtime, identity.db_role)
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._connect_url,
-                autocommit=True,
-            ) as connection:
+            async with storage_admin_connection(self._admin_url, identity, action="retire") as connection:
                 roles_result = await connection.execute(
                     "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
                     (list(protected),),
@@ -1098,11 +1093,20 @@ class PsycopgPersonalDevCapacityDatabase:
                                 sql.Identifier(role)
                             )
                         )
-                await connection.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
-                    "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
-                    (list(protected),),
-                )
+                if identity.storage_binding is not None:
+                    terminated = await connection.execute(
+                        "SELECT pg_terminate_backend(pid, 10000) FROM pg_catalog.pg_stat_activity "
+                        "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
+                        (list(protected),),
+                    )
+                    if any(row != (True,) for row in await terminated.fetchall()):
+                        raise PersonalDevCapacityInstallationError("protected storage session termination is incomplete")
+                else:
+                    await connection.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+                        "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
+                        (list(protected),),
+                    )
                 database_exists = await connection.execute(
                     "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
                     (identity.database,),
@@ -1133,10 +1137,7 @@ class PsycopgPersonalDevCapacityDatabase:
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)
         roles = (runtime, observer, executor, agent, migrator, owner, identity.db_role)
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._connect_url,
-                autocommit=True,
-            ) as connection:
+            async with storage_admin_connection(self._admin_url, identity, action="cleanup") as connection:
                 await connection.execute(
                     "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
                     "WHERE datname = %s AND pid <> pg_backend_pid()",

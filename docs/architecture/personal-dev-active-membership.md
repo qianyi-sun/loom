@@ -478,6 +478,31 @@ objects used by admission policies come from an informer cache, and a namespace
 read is not atomic with a child write. External-effect fencing and full
 concurrent-owner acceptance remain required before rollout.
 
+Bound PostgreSQL administration uses a permanent
+`ld_fence_<incarnation UUID hex>` NOLOGIN role, outside the disposable database
+and runtime-role set. Its canonical COMMENT binds the complete storage identity
+and an irreversible retired state. Guard creation and COMMENT are atomic;
+retirement commits before revocation or cleanup. Unexpected role attributes,
+password, memberships, settings or COMMENT fail closed rather than being adopted.
+The guard is never included in runtime-role cleanup.
+
+Primary and capacity cluster-DDL provision/seal/drop operations hold a session
+advisory lock in the canonical `postgres` maintenance database on the same backend
+that executes those changes. Bound administration requires CONNECT to that
+database and permission to verify the protected role catalog; it does not grant
+new privileges. Supplying another database in the admin URL cannot split the
+lock. A delayed provisioner cannot reopen retired roles or recreate dropped
+storage, including retirement before first provisioning. Failed retirement can
+resume without clearing the marker. Bound sealing waits for protected-role
+backend termination and rejects an incomplete result.
+
+This is a cluster-DDL fence, not a transaction around operations on other
+database connections, a MinIO request fence, or proof of concurrent-owner
+acceptance. Target-database administrative work and requests already authorized
+by MinIO still require separate treatment. Adoption must drain older unguarded
+writers; the guard cannot constrain code that never consults it. The live layout
+remains disabled.
+
 These contracts do not enable the new layout in the live service. Full lifecycle
 acceptance, stale namespace-child-write fencing and allowlisted data transfer
 remain required before selecting it or lifting retained-data recreation's

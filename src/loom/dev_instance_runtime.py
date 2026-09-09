@@ -46,6 +46,7 @@ from loom.personal_dev_incarnation_storage import (
     validate_personal_dev_storage_identity,
 )
 from loom.personal_dev_reconciler import PersonalDevReadinessObservation
+from loom.personal_dev_storage_admin_fence import storage_admin_connection
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 
 _STORAGE_JSON = "storage-binding.json"
@@ -470,10 +471,7 @@ class PsycopgSharedFixtureSqlExecutor:
         create_database_sql: str,
     ) -> None:
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._connect_url,
-                autocommit=True,
-            ) as connection:
+            async with storage_admin_connection(self.admin_url, identity, action="provision") as connection:
                 await connection.execute(role_sql)
                 exists = await connection.execute(
                     "SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s",
@@ -497,10 +495,7 @@ class PsycopgSharedFixtureSqlExecutor:
 
     async def drop_database_and_role(self, identity: DevInstanceIdentity) -> None:
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._connect_url,
-                autocommit=True,
-            ) as connection:
+            async with storage_admin_connection(self.admin_url, identity, action="cleanup") as connection:
                 await connection.execute(
                     "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
                     "WHERE datname = %s AND pid <> pg_backend_pid()",
