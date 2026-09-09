@@ -65,9 +65,30 @@ def application_origin_payload(configuration, acknowledgement, *, configuration_
         base_projection=projection, acknowledgement=acknowledgement)
 
 
-async def typed_sql_execution(session, *, max_subjects=8):
+async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None):
     fleet = fleet_with_development_template()
     fixture = await setup_execution(session, execution_policy=execution_policy(), fleet=fleet)
+    origins = ()
+    if managed_projection is not None:
+        from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
+
+        projected = await fixture.store.project_development_subject(session, managed_projection,
+            actor="environment-lifecycle", idempotency_key=UUID(int=88770))
+        ack = SubjectExecutionAcknowledgementV2(subject_id=managed_projection.subject_id,
+            subject_incarnation=managed_projection.subject_incarnation,
+            configuration_generation=managed_projection.configuration_generation,
+            deployment_generation=managed_projection.deployment_generation,
+            candidate=CandidateBindingV2(algorithm="source-sha256", identity=managed_projection.candidate_sha256,
+                publication_sha256=managed_projection.candidate_publication_sha256),
+            reporter_incarnation=managed_projection.demand_reporter_incarnation,
+            protected_admission_sha256=managed_projection.protected_admission_sha256,
+            legacy_writer_high_water=0, acknowledgement_sha256="a" * 64)
+        origins = (ManagedApplicationOriginV1(configuration=projected.subject, acknowledgement=ack,
+            installation_projection=managed_projection, base_projection=managed_projection),)
+        fixture = replace(fixture, request=fixture.request.model_copy(update={
+            "configuration_epoch": projected.configuration_epoch,
+            "subject_acknowledgements": (*fixture.request.subject_acknowledgements, ack),
+        }))
     profiles = []
     for profile in fleet.development_subject_template.profiles:
         architecture = "arm64" if profile.pool_id == "gb10" else "x86_64"
@@ -83,8 +104,10 @@ async def typed_sql_execution(session, *, max_subjects=8):
     )
     preparation = ExecutionPreparationV4.model_validate(fixture.request.model_dump(mode="python") | {
         "schema_version": 4, "personal_builds": template,
+        "managed_application_origins": origins,
         "personal_membership": PersonalMembershipPolicyV1(namespace_id=UUID(int=88001),
-            management_principal_id="build-management", development_template_sha256=canonical_digest(fleet.development_subject_template), max_subjects=max_subjects),
+            management_principal_id="build-management", development_template_sha256=canonical_digest(fleet.development_subject_template), max_subjects=max_subjects,
+            managed_base_subject_ids=tuple(origin.configuration.subject_id for origin in origins)),
     })
     digest = canonical_executable_digest(preparation)
     values = dict(execution_epoch=42, authority_incarnation=preparation.authority_incarnation,
