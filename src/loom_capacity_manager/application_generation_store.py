@@ -12,8 +12,13 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
 from loom_capacity_manager.build_generation_store import _require_values
-from loom_capacity_manager.contracts import DynamicDevelopmentSubjectProjectionV1, canonical_bytes
+from loom_capacity_manager.contracts import (
+    DynamicDevelopmentSubjectProjectionV1,
+    SubjectConfigurationV1,
+    canonical_bytes,
+)
 from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
 from loom_capacity_manager.models import (
     CapacityCandidate,
@@ -39,27 +44,26 @@ async def require_application_generation_evidence(
     member = PersonalApplicationMemberV1.model_validate_json(canonical_bytes(member))
     projection = DynamicDevelopmentSubjectProjectionV1.model_validate_json(canonical_bytes(projection))
     origin = DynamicDevelopmentSubjectProjectionV1.model_validate_json(canonical_bytes(origin))
-    subject, ack = member.configuration, member.acknowledgement
-    mutable = {"operation_kind", "operation_id", "operation_epoch", "configuration_generation", "min_slots", "max_slots"}
-    if (
-        reporter_state not in {"current", "fenced"} or origin.operation_kind not in {"create", "update"}
-        or origin.configuration_generation > projection.configuration_generation
-        or projection.model_dump(exclude=mutable) != origin.model_dump(exclude=mutable)
-        or (projection.operation_kind in {"create", "update"} and canonical_bytes(projection) != canonical_bytes(origin))
-        or projection.subject_id != subject.subject_id or projection.subject_incarnation != subject.subject_incarnation
-        or projection.owner_id != member.owner_id or subject.display_name != f"dev-{projection.environment_name}"
-        or projection.configuration_generation != subject.configuration_generation
-        or projection.deployment_generation != subject.deployment_generation
-        or projection.candidate_generation != subject.candidate_generation
-        or projection.demand_reporter_incarnation != subject.demand_reporter_incarnation
-        or subject.lifecycle_state != ("disabled" if projection.operation_kind == "destroy" else "active")
-        or subject.min_slots != (0 if projection.operation_kind == "destroy" else projection.min_slots)
-        or subject.max_slots != (0 if projection.operation_kind == "destroy" else projection.max_slots)
-        or ack.candidate.algorithm != "source-sha256" or ack.candidate.identity != projection.candidate_sha256
-        or ack.candidate.publication_sha256 != projection.candidate_publication_sha256
-        or ack.protected_admission_sha256 != projection.protected_admission_sha256
-    ):
-        raise ValueError("application generation origin or latest membership changed")
+    if projection.owner_id != member.owner_id:
+        raise ValueError("application generation owner changed")
+    binding = ManagedApplicationOriginV1(configuration=member.configuration,
+        acknowledgement=member.acknowledgement, base_projection=projection, installation_projection=origin)
+    await require_application_installation_evidence(session, binding)
+    await require_application_reporter_evidence(session, member.configuration,
+        projection.demand_reporter_token_sha256, reporter_state=reporter_state)
+
+
+async def require_application_installation_evidence(
+    session: AsyncSession, binding: ManagedApplicationOriginV1,
+) -> None:
+    """Check retained installation without interpreting a mutable reporter tip.
+
+    The caller authenticates the pinned origin and immutable configuration/event
+    provenance. This read works for both real members and imported bases without
+    inventing a membership revision. It cannot establish current admission.
+    """
+    binding = ManagedApplicationOriginV1.model_validate_json(canonical_bytes(binding))
+    subject, origin = binding.configuration, binding.installation_projection
     candidate = (await session.scalars(select(CapacityCandidate).where(
         CapacityCandidate.subject_id == subject.subject_id,
         CapacityCandidate.subject_incarnation == subject.subject_incarnation,
@@ -91,16 +95,6 @@ async def require_application_generation_evidence(
             "protected_admission_sha256": origin.protected_admission_sha256,
             "capacity_agent_installation_sha256": origin.capacity_agent_installation_sha256},
     }, label="application deployment")
-    reporter = (await session.scalars(select(CapacityDemandReporter).where(
-        CapacityDemandReporter.subject_id == subject.subject_id,
-        CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
-        CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,
-    ).execution_options(populate_existing=True))).one_or_none()
-    _require_values(reporter, {"state": reporter_state,
-        "configuration_generation": subject.configuration_generation,
-        "deployment_generation": subject.deployment_generation,
-        "token_sha256": projection.demand_reporter_token_sha256,
-    }, label="application reporter")
     profiles = tuple((await session.scalars(select(CapacityWorkerProfile).where(
         CapacityWorkerProfile.subject_id == subject.subject_id,
         CapacityWorkerProfile.subject_incarnation == subject.subject_incarnation,
@@ -116,3 +110,22 @@ async def require_application_generation_evidence(
             "shape_catalog": [shape.model_dump(mode="json") for shape in profile.worker_shapes],
             "narrowing_constraints": {"eligible_resource_domains": list(profile.eligible_resource_domains)},
         }, label="application profile")
+
+
+async def require_application_reporter_evidence(
+    session: AsyncSession, subject: SubjectConfigurationV1, token_sha256: str,
+    *, reporter_state: Literal["current", "fenced"] = "current",
+) -> None:
+    """Verify the authenticated latest binding, never infer it from row ordering."""
+    subject = SubjectConfigurationV1.model_validate_json(canonical_bytes(subject))
+    if reporter_state not in {"current", "fenced"}:
+        raise ValueError("application reporter state is invalid")
+    reporter = (await session.scalars(select(CapacityDemandReporter).where(
+        CapacityDemandReporter.subject_id == subject.subject_id,
+        CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
+        CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,
+    ).execution_options(populate_existing=True))).one_or_none()
+    _require_values(reporter, {"state": reporter_state,
+        "configuration_generation": subject.configuration_generation,
+        "deployment_generation": subject.deployment_generation, "token_sha256": token_sha256,
+    }, label="application reporter")

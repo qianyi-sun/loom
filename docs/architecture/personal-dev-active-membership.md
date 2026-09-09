@@ -705,6 +705,12 @@ not a digest reconstructed from mutable database rows. It creates no synthetic
 membership revision. Durable adoption and reporter-currentness resolution remain
 separate requirements before any base mutation or executable V4 admission.
 
+The retained application reader exposes installation-only validation separately
+from reporter validation. Historical installation reads still verify exact
+candidate attestation, deployment and complete profile records after reporter
+rotation; they do not claim the old reporter is current. Existing member callers
+retain the combined check until cross-epoch reporter authority is connected.
+
 Build-generation persistence now stages the exact native runtime candidate,
 two worker-profile records and the service reporter in the membership transaction.
 Candidate digests hash the complete runtime binding rather than padding a Git
