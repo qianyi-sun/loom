@@ -60,6 +60,7 @@ from loom_control_plane.metrics import (
 
 _EXECUTION_UNIT_NAMESPACE = UUID("a2f6a80b-b27c-4ae1-b9a0-8c743edb0fa5")
 _TERMINAL_EVENT_KINDS = frozenset({"cancelled", "timed_out", "failed", "finalized", "deleted"})
+_TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 _EVENT_TO_OBSERVED = {
     "created": "created",
     "started": "running",
@@ -510,7 +511,12 @@ async def reserve_trial_execution(
         raise ServiceExecutionConflict(str(exc)) from exc
 
     trial = (
-        await session.execute(select(Trial).where(Trial.id == trial_id).with_for_update())
+        await session.execute(
+            select(Trial)
+            .where(Trial.id == trial_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if trial is None:
         raise ServiceExecutionConflict("trial not found")
@@ -771,6 +777,7 @@ async def enqueue_execution_transition(
             select(ServiceExecutionLease)
             .where(ServiceExecutionLease.id == lease_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if lease is None:
@@ -802,6 +809,18 @@ async def enqueue_execution_transition(
     if existing is not None:
         return existing
 
+    retry_trial = None
+    if desired_state == "retry":
+        # Validate before changing lease intent: a rejected retry must not
+        # autoflush a revocation or resurrect a reference retention has released.
+        retry_trial = await session.get(
+            Trial, lease.trial_id, with_for_update=True, populate_existing=True
+        )
+        if retry_trial is None or retry_trial.attempt_count != lease.attempt:
+            raise ServiceExecutionFenceError("retry lost the trial attempt fence")
+        if retry_trial.state in _TERMINAL_TRIAL_STATES:
+            raise ServiceExecutionConflict("retry cannot reopen a terminal trial")
+
     # Generation and desired state are one atomic intent.  Set desired state
     # before any query can autoflush a generation change.
     lease.desired_state = desired_state
@@ -812,15 +831,12 @@ async def enqueue_execution_transition(
         lease.cleanup_state = "pending"
         lease.cleanup_requested_at = revoked_at
         lease.cleanup_deadline_at = revoked_at + _RESOURCE_RELEASE_DEADLINE
-        if desired_state == "retry":
-            trial = await session.get(Trial, lease.trial_id, with_for_update=True)
-            if trial is None or trial.attempt_count != lease.attempt:
-                raise ServiceExecutionFenceError("retry lost the trial attempt fence")
-            trial.state = "queued"
-            trial.worker_id = None
-            trial.claimed_at = None
-            trial.pre_start_heartbeat_at = None
-            trial.started_at = None
+        if retry_trial is not None:
+            retry_trial.state = "queued"
+            retry_trial.worker_id = None
+            retry_trial.claimed_at = None
+            retry_trial.pre_start_heartbeat_at = None
+            retry_trial.started_at = None
     sequence = (
         await session.execute(
             select(func.coalesce(func.max(ServiceExecutionCommand.sequence), 0)).where(
@@ -1210,6 +1226,7 @@ async def record_execution_event(
             select(ServiceExecutionLease)
             .where(ServiceExecutionLease.id == lease_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if lease is None:
@@ -1270,6 +1287,28 @@ async def record_execution_event(
         raise ServiceExecutionConflict(
             f"execution event {event_kind} is invalid for desired state {lease.desired_state}"
         )
+    advances_projection = ordinal > lease.last_event_ordinal
+    finalized_projection: tuple[Trial, str] | None = None
+    trial_state = payload.get("trial_state")
+    if event_kind == "finalized" and advances_projection:
+        # Exact replay returned above. A new projection must validate the fresh
+        # Trial under its row lock before adding the event or mutating the lease.
+        finalized_trial = await session.get(
+            Trial, lease.trial_id, with_for_update={"key_share": True}, populate_existing=True
+        )
+        if (
+            finalized_trial is None
+            or not isinstance(trial_state, str)
+            or trial_state not in {"materializing", "succeeded", "failed", "cancelled"}
+        ):
+            raise ServiceExecutionConflict("finalized event lacks a valid trial state")
+        if finalized_trial.state in _TERMINAL_TRIAL_STATES and trial_state == "materializing":
+            raise ServiceExecutionConflict("finalized event cannot reopen a terminal trial")
+        if trial_state in {"materializing", "succeeded"} and not isinstance(
+            payload.get("result"), dict
+        ):
+            raise ServiceExecutionConflict("successful compute finalization requires a result")
+        finalized_projection = (finalized_trial, trial_state)
     event = ServiceExecutionEvent(
         id=uuid4(),
         lease_id=lease_id,
@@ -1282,7 +1321,6 @@ async def record_execution_event(
         observed_at=observed_at,
     )
     session.add(event)
-    advances_projection = ordinal > lease.last_event_ordinal
     if advances_projection:
         lease.last_event_ordinal = ordinal
     if event_kind == "heartbeat" and advances_projection:
@@ -1405,21 +1443,9 @@ async def record_execution_event(
             lease.desired_state = "deleted"
             lease.deleted_at = observed_at
             lease.cleanup_state = "complete"
-    if event_kind == "finalized" and advances_projection:
+    if finalized_projection is not None:
         lease.finalized_at = observed_at
-        trial = await session.get(Trial, lease.trial_id)
-        trial_state = payload.get("trial_state")
-        if trial is None or trial_state not in {
-            "materializing",
-            "succeeded",
-            "failed",
-            "cancelled",
-        }:
-            raise ServiceExecutionConflict("finalized event lacks a valid trial state")
-        if trial_state in {"materializing", "succeeded"} and not isinstance(
-            payload.get("result"), dict
-        ):
-            raise ServiceExecutionConflict("successful compute finalization requires a result")
+        trial, trial_state = finalized_projection
         trial.state = trial_state
         trial.result = payload.get("result") if isinstance(payload.get("result"), dict) else None
         trial.failure_reason = (
