@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -62,8 +61,14 @@ class TaskImageBundleBackend(Protocol):
         *,
         bucket: str,
         key: str,
-        expires_in_seconds: int,
-    ) -> str: ...
+        expires_at: datetime,
+    ) -> str:
+        """Sign to this exact UTC-second deadline using the actual signing stamp.
+
+        Do not convert the deadline to a duration before delayed signing work.
+        Credentials must also remain usable through the requested deadline.
+        """
+        ...
 
 
 def _nonzero_uuid(value: UUID) -> UUID:
@@ -230,6 +235,7 @@ class TaskImageBundleCapabilityProvider:
         url_expiry_seconds: int,
         capability_id_factory: Callable[[], UUID] = uuid4,
         maximum_capability_bytes: int = MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._backend = backend
         self._origin = _origin(public_https_origin)
@@ -256,6 +262,16 @@ class TaskImageBundleCapabilityProvider:
         self._url_expiry_seconds = url_expiry_seconds
         self._capability_id_factory = capability_id_factory
         self._maximum_capability_bytes = maximum_capability_bytes
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _checked_time(self, *, previous: datetime, expires_at: datetime) -> datetime:
+        current = self._clock()
+        if current.utcoffset() is None or current < previous:
+            raise TaskImageBundleCapabilityError("task-image bundle clock is invalid")
+        current = current.astimezone(UTC)
+        if current >= expires_at:
+            raise TaskImageBundleCapabilityError("task-image bundle authorization expired")
+        return current
 
     def _validated_plan(self, plan: TaskImageBuildPlanV1) -> TaskImageBuildPlanV1:
         try:
@@ -360,7 +376,7 @@ class TaskImageBundleCapabilityProvider:
             or not 0 < signed_lifetime <= self._url_expiry_seconds
             or signed_at > now
             or signed_at + timedelta(seconds=signed_lifetime) <= now
-            or signed_at + timedelta(seconds=signed_lifetime) > expires_at
+            or signed_at + timedelta(seconds=signed_lifetime) != expires_at
         ):
             raise TaskImageBundleCapabilityError("task-image bundle presigned URL is invalid")
         return value
@@ -375,25 +391,33 @@ class TaskImageBundleCapabilityProvider:
             raise ValueError("bundle capability issue time must be timezone-aware")
         now = now.astimezone(UTC)
         plan = self._validated_plan(plan)
-        remaining_seconds = math.floor((plan.authorization_expires_at - now).total_seconds())
-        expiry_seconds = min(self._url_expiry_seconds, remaining_seconds)
-        if expiry_seconds <= 0:
+        # SigV4 timestamps have second precision. One rounded-down absolute
+        # deadline binds every object; elapsed I/O cannot extend it or leave
+        # the capability advertising validity beyond one object's URL.
+        expires_at = min(
+            plan.authorization_expires_at,
+            now + timedelta(seconds=self._url_expiry_seconds),
+        ).replace(microsecond=0)
+        if expires_at <= now:
             raise TaskImageBundleCapabilityError("task-image bundle authorization expired")
-        expires_at = now + timedelta(seconds=expiry_seconds)
+        observed_at = self._checked_time(previous=now, expires_at=expires_at)
         listed = self._listed_objects(plan)
+        observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
 
         objects: list[TaskImageBundleObjectCapabilityV1] = []
         for relative_path, item in listed:
+            observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
             try:
                 url = self._backend.presign_get(
                     bucket=plan.bundle_bucket,
                     key=item.key,
-                    expires_in_seconds=expiry_seconds,
+                    expires_at=expires_at,
                 )
             except Exception:
                 raise TaskImageBundleCapabilityError(
                     "task-image bundle presigning is unavailable"
                 ) from None
+            observed_at = self._checked_time(previous=observed_at, expires_at=expires_at)
             objects.append(
                 TaskImageBundleObjectCapabilityV1(
                     relative_path=relative_path,
@@ -401,7 +425,7 @@ class TaskImageBundleCapabilityProvider:
                     url=self._validated_url(
                         url,
                         key=item.key,
-                        now=now,
+                        now=observed_at,
                         expires_at=expires_at,
                     ),
                 )
@@ -425,6 +449,7 @@ class TaskImageBundleCapabilityProvider:
             raise TaskImageBundleCapabilityError(
                 "task-image bundle capability response is too large"
             )
+        self._checked_time(previous=observed_at, expires_at=expires_at)
         return capability
 
 
