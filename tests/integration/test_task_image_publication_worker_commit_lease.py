@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import timedelta
 from uuid import UUID
 
@@ -32,18 +31,50 @@ from tests.unit.test_task_image_registry_reader import token_key as token_key
 @pytest.mark.parametrize("expired_at_commit", [True, False])
 @pytest.mark.parametrize("commit_stage", ["claim", "renewal"])
 async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
-    registry_authority_session, tls_registry, token_key, expired_at_commit, commit_stage
+    registry_authority_session,
+    tls_registry,
+    token_key,
+    monkeypatch,
+    expired_at_commit,
+    commit_stage,
 ):
     values = await _prepared(registry_authority_session, tls_registry, token_key)
     next(
         response for path, response in tls_registry.routes.items() if "/manifests/" in path
     ).wait_for_peer_close_before_response = True
-    base, started = NOW + timedelta(seconds=14), time.monotonic()
-    last_sample = [base]
+    now = NOW + timedelta(seconds=14)
+    commit_released = False
+    post_commit_sleeps = []
+    real_sleep = asyncio.sleep
 
     def clock():
-        last_sample[0] = base + timedelta(seconds=time.monotonic() - started)
-        return last_sample[0]
+        return now
+
+    async def renewal_sleep(delay, result=None):
+        nonlocal now
+        if asyncio.current_task().get_name() != "publication-renewal":
+            return await real_sleep(delay, result)
+        if commit_released:
+            post_commit_sleeps.append(delay)
+            if len(post_commit_sleeps) > 1:
+                # The recovered transaction has committed. Keep its next renewal
+                # asleep until the observer verifies the row and cancels work.
+                await asyncio.Event().wait()
+            assert delay == 4, "renewal must use half the remaining committed lease"
+        else:
+            assert delay == 15
+            # Establish actual in-flight I/O before testing renewal-COMMIT loss;
+            # accelerating the scheduler must not race the TLS setup itself.
+            async with asyncio.timeout(5):
+                await tls_registry.request_received.wait()
+        now += timedelta(seconds=delay)
+        return await real_sleep(0, result)
+
+    # Control only this worker's renewal scheduling and injected authority clock.
+    # Claim, deferred COMMIT, renewal, timeout contexts and TLS remain real. This
+    # asserts the requested sleep directly instead of requiring DB/scheduler work
+    # to finish inside a 50 ms wall-clock lease on a shared CI runner.
+    monkeypatch.setattr(asyncio, "sleep", renewal_sleep)
 
     values = (*values[:4], clock)
     old_state = "queued" if commit_stage == "claim" else "running"
@@ -64,8 +95,8 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
         registry_authority_session,
         tls_registry,
         values,
-        lease_seconds=4,
-        renewal_interval_seconds=1.5,
+        lease_seconds=60,
+        renewal_interval_seconds=15,
         database_timeout_seconds=10,
     )
     task = None
@@ -81,12 +112,16 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
             assert query.strip().upper() == "COMMIT"
             # Simulate clock passage while a genuine deferred PostgreSQL commit
             # owns the new lease. Do not mock claim, transaction, renewal or I/O.
-            claimed_lease_expiry = last_sample[0] + timedelta(seconds=4)
-            base = claimed_lease_expiry + timedelta(seconds=0.2 if expired_at_commit else -0.05)
-            started = time.monotonic()
+            claimed_lease_expiry = now + timedelta(seconds=60)
+            now = claimed_lease_expiry + timedelta(seconds=0.2 if expired_at_commit else -8)
+            if not expired_at_commit:
+                # A real release delay must not choose the simulated authority
+                # branch. This deterministically broke the former 50 ms test.
+                await blocker.execute(text("SELECT pg_sleep(0.1)"))
+            commit_released = True
             await blocker.rollback()
         if expired_at_commit:
-            done, _ = await asyncio.wait({task}, timeout=0.8)
+            done, _ = await asyncio.wait({task}, timeout=5)
             assert task in done, "claim commit left work running beyond its remaining lease"
             with pytest.raises(PublicationJobOwnershipError):
                 await task
@@ -96,20 +131,29 @@ async def test_claim_commit_consumed_lease_bounds_work_before_renewal_sleep(
                 assert len(tls_registry.requests) == 1
                 assert tls_registry.peer_closed.is_set()
             assert not values[2].entered.is_set()
+            assert not post_commit_sleeps
         else:
-            # Recover remaining live authority promptly instead of unnecessarily
-            # discarding valid work. The previous fixed sleep cannot renew in
-            # this window; acceptance requires a genuinely committed new lease.
-            async with asyncio.timeout(0.8):
+            # Acceptance requires a genuinely committed new lease, not merely
+            # entering renewal or requesting the correct sleep duration.
+            async with asyncio.timeout(5):
                 while True:
+                    if post_commit_sleeps:
+                        assert post_commit_sleeps[0] == 4
+                    if task.done():
+                        await task
                     async with registry_authority_session() as observer:
                         expiry = await observer.scalar(
                             select(TaskImagePublicationJob.worker_expires_at)
                         )
-                    if expiry is not None and expiry > claimed_lease_expiry:
+                    if (
+                        expiry is not None
+                        and expiry > claimed_lease_expiry
+                        and tls_registry.request_received.is_set()
+                    ):
                         break
                     await asyncio.sleep(0.01)
             assert tls_registry.request_received.is_set()
+            assert post_commit_sleeps[0] == 4
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
