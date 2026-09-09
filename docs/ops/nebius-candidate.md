@@ -51,7 +51,12 @@ through IAM as needed, without editing pipeline code. See the
 
 BuildKit is pinned to `v0.33.0` and its manifest digest in the workflow.
 Skopeo is pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3`; the explicit
-Ubuntu 24.04 runner label keeps that package source stable. Trivy uses the
+Ubuntu 24.04 runner label keeps that package source stable. Its APT update and
+install use only the runner's `/etc/apt/sources.list.d/ubuntu.sources`, retaining
+the configured Ubuntu mirrors and native signature/checksum validation. Unrelated
+vendor repositories cannot block this install; their files remain untouched.
+This follows the upstream [runner source configuration](https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-apt-sources.sh).
+Trivy uses the
 repository's version/hash-checked installer and controlled scan exceptions;
 Python tooling uses `uv sync --locked` with the existing `cluster` extra for the
 Nebius SDK. Images are built to an OCI archive, scanned and copied with digest

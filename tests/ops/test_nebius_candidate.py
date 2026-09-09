@@ -9,9 +9,51 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import nebius_candidate as candidate
+
+
+def test_tooling_step_ignores_unrelated_apt_sources() -> None:
+    workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
+    script = next(
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if step.get("name") == "Install locked candidate tooling"
+    )
+    # Exercise the actual Bash step; an unscoped APT command simulates a broken
+    # vendor repository. Package installation and the existing pin check remain.
+    prelude = r"""
+    uv() { :; }
+    test() {
+      if [[ "$*" == '-s /etc/apt/sources.list.d/ubuntu.sources' ]]; then return 0; fi
+      builtin test "$@"
+    }
+    sudo() {
+      [[ "$1" == apt-get ]] || return 1
+      shift
+      [[ "$1" == -o && "$2" == Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources ]] || return 100
+      shift 2
+      [[ "$1" == -o && "$2" == Dir::Etc::sourceparts=- ]] || return 100
+      shift 2
+      printf '%s\n' "$*"
+    }
+    dpkg-query() { printf '%s' '1.13.3+ds1-2ubuntu0.24.04.3'; }
+    skopeo() { printf '%s\n' 'skopeo version 1.13.3'; }
+    """
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", prelude + script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "update",
+        "install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3",
+        "skopeo version 1.13.3",
+    ]
 
 
 def inputs(tmp_path: Path) -> tuple[dict, Path, str]:

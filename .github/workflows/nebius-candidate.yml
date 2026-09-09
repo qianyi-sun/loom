@@ -36,10 +36,14 @@ jobs:
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
       - name: Install locked candidate tooling
+        shell: bash
         run: |
           uv sync --locked --no-dev --extra cluster
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
+          # Skopeo needs Ubuntu packages, not the runner's unrelated vendor repositories.
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          apt_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          sudo apt-get "${apt_sources[@]}" update
+          sudo apt-get "${apt_sources[@]}" install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
           test "$(dpkg-query -W -f='${Version}' skopeo)" = '1.13.3+ds1-2ubuntu0.24.04.3'
           skopeo --version
       - name: Start pinned BuildKit
