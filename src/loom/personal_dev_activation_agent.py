@@ -29,6 +29,7 @@ from loom.personal_dev_activation import (
     PersonalDevActivationIntentRequest,
     PersonalDevActivationSigner,
 )
+from loom.personal_dev_incarnation_storage import parse_personal_dev_storage_binding
 from loom.personal_dev_reconciler import personal_dev_intent_readiness_sha256
 
 
@@ -187,8 +188,19 @@ class HttpPersonalDevActivationAuthority:
                 "intent_created_at",
                 "intent_sha256",
             }
-            if not isinstance(value, dict) or set(value) != expected_fields:
+            if not isinstance(value, dict):
                 raise ValueError
+            if "schema_version" in value:
+                if type(value["schema_version"]) is not int or value["schema_version"] != 2:
+                    raise ValueError
+                expected_fields |= {"schema_version", "storage_binding", "storage_binding_sha256"}
+            if set(value) != expected_fields:
+                raise ValueError
+            if "storage_binding" in value:
+                value["storage_binding"] = parse_personal_dev_storage_binding(
+                    json.dumps(value["storage_binding"], sort_keys=True, separators=(",", ":")).encode(),
+                    expected_sha256=value["storage_binding_sha256"],
+                )
             supplied_digest = value.pop("intent_sha256")
             for field in (
                 "subject_id",
@@ -293,7 +305,10 @@ class KubectlPersonalDevActivationExecutor:
         return values
 
     async def activate(self, intent: PersonalDevActivationIntent) -> str:
-        identity = derive_identity(intent.environment_name)
+        identity = (
+            intent.storage_binding.identity if intent.storage_binding is not None
+            else derive_identity(intent.environment_name)
+        )
         config = self._config(intent)
         observation = await observe_personal_dev_candidate_generation(
             self.kubectl,

@@ -167,8 +167,20 @@ class SqlAlchemyPersonalDevActivationIntentReader:
         if row is None:
             return None
         operation, environment, attempt, candidate = row
+        try:
+            storage_binding = _storage_record(operation)
+            if storage_binding != _storage_record(environment):
+                raise ValueError("activation storage binding mismatch")
+        except ValueError:
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev activation storage bindings are inconsistent",
+            ) from None
         if (
             operation.subject_id != environment.subject_id
+            or operation.owner_user_id != environment.owner_user_id
+            or operation.owner_team_id != environment.owner_team_id
+            or operation.owner_user_id != candidate.owner_user_id
+            or operation.owner_team_id != candidate.owner_team_id
             or operation.subject_incarnation != environment.subject_incarnation
             or operation.subject_id != attempt.subject_id
             or operation.subject_incarnation != attempt.subject_incarnation
@@ -215,6 +227,9 @@ class SqlAlchemyPersonalDevActivationIntentReader:
             max_slots=operation.max_slots,
             images=images,
             intent_created_at=operation.updated_at,
+            schema_version=2 if storage_binding is not None else 1,
+            storage_binding=storage_binding,
+            storage_binding_sha256=operation.storage_binding_sha256,
         )
 
 

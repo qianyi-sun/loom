@@ -52,6 +52,7 @@ from loom.personal_dev_expected_denial import (
     EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
     expected_hidden_denial_phase,
 )
+from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlockError,
     PersonalDevOperationalInterlockError,
@@ -245,6 +246,12 @@ class PersonalDevActivationIntentPayload(BaseModel):
     images: dict[str, str]
     intent_created_at: datetime
     intent_sha256: str
+
+
+class PersonalDevActivationIntentV2Payload(PersonalDevActivationIntentPayload):
+    schema_version: Literal[2] = 2
+    storage_binding: PersonalDevStorageBindingV1
+    storage_binding_sha256: str
 
 
 class DevInstanceIdentityResponse(BaseModel):
@@ -469,7 +476,7 @@ def _response(
         updated_at=record.updated_at,
         ready_at=record.ready_at,
         deleted_at=record.deleted_at,
-        identity=_identity_response(derive_identity(record.name)),
+        identity=_identity_response(_record_identity(record)),
     )
 
 
@@ -498,6 +505,12 @@ async def _enriched_response(request: Request, record: DevInstanceRecord) -> Dev
     except Exception:
         availability = PersonalDevCapacityAvailability("waiting", True, False)
     return _response(record, availability)
+
+
+def _record_identity(record: DevInstanceRecord | PersonalDevEnvironmentRecord) -> DevInstanceIdentity:
+    if isinstance(record, PersonalDevEnvironmentRecord) and record.storage_binding is not None:
+        return record.storage_binding.identity
+    return derive_identity(record.name)
 
 
 def _personal_environment_response(
@@ -535,14 +548,14 @@ def _personal_environment_response(
         updated_at=record.updated_at,
         ready_at=record.ready_at,
         deleted_at=record.deleted_at,
-        identity=_identity_response(derive_identity(record.name)),
+        identity=_identity_response(_record_identity(record)),
     )
 
 
 def _personal_activation_intent_response(
     intent: PersonalDevActivationIntent,
-) -> PersonalDevActivationIntentPayload:
-    return PersonalDevActivationIntentPayload(
+) -> PersonalDevActivationIntentPayload | PersonalDevActivationIntentV2Payload:
+    legacy = PersonalDevActivationIntentPayload(
         environment_name=intent.environment_name,
         subject_id=intent.subject_id,
         subject_incarnation=intent.subject_incarnation,
@@ -560,6 +573,13 @@ def _personal_activation_intent_response(
         images=dict(intent.images),
         intent_created_at=intent.intent_created_at,
         intent_sha256=intent.intent_sha256,
+    )
+    if intent.storage_binding is None:
+        return legacy
+    assert intent.storage_binding_sha256 is not None
+    return PersonalDevActivationIntentV2Payload(
+        **legacy.model_dump(), storage_binding=intent.storage_binding,
+        storage_binding_sha256=intent.storage_binding_sha256,
     )
 
 
@@ -794,14 +814,14 @@ async def apply_personal_dev_environment(
 
 @internal_router.post(
     "/personal-dev/activation-intents/next",
-    response_model=PersonalDevActivationIntentPayload,
+    response_model=PersonalDevActivationIntentPayload | PersonalDevActivationIntentV2Payload,
     responses={204: {"description": "No current activation intent"}},
 )
 async def next_personal_dev_activation_intent(
     payload: PersonalDevActivationIntentRequestPayload,
     request: Request,
     signature: Annotated[str, Header(alias="X-Loom-Activation-Signature")],
-) -> PersonalDevActivationIntentPayload | Response:
+) -> PersonalDevActivationIntentPayload | PersonalDevActivationIntentV2Payload | Response:
     """Return one current intent only to an agent proving signing-key possession."""
     await _assert_personal_dev_acceptance(request)
     verifier = getattr(request.app.state, "personal_dev_activation_verifier", None)

@@ -306,8 +306,29 @@ legacy-only administrative deletion before opt-in. The lifecycle controller has
 no environment/operation row-deletion path; destructive database administration
 is outside the supported recreation workflow.
 
-This durable contract does not enable storage provisioning. Runtime and independent
-activation propagation, credential fencing, UID-fenced namespace cleanup and
+The identity-taking SQL planner and claim resolver retain this persisted binding
+instead of deriving name-only physical targets. The Kubernetes credential vault
+keys caches by the full immutable identity and rereads bound Secret sets before
+reuse. Main, admin and protected-runtime Secrets carry canonical binding JSON and
+SHA; database endpoints/roles, object-store tenant identity and namespace binding
+must match. Namespace provenance uses annotations, since SHA256 exceeds the
+Kubernetes label-value limit. Creating a bound namespace never adopts an existing
+unbound namespace. Legacy Secret shapes remain unchanged and cannot reinterpret
+bound credentials. The pinned MinIO integration test exercises maximum-length
+static-IAM tenant names, cross-owner/incarnation access denial and old-tenant
+cleanup without removing retained objects or newer tenants.
+Bound Secrets use immutable, create-only writes. Main credentials persist first;
+retries validate all existing material before filling missing admin/runtime
+Secrets, preserving credentials if the API reply is lost after server persistence.
+
+Storage-aware activation uses explicit intent version 2 with a full binding and
+digest. Historical version-1 canonical bytes and its unversioned HTTP response
+remain unchanged. Management checks the environment, operation and candidate
+owner before emitting the new intent; the independent agent uses its bound
+physical identity. Owner responses report those same persisted storage names.
+
+These contracts do not enable storage provisioning. Runtime and independent
+activation propagation, UID-fenced namespace cleanup and
 allowlisted data transfer remain required before selecting the new layout in the
 live service or lifting the retained-data recreation interlock.
 

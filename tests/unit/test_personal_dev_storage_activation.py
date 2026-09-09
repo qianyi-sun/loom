@@ -7,9 +7,12 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from loom.personal_dev_activation import PersonalDevActivationIntentRequest
-from loom.personal_dev_activation_agent import HttpPersonalDevActivationAuthority, KubectlPersonalDevActivationExecutor
 from loom.dev_instance_runtime import KubectlClient
+from loom.personal_dev_activation import PersonalDevActivationIntentRequest
+from loom.personal_dev_activation_agent import (
+    HttpPersonalDevActivationAuthority,
+    KubectlPersonalDevActivationExecutor,
+)
 from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom_capacity_manager.contracts import canonical_digest
 from loom_service.routes.dev_instances import (
