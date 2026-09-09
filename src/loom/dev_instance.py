@@ -21,7 +21,11 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 
 # ── Envelope defaults (operator-tunable via control-plane config) ────────────
 #: Runtime ceiling enforced by the one global development-fleet autoscaler.
@@ -85,6 +89,7 @@ class DevInstanceIdentity:
     worker_pool: str  # dev-<name>
     provider_connection_namespace: str  # dev-<name>
     storage_incarnation: UUID | None = None  # Explicit opt-in; legacy storage stays name-bound.
+    storage_binding: PersonalDevStorageBindingV1 | None = None
 
 
 @dataclass(frozen=True)

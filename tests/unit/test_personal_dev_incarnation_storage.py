@@ -25,7 +25,7 @@ def test_incarnation_storage_preserves_routes_and_replaces_all_storage_authority
     binding = _binding()
     identity = binding.identity
     legacy = derive_identity("alice")
-    storage = {"database", "db_role", "task_bucket", "trajectories_bucket", "artifacts_bucket", "storage_incarnation"}
+    storage = {"database", "db_role", "task_bucket", "trajectories_bucket", "artifacts_bucket", "storage_incarnation", "storage_binding"}
     for field in fields(identity):
         if field.name not in storage:
             assert getattr(identity, field.name) == getattr(legacy, field.name)

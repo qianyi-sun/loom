@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 
 from loom.dev_instance import DevInstanceIdentity, derive_identity
+from loom.personal_dev_incarnation_storage import validate_personal_dev_storage_identity
 
 # Identifiers come from ``derive_identity`` (names are ``[a-z][a-z0-9-]*`` →
 # db_slug ``[a-z][a-z0-9_]*``), so they are already safe Postgres identifiers.
@@ -103,7 +104,12 @@ def provisioning_plan(name: str, password: str) -> dict[str, object]:
     that the executor consumes: the role SQL, the create-database SQL, and the
     buckets. Raises if the name or password is unsafe.
     """
-    identity = derive_identity(name)
+    return provisioning_plan_for_identity(derive_identity(name), password)
+
+
+def provisioning_plan_for_identity(identity: DevInstanceIdentity, password: str) -> dict[str, object]:
+    """Plan exact persisted physical targets without reverting to name-only storage."""
+    identity = validate_personal_dev_storage_identity(identity)
     return {
         "identity": identity,
         "role_sql": render_role_convergence_sql(identity, password),
