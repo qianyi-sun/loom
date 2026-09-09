@@ -12,6 +12,14 @@ capacity manager remains the only Loom allocation authority; pool-local Slurm
 execution performs placement within its allowance. Do not add an independent
 personal-build autoscaler or send personal candidates through task materialization.
 
+Under active membership, preserving OLDLAB means preserving native AMD64
+execution, not retaining an unaccounted Kubernetes launch. Each candidate still
+needs both platform bundles. One build-service subject per owner has both physical
+profiles, with platform-specific demand and the same owner account as applications.
+Both providers must consume physical allocation and prove cleanup before membership
+source intake can become available. A reservation beside an independently scheduled
+container is not allocation-contained execution.
+
 Initial policy permits a subset of `trt-gb10-3` through `trt-gb10-15`. Exclude
 controller node 1 and reserved task-builder node 2. This is an operator eligibility
 boundary, not a preferred-host list or a promise that every member is ready.

@@ -628,17 +628,33 @@ multi-person readiness.
 
 ## Build service and runtime connection
 
-The common membership mechanism will admit a typed `personal-build-worker`
-service from an operator-pinned builder-runtime release. Its GB10-only profile
-is a purpose-specific rule, not a reason to mislabel the work as staging.
-Application admission remains dual-pool. The build-purpose executor path must
-be implemented before that purpose is accepted for executable admission.
+The common membership mechanism will admit one typed `personal-build-worker`
+service per owner from an operator-pinned builder-runtime release. It has two
+operator-owned profiles: ARM64 builds use GB10, and AMD64 builds use OLDLAB.
+Both executions charge the same `dev-owner-<owner UUID hex>` account as the
+owner's applications. Every source attempt still requires both native platform
+bundles. Build demand is explicitly architecture-specific, never arch-neutral;
+the GB10-only restriction applies to the ARM64 profile, not the whole service.
+Application task demand retains its architecture-specific and neutral choices.
+The build-purpose executor paths must be implemented on both pools before that
+purpose is accepted for executable admission.
 
 Management translates source attempts into build-capability demand buckets.
 The existing global allocator and charged intent ledger handle placement and
 fairness. The pool executor routes build intents to a management admission
 adapter, not environment trial procedures. Builder launch profiles must match
 the real CI publication, not merely contain an unrelated publication digest.
+
+The initial management demand projector emits one cold slot per explicitly
+requested native platform from a current, owner-matching running build lease.
+Its deterministic work identity binds the source candidate, archive generation,
+owner/team, lifecycle operation, whole attempt/lease and platform. It rejects
+duplicates, conflicting records, missing/expired leases and unusable sources.
+Build-specific capabilities keep these requests out of ordinary task shapes.
+This pure projector does not authenticate database records or publish demand:
+the durable caller must select unassigned platform requests under the current
+fence and include assignments and cleanup-unproven commitments in the same
+snapshot. Removing pending demand is not physical release. Intake stays disabled.
 
 Submit a Slurm job held, durably bind it, then release under the exact current
 fence. Reconcile ambiguous submissions before retrying. The allocation grant
@@ -652,7 +668,10 @@ KVM-gVisor separation, private state and capability-client boundary. Select
 certified nodes from `trt-gb10-3` through `trt-gb10-15`; exclude nodes 1 and 2.
 Cancellation closes source/publication capabilities for the exact lease and
 retains its charge until cleanup is proved. Reboot or stale certification fences
-the grant. Preserve OLDLAB's native build path and node 2's task-image reservation.
+the grant. Preserve native AMD64 execution on OLDLAB, but do not reuse its
+unaccounted Kubernetes executor in membership mode. That provider also needs
+allocation-contained execution and authenticated cleanup. Preserve node 2's
+task-image reservation.
 
 ## Implementation boundaries and acceptance
 

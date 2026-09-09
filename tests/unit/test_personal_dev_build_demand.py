@@ -109,3 +109,57 @@ def test_batch_and_time_bounds_reject_before_projection():
         )
     with pytest.raises(ValueError):
         _project((replace(request, registration=CandidateRegistration.from_candidate(_candidate())),))
+
+
+def _allocator_build_subject(index=40, *, capabilities=True):
+    from tests.capacity_fixtures import allocator_subject
+
+    subject = allocator_subject(index, account_id=f"dev-owner-{_candidate().owner_user_id.hex}")
+    profiles = []
+    for profile in subject.configuration.profiles:
+        architecture = "cpu_arch.arm64" if profile.pool_id == "gb10" else "cpu_arch.x86_64"
+        shapes = tuple(shape.model_copy(update={
+            "capabilities": (architecture, "personal-build-worker") if capabilities else ("cpu",),
+        }) for shape in profile.worker_shapes)
+        profiles.append(profile.model_copy(update={"worker_shapes": shapes}))
+    demand = subject.last_demand.model_copy(update={"pending_unassigned": _project((
+        _request(), _request("linux/amd64"),
+    ))})
+    return subject.model_copy(update={
+        "configuration": subject.configuration.model_copy(update={"profiles": tuple(profiles)}),
+        "last_demand": demand,
+    })
+
+
+@pytest.mark.parametrize("capabilities", (True, False))
+def test_existing_allocator_routes_only_to_build_capable_native_shapes(capabilities):
+    from loom_capacity_manager.allocator import allocate_shadow
+    from tests.capacity_fixtures import allocator_input
+
+    subject = _allocator_build_subject(capabilities=capabilities)
+    result = allocate_shadow(allocator_input((subject,), gb10_slots=1, oldlab_slots=1))
+    actual = {allowance.attempt_id: allocation.pool_id for allocation in result.allocations
+              for allowance in allocation.placement_allowances}
+    expected = {bucket.attempt_ids[0]: bucket.eligible_pool_ids[0]
+                for bucket in subject.last_demand.pending_unassigned} if capabilities else {}
+    assert actual == expected
+
+
+def test_build_and_application_share_one_owner_ceiling():
+    from loom_capacity_manager.allocator import allocate_shadow
+    from loom_capacity_manager.contracts import canonical_digest, canonical_digest_excluding
+    from tests.capacity_fixtures import allocator_input, allocator_subject
+
+    build = _allocator_build_subject()
+    application = allocator_subject(41, account_id=build.configuration.account_id,
+                                    pending=(("application-task", ("gb10", "oldlab"), ("cpu",)),))
+    value = allocator_input((build, application), gb10_slots=2, oldlab_slots=2)
+    fleet = value.fleet.model_copy(update={"account_policies": tuple(
+        account.model_copy(update={"max_slots": 1}) for account in value.fleet.account_policies
+    )})
+    fleet = fleet.model_copy(update={"fleet_digest": canonical_digest_excluding(fleet, "fleet_digest")})
+    configuration = value.configuration.model_copy(update={
+        "fleet": value.configuration.fleet.model_copy(update={"digest": canonical_digest(fleet)}),
+    })
+    result = allocate_shadow(value.model_copy(update={"fleet": fleet, "configuration": configuration}))
+    assert sum(item.desired_slots for item in result.allocations) == 1
