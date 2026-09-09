@@ -388,3 +388,153 @@ async def test_manifest_redacts_storage_errors(monkeypatch, manifest):
     with pytest.raises(RuntimeError) as error:
         await _get_manifest(backend, manifest)
     assert "private" not in str(error.value)
+
+
+class _VerifiedReader(_ManifestReader):
+    def __init__(self, manifest):
+        super().__init__(manifest.canonical_bytes)
+        self.manifest = manifest
+        self.entries = None
+        self.list_requests = []
+        self.on_list = lambda: None
+
+    async def fetch(self, url, *, deadline):
+        from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
+
+        self.list_requests.append((url, deadline))
+        self.on_list()
+        query = parse_qs(urlsplit(url).query)
+        prefix = query["prefix"][0]
+        entries = self.entries
+        if entries is None:
+            entries = [(item.path, item.size_bytes) for item in self.manifest.files]
+            entries.append((BUNDLE_FILE_METADATA_NAME, len(self.manifest.mode_metadata_bytes)))
+        entries = sorted(entries)
+        index = int(query.get("continuation-token", ["0"])[0])
+        maximum = int(query["max-keys"][0])
+        selected = entries[index:index + maximum]
+        next_index = index + len(selected)
+        token = str(next_index) if next_index < len(entries) else None
+        # Reuse the production-facing XML fixture with heterogeneous file sizes.
+        payload = _page(query, keys=(), next_token=token).decode()
+        contents = "".join(f"<Contents><Key>{quote_plus(prefix + path)}</Key><Size>{size}</Size></Contents>" for path, size in selected)
+        return payload.replace("<KeyCount>0</KeyCount>", f"<KeyCount>{len(selected)}</KeyCount>").replace("</ListBucketResult>", contents + "</ListBucketResult>").encode()
+
+
+async def _verified(backend, manifest, **changes):
+    options = dict(
+        bucket="loom-bundles", prefix=f"revision/{manifest.digest}/",
+        expected_sha256=manifest.digest, task_checksum=manifest.task_checksum,
+        bundle_file_metadata_sha256=manifest.bundle_file_metadata_sha256,
+        maximum_objects=2000, maximum_bytes=512 * 1024 * 1024,
+        expires_at=NOW + timedelta(seconds=60),
+    )
+    options.update(changes)
+    return await backend.get_verified_bundle_manifest(**options)
+
+
+async def test_verified_manifest_requires_complete_inventory_under_one_deadline(monkeypatch, manifest):
+    reader = _VerifiedReader(manifest)
+    backend, _ = _backend(monkeypatch, reader=reader, limits=_module().S3InventoryLimits(page_size=1))
+    assert await _verified(backend, manifest) == manifest
+    assert len(reader.requests) == 1 and len(reader.list_requests) == 2
+    assert {deadline for _, deadline in reader.list_requests} == {reader.requests[0][1]}
+
+
+@pytest.mark.parametrize("change", ["omit_data", "omit_sidecar", "extra", "data_size", "sidecar_size"])
+async def test_verified_manifest_rejects_inventory_mismatch(monkeypatch, manifest, change):
+    from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
+
+    reader = _VerifiedReader(manifest)
+    entries = {item.path: item.size_bytes for item in manifest.files}
+    entries[BUNDLE_FILE_METADATA_NAME] = len(manifest.mode_metadata_bytes)
+    if change == "omit_data":
+        del entries["Dockerfile"]
+    elif change == "omit_sidecar":
+        del entries[BUNDLE_FILE_METADATA_NAME]
+    elif change == "extra":
+        entries["extra"] = 0
+    elif change == "data_size":
+        entries["Dockerfile"] -= 1
+    else:
+        entries[BUNDLE_FILE_METADATA_NAME] -= 1
+    reader.entries = list(entries.items())
+    backend, _ = _backend(monkeypatch, reader=reader)
+    with pytest.raises(RuntimeError):
+        await _verified(backend, manifest)
+
+
+@pytest.mark.parametrize("changes", [
+    {"prefix": "revision/legacy/"}, {"prefix": "../invalid/"}, {"bucket": "foreign"},
+    {"maximum_objects": True}, {"maximum_objects": 2001}, {"maximum_bytes": -1},
+    {"maximum_bytes": 512 * 1024 * 1024 + 1}, {"expected_sha256": "A" * 64},
+])
+async def test_verified_scope_rejects_before_any_network(monkeypatch, manifest, changes):
+    reader = _VerifiedReader(manifest)
+    backend, _ = _backend(monkeypatch, reader=reader)
+    with pytest.raises(RuntimeError):
+        await _verified(backend, manifest, **changes)
+    assert not reader.requests and not reader.list_requests
+
+
+async def test_verified_manifest_data_limit_is_not_spent_on_transport_sidecar(monkeypatch, tmp_path):
+    for index in range(2000):
+        (tmp_path / f"f{index:04d}").touch()
+    manifest = capture_task_image_bundle_manifest(tmp_path)
+    reader = _VerifiedReader(manifest)
+    backend, _ = _backend(monkeypatch, reader=reader)
+    assert await _verified(backend, manifest, maximum_bytes=0) == manifest
+    assert len(reader.list_requests) == 8
+    # Public legacy entrypoint keeps its old ceiling; only authenticated native
+    # composition can add the manifest-derived exact transport overhead.
+    with pytest.raises(RuntimeError):
+        await _list(backend, maximum_objects=2001)
+
+
+async def test_verified_limits_reject_registered_data_before_listing(monkeypatch, manifest):
+    reader = _VerifiedReader(manifest)
+    backend, _ = _backend(monkeypatch, reader=reader)
+    with pytest.raises(RuntimeError):
+        await _verified(backend, manifest, maximum_bytes=1)
+    assert len(reader.requests) == 1 and not reader.list_requests
+
+
+async def test_verified_forward_wall_clock_shrinks_next_phase_deadline(monkeypatch, manifest):
+    observed = [NOW]
+    reader = _VerifiedReader(manifest)
+    reader.on_fetch = lambda: observed.__setitem__(0, NOW + timedelta(seconds=59))
+    backend, _ = _backend(monkeypatch, reader=reader, clock=lambda: observed[0])
+    assert await _verified(backend, manifest) == manifest
+    assert reader.list_requests[0][1] < reader.requests[0][1]
+    assert reader.list_requests[0][1] - asyncio.get_running_loop().time() <= 1
+
+
+async def test_verified_clock_regression_between_phases_is_not_reset(monkeypatch, manifest):
+    observed = [NOW]
+    reader = _VerifiedReader(manifest)
+    reader.on_fetch = lambda: observed.__setitem__(0, NOW + timedelta(seconds=10))
+    reader.on_list = lambda: observed.__setitem__(0, NOW + timedelta(seconds=5))
+    backend, _ = _backend(monkeypatch, reader=reader, clock=lambda: observed[0])
+    with pytest.raises(RuntimeError):
+        await _verified(backend, manifest)
+
+
+async def test_verified_manifest_and_inventory_share_total_timeout_and_cancellation(monkeypatch, manifest):
+    entered = asyncio.Event()
+
+    class WaitingReader(_VerifiedReader):
+        async def fetch(self, url, *, deadline):
+            entered.set()
+            await asyncio.Future()
+
+    reader = WaitingReader(manifest)
+    backend, _ = _backend(monkeypatch, reader=reader, limits=_module().S3InventoryLimits(total_timeout_seconds=0.03))
+    with pytest.raises(RuntimeError):
+        await _verified(backend, manifest)
+    assert entered.is_set()
+    entered.clear()
+    task = asyncio.create_task(_verified(backend, manifest))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
