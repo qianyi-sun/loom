@@ -40,9 +40,9 @@ from loom_task_image_authority.auth import (
 )
 from loom_task_image_authority.bundle_capability import (
     MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
+    AsyncTaskImageBundleCapabilityProvider,
     TaskImageBundleCapabilityError,
     TaskImageBundleCapabilityProvider,
-    TaskImageBundleCapabilityV1,
 )
 from loom_task_image_authority.config import (
     TaskImageAuthoritySettings,
@@ -78,12 +78,14 @@ from loom_task_image_authority.http_contracts import (
 )
 from loom_task_image_authority.materializations import (
     DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS,
+    TaskImageBundlePreparation,
     TaskImageSessionMaterializationAuthorizationError,
     TaskImageSessionMaterializationConflictError,
     claim_session_materialization,
     fail_session_materialization,
+    finalize_session_materialization_bundle,
     heartbeat_session_materialization,
-    issue_session_materialization_bundle,
+    prepare_session_materialization_bundle,
     release_containment_failed_session_materialization,
     release_session_materialization,
     start_session_materialization,
@@ -420,7 +422,7 @@ def create_app(
     bootstrap_token_factory: Callable[[], str] | None = None,
     session_token_factory: Callable[[], str] | None = None,
     session_id_factory: Callable[[], UUID] | None = None,
-    bundle_capability_provider: TaskImageBundleCapabilityProvider | None = None,
+    bundle_capability_provider: TaskImageBundleCapabilityProvider | AsyncTaskImageBundleCapabilityProvider | None = None,
     registry_token_issuer: DistributionRegistryTokenIssuer | None = None,
     credential_id_factory: Callable[[], UUID] | None = None,
     candidate_id_factory: Callable[[], UUID] | None = None,
@@ -582,6 +584,7 @@ def create_app(
         ],
         *,
         read_committed: bool = False,
+        check_result: Callable[[_TransitionT], None] | None = None,
     ) -> _TransitionT:
         if app.state.session_factory is None or app.state.keyring is None:
             raise HTTPException(status_code=503, detail="task-image authority not ready")
@@ -601,7 +604,11 @@ def create_app(
                     # control and cleanup-only routes retain SERIALIZABLE.
                     await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
                 result = await operation(session, secret_store)
+                if check_result is not None:
+                    check_result(result)
                 await session.commit()
+                if check_result is not None:
+                    check_result(result)
             except TaskImageProjectionEquivocationError:
                 try:
                     await session.commit()
@@ -1199,35 +1206,81 @@ def create_app(
                 status_code=503,
                 detail="task-image authority unavailable",
             )
-        request_now = resolved_now()
+        provider = resolved_bundle_capability_provider
+        observed_at = resolved_now()
 
-        async def bundle_transition(
+        def bundle_clock() -> datetime:
+            nonlocal observed_at
+            current = resolved_now()
+            if current.utcoffset() is None or current < observed_at:
+                raise TaskImageBundleCapabilityError("task-image bundle clock is invalid")
+            observed_at = current
+            return current
+
+        def check_bundle(result: TaskImageBundlePreparation) -> None:
+            now = bundle_clock()
+            if (
+                now < result.checked_at or now >= result.valid_until
+                or (result.capability is not None and now >= result.capability.expires_at)
+            ):
+                raise TaskImageBundleCapabilityError("task-image bundle authorization expired")
+
+        async def prepare_bundle(
             session: AsyncSession,
             secret_store: LocalEncryptedSecretStore,
-        ) -> TaskImageBundleCapabilityV1:
+        ) -> TaskImageBundlePreparation:
             authorization = await authorize_materialization_request(
                 session,
                 guard=guard,
                 body=body,
-                now=request_now,
+                now=bundle_clock(),
             )
-            return await issue_session_materialization_bundle(
+            return await prepare_session_materialization_bundle(
                 session,
                 authorization=authorization,
                 materialization_id=body.materialization_id,
                 attempt_id=body.attempt_id,
                 lease_epoch=body.lease_epoch,
                 operation_id=body.operation_id,
-                now=request_now,
-                provider=resolved_bundle_capability_provider,
+                clock=bundle_clock,
+                provider=provider,
                 secret_store=secret_store,
             )
 
-        result = await transition(bundle_transition, read_committed=True)
-        return bounded_response(
-            result,
-            maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
-        )
+        prepared = await transition(prepare_bundle, read_committed=True, check_result=check_bundle)
+        try:
+            if prepared.capability is None:
+                # No AsyncSession, secret store or authority lock survives the
+                # preparation transition. Native storage I/O is cancellable here.
+                if isinstance(provider, AsyncTaskImageBundleCapabilityProvider):
+                    capability = await provider.issue(prepared.plan, now=bundle_clock())
+                else:
+                    capability = provider.issue(prepared.plan, now=bundle_clock())
+
+                async def finalize_bundle(
+                    session: AsyncSession, secret_store: LocalEncryptedSecretStore,
+                ) -> TaskImageBundlePreparation:
+                    authorization = await authorize_materialization_request(
+                        session, guard=guard, body=body, now=bundle_clock(),
+                    )
+                    return await finalize_session_materialization_bundle(
+                        session, authorization=authorization, materialization_id=body.materialization_id,
+                        attempt_id=body.attempt_id, lease_epoch=body.lease_epoch, operation_id=body.operation_id,
+                        prepared=prepared, capability=capability, provider=provider,
+                        secret_store=secret_store, clock=bundle_clock,
+                    )
+
+                result = await transition(finalize_bundle, read_committed=True, check_result=check_bundle)
+            else:
+                result = prepared
+            assert result.capability is not None
+            response = bounded_response(result.capability, maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES)
+            check_bundle(result)
+            return response
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=503, detail="task-image authority unavailable") from None
 
     @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/registry-credential")
     async def registry_credential(

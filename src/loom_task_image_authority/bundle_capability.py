@@ -406,6 +406,39 @@ class _TaskImageBundleProviderBase(Generic[_Backend]):
         observed_at = self._checked_time(previous=now, expires_at=expires_at)
         return plan, now, expires_at, observed_at
 
+    def validate(
+        self, capability: TaskImageBundleCapabilityV1, plan: TaskImageBuildPlanV1,
+        *, now: datetime,
+    ) -> None:
+        """Validate new or encrypted replay capabilities against current inputs.
+
+        CPU-only: no listing or signing. Final admission must apply this to a
+        concurrent winner as well as the candidate it just generated.
+        """
+        plan = self._validated_plan(plan)
+        try:
+            capability = TaskImageBundleCapabilityV1.model_validate_json(capability.model_dump_json())
+            if (
+                capability.grant_id != plan.grant_id or capability.session_id != plan.session_id
+                or capability.session_generation != plan.session_generation
+                or capability.materialization_id != plan.materialization_id
+                or capability.task_checksum != plan.task_checksum
+                or capability.bundle_file_metadata_sha256 != plan.bundle_file_metadata_sha256
+                or now.utcoffset() is None or capability.issued_at > now
+                or capability.expires_at <= now or capability.expires_at > plan.authorization_expires_at
+                or capability.expires_at > capability.issued_at + timedelta(seconds=self._url_expiry_seconds)
+                or len(capability.model_dump_json().encode("utf-8")) > self._maximum_capability_bytes
+            ):
+                raise ValueError("capability binding changed")
+            self._validated_objects(plan, tuple(
+                TaskImageBundleObject(key=plan.bundle_prefix + item.relative_path, size_bytes=item.size_bytes)
+                for item in capability.objects
+            ))
+            for item in capability.objects:
+                self._validated_url(item.url, key=plan.bundle_prefix + item.relative_path, now=now, expires_at=capability.expires_at)
+        except (ValueError, TypeError, AttributeError):
+            raise TaskImageBundleCapabilityError("task-image bundle capability binding is invalid") from None
+
     def _finish_issue(
         self, plan: TaskImageBuildPlanV1, *, now: datetime, expires_at: datetime,
         observed_at: datetime, listed: tuple[tuple[str, TaskImageBundleObject], ...],

@@ -265,12 +265,12 @@ Deterministic tests cover elapsed listing/signing time, expiry during I/O and
 response construction, backward/future clocks, exact deadline matching, and
 subsecond rounding. The composed fixture retains an actual advancing signing
 clock. These are provider-contract checks: the backend and async provider below
-are not yet connected to the service entrypoint. A production
+still require production settings/lifespan wiring. A production
 adapter must compose the timestamp/deadline contract and bounded network I/O;
 test backends and post-call clock checks are not that evidence. The provider
-continues to fail closed when none is configured. Encrypted replay bypasses the
-provider, and secret persistence/transaction commit follow its final clock check;
-this patch does not establish response-time freshness across those boundaries.
+continues to fail closed when none is configured. The HTTP composition described
+below also validates encrypted replays and checks freshness across persistence,
+transaction commit and response serialization.
 
 The CPU-only S3 presigner now signs exact public-origin path-style
 `/bucket/key` GET capabilities from an explicit immutable credential snapshot.
@@ -322,10 +322,9 @@ wire input, trust failures, queue/deadline/cancellation behavior and orphaned
 connection disposal; the pinned MinIO integration exercises production signing,
 reader and XML parser together across paginated responses.
 
-This is a transport primitive, not production adapter activation. API async
-composition, unlocked I/O
-with fresh database re-admission, path-style consumer validation and explicit
-credential/settings/lifespan deployment wiring remain required.
+This is a transport primitive, not production adapter activation. Path-style
+consumer validation and explicit credential/settings/lifespan deployment wiring
+remain required; the HTTP route now supports the unlocked async composition below.
 
 The native MinIO backend now owns the reader and an explicit static signing
 identity. It rejects ambient or session-token credentials and returns only
@@ -338,16 +337,43 @@ Every signing/read/parse boundary checks authorization expiry and clock regressi
 Closing the backend closes the owned reader and disables both listing and signing.
 The pinned TLS MinIO tests exercise exact complete inventories and subsequent
 GETs, as well as rejection of missing or excessive inventories. These do not
-prove immutable source provenance, retained metadata integrity, unlocked database
-admission, or a configured live service.
+prove immutable source provenance, retained metadata integrity, or a configured
+live service. Database admission is covered separately below.
 
 An asynchronous capability provider composes that backend with the same inventory,
 deadline, object and response validation used by the synchronous injected-backend
 compatibility path. Addressing is explicitly `path` or `bucket-host`; the native
 MinIO composition selects `path`. Real TLS tests issue capabilities and fetch
 their exact object URLs, including ports, spaces, plus signs, Unicode and literal
-`%2F`. The API has not yet switched to unlocked preparation/I/O/fresh admission,
-and these component checks must not be treated as an activated service.
+`%2F`. These component checks must not be treated as an activated service.
+
+The bundle HTTP route now uses two short READ COMMITTED transactions around
+unlocked storage I/O. Preparation authenticates the current bearer and checks the
+grant, generation, materialization lease, retirement state and frozen claim inputs.
+It releases its database session before awaiting listing/signing. Finalization
+authenticates again, re-locks current authority and compares the prepared inputs
+before persisting one encrypted capability and operation receipt atomically.
+Concurrent requests for the same operation return the validated persisted winner;
+replay skips storage listing but not capability validation. Exact operation-ID
+unique-constraint conflicts return 409 and roll back the losing secret.
+
+The original claim is provenance for the grant-owned attempt, not a requirement
+to keep using its original session. Its canonical payload/digest and original
+attempt identity remain checked. A renewed successor can issue a newly bound
+capability without changing frozen build inputs; the superseded bearer cannot
+finish an in-flight issuance or replay a claim as the successor.
+
+Issuance lifetime is bounded by the current grant, attestation, session and lease.
+Heartbeat extension never extends an already minted capability. Live clock checks
+cover lock waits, secret persistence, both sides of commit, cached replay and
+response serialization; expiry or regression fails closed. Expiry during commit
+can leave an expired receipt, but it cannot return an expired capability. Disposable
+PostgreSQL HTTP tests cover heartbeat/renewal progress during listing, release,
+retirement/revocation, source drift, cancellation, concurrent winner/replay, clock
+changes during actual row-lock waits and persistence/response expiry. Actual SQL
+constraint faults verify conflict mapping and rollback; they are not a full
+cross-grant concurrent HTTP test. The synchronous injected-provider compatibility
+path also runs outside HTTP transactions, but is not production async I/O evidence.
 
 Native downloader alignment is also still required: the production Go
 `DownloadBundle` currently accepts a different `schema`/`files` capability than
