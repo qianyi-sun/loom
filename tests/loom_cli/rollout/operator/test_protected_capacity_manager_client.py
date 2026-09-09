@@ -1153,16 +1153,15 @@ def test_client_accepts_exact_child_forwarding_confirmation(
 
 def test_client_observes_a_flushed_confirmation_while_child_remains_alive(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = _Runner(_kubeconfig(tmp_path), [_pod("manager-exact")])
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as allocator:
         allocator.bind(("127.0.0.1", 0))
         port = allocator.getsockname()[1]
     script = (
-        "import sys,time;"
+        "import signal,sys;"
         f"sys.stderr.write('Forwarding from 127.0.0.1:{port} -> 8443\\n');"
-        "sys.stderr.flush();time.sleep(10)"
+        "sys.stderr.flush();signal.pause()"
     )
     processes: list[subprocess.Popen[str]] = []
 
@@ -1181,7 +1180,9 @@ def test_client_observes_a_flushed_confirmation_while_child_remains_alive(
         processes.append(process)
         return process
 
-    monkeypatch.setattr(client_module, "_START_TIMEOUT_SECONDS", 0.2)
+    # Exercise the normal bounded, condition-based readiness wait. A 0.2s
+    # allowance also measures interpreter scheduling under concurrent CI load.
+    # Keep the child alive until client teardown, independently of that timing.
     with open_protected_capacity_manager_client(
         runner=runner,
         credentials_root=_credentials(tmp_path),
@@ -1192,6 +1193,7 @@ def test_client_observes_a_flushed_confirmation_while_child_remains_alive(
         client_factory=lambda _context: _HTTPClient([]),
     ) as client:
         assert client.origin == f"https://127.0.0.1:{port}"
+        assert processes[0].poll() is None
 
     assert len(processes) == 1
     assert processes[0].poll() is not None
