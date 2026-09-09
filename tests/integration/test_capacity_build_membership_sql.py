@@ -245,3 +245,100 @@ async def test_sql_rejects_retained_build_fact_tampering(capacity_session, table
             capacity_session.add(row)
             await capacity_session.flush()
     assert error.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.parametrize("failure", ("subject-bound", "stale-revision", "operation-reuse", "key-reuse"))
+async def test_sql_build_events_share_bounds_revision_and_replay_keys(capacity_session, failure):
+    from tests.capacity_build_membership_fixtures import (
+        build_request,
+        staged_build_event,
+        typed_sql_execution,
+    )
+
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session, max_subjects=1 if failure == "subject-bound" else 8)
+    first = await staged_build_event(capacity_session, management, preparation, fleet, build_request(preparation, execution))
+    capacity_session.add(first)
+    await capacity_session.flush()
+    second = await staged_build_event(capacity_session, management, preparation, fleet,
+        build_request(preparation, execution, owner=88011, revision=0 if failure == "stale-revision" else 1),
+        previous_head="0" * 64 if failure == "stale-revision" else first.head_sha256)
+    if failure == "operation-reuse":
+        second.operation_id = first.operation_id
+        second.request_payload["command"]["projection"]["operation_id"] = str(first.operation_id)
+    elif failure == "key-reuse":
+        second.idempotency_key = first.idempotency_key
+    _reseal(second)
+    with pytest.raises(DBAPIError) as error:
+        async with capacity_session.begin_nested():
+            capacity_session.add(second)
+            await capacity_session.flush()
+    assert error.value.orig.sqlstate == ("23505" if failure.endswith("reuse") else "23514")
+    assert await capacity_session.scalar(text("SELECT count(*) FROM public.capacity_personal_membership_events")) == 1
+
+
+async def test_sql_build_owner_subject_bound_includes_application_materialization(capacity_session):
+    from sqlalchemy import select
+
+    from loom_capacity_manager.models import CapacityAccountPolicy, CapacitySubject
+    from tests.capacity_build_membership_fixtures import (
+        build_request,
+        staged_build_event,
+        typed_sql_execution,
+    )
+
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    row = await staged_build_event(capacity_session, management, preparation, fleet, build_request(preparation, execution))
+    build = (await capacity_session.scalars(select(CapacitySubject).where(CapacitySubject.subject_id == row.subject_id))).one()
+    account = (await capacity_session.scalars(select(CapacityAccountPolicy).where(CapacityAccountPolicy.account_id == build.account_id))).one()
+    # Seed other active subjects without membership events, as an immutable base
+    # application can predate the typed event overlay. They still consume slots
+    # in the shared owner's live-subject quota.
+    for index in range(account.max_live_subjects):
+        payload = build.payload | {"subject_id": str(UUID(int=99000 + index)), "subject_incarnation": str(UUID(int=99500 + index)), "display_name": f"dev-app-{index}"}
+        values = {column.name: getattr(build, column.name) for column in CapacitySubject.__table__.columns if column.name not in {"id", "payload"}}
+        values.update(subject_id=UUID(payload["subject_id"]), subject_incarnation=UUID(payload["subject_incarnation"]), display_name=payload["display_name"], payload=payload)
+        capacity_session.add(CapacitySubject(**values))
+    await capacity_session.flush()
+    with pytest.raises(DBAPIError, match="membership bound changed"):
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()
+
+
+async def test_sql_build_migration_refuses_downgrade_with_retained_v4_authority(capacity_session):
+    from tests.capacity_build_membership_fixtures import typed_sql_execution
+
+    await typed_sql_execution(capacity_session)
+    connection = await capacity_session.connection()
+    with pytest.raises(RuntimeError, match="typed membership history exists"):
+        async with capacity_session.begin_nested():
+            await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0017"))
+    assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0018"
+    assert await capacity_session.scalar(text("SELECT to_regprocedure('public.capacity_personal_build_initial_insert_guard()')")) is not None
+
+
+@pytest.mark.parametrize("conflict", ("same-subject", "foreign-name"))
+async def test_sql_initial_build_rejects_retained_identity_aliases(capacity_session, conflict):
+    from sqlalchemy import select
+
+    from loom_capacity_manager.models import CapacitySubject
+    from tests.capacity_build_membership_fixtures import (
+        build_request,
+        staged_build_event,
+        typed_sql_execution,
+    )
+
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    row = await staged_build_event(capacity_session, management, preparation, fleet, build_request(preparation, execution))
+    build = (await capacity_session.scalars(select(CapacitySubject).where(CapacitySubject.subject_id == row.subject_id))).one()
+    values = {column.name: getattr(build, column.name) for column in CapacitySubject.__table__.columns if column.name not in {"id", "payload"}}
+    values.update(subject_incarnation=UUID(int=99700), lifecycle_state="disabled")
+    if conflict == "foreign-name":
+        values["subject_id"] = UUID(int=99701)
+    values["payload"] = build.payload | {"subject_id": str(values["subject_id"]), "subject_incarnation": str(values["subject_incarnation"]), "lifecycle_state": "disabled"}
+    capacity_session.add(CapacitySubject(**values))
+    await capacity_session.flush()
+    with pytest.raises(DBAPIError, match="identity or membership bound changed"):
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()

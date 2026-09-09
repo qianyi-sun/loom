@@ -37,7 +37,7 @@ from tests.capacity_execution_fixtures import (
 from tests.capacity_fixtures import fleet_with_development_template
 
 
-async def typed_sql_execution(session):
+async def typed_sql_execution(session, *, max_subjects=8):
     fleet = fleet_with_development_template()
     fixture = await setup_execution(session, execution_policy=execution_policy(), fleet=fleet)
     profiles = []
@@ -56,7 +56,7 @@ async def typed_sql_execution(session):
     preparation = ExecutionPreparationV4.model_validate(fixture.request.model_dump(mode="python") | {
         "schema_version": 4, "personal_builds": template,
         "personal_membership": PersonalMembershipPolicyV1(namespace_id=UUID(int=88001),
-            management_principal_id="build-management", development_template_sha256=canonical_digest(fleet.development_subject_template), max_subjects=8),
+            management_principal_id="build-management", development_template_sha256=canonical_digest(fleet.development_subject_template), max_subjects=max_subjects),
     })
     digest = canonical_executable_digest(preparation)
     values = dict(execution_epoch=42, authority_incarnation=preparation.authority_incarnation,
