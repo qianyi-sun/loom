@@ -1,7 +1,7 @@
 """Version storage-aware activation without reinterpreting historical intent bytes."""
 
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
 from uuid import uuid4
 
 import httpx
@@ -11,8 +11,12 @@ from loom.personal_dev_activation import PersonalDevActivationIntentRequest
 from loom.personal_dev_activation_agent import HttpPersonalDevActivationAuthority
 from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom_capacity_manager.contracts import canonical_digest
-from loom_service.routes.dev_instances import _personal_activation_intent_response
+from loom_service.routes.dev_instances import (
+    _personal_activation_intent_response,
+    _personal_environment_response,
+)
 from tests.unit.test_personal_dev_activation_agent import _intent
+from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 
 
 def _binding():
@@ -86,3 +90,64 @@ async def test_activation_http_v2_roundtrip_and_fail_closed(changes):
                 await authority.next_intent(request, signature="1" * 128)
         else:
             assert await authority.next_intent(request, signature="1" * 128) == intent
+
+
+def test_owner_environment_response_uses_persisted_storage_names():
+    claim = _bound_claim()
+    response = _personal_environment_response(claim.environment)
+    assert response.identity.database == claim.operation.storage_binding.identity.database
+    assert response.identity.task_bucket == claim.operation.storage_binding.identity.task_bucket
+
+
+@pytest.mark.parametrize("tamper", (None, "environment_binding", "environment_owner", "candidate_owner", "digest"))
+async def test_activation_reader_checks_durable_storage_before_returning_intent(monkeypatch, tamper):
+    from loom.db.schema import DevInstance, DevLifecycleOperation, DevLifecycleOperationAttempt, PersonalDevCandidate
+    from loom.personal_dev_environment_store import (
+        PersonalDevEnvironmentOperationFencedError,
+        SqlAlchemyPersonalDevActivationIntentReader,
+    )
+
+    claim = _bound_claim()
+    claim = replace(claim, operation=replace(claim.operation, readiness_evidence_sha256="a" * 64))
+
+    def row(model, record):
+        values = {f.name: getattr(record, f.name) for f in fields(record) if f.name in model.__table__.columns}
+        binding = values.get("storage_binding")
+        if binding is not None:
+            values.update(storage_binding=binding.model_dump(mode="json"), storage_binding_sha256=canonical_digest(binding))
+        return model(**values)
+
+    operation = row(DevLifecycleOperation, claim.operation)
+    environment = row(DevInstance, claim.environment)
+    attempt = row(DevLifecycleOperationAttempt, claim.attempt)
+    candidate = row(PersonalDevCandidate, claim.candidate)
+    if tamper == "environment_binding":
+        environment.storage_binding = environment.storage_binding_sha256 = None
+    elif tamper == "environment_owner":
+        environment.owner_user_id = uuid4()
+    elif tamper == "candidate_owner":
+        candidate.owner_user_id = uuid4()
+    elif tamper == "digest":
+        operation.storage_binding_sha256 = "0" * 64
+
+    # Publication is independently verified elsewhere; exercise actual ORM
+    # storage deserialization and reader ownership fences, not a fake binding.
+    monkeypatch.setattr("loom.personal_dev_environment_store.validate_personal_dev_candidate_publication",
+                        lambda record, document: (document, candidate.publication_sha256, "unused"))
+
+    class Session:
+        async def execute(self, statement):
+            return self
+
+        def one_or_none(self):
+            return operation, environment, attempt, candidate
+
+    reader = SqlAlchemyPersonalDevActivationIntentReader(Session())
+    if tamper:
+        with pytest.raises(PersonalDevEnvironmentOperationFencedError):
+            await reader.next_intent()
+    else:
+        intent = await reader.next_intent()
+        assert intent.schema_version == 2
+        assert intent.storage_binding == claim.operation.storage_binding
+        assert intent.storage_binding_sha256 == canonical_digest(intent.storage_binding)
