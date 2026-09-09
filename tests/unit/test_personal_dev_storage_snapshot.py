@@ -5,7 +5,10 @@ from uuid import UUID
 
 import pytest
 
-from loom.personal_dev_storage_object_capture import CapturedStorageObjectV1, StorageObjectCaptureIntentV1
+from loom.personal_dev_storage_object_capture import (
+    CapturedStorageObjectV1,
+    StorageObjectCaptureIntentV1,
+)
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_personal_dev_storage_transfer import _recipe
 

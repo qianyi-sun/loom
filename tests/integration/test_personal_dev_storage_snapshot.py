@@ -38,7 +38,8 @@ def test_snapshot_scans_all_three_buckets_with_pagination_before_capture(object_
     inventory = snapshots.inventory(recipe, capture_id=UUID(int=800))
     identity = recipe.source.identity
     assert set(calls) == {identity.task_bucket, identity.trajectories_bucket, identity.artifacts_bucket}
-    assert calls.count(identity.task_bucket) == 3
+    # The pinned server can return a terminal empty page after the last key.
+    assert calls.count(identity.task_bucket) >= 3
     assert len(inventory.objects) == 5
     snapshot = snapshots.capture_inventory(inventory)
     assert len(snapshot.captures) == 5
@@ -56,3 +57,16 @@ def test_snapshot_cannot_complete_when_a_selected_source_object_changes(object_s
     with pytest.raises(StorageObjectCaptureError):
         snapshots.capture_inventory(inventory)
     assert client.head_object(Bucket=recipe.source.identity.artifacts_bucket, Key="artifact")["ContentLength"] == 8
+
+
+def test_empty_snapshot_requires_all_three_bucket_observations(object_store):  # noqa: F811
+    module = import_module("loom.personal_dev_storage_snapshot")
+    client, recipe, bucket = object_store
+    snapshots = module.S3RetainedObjectSnapshot(client, snapshot_bucket=bucket)
+    with pytest.raises(StorageObjectCaptureError):
+        snapshots.inventory(recipe, capture_id=UUID(int=800))
+    client.create_bucket(Bucket=recipe.source.identity.trajectories_bucket)
+    client.create_bucket(Bucket=recipe.source.identity.artifacts_bucket)
+    inventory = snapshots.inventory(recipe, capture_id=UUID(int=800))
+    assert inventory.objects == ()
+    assert snapshots.capture_inventory(inventory).captures == ()
