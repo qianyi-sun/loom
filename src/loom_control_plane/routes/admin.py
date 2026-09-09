@@ -314,16 +314,17 @@ class _ExecutionCapacityObservationPayload(BaseModel):
     provider_capacity_reason: str | None = Field(default=None, max_length=500)
     autoscaler_state: Literal["ready", "scaling", "stalled", "unknown"]
     autoscaler_reason: str | None = Field(default=None, max_length=500)
-    provider_quota_nodes: int = Field(gt=0)
-    provider_quota_vcpu_millis: int = Field(gt=0)
-    provider_quota_memory_mib: int = Field(gt=0)
-    provider_quota_storage_mib: int = Field(gt=0)
+    provider_quota_nodes: int = Field(ge=0)
+    provider_quota_vcpu_millis: int = Field(ge=0)
+    provider_quota_memory_mib: int = Field(ge=0)
+    provider_quota_storage_mib: int = Field(ge=0)
     provider_used_nodes: int = Field(ge=0)
     provider_used_vcpu_millis: int = Field(ge=0)
     provider_used_memory_mib: int = Field(ge=0)
     provider_used_storage_mib: int = Field(ge=0)
     active_nodes: int = Field(ge=0)
     node_states: dict[str, int] | None = None
+    placement: dict[str, Any] | None = None
     provisioned_vcpu_millis: int = Field(ge=0)
     provisioned_memory_mib: int = Field(ge=0)
     provisioned_storage_mib: int = Field(ge=0)

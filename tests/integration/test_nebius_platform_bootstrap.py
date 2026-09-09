@@ -182,6 +182,120 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
         monkeypatch.setattr(bootstrap.urllib.request, "urlopen", open_request)
         bootstrap.configure_platform(environment, config_dir=tmp_path, admin_secret=admin_path)
         bootstrap.configure_platform(environment, config_dir=tmp_path, admin_secret=admin_path)
+        headers = {"Authorization": "Bearer " + admin_token}
+
+        def api(method: str, path: str, body: dict | None = None) -> dict:
+            response = client.request(method, "/admin/" + path, headers=headers, json=body)
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        assert api("GET", "execution-admission/status")["policies"] == []
+        capacity_path = "execution-capacity-policies/" + environment["target_id"]
+        historical = {
+            "enabled": True,
+            "max_nodes": 2,
+            "max_vcpu_millis": 32000,
+            "max_memory_mib": 131072,
+            "max_storage_mib": 131072,
+            "node_cpu_millis": 16000,
+            "node_memory_mib": 65536,
+            "node_storage_mib": 65536,
+            "max_pending_jobs": 4,
+            "max_unschedulable_jobs": 4,
+            "max_image_pull_backoff_jobs": 0,
+            "max_create_per_minute": 4,
+            "observation_max_age_seconds": 300,
+            "reason": "Dedicated bounded Nebius integration pool; validate current quota before activation.",
+        }
+        api("PUT", capacity_path, historical)
+        api(
+            "PUT",
+            "execution-admission-policies/global/*",
+            {
+                "max_concurrent": 4,
+                "enabled": True,
+                "reason": "Nebius integration environment capacity",
+            },
+        )
+        api(
+            "PUT",
+            "execution-admission-policies/pool/nebius-cpu",
+            {
+                "max_concurrent": 3,
+                "enabled": True,
+                "reason": "Deliberate operator pool limit",
+            },
+        )
+        bootstrap.configure_platform(environment, config_dir=tmp_path, admin_secret=admin_path)
+        status = api("GET", "execution-capacity/status")
+        policy = next(
+            row["policy"]
+            for row in status["targets"]
+            if row["target_id"] == environment["target_id"]
+        )
+        assert all(policy[key] == value for key, value in environment["capacity_policy"].items())
+        policies = api("GET", "execution-admission/status")["policies"]
+        assert next(row for row in policies if row["scope_kind"] == "global")["enabled"] is False
+        pool = next(row for row in policies if row["scope_kind"] == "pool")
+        assert pool["enabled"] is True and pool["max_concurrent"] == 3
+        assert pool["reason"] == "Deliberate operator pool limit"
+
+        # Matching a historical reason alone cannot widen an operator edit.
+        # Different reason, disabled state and a changed create rate all remain.
+        for changes in (
+            {"max_nodes": 1},
+            {"reason": "Reviewed operator capacity"},
+            {"enabled": False},
+            {"max_create_per_minute": 1},
+        ):
+            explicit = dict(historical, **changes)
+            api("PUT", capacity_path, explicit)
+            api(
+                "PUT",
+                "execution-admission-policies/global/*",
+                {
+                    "max_concurrent": 4,
+                    "enabled": True,
+                    "reason": "Deliberate operator global limit",
+                },
+            )
+            api(
+                "PUT",
+                "execution-admission-policies/pool/nebius-cpu",
+                {
+                    "max_concurrent": 2,
+                    "enabled": True,
+                    "reason": "Nebius integration environment capacity",
+                },
+            )
+            capsys.readouterr()
+            bootstrap.configure_platform(environment, config_dir=tmp_path, admin_secret=admin_path)
+            assert json.loads(capsys.readouterr().out)["retained_operator_capacity_policy"] is True
+            status = api("GET", "execution-capacity/status")
+            retained = next(
+                row["policy"]
+                for row in status["targets"]
+                if row["target_id"] == environment["target_id"]
+            )
+            assert all(retained[key] == value for key, value in explicit.items())
+            policies = api("GET", "execution-admission/status")["policies"]
+            assert all(row["enabled"] for row in policies)
+            assert (
+                next(row for row in policies if row["scope_kind"] == "global")["max_concurrent"]
+                == 4
+            )
+            assert (
+                next(row for row in policies if row["scope_kind"] == "pool")["max_concurrent"] == 2
+            )
+
+        # Reviewed explicit concurrency remains available; null never means zero.
+        bootstrap.configure_platform(
+            dict(environment, max_concurrent=7), config_dir=tmp_path, admin_secret=admin_path
+        )
+        assert all(
+            row["enabled"] and row["max_concurrent"] == 7
+            for row in api("GET", "execution-admission/status")["policies"]
+        )
         client.portal.call(engine.dispose)
     with psycopg.connect(platform_database) as connection:
         assert connection.execute(

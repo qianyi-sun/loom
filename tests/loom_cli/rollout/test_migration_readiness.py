@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_repository_migration_plan_is_single_head_and_policy_bound() -> None:
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0133"
+    assert result.head == "0134"
     assert result.base == "0001"
     assert result.revision_count == 134
     assert len(result.revision_sha256) == 134
@@ -32,7 +32,7 @@ def test_repository_migration_plan_is_independent_of_process_cwd(
 
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0133"
+    assert result.head == "0134"
     assert result.revision_count == 134
 
 

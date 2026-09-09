@@ -138,6 +138,12 @@ def test_job_renderer_is_deterministic_restricted_and_lease_scoped() -> None:
         first["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/component"]
         == "execution-unit"
     )
+    assert (
+        first["spec"]["template"]["metadata"]["annotations"][
+            "cluster-autoscaler.kubernetes.io/safe-to-evict"
+        ]
+        == "false"
+    )
     assert first["spec"]["backoffLimit"] == 0
     pod = first["spec"]["template"]["spec"]
     assert pod["restartPolicy"] == "Never"

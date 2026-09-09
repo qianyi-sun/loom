@@ -36,6 +36,10 @@ run "independent_platform" {
     error_message = "Only the system node is persistent."
   }
   assert {
+    condition     = nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 100
+    error_message = "The default is the native API technical maximum; CP admits only real quota-backed demand."
+  }
+  assert {
     condition     = nebius_storage_v1_bucket.integration["source"].versioning_policy == "DISABLED" && alltrue([for name in ["artifacts", "trajectories", "backups"] : nebius_storage_v1_bucket.integration[name].versioning_policy == "ENABLED"])
     error_message = "Source cleanup must release bytes; canonical and backups retain versions."
   }
@@ -55,5 +59,19 @@ run "independent_platform" {
 run "reject_unbounded_capacity" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 999 } }
+  expect_failures = [var.integration_platform]
+}
+
+run "preserve_explicit_operator_ceiling" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 3 } }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 3
+    error_message = "A deliberate lower Terraform ceiling must remain unchanged."
+  }
+}
+run "reject_fractional_node_ceiling" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 2.5 } }
   expect_failures = [var.integration_platform]
 }

@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from types import SimpleNamespace
 from typing import Any
 
 from loom_execution_capacity_collector.contracts import (
+    DaemonSetPlacement,
     KubernetesCapacitySnapshot,
+    ManagedPodPlacement,
+    NodePlacement,
+    NodeTemplateSample,
     ResourceTotals,
 )
 
@@ -110,6 +115,196 @@ def _node_ready(node: Any) -> bool:
     )
 
 
+def _identity(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise KubernetesObservationError(f"Kubernetes {name} is unavailable")
+    return value
+
+
+def _positive_int(value: object, *, name: str) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise KubernetesObservationError(f"Kubernetes {name} is invalid") from exc
+    if isinstance(value, bool) or parsed <= 0:
+        raise KubernetesObservationError(f"Kubernetes {name} is invalid")
+    return parsed
+
+
+def _plain(value: Any) -> Any:
+    if hasattr(value, "to_dict"):
+        return _plain(value.to_dict())
+    if isinstance(value, SimpleNamespace):
+        return _plain(vars(value))
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items() if item is not None}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _scheduling(spec: Any) -> dict[str, Any]:
+    # Only scheduling fields, never commands, environment, volumes or credentials.
+    return {
+        field: _plain(getattr(spec, field))
+        for field in (
+            "node_selector",
+            "tolerations",
+            "affinity",
+            "topology_spread_constraints",
+            "scheduler_name",
+            "priority_class_name",
+            "runtime_class_name",
+            "overhead",
+        )
+        if getattr(spec, field, None) is not None
+    }
+
+
+def _managed_placement(pod: Any) -> ManagedPodPlacement:
+    labels = dict(getattr(pod.metadata, "labels", None) or {})
+    return ManagedPodPlacement(
+        uid=_identity(getattr(pod.metadata, "uid", None), name="Pod UID"),
+        lease_id=_identity(labels.get("loom.openai.com/lease-id"), name="Pod lease ID"),
+        generation=_positive_int(labels.get("loom.openai.com/generation"), name="Pod generation"),
+        requests=_pod_request(pod),
+    )
+
+
+def _matches_expression(expression: dict[str, Any], labels: dict[str, str]) -> bool:
+    key, op = expression.get("key"), expression.get("operator")
+    if not isinstance(key, str):
+        raise KubernetesObservationError("DaemonSet node selector key is invalid")
+    values = expression.get("values", [])
+    if op == "In":
+        return key in labels and labels[key] in values
+    if op == "NotIn":
+        return key not in labels or labels[key] not in values
+    if op == "Exists":
+        return key in labels
+    if op == "DoesNotExist":
+        return key not in labels
+    if op in {"Gt", "Lt"}:
+        try:
+            left, right = int(labels[key]), int(values[0])
+            return left > right if op == "Gt" else left < right
+        except (KeyError, IndexError, TypeError, ValueError):
+            return False
+    raise KubernetesObservationError("unsupported DaemonSet node selector operator")
+
+
+def _daemonset_matches_node(daemon: Any, node: Any) -> bool:
+    """Only hard node constraints; Pod affinity is established by observed Pods."""
+    spec = daemon.spec.template.spec
+    labels = dict(getattr(node.metadata, "labels", None) or {})
+    if any(
+        labels.get(key) != value
+        for key, value in (getattr(spec, "node_selector", None) or {}).items()
+    ):
+        return False
+    affinity = _plain(getattr(spec, "affinity", None) or {})
+    required = affinity.get("node_affinity", {}).get(
+        "required_during_scheduling_ignored_during_execution"
+    )
+    if required is not None:
+        terms = required.get("node_selector_terms", [])
+        if not any(
+            (term.get("match_expressions") or term.get("match_fields"))
+            and all(_matches_expression(item, labels) for item in term.get("match_expressions", []))
+            and all(
+                _matches_expression(item, {"metadata.name": node.metadata.name})
+                for item in term.get("match_fields", [])
+            )
+            for term in terms
+        ):
+            return False
+    tolerations = _plain(getattr(spec, "tolerations", None) or [])
+    for taint in _plain(getattr(node.spec, "taints", None) or []):
+        if taint.get("effect") not in {"NoSchedule", "NoExecute"}:
+            continue
+        if not any(
+            (not tol.get("effect") or tol["effect"] == taint["effect"])
+            and (
+                (
+                    tol.get("operator") == "Exists"
+                    and (not tol.get("key") or tol["key"] == taint["key"])
+                )
+                or (
+                    tol.get("operator", "Equal") == "Equal"
+                    and tol.get("key") == taint["key"]
+                    and tol.get("value", "") == taint.get("value", "")
+                )
+            )
+            for tol in tolerations
+        ):
+            return False
+    return True
+
+
+def _template_sample(
+    node: Any, placement: NodePlacement, pods: list[Any], daemons: list[Any]
+) -> NodeTemplateSample | None:
+    if not placement.ready:
+        return None
+    daemon_requests: list[ResourceTotals] = []
+    revisions: dict[str, int] = {}
+    for daemon in daemons:
+        if not _daemonset_matches_node(daemon, node):
+            continue
+        uid = _identity(getattr(daemon.metadata, "uid", None), name="DaemonSet UID")
+        generation = _positive_int(daemon.metadata.generation, name="DaemonSet generation")
+        status = daemon.status
+        if (
+            getattr(status, "observed_generation", None) != generation
+            or getattr(status, "updated_number_scheduled", None)
+            != getattr(status, "desired_number_scheduled", None)
+            or getattr(daemon.spec.template.spec, "runtime_class_name", None)
+        ):
+            return None
+        matches = [
+            pod
+            for pod in pods
+            if any(
+                getattr(owner, "kind", None) == "DaemonSet" and getattr(owner, "uid", None) == uid
+                for owner in getattr(pod.metadata, "owner_references", None) or []
+            )
+        ]
+        if (
+            len(matches) != 1
+            or matches[0].status.phase != "Running"
+            or getattr(matches[0].metadata, "deletion_timestamp", None)
+        ):
+            return None
+        actual = _pod_request(matches[0])
+        declared = _pod_request(SimpleNamespace(spec=daemon.spec.template.spec))
+        if actual != declared:
+            return None
+        daemon_requests.append(actual)
+        revisions[uid] = generation
+    # A disappearing controller or a still-running old DaemonSet must not vanish
+    # from the next-node overhead estimate.
+    observed_daemons = {
+        getattr(owner, "uid", None)
+        for pod in pods
+        for owner in getattr(pod.metadata, "owner_references", None) or []
+        if getattr(owner, "kind", None) == "DaemonSet"
+    }
+    if observed_daemons != set(revisions):
+        return None
+    version = getattr(getattr(node.status, "node_info", None), "kubelet_version", None)
+    if not isinstance(version, str) or not version:
+        return None
+    return NodeTemplateSample(
+        node_uid=placement.uid,
+        allocatable=placement.allocatable,
+        pod_slots=placement.pod_slots,
+        daemonset_requests=_add(*daemon_requests),
+        daemonset_slots=len(daemon_requests),
+        kubelet_version=version,
+        daemonsets=revisions,
+    )
+
+
 def _target_pod(pod: Any, *, namespace: str, target_id: str) -> bool:
     metadata = pod.metadata
     labels = dict(getattr(metadata, "labels", None) or {})
@@ -154,6 +349,7 @@ class InClusterKubernetesCapacityReader:
         self,
         *,
         core_api: Any | None = None,
+        apps_api: Any | None = None,
         request_timeout_seconds: float = 15.0,
     ) -> None:
         if not 1.0 <= request_timeout_seconds <= 60.0:
@@ -166,6 +362,11 @@ class InClusterKubernetesCapacityReader:
             config.load_incluster_config()
             core_api = client.CoreV1Api()
         self._core = core_api
+        if apps_api is None:
+            from kubernetes import client
+
+            apps_api = client.AppsV1Api()
+        self._apps = apps_api
         self._request_timeout = request_timeout_seconds
 
     def _list_all(
@@ -225,6 +426,12 @@ class InClusterKubernetesCapacityReader:
                 page_size=1000,
                 watch=False,
             )
+            daemons, daemon_version = self._list_all(
+                self._apps.list_daemon_set_for_all_namespaces,
+                maximum_items=10_000,
+                page_size=500,
+                watch=False,
+            )
         except Exception as exc:
             if isinstance(exc, KubernetesObservationError):
                 raise
@@ -258,12 +465,11 @@ class InClusterKubernetesCapacityReader:
         unschedulable_jobs = 0
         image_pull_jobs = 0
         reasons: dict[str, int] = {}
+        by_node: dict[str, list[Any]] = {name: [] for name in node_names}
+        pending_pods: list[ManagedPodPlacement] = []
         for pod in pods:
             phase = getattr(pod.status, "phase", None)
-            if (
-                phase in {"Succeeded", "Failed"}
-                or getattr(pod.metadata, "deletion_timestamp", None) is not None
-            ):
+            if phase in {"Succeeded", "Failed"}:
                 continue
             node_name = getattr(pod.spec, "node_name", None)
             target = _target_pod(pod, namespace=namespace, target_id=target_id)
@@ -273,6 +479,10 @@ class InClusterKubernetesCapacityReader:
                 )
             if node_name in node_names or (target and node_name is None and phase == "Pending"):
                 requested_rows.append(_pod_request(pod))
+            if node_name in node_names:
+                by_node[node_name].append(pod)
+            elif target and node_name is None and phase == "Pending":
+                pending_pods.append(_managed_placement(pod))
             if not target:
                 continue
             pending, unschedulable, image_pull, reason = _pending_state(pod)
@@ -281,8 +491,38 @@ class InClusterKubernetesCapacityReader:
             image_pull_jobs += int(image_pull)
             if reason is not None:
                 reasons[reason] = reasons.get(reason, 0) + 1
+        placements: list[NodePlacement] = []
+        samples: list[NodeTemplateSample] = []
+        for node in nodes:
+            assigned = by_node[node.metadata.name]
+            placement = NodePlacement(
+                uid=_identity(getattr(node.metadata, "uid", None), name="Node UID"),
+                provider_id=_identity(
+                    getattr(node.spec, "provider_id", None), name="Node provider ID"
+                ),
+                ready=_node_ready(node),
+                unschedulable=bool(getattr(node.spec, "unschedulable", False)),
+                deleting=getattr(node.metadata, "deletion_timestamp", None) is not None,
+                allocatable=_required_node_resources(node.status.allocatable, name="allocatable"),
+                requested=_add(*[_pod_request(pod) for pod in assigned]),
+                pod_slots=_positive_int(node.status.allocatable.get("pods"), name="node Pod slots"),
+                used_pod_slots=len(assigned),
+                managed_pods=[
+                    _managed_placement(pod)
+                    for pod in assigned
+                    if _target_pod(pod, namespace=namespace, target_id=target_id)
+                ],
+            )
+            placements.append(placement)
+            sample = _template_sample(node, placement, assigned, daemons)
+            if sample is not None:
+                samples.append(sample)
         return KubernetesCapacitySnapshot(
-            source_versions={"nodes": str(node_version), "pods": str(pod_version)},
+            source_versions={
+                "nodes": str(node_version),
+                "pods": str(pod_version),
+                "daemonsets": str(daemon_version),
+            },
             active_nodes=len(nodes),
             ready_nodes=sum(_node_ready(node) for node in nodes),
             provisioned=provisioned,
@@ -292,6 +532,36 @@ class InClusterKubernetesCapacityReader:
             unschedulable_jobs=unschedulable_jobs,
             image_pull_backoff_jobs=image_pull_jobs,
             pending_reasons=dict(sorted(reasons.items())),
+            nodes=sorted(placements, key=lambda row: row.uid),
+            pending_pods=sorted(pending_pods, key=lambda row: row.uid),
+            daemonsets=sorted(
+                [
+                    DaemonSetPlacement(
+                        uid=_identity(getattr(daemon.metadata, "uid", None), name="DaemonSet UID"),
+                        generation=_positive_int(
+                            daemon.metadata.generation, name="DaemonSet generation"
+                        ),
+                        requests=_pod_request(SimpleNamespace(spec=daemon.spec.template.spec)),
+                        scheduling=_scheduling(daemon.spec.template.spec),
+                    )
+                    for daemon in daemons
+                ],
+                key=lambda row: row.uid,
+            ),
+            template_samples=sorted(samples, key=lambda row: row.node_uid),
+            node_templates={
+                node.metadata.uid: {
+                    "labels": dict(getattr(node.metadata, "labels", None) or {}),
+                    "taints": _plain(getattr(node.spec, "taints", None) or []),
+                    "capacity": _required_node_resources(
+                        node.status.capacity, name="capacity"
+                    ).model_dump(),
+                    "os_image": str(
+                        getattr(getattr(node.status, "node_info", None), "os_image", None) or ""
+                    ),
+                }
+                for node in nodes
+            },
         )
 
     async def capture(

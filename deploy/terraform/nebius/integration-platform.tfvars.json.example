@@ -13,6 +13,6 @@
   "integration_platform": {
     "bucket_prefix": "loom-nebius-integration-REPLACE",
     "system_preset": "4vcpu-16gb",
-    "execution_max_nodes": 2
+    "execution_max_nodes": 100
   }
 }

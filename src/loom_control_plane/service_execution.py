@@ -18,6 +18,7 @@ from loom.db.schema import (
     ServiceExecutionEvent,
     ServiceExecutionLease,
     ServiceExecutionTarget,
+    TeamQuota,
     Trial,
 )
 from loom.execution_contract import (
@@ -48,6 +49,7 @@ from loom_control_plane.execution_admission import (
     ExecutionAdmissionIdentity,
     reserve_execution_admission,
 )
+from loom_control_plane.execution_capacity import reserve_execution_provisioning
 from loom_control_plane.execution_finance import (
     ExecutionFinanceBlockedError,
     reserve_execution_cost,
@@ -687,6 +689,10 @@ async def reserve_trial_execution(
         )
     except ExecutionFinanceBlockedError as exc:
         raise ServiceExecutionConflict(exc.reason) from exc
+    # Capacity waits remain queued: reservation, budget and admission writes are
+    # rolled back together before any outbox command or execution attempt exists.
+    # The actuator reuses this authorization when it eventually creates the Job.
+    await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time)
     command_payload = {
         "schema_version": "loom.execution-command.v1",
         "lease_id": str(lease_id),
@@ -1372,16 +1378,21 @@ async def record_execution_event(
             else:
                 projected_state = "finalized"
         lease.observed_state = projected_state
-        if lease.finalized_at is None and normalized_state in {
-            "unschedulable",
-            "missing",
-            "image_pull_backoff",
-            "failed",
-            "oom_killed",
-            "evicted",
-            "node_lost",
-            "deadline_exceeded",
-        }:
+        if (
+            lease.finalized_at is None
+            and lease.desired_state != "retry"
+            and normalized_state
+            in {
+                "unschedulable",
+                "missing",
+                "image_pull_backoff",
+                "failed",
+                "oom_killed",
+                "evicted",
+                "node_lost",
+                "deadline_exceeded",
+            }
+        ):
             lease.error_class = (
                 "transient"
                 if normalized_state in {"missing", "unschedulable", "evicted", "node_lost"}
@@ -1389,7 +1400,7 @@ async def record_execution_event(
             )
             lease.error_code = normalized_state
             lease.error_message = _bounded_optional_text(payload.get("message"), 2000, "message")
-        elif lease.finalized_at is None:
+        elif lease.finalized_at is None and lease.desired_state != "retry":
             lease.error_class = None
             lease.error_code = None
             lease.error_message = None
@@ -1496,6 +1507,56 @@ async def record_kubernetes_observation(
         observed_at=observed_at,
         idempotency_key=idempotency_key,
     )
+
+
+async def retry_unscheduled_execution_after_deadline(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    generation: int,
+    observed_at: datetime,
+) -> bool:
+    """Recover an unstarted capacity wait through the existing fenced cleanup."""
+
+    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+    if (
+        lease is None
+        or lease.generation != generation
+        or lease.execution_role != "attempt"
+        or lease.desired_state != "create"
+        or lease.revoked_at is not None
+        or lease.deadline_at > observed_at
+        or lease.error_code != "unschedulable"
+        or lease.pod_started_at is not None
+        or lease.pod_scheduled_at is not None
+        or lease.node_name is not None
+        or lease.output_commit_state == "committed"
+    ):
+        return False
+    trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+    if trial is None or trial.started_at is not None or trial.state != "claimed":
+        return False
+    attempt_ceiling = await session.scalar(
+        select(TeamQuota.max_attempts_ceiling).where(TeamQuota.team_id == trial.team_id)
+    )
+    await enqueue_execution_transition(
+        session,
+        lease_id=lease.id,
+        expected_generation=generation,
+        desired_state="retry",
+        now=observed_at,
+    )
+    trial.next_attempt_at = observed_at + timedelta(seconds=15)
+    lease.error_class = "transient"
+    lease.error_code = (
+        "infra_recovery_exhausted"
+        if attempt_ceiling is not None and trial.attempt_count >= attempt_ceiling
+        else "unschedulable"
+    )
+    # Existing attempts remain immutable history. Cleanup releases the same
+    # authorization and budget before the scheduler can acquire a new lease.
+    await session.flush()
+    return True
 
 
 async def record_committed_runtime_result(

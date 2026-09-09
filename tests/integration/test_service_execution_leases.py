@@ -128,6 +128,7 @@ from loom_execution_actuator.contracts import (
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
+from tests.execution_placement_fixtures import placement_fixture
 from tests.support.execution_image_admission import (
     IMAGE_ADMISSION_KEYRING,
     signed_image_admission_bundle,
@@ -655,6 +656,7 @@ async def _seed_ready_trial(
         unschedulable_jobs=0,
         image_pull_backoff_jobs=0,
         pending_reasons={},
+        placement=placement_fixture(target_id=target.target_id),
     )
     return trial_id, target
 
@@ -669,6 +671,7 @@ async def _reserve(
     requirements: WorkloadRequirementsV1 | None = None,
     runtime_contract: ExecutionRuntimePlanV1 | None = None,
     parent_lease_id: UUID | None = None,
+    deadline_seconds: int = 3600,
 ) -> ServiceExecutionLease:
     return await reserve_trial_execution(
         session,
@@ -680,7 +683,7 @@ async def _reserve(
         runtime_contract=runtime_contract or _runtime_contract(now=now),
         image_admission_keyring=IMAGE_ADMISSION_KEYRING,
         parent_lease_id=parent_lease_id,
-        deadline_at=now + timedelta(hours=1),
+        deadline_at=now + timedelta(seconds=deadline_seconds),
         now=now,
     )
 
@@ -862,6 +865,72 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
         await engine.dispose()
 
 
+async def _configure_scheduler_trial(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    now: datetime,
+    batch_backend: str = "nebius",
+    cpu_millis: int = 1000,
+) -> None:
+    trial = await session.get(Trial, trial_id)
+    assert trial is not None
+    session.add(TeamQuota(team_id=trial.team_id))
+    batch_id = uuid4()
+    session.add(
+        Batch(
+            id=batch_id,
+            team_id=trial.team_id,
+            name=f"service scheduler {batch_backend}",
+            task_filter={},
+            trial_config={},
+            backend=batch_backend,
+            state="submitted",
+            created_by_token_prefix="test",
+            expected_trial_count=1,
+        )
+    )
+    trial.batch_id = batch_id
+    task = await session.get(Task, trial.task_id)
+    assert task is not None
+    plan = _runtime_contract(now=now)
+    plan = plan.model_copy(
+        update={"task_resources": plan.task_resources.model_copy(update={"cpu_millis": cpu_millis})}
+    )
+    task.checksum = plan.task_revision_sha256.removeprefix("sha256:")
+    task.config = {
+        "schema_version": "1",
+        "task": {"id": task.id, "name": "Service execution scheduler"},
+        "environment": {
+            "os": "linux",
+            "cpu_arch": "x86_64",
+            "gpu_vendor": "none",
+            "docker_image": plan.task_image_ref,
+            "cpus": cpu_millis / 1000,
+            "memory_mb": 1024,
+            "storage_mb": 2048,
+            "tmpfs": ["/tmp"],
+            "baseline_network_policy": {"kind": "gateway-only"},
+            "network_policies_supported": ["gateway-only"],
+        },
+        "agent": {"name": "service-smoke"},
+        "verifier": {"name": "script"},
+        "service_execution": {
+            "schema_version": "loom.task-service-execution.v1",
+            "logical_pool_id": "nebius-cpu",
+            "runtime_template": plan.model_dump(mode="json", exclude={"task_revision_sha256"}),
+        },
+    }
+    trial.requires_caps = {
+        "os": "linux",
+        "cpu_arch": "x86_64",
+        "gpu_vendor": "none",
+        "network_policies": ["gateway-only"],
+        "backend": "nebius",
+        "worker_pool": "nebius-cpu",
+    }
+
+
 @pytest.mark.parametrize(
     ("batch_backend", "expects_lease"),
     [("nebius", True), ("docker", False)],
@@ -877,61 +946,9 @@ async def test_normal_scheduler_requires_explicit_nebius_backend(
     try:
         async with sessions() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
-            trial = await session.get(Trial, trial_id)
-            assert trial is not None
-            session.add(TeamQuota(team_id=trial.team_id))
-            batch_id = uuid4()
-            session.add(
-                Batch(
-                    id=batch_id,
-                    team_id=trial.team_id,
-                    name=f"service scheduler {batch_backend}",
-                    task_filter={},
-                    trial_config={},
-                    backend=batch_backend,
-                    state="submitted",
-                    created_by_token_prefix="test",
-                    expected_trial_count=1,
-                )
+            await _configure_scheduler_trial(
+                session, trial_id=trial_id, now=now, batch_backend=batch_backend
             )
-            trial.batch_id = batch_id
-            task = await session.get(Task, trial.task_id)
-            assert task is not None
-            plan = _runtime_contract(now=now)
-            task.checksum = plan.task_revision_sha256.removeprefix("sha256:")
-            task.config = {
-                "schema_version": "1",
-                "task": {"id": task.id, "name": "Service execution scheduler"},
-                "environment": {
-                    "os": "linux",
-                    "cpu_arch": "x86_64",
-                    "gpu_vendor": "none",
-                    "docker_image": plan.task_image_ref,
-                    "cpus": 1,
-                    "memory_mb": 1024,
-                    "storage_mb": 2048,
-                    "tmpfs": ["/tmp"],
-                    "baseline_network_policy": {"kind": "gateway-only"},
-                    "network_policies_supported": ["gateway-only"],
-                },
-                "agent": {"name": "service-smoke"},
-                "verifier": {"name": "script"},
-                "service_execution": {
-                    "schema_version": "loom.task-service-execution.v1",
-                    "logical_pool_id": "nebius-cpu",
-                    "runtime_template": plan.model_dump(
-                        mode="json", exclude={"task_revision_sha256"}
-                    ),
-                },
-            }
-            trial.requires_caps = {
-                "os": "linux",
-                "cpu_arch": "x86_64",
-                "gpu_vendor": "none",
-                "network_policies": ["gateway-only"],
-                "backend": "nebius",
-                "worker_pool": "nebius-cpu",
-            }
             await session.execute(
                 delete(ExecutionBudgetPolicy).where(
                     ExecutionBudgetPolicy.scope_key.in_((target.logical_pool_id, target.target_id))
@@ -979,6 +996,184 @@ async def test_normal_scheduler_requires_explicit_nebius_backend(
                         .where(ExecutionCostReservation.lease_id == lease.id)
                         .scalar_subquery()
                     )
+                )
+                == 0
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("has_smaller_trial", [False, True])
+async def test_scheduler_capacity_wait_rolls_back_and_skips_oversized_head(
+    postgres_url: str,
+    has_smaller_trial: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            blocked_id, target = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(
+                session, trial_id=blocked_id, now=now, cpu_millis=64_000
+            )
+            blocked = await session.get(Trial, blocked_id)
+            assert blocked is not None
+            blocked.submit_priority = 200
+            team_id = blocked.team_id
+            smaller_id = None
+            if has_smaller_trial:
+                smaller_id, _ = await _seed_ready_trial(session, now=now)
+                await _configure_scheduler_trial(session, trial_id=smaller_id, now=now)
+            await session.commit()
+
+        async with sessions() as session:
+            lease = await reserve_next_service_execution(
+                session,
+                environment="staging",
+                pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                now=now,
+            )
+            await session.commit()
+            if smaller_id is None:
+                assert lease is None
+            else:
+                assert lease is not None and lease.trial_id == smaller_id
+                assert lease.attempt == 1
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ExecutionProvisioningAuthorization)
+                        .where(ExecutionProvisioningAuthorization.lease_id == lease.id)
+                    )
+                    == 1
+                )
+
+        async with sessions() as session:
+            blocked = await session.get(Trial, blocked_id)
+            assert blocked is not None
+            assert blocked.state == "queued" and blocked.attempt_count == 0
+            assert blocked.claimed_at is None and blocked.started_at is None
+            assert blocked.next_attempt_at == now + timedelta(seconds=15)
+            quota = await session.get(TeamQuota, team_id)
+            assert quota is not None and quota.in_flight_count == 0
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ServiceExecutionLease)
+                    .where(ServiceExecutionLease.trial_id == blocked_id)
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ExecutionCostReservation)
+                    .where(ExecutionCostReservation.team_id == team_id)
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ExecutionAdmissionReservation)
+                    .where(ExecutionAdmissionReservation.team_id == team_id)
+                )
+                == 0
+            )
+            budget = await session.scalar(
+                select(ExecutionBudgetPolicy).where(
+                    ExecutionBudgetPolicy.scope_kind == "target",
+                    ExecutionBudgetPolicy.scope_key == target.target_id,
+                )
+            )
+            assert budget is not None
+            if not has_smaller_trial:
+                assert budget.daily_reserved_microusd == budget.monthly_reserved_microusd == 0
+            # Correcting the task lets the same first attempt start after the
+            # existing backoff, with a fresh execution deadline.
+            task = await session.get(Task, blocked.task_id)
+            assert task is not None
+            config = json.loads(json.dumps(task.config))
+            config["environment"]["cpus"] = 1
+            config["service_execution"]["runtime_template"]["task_resources"]["cpu_millis"] = 1000
+            task.config = config
+            await session.commit()
+
+        async with sessions() as session:
+            assert (
+                await reserve_next_service_execution(
+                    session,
+                    environment="staging",
+                    pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                    now=now + timedelta(seconds=14),
+                )
+                is None
+            )
+            recovered = await reserve_next_service_execution(
+                session,
+                environment="staging",
+                pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                now=now + timedelta(seconds=15),
+            )
+            assert recovered is not None and recovered.trial_id == blocked_id
+            assert recovered.attempt == 1
+            assert recovered.deadline_at > now + timedelta(seconds=15 + 600)
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def test_scheduler_capacity_scan_is_bounded(postgres_url: str) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, _ = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now, cpu_millis=64_000)
+            first = await session.get(Trial, trial_id)
+            assert first is not None
+            trial_ids = [trial_id, *(uuid4() for _ in range(32))]
+            for extra_id in trial_ids[1:]:
+                session.add(
+                    Trial(
+                        id=extra_id,
+                        team_id=first.team_id,
+                        task_id=first.task_id,
+                        batch_id=first.batch_id,
+                        config=first.config,
+                        requires_caps=first.requires_caps,
+                        state="queued",
+                        attempt_count=0,
+                    )
+                )
+            await session.commit()
+        async with sessions() as session:
+            assert (
+                await reserve_next_service_execution(
+                    session,
+                    environment="staging",
+                    pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                    now=now,
+                )
+                is None
+            )
+            await session.commit()
+        async with sessions() as session:
+            rows = (await session.scalars(select(Trial).where(Trial.id.in_(trial_ids)))).all()
+            assert len(rows) == 33
+            assert sum(row.next_attempt_at is not None for row in rows) == 32
+            assert all(row.state == "queued" and row.attempt_count == 0 for row in rows)
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ServiceExecutionLease)
+                    .where(ServiceExecutionLease.trial_id.in_(trial_ids))
                 )
                 == 0
             )
@@ -1288,6 +1483,13 @@ async def test_actuator_defers_create_with_distinct_capacity_blocker(
             await create_execution_capacity_observation(
                 session,
                 target_id=target.target_id,
+                placement=placement_fixture(
+                    target_id=target.target_id,
+                    quota_nodes=quota_nodes,
+                    requested_cpu=cluster_requested,
+                    requested_memory=262_144 if cluster_requested else 0,
+                    requested_storage=1_048_576 if cluster_requested else 0,
+                ),
                 source="service-execution-test",
                 source_version=f"{target.target_id}-{case}-blocker",
                 observed_at=now + timedelta(seconds=1),
@@ -1354,7 +1556,7 @@ async def test_actuator_defers_create_with_distinct_capacity_blocker(
                         ExecutionProvisioningAuthorization.lease_id == lease.id
                     )
                 )
-                == 0
+                == 1
             )
             status = await fetch_execution_capacity_status(
                 session,
@@ -1372,18 +1574,18 @@ async def test_actuator_defers_create_with_distinct_capacity_blocker(
         await engine.dispose()
 
 
-async def test_provisioning_pending_limit_is_race_safe_across_actuators(
+async def test_provisioning_pending_limit_is_race_safe_before_claim(
     postgres_url: str,
 ) -> None:
+    from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
+
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    kubernetes = _FakeKubernetesJobApi()
     now = datetime.now(UTC)
     try:
         async with sessions() as session:
             first_trial_id, target = await _seed_ready_trial(session, now=now)
             first_trial = await session.get(Trial, first_trial_id)
-            assert first_trial is not None
             second_trial_id = uuid4()
             session.add(
                 Trial(
@@ -1396,132 +1598,35 @@ async def test_provisioning_pending_limit_is_race_safe_across_actuators(
                     attempt_count=0,
                 )
             )
-            first_lease = await _reserve(
-                session,
-                trial_id=first_trial_id,
-                target=target,
-                now=now,
-            )
-            second_lease = await _reserve(
-                session,
-                trial_id=second_trial_id,
-                target=target,
-                now=now,
-            )
-            await upsert_execution_capacity_policy(
-                session,
-                target_id=target.target_id,
-                enabled=True,
-                max_nodes=20,
-                max_vcpu_millis=1_280_000,
-                max_memory_mib=5_242_880,
-                max_storage_mib=20_971_520,
-                node_cpu_millis=64_000,
-                node_memory_mib=262_144,
-                node_storage_mib=1_048_576,
-                max_pending_jobs=1,
-                max_unschedulable_jobs=10,
-                max_image_pull_backoff_jobs=10,
-                max_create_per_minute=100,
-                observation_max_age_seconds=900,
-                reason="one pending create at a time",
-                now=now + timedelta(seconds=1),
-            )
-            await create_execution_capacity_observation(
-                session,
-                target_id=target.target_id,
-                source="service-execution-test",
-                source_version=f"{target.target_id}-race",
-                observed_at=now + timedelta(seconds=1),
-                provider_capacity_state="available",
-                provider_capacity_reason=None,
-                autoscaler_state="ready",
-                autoscaler_reason=None,
-                provider_quota_nodes=20,
-                provider_quota_vcpu_millis=1_280_000,
-                provider_quota_memory_mib=5_242_880,
-                provider_quota_storage_mib=20_971_520,
-                provider_used_nodes=1,
-                provider_used_vcpu_millis=64_000,
-                provider_used_memory_mib=262_144,
-                provider_used_storage_mib=1_048_576,
-                active_nodes=1,
-                provisioned_vcpu_millis=64_000,
-                provisioned_memory_mib=262_144,
-                provisioned_storage_mib=1_048_576,
-                allocatable_cpu_millis=64_000,
-                allocatable_memory_mib=262_144,
-                allocatable_storage_mib=1_048_576,
-                requested_cpu_millis=0,
-                requested_memory_mib=0,
-                requested_storage_mib=0,
-                pending_jobs=0,
-                unschedulable_jobs=0,
-                image_pull_backoff_jobs=0,
-                pending_reasons={},
-            )
+            policy = await session.get(ExecutionCapacityPolicy, target.target_id)
+            policy.max_pending_jobs = 1
             await session.commit()
 
-        runtime = ExecutionTargetRuntime(
-            target_id=target.target_id,
-            namespace=target.namespace_name,
-            runtime_class_name="loom-sandbox",
-        )
-        actuators = (
-            ExecutionActuator(
-                sessions=sessions,
-                kubernetes=kubernetes,
-                target=runtime,
-                controller_id="capacity-race-a",
-                command_limit=1,
-                command_lease_seconds=5,
-            ),
-            ExecutionActuator(
-                sessions=sessions,
-                kubernetes=kubernetes,
-                target=runtime,
-                controller_id="capacity-race-b",
-                command_limit=1,
-                command_lease_seconds=5,
-            ),
-        )
-        assert sorted(
-            await asyncio.gather(
-                *(item.run_commands_once(now=now + timedelta(seconds=2)) for item in actuators)
-            )
-        ) == [1, 1]
-        assert kubernetes.create_count == 1
+        async def claim(trial_id):
+            try:
+                async with sessions() as session, session.begin():
+                    return await _reserve(session, trial_id=trial_id, target=target, now=now)
+            except ExecutionProvisioningBlockedError as exc:
+                return exc.reason
 
+        results = await asyncio.gather(claim(first_trial_id), claim(second_trial_id))
+        assert sum(isinstance(row, ServiceExecutionLease) for row in results) == 1
+        assert "execution_capacity_pending_limit_exceeded" in results
         async with sessions() as session:
-            authorizations = (
+            trials = (
                 (
                     await session.execute(
-                        select(ExecutionProvisioningAuthorization).where(
-                            ExecutionProvisioningAuthorization.lease_id.in_(
-                                (first_lease.id, second_lease.id)
-                            )
-                        )
+                        select(Trial).where(Trial.id.in_([first_trial_id, second_trial_id]))
                     )
                 )
                 .scalars()
                 .all()
             )
-            assert len(authorizations) == 1
-            commands = (
-                (
-                    await session.execute(
-                        select(ServiceExecutionCommand).where(
-                            ServiceExecutionCommand.lease_id.in_((first_lease.id, second_lease.id)),
-                            ServiceExecutionCommand.command_type == "create",
-                        )
-                    )
-                )
-                .scalars()
-                .all()
+            assert sorted(row.attempt_count for row in trials) == [0, 1]
+            assert sum(row.state == "queued" for row in trials) == 1
+            assert (
+                await session.scalar(select(func.count(ExecutionProvisioningAuthorization.id))) == 1
             )
-            assert {row.state for row in commands} == {"acknowledged", "pending"}
-            blocked = next(row for row in commands if row.state == "pending")
-            assert blocked.last_error_code == "execution_capacity_pending_limit_exceeded"
     finally:
         await engine.dispose()
 
@@ -3615,6 +3720,133 @@ async def test_operator_projection_is_team_isolated(
         assert len(projection["commands"]) == 1
         assert projection["events"] == []
         assert projection["history"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("state", "started", "exhausted", "expects_retry"),
+    [
+        (NormalizedJobState.PENDING, False, False, False),
+        (NormalizedJobState.UNSCHEDULABLE, True, False, False),
+        (NormalizedJobState.UNSCHEDULABLE, False, False, True),
+        (NormalizedJobState.UNSCHEDULABLE, False, True, True),
+    ],
+)
+async def test_actuator_requeues_only_unstarted_unschedulable_at_deadline(
+    postgres_url: str,
+    state: NormalizedJobState,
+    started: bool,
+    exhausted: bool,
+    expects_retry: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    kubernetes = _FakeKubernetesJobApi()
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            quota = await session.get(TeamQuota, trial.team_id)
+            assert quota is not None
+            quota.max_attempts_ceiling = 1 if exhausted else 3
+            lease = await _reserve(
+                session, trial_id=trial_id, target=target, now=now, deadline_seconds=60
+            )
+            await session.commit()
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id, namespace=target.namespace_name
+            ),
+            controller_id="infra-recovery-test",
+        )
+        assert await actuator.run_commands_once(now=now) == 1
+        observation = kubernetes.jobs[lease.job_name].model_copy(
+            update={
+                "normalized_state": state,
+                "resource_version": "2",
+                "started_at": now if started else None,
+                "message": "Insufficient cpu"
+                if state == NormalizedJobState.UNSCHEDULABLE
+                else None,
+            }
+        )
+        kubernetes.jobs[lease.job_name] = observation
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=59))
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None and current.desired_state == "create"
+        # Same resourceVersion still needs deadline recovery; replay-safe event
+        # ingestion must not prevent this existing-clock decision.
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=60))
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            assert current is not None and trial is not None
+            assert (
+                trial.attempt_count == 1 and trial.failure_reason is None and trial.result is None
+            )
+            if not expects_retry:
+                assert current.desired_state == "create" and trial.state == "claimed"
+                return
+            assert current.desired_state == "retry" and current.generation == 2
+            assert current.cleanup_state == "pending" and trial.state == "queued"
+            authorization = await session.scalar(
+                select(ExecutionProvisioningAuthorization).where(
+                    ExecutionProvisioningAuthorization.lease_id == lease.id
+                )
+            )
+            assert authorization is not None and authorization.state != "released"
+            assert trial.next_attempt_at == now + timedelta(seconds=75)
+            assert current.error_code == (
+                "infra_recovery_exhausted" if exhausted else "unschedulable"
+            )
+            assert (
+                await reserve_next_service_execution(
+                    session,
+                    environment="staging",
+                    pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                    now=now + timedelta(seconds=76),
+                )
+                is None
+            )
+        # Keep the existing output grace period and exact UID cleanup; no second
+        # Job can be admitted while the old execution still owns resources.
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=76))
+        await actuator.run_commands_once(now=now + timedelta(seconds=76))
+        assert kubernetes.delete_count == 0
+        await actuator.run_commands_once(now=now + timedelta(seconds=361))
+        assert kubernetes.delete_count == 1 and not kubernetes.jobs
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=362))
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None and current.cleanup_state == "complete"
+            authorization = await session.scalar(
+                select(ExecutionProvisioningAuthorization).where(
+                    ExecutionProvisioningAuthorization.lease_id == lease.id
+                )
+            )
+            assert authorization is not None and authorization.state == "released"
+            recovered = await reserve_next_service_execution(
+                session,
+                environment="staging",
+                pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                now=now + timedelta(seconds=363),
+            )
+            if exhausted:
+                assert recovered is None
+                assert current.error_code == "infra_recovery_exhausted"
+            else:
+                assert recovered is not None and recovered.attempt == 2
+                assert recovered.id != lease.id
+            await session.commit()
     finally:
         await engine.dispose()
 

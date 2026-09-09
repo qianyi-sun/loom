@@ -401,3 +401,73 @@ def test_public_tls_bootstrap_requires_boolean(platform_inputs: tuple) -> None:
     config["public_tls_bootstrap"] = "false"
     with pytest.raises(NebiusPlatformError, match="public_tls_bootstrap must be a boolean"):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_execution_quota_uses_native_envelope_and_namespace_control_requests(
+    platform_inputs: tuple,
+) -> None:
+    config, candidate, profile = platform_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    docs = files["60-execution.yaml"]
+    quota = next(doc for doc in docs if doc["kind"] == "ResourceQuota")
+    assert config["max_concurrent"] is None
+    assert quota["spec"]["hard"] == {
+        "pods": "6403",
+        "requests.cpu": "1600300m",
+        "requests.memory": "6553984Mi",
+        "requests.ephemeral-storage": "8192000Mi",
+    }
+    # Cold-template discovery adds no mutation or cloud privileges.
+    role = next(doc for doc in docs if doc["kind"] == "ClusterRole")
+    assert {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]} in role[
+        "rules"
+    ]
+    assert all(set(rule["verbs"]) <= {"get", "list"} for rule in role["rules"])
+
+
+def test_execution_quota_preserves_explicit_lower_limits(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config["capacity_policy"].update(
+        max_nodes=3, max_vcpu_millis=48000, max_memory_mib=196608, max_storage_mib=245760
+    )
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    quota = next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "ResourceQuota")
+    assert quota["spec"]["hard"] == {
+        "pods": "195",
+        "requests.cpu": "48300m",
+        "requests.memory": "196992Mi",
+        "requests.ephemeral-storage": "245760Mi",
+    }
+    # An explicit namespace restriction, including a deliberate stop, wins.
+    config["execution_resource_quota"] = {"pods": "0", "requests.cpu": "1"}
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    quota = next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "ResourceQuota")
+    assert quota["spec"]["hard"]["pods"] == "0"
+    assert quota["spec"]["hard"]["requests.cpu"] == "1"
+    assert quota["spec"]["hard"]["requests.memory"] == "196992Mi"
+
+
+@pytest.mark.parametrize(
+    "hard",
+    [
+        {"pods": "-1"},
+        {"requests.cpu": "-1m"},
+        {"requests.memory": "bad"},
+        {"secrets": "1"},
+        {"pods": 4},
+    ],
+)
+def test_execution_quota_rejects_invalid_or_unowned_resource_types(
+    platform_inputs: tuple, hard: dict
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_resource_quota"] = hard
+    with pytest.raises(NebiusPlatformError, match="execution_resource_quota"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_execution_policy_rejects_beyond_native_node_ceiling(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config["capacity_policy"]["max_nodes"] = 101
+    with pytest.raises(NebiusPlatformError, match="max_nodes"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

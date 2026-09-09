@@ -172,7 +172,7 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.resource_version == "42"
 
 
-def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
+def test_unschedulable_job_start_is_not_reported_as_pod_scheduled_or_started() -> None:
     job_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
     job = _job()
     job.status.start_time = job_started
@@ -193,7 +193,7 @@ def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
 
     assert observation.normalized_state is NormalizedJobState.UNSCHEDULABLE
     assert observation.scheduled_at is None
-    assert observation.started_at == job_started
+    assert observation.started_at is None
 
 
 def test_scheduled_transition_is_clamped_to_pod_start_time() -> None:

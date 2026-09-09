@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,7 +12,12 @@ from loom_execution_capacity_collector.config import ExecutionCapacityCollectorS
 from loom_execution_capacity_collector.contracts import (
     CapacityObservationReceipt,
     CapacityObservationV1,
+    CapacityPlacement,
+    KubernetesCapacitySnapshot,
     NodeStateCounts,
+    NodeTemplateSample,
+    ProviderCapacitySnapshot,
+    ResourceTotals,
 )
 from loom_execution_capacity_collector.control_plane import CapacityControlPlaneClient
 from loom_execution_capacity_collector.kubernetes import InClusterKubernetesCapacityReader
@@ -20,6 +26,68 @@ from loom_execution_capacity_collector.nebius import NebiusCapacityReader
 
 class CapacityCollectionError(RuntimeError):
     """Complete source snapshots disagree on their shared target identity."""
+
+
+def _matching_samples(
+    provider: ProviderCapacitySnapshot, kubernetes: KubernetesCapacitySnapshot
+) -> list[NodeTemplateSample]:
+    """Never attach an old or foreign Node sample to a newly changed template."""
+    group = provider.node_group
+    if group is None or provider.autoscaler_state != "ready":
+        return []
+    template = group.template
+    expected_version = (
+        str(template.get("kubernetes_version", "")).removeprefix("v").removesuffix(".x").split(".")
+    )
+    if not expected_version[0]:
+        return []
+    effects = {
+        "NO_SCHEDULE": "NoSchedule",
+        "NO_EXECUTE": "NoExecute",
+        "PREFER_NO_SCHEDULE": "PreferNoSchedule",
+    }
+
+    def taints(rows: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
+        return {
+            (row["key"], row.get("value", ""), effects.get(row["effect"], row["effect"]))
+            for row in rows
+        }
+
+    matched = []
+    for sample in kubernetes.template_samples:
+        context = kubernetes.node_templates.get(sample.node_uid)
+        if context is None:
+            continue
+        labels = context["labels"]
+        version = sample.kubelet_version.removeprefix("v").split(".")
+        if (
+            labels.get("nebius.com/node-group-id") != group.id
+            or labels.get("node.kubernetes.io/instance-type") != template.get("platform")
+            or any(labels.get(key) != value for key, value in template.get("labels", {}).items())
+            or version[: len(expected_version)] != expected_version
+            or sample.pod_slots != template.get("max_pods")
+            or taints(context["taints"]) != taints(template.get("taints", []))
+        ):
+            continue
+        os_name = re.sub(r"[^a-z0-9]", "", str(template.get("os", "")).lower())
+        if os_name and not re.sub(r"[^a-z0-9]", "", context["os_image"].lower()).startswith(
+            os_name
+        ):
+            continue
+        capacity = context["capacity"]
+        if capacity["cpu_millis"] != group.raw_node.cpu_millis:
+            continue
+        # Preset labels are not exposed on every Nebius Node (the actual CPU
+        # sample exposes platform only). Reject larger/old nodes; never inflate
+        # the observed allocatable up to the new provider shape.
+        if any(
+            capacity[key] > getattr(group.raw_node, key)
+            or getattr(sample.allocatable, key) > capacity[key]
+            for key in ("cpu_millis", "memory_mib", "storage_mib")
+        ):
+            continue
+        matched.append(sample)
+    return matched
 
 
 async def collect_capacity_observation(
@@ -60,18 +128,27 @@ async def collect_capacity_observation(
         # Nebius quota usage can lag node-group inventory while autoscaling. Use
         # the complete node-group snapshot as a conservative floor so the
         # observation never overstates headroom during that convergence window.
+        raw_node = (
+            provider_snapshot.node_group.raw_node
+            if provider_snapshot.node_group is not None
+            else ResourceTotals(
+                cpu_millis=policy.node_cpu_millis,
+                memory_mib=policy.node_memory_mib,
+                storage_mib=policy.node_storage_mib,
+            )
+        )
         provider_used_nodes = max(provider_snapshot.used_nodes, provider_snapshot.node_count)
         provider_used_vcpu_millis = max(
             provider_snapshot.used_vcpu_millis,
-            provider_snapshot.node_count * policy.node_cpu_millis,
+            provider_snapshot.node_count * raw_node.cpu_millis,
         )
         provider_used_memory_mib = max(
             provider_snapshot.used_memory_mib,
-            provider_snapshot.node_count * policy.node_memory_mib,
+            provider_snapshot.node_count * raw_node.memory_mib,
         )
         provider_used_storage_mib = max(
             provider_snapshot.used_storage_mib,
-            provider_snapshot.node_count * policy.node_storage_mib,
+            provider_snapshot.node_count * raw_node.storage_mib,
         )
         if provider_snapshot.autoscaler_state == "ready" and (
             kubernetes_snapshot.active_nodes != provider_snapshot.node_count
@@ -93,9 +170,7 @@ async def collect_capacity_observation(
         )
         non_ready_nodes = max(
             0,
-            kubernetes_snapshot.active_nodes
-            - kubernetes_snapshot.ready_nodes
-            - deleting_nodes,
+            kubernetes_snapshot.active_nodes - kubernetes_snapshot.ready_nodes - deleting_nodes,
         )
         missing_desired_nodes = max(
             0,
@@ -118,6 +193,21 @@ async def collect_capacity_observation(
         provisioned_storage = (
             kubernetes_snapshot.provisioned.storage_mib + missing_nodes * policy.node_storage_mib
         )
+        placement = None
+        if provider_snapshot.node_group is not None:
+            # Kubernetes capacity is filesystem/OS-visible, not the billable VM
+            # and disk allocation. Keep this charge separate from Pod placement.
+            provisioned_cpu = active_nodes * raw_node.cpu_millis
+            provisioned_memory = active_nodes * raw_node.memory_mib
+            provisioned_storage = active_nodes * raw_node.storage_mib
+            placement = CapacityPlacement(
+                quota_resources=provider_snapshot.quota_resources,
+                node_group=provider_snapshot.node_group,
+                nodes=kubernetes_snapshot.nodes,
+                pending_pods=kubernetes_snapshot.pending_pods,
+                daemonsets=kubernetes_snapshot.daemonsets,
+                template_samples=_matching_samples(provider_snapshot, kubernetes_snapshot),
+            )
         identity = {
             "schema_version": "loom.execution-capacity-collector-source.v1",
             "target_id": settings.target_id,
@@ -158,6 +248,7 @@ async def collect_capacity_observation(
             unschedulable_jobs=kubernetes_snapshot.unschedulable_jobs,
             image_pull_backoff_jobs=kubernetes_snapshot.image_pull_backoff_jobs,
             pending_reasons=kubernetes_snapshot.pending_reasons,
+            placement=placement,
         )
         return await control_plane.publish(observation)
     finally:

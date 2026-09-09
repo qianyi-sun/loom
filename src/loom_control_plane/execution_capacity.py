@@ -20,12 +20,23 @@ from loom.db.schema import (
     ServiceExecutionTarget,
 )
 from loom.pipeline.keys import canonical_digest
+from loom_control_plane.execution_placement import (
+    PlacementUnavailableError,
+    cold_sample,
+    plan_placement,
+    quota_identity,
+)
+from loom_execution_capacity_collector.contracts import (
+    CapacityPlacement,
+    NodeTemplateSample,
+    ResourceTotals,
+)
 
 _CAPACITY_MUTATION_LOCK = text(
     "SELECT pg_advisory_xact_lock(hashtextextended('execution-capacity-mutation', 1552))"
 )
 _CAPACITY_ADMISSION_LOCK = text(
-    "SELECT pg_advisory_xact_lock_shared(hashtextextended('execution-capacity-mutation', 1552))"
+    "SELECT pg_advisory_xact_lock(hashtextextended('execution-capacity-mutation', 1552))"
 )
 _ACTIVE_AUTHORIZATION_STATES = (
     "authorized",
@@ -82,10 +93,6 @@ def _non_negative_int(value: int, *, name: str) -> int:
     return value
 
 
-def _ceil_div(value: int, divisor: int) -> int:
-    return (value + divisor - 1) // divisor if value > 0 else 0
-
-
 def _normalized_pending_reasons(value: dict[str, int]) -> dict[str, int]:
     normalized: dict[str, int] = {}
     if len(value) > 100:
@@ -113,13 +120,8 @@ def _normalized_node_states(
             "deleting": 0,
         }
     if set(value) != set(keys):
-        raise ValueError(
-            "node_states must contain desired, creating, ready, failed, deleting"
-        )
-    return {
-        key: _non_negative_int(value[key], name=f"node_states.{key}")
-        for key in keys
-    }
+        raise ValueError("node_states must contain desired, creating, ready, failed, deleting")
+    return {key: _non_negative_int(value[key], name=f"node_states.{key}") for key in keys}
 
 
 async def create_execution_capacity_observation(
@@ -156,6 +158,7 @@ async def create_execution_capacity_observation(
     image_pull_backoff_jobs: int,
     pending_reasons: dict[str, int],
     node_states: dict[str, int] | None = None,
+    placement: dict[str, Any] | None = None,
 ) -> tuple[ExecutionCapacityObservation, bool]:
     target_id = _clean_text(target_id, name="target_id", max_length=120)
     source = _clean_text(source, name="source", max_length=120)
@@ -191,7 +194,7 @@ async def create_execution_capacity_observation(
         "image_pull_backoff_jobs": image_pull_backoff_jobs,
     }
     for name, value in positive_values.items():
-        _positive_int(value, name=name)
+        _non_negative_int(value, name=name)
     for name, value in non_negative_values.items():
         _non_negative_int(value, name=name)
     if provider_capacity_state not in {"available", "insufficient", "unknown"}:
@@ -224,6 +227,15 @@ async def create_execution_capacity_observation(
         "pending_reasons": reasons,
         "node_states": normalized_node_states,
     }
+    if placement is not None:
+        parsed = CapacityPlacement.model_validate(placement)
+        if not {"nodes", "vcpu", "storage"}.issubset(parsed.quota_resources):
+            raise ValueError("placement requires native nodes, vcpu and storage quota identities")
+        if len({node.uid for node in parsed.nodes}) != len(parsed.nodes) or len(
+            {node.provider_id for node in parsed.nodes}
+        ) != len(parsed.nodes):
+            raise ValueError("placement contains duplicate node identities")
+        payload["placement"] = parsed.model_dump(mode="json")
     digest = canonical_digest(payload)
     existing = (
         await session.execute(
@@ -363,25 +375,12 @@ async def _latest_observation(
     ).scalar_one_or_none()
 
 
-def _required_nodes(
-    *,
-    cpu_millis: int,
-    memory_mib: int,
-    storage_mib: int,
-    policy: ExecutionCapacityPolicy,
-) -> int:
-    return max(
-        _ceil_div(cpu_millis, policy.node_cpu_millis),
-        _ceil_div(memory_mib, policy.node_memory_mib),
-        _ceil_div(storage_mib, policy.node_storage_mib),
-    )
-
-
 async def reserve_execution_provisioning(
     session: AsyncSession,
     *,
     lease_id: UUID,
     now: datetime | None = None,
+    revalidate_existing: bool = False,
 ) -> ExecutionProvisioningAuthorization | None:
     """Authorize one Nebius create against fresh provider and cluster evidence."""
 
@@ -405,7 +404,8 @@ async def reserve_execution_provisioning(
     if existing is not None:
         if existing.state == "released":
             raise ExecutionProvisioningBlockedError("execution_capacity_authorization_released")
-        return existing
+        if not revalidate_existing:
+            return existing
     if target.desired_state != "active":
         raise ExecutionProvisioningBlockedError("execution_capacity_target_not_active")
     if target.health_status != "healthy":
@@ -438,29 +438,48 @@ async def reserve_execution_provisioning(
         or requested_storage > policy.node_storage_mib
     ):
         raise ExecutionProvisioningBlockedError("execution_capacity_workload_exceeds_node_shape")
-    recent_authorizations = (
+    placement_payload = observation.observation_json.get("placement")
+    if not placement_payload:
+        raise ExecutionProvisioningBlockedError("execution_capacity_placement_unavailable")
+    placement = CapacityPlacement.model_validate(placement_payload)
+    authorizations = (
         (
             await session.execute(
                 select(ExecutionProvisioningAuthorization).where(
-                    ExecutionProvisioningAuthorization.target_id == target.id,
                     ExecutionProvisioningAuthorization.state.in_(_ACTIVE_AUTHORIZATION_STATES),
-                    (
-                        (ExecutionProvisioningAuthorization.authorized_at > observation.observed_at)
-                        | (ExecutionProvisioningAuthorization.state == "authorized")
-                    ),
+                    ExecutionProvisioningAuthorization.lease_id != lease_id,
                 )
             )
         )
         .scalars()
         .all()
     )
+    same_target = [row for row in authorizations if row.target_id == target.id]
+    generations = {
+        lease_key: generation
+        for lease_key, generation in (
+            await session.execute(
+                select(ServiceExecutionLease.id, ServiceExecutionLease.resource_generation).where(
+                    ServiceExecutionLease.id.in_([row.lease_id for row in authorizations])
+                )
+            )
+        ).all()
+    }
+    observed_leases = {
+        f"{pod.lease_id}:{pod.generation}" for node in placement.nodes for pod in node.managed_pods
+    } | {f"{pod.lease_id}:{pod.generation}" for pod in placement.pending_pods}
+    recent_authorizations = [
+        row
+        for row in same_target
+        if f"{row.lease_id}:{generations[row.lease_id]}" not in observed_leases
+    ]
     recent_creates = await session.scalar(
         select(func.count(ExecutionProvisioningAuthorization.id)).where(
             ExecutionProvisioningAuthorization.target_id == target.id,
             ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
         )
     )
-    if int(recent_creates or 0) >= policy.max_create_per_minute:
+    if existing is None and int(recent_creates or 0) >= policy.max_create_per_minute:
         raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
     recent_pending = sum(
         row.state in _PENDING_AUTHORIZATION_STATES for row in recent_authorizations
@@ -485,76 +504,225 @@ async def reserve_execution_provisioning(
         raise ExecutionProvisioningBlockedError(
             "execution_capacity_image_pull_backoff_limit_exceeded"
         )
-    recent_cpu = sum(row.requested_cpu_millis for row in recent_authorizations)
-    recent_memory = sum(row.requested_memory_mib for row in recent_authorizations)
-    recent_storage = sum(row.requested_storage_mib for row in recent_authorizations)
-    free_cpu = max(0, observation.allocatable_cpu_millis - observation.requested_cpu_millis)
-    free_memory = max(0, observation.allocatable_memory_mib - observation.requested_memory_mib)
-    free_storage = max(0, observation.allocatable_storage_mib - observation.requested_storage_mib)
-    prior_nodes = _required_nodes(
-        cpu_millis=max(0, recent_cpu - free_cpu),
-        memory_mib=max(0, recent_memory - free_memory),
-        storage_mib=max(0, recent_storage - free_storage),
-        policy=policy,
-    )
-    total_nodes = _required_nodes(
-        cpu_millis=max(0, recent_cpu + requested_cpu - free_cpu),
-        memory_mib=max(0, recent_memory + requested_memory - free_memory),
-        storage_mib=max(0, recent_storage + requested_storage - free_storage),
-        policy=policy,
-    )
-    incremental_nodes = max(0, total_nodes - prior_nodes)
-    if incremental_nodes > 0:
+
+    def demands(rows: list[ExecutionProvisioningAuthorization]) -> list[tuple[str, ResourceTotals]]:
+        return [
+            (
+                f"{row.lease_id}:{generations[row.lease_id]}",
+                ResourceTotals(
+                    cpu_millis=row.requested_cpu_millis,
+                    memory_mib=row.requested_memory_mib,
+                    storage_mib=row.requested_storage_mib,
+                ),
+            )
+            for row in rows
+        ]
+
+    async def sample_for(target_id: str, current: CapacityPlacement) -> NodeTemplateSample | None:
+        sample = cold_sample(current)
+        if sample is not None:
+            return sample
+        # JSONB preserves immutable observed templates; no new table/cache writer.
+        history = (
+            (
+                await session.execute(
+                    select(ExecutionCapacityObservation.observation_json)
+                    .where(
+                        ExecutionCapacityObservation.target_id == target_id,
+                        ExecutionCapacityObservation.observation_json["placement"][
+                            "template_samples"
+                        ].astext
+                        != "[]",
+                    )
+                    .order_by(ExecutionCapacityObservation.observed_at.desc())
+                    .limit(100)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return cold_sample(
+            current,
+            (
+                CapacityPlacement.model_validate(row["placement"])
+                for row in history
+                if row.get("placement")
+            ),
+        )
+
+    try:
+        sample = await sample_for(target.id, placement)
+        prior = plan_placement(placement, demands(same_target), sample=sample)
+        projected = plan_placement(
+            placement,
+            [
+                *demands(same_target),
+                (
+                    f"{lease_id}:{lease.resource_generation}",
+                    ResourceTotals(
+                        cpu_millis=requested_cpu,
+                        memory_mib=requested_memory,
+                        storage_mib=requested_storage,
+                    ),
+                ),
+            ],
+            sample=sample,
+        )
+    except PlacementUnavailableError as exc:
+        raise ExecutionProvisioningBlockedError(str(exc)) from exc
+    total_nodes = projected.additional_nodes
+    incremental_nodes = max(0, total_nodes - prior.additional_nodes)
+    raw = placement.node_group.raw_node
+    if projected.cold_nodes > 0:
         if observation.provider_capacity_state == "insufficient":
             raise ExecutionProvisioningBlockedError(
                 "execution_capacity_physical_capacity_unavailable"
             )
         if observation.provider_capacity_state == "unknown":
-            raise ExecutionProvisioningBlockedError("execution_capacity_physical_capacity_unknown")
-        if observation.autoscaler_state == "stalled":
-            raise ExecutionProvisioningBlockedError("execution_capacity_autoscaler_stalled")
-        if observation.autoscaler_state == "unknown":
-            raise ExecutionProvisioningBlockedError("execution_capacity_autoscaler_unknown")
-    projected_active_nodes = observation.active_nodes + total_nodes
-    projected_provisioned_vcpu = (
-        observation.provisioned_vcpu_millis + total_nodes * policy.node_cpu_millis
-    )
-    projected_provisioned_memory = (
-        observation.provisioned_memory_mib + total_nodes * policy.node_memory_mib
-    )
-    projected_provisioned_storage = (
-        observation.provisioned_storage_mib + total_nodes * policy.node_storage_mib
-    )
-    policy_limits = (
-        (projected_active_nodes, policy.max_nodes, "nodes"),
-        (projected_provisioned_vcpu, policy.max_vcpu_millis, "vcpu"),
-        (projected_provisioned_memory, policy.max_memory_mib, "memory"),
-        (projected_provisioned_storage, policy.max_storage_mib, "storage"),
-    )
-    for projected, limit, label in policy_limits:
-        if projected > limit:
-            raise ExecutionProvisioningBlockedError(f"execution_capacity_max_{label}_exceeded")
-    projected_provider_nodes = observation.provider_used_nodes + total_nodes
-    projected_provider_vcpu = (
-        observation.provider_used_vcpu_millis + total_nodes * policy.node_cpu_millis
-    )
-    projected_provider_memory = (
-        observation.provider_used_memory_mib + total_nodes * policy.node_memory_mib
-    )
-    projected_provider_storage = (
-        observation.provider_used_storage_mib + total_nodes * policy.node_storage_mib
-    )
-    quota_limits = (
-        (projected_provider_nodes, observation.provider_quota_nodes, "nodes"),
-        (projected_provider_vcpu, observation.provider_quota_vcpu_millis, "vcpu"),
-        (projected_provider_memory, observation.provider_quota_memory_mib, "memory"),
-        (projected_provider_storage, observation.provider_quota_storage_mib, "storage"),
-    )
-    for projected, limit, label in quota_limits:
-        if projected > limit:
-            raise ExecutionProvisioningBlockedError(
-                f"execution_capacity_provider_quota_{label}_exceeded"
+            reason = (
+                "execution_capacity_provisioning_delay"
+                if observation.autoscaler_state == "scaling"
+                else "execution_capacity_physical_capacity_unknown"
             )
+            raise ExecutionProvisioningBlockedError(reason)
+        if observation.autoscaler_state in {"stalled", "unknown"}:
+            raise ExecutionProvisioningBlockedError(
+                f"execution_capacity_autoscaler_{observation.autoscaler_state}"
+            )
+    projected_active_nodes = placement.node_group.node_count + total_nodes
+    policy_limits = (
+        (projected_active_nodes, min(policy.max_nodes, placement.node_group.max_nodes), "nodes"),
+        (projected_active_nodes * raw.cpu_millis, policy.max_vcpu_millis, "vcpu"),
+        (projected_active_nodes * raw.memory_mib, policy.max_memory_mib, "memory"),
+        (projected_active_nodes * raw.storage_mib, policy.max_storage_mib, "storage"),
+    )
+    for projected_value, limit, label in policy_limits:
+        if projected_value > limit:
+            raise ExecutionProvisioningBlockedError(f"execution_capacity_max_{label}_exceeded")
+
+    # The same database lock serializes ALL target admissions. Account resources
+    # are keyed by their native quota identities (SSD can be shared by CPU/GPU).
+    # Recompute unobserved demand per node group; never add different pools' free
+    # CPU and RAM together or assume a shared lock alone prevents double spend.
+    charges = {
+        key: total_nodes * amount
+        for key, amount in {
+            "nodes": 1,
+            "vcpu": raw.cpu_millis,
+            "memory": raw.memory_mib,
+            "storage": raw.storage_mib,
+        }.items()
+    }
+    quota_used = {key: quota.used for key, quota in placement.quota_resources.items()}
+    quota_limit = {key: quota.limit for key, quota in placement.quota_resources.items()}
+    other_targets = (
+        (
+            await session.execute(
+                select(ServiceExecutionTarget.id)
+                .where(
+                    ServiceExecutionTarget.provider == "nebius",
+                    ServiceExecutionTarget.id != target.id,
+                )
+                .order_by(ServiceExecutionTarget.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    native_floor = {
+        key: placement.node_group.node_count * amount
+        for key, amount in {
+            "nodes": 1,
+            "vcpu": raw.cpu_millis,
+            "memory": raw.memory_mib,
+            "storage": raw.storage_mib,
+        }.items()
+    }
+    all_node_ids = {node.uid for node in placement.nodes}
+    all_provider_ids = {node.provider_id for node in placement.nodes}
+    seen_groups = {placement.node_group.id}
+    for other_target in other_targets:
+        other_observation = await _latest_observation(session, other_target)
+        has_active = any(row.target_id == other_target for row in authorizations)
+        if other_observation is None and not has_active:
+            continue
+        if other_observation is None:
+            raise ExecutionProvisioningBlockedError(
+                "execution_capacity_shared_observation_unavailable"
+            )
+        other_payload = other_observation.observation_json.get("placement")
+        if not other_payload:
+            if not has_active:
+                continue
+            other_target_row = await session.get(ServiceExecutionTarget, other_target)
+            if other_target_row is not None and other_target_row.region != target.region:
+                continue
+            # An old aggregate-only active pool cannot safely be charged to an
+            # unknown quota domain. Wait for its ordinary collector upgrade.
+            raise ExecutionProvisioningBlockedError(
+                "execution_capacity_shared_placement_unavailable"
+            )
+        other = CapacityPlacement.model_validate(other_payload)
+        shared = {
+            key
+            for key, quota in placement.quota_resources.items()
+            if key in other.quota_resources
+            and quota_identity(quota) == quota_identity(other.quota_resources[key])
+        }
+        if not shared:
+            continue
+        other_policy = await session.get(ExecutionCapacityPolicy, other_target)
+        if (
+            other_policy is None
+            or other_observation.observed_at > current_time + timedelta(seconds=60)
+            or current_time
+            > other_observation.observed_at
+            + timedelta(seconds=other_policy.observation_max_age_seconds)
+        ):
+            if not has_active:
+                continue
+            raise ExecutionProvisioningBlockedError("execution_capacity_shared_observation_stale")
+        if (
+            other.node_group.id in seen_groups
+            or {node.uid for node in other.nodes} & all_node_ids
+            or {node.provider_id for node in other.nodes} & all_provider_ids
+        ):
+            raise ExecutionProvisioningBlockedError("execution_capacity_overlapping_targets")
+        seen_groups.add(other.node_group.id)
+        all_node_ids.update(node.uid for node in other.nodes)
+        all_provider_ids.update(node.provider_id for node in other.nodes)
+        try:
+            other_plan = plan_placement(
+                other,
+                demands([row for row in authorizations if row.target_id == other_target]),
+                sample=await sample_for(other_target, other),
+            )
+        except PlacementUnavailableError as exc:
+            raise ExecutionProvisioningBlockedError(
+                "execution_capacity_shared_placement_unknown"
+            ) from exc
+        amounts = {
+            "nodes": 1,
+            "vcpu": other.node_group.raw_node.cpu_millis,
+            "memory": other.node_group.raw_node.memory_mib,
+            "storage": other.node_group.raw_node.storage_mib,
+        }
+        for key in shared:
+            charges[key] += other_plan.additional_nodes * amounts[key]
+            native_floor[key] += other.node_group.node_count * amounts[key]
+            # Independent observations are not atomic with external account use.
+            # Conservatively retain the highest usage / lowest quota snapshot.
+            quota_used[key] = max(quota_used[key], other.quota_resources[key].used)
+            quota_limit[key] = min(quota_limit[key], other.quota_resources[key].limit)
+    for key in ("nodes", "vcpu", "memory", "storage"):
+        if key not in placement.quota_resources:
+            continue
+        if max(quota_used[key], native_floor[key]) + charges[key] > quota_limit[key]:
+            raise ExecutionProvisioningBlockedError(
+                f"execution_capacity_provider_quota_{key}_exceeded"
+            )
+    if existing is not None:
+        return existing
     decision_reason = "existing_allocatable" if total_nodes == 0 else "bounded_scale_headroom"
     payload = {
         "schema_version": "loom.execution-provisioning-authorization.v1",
@@ -566,9 +734,9 @@ async def reserve_execution_provisioning(
         "requested_memory_mib": requested_memory,
         "requested_storage_mib": requested_storage,
         "incremental_nodes": incremental_nodes,
-        "incremental_vcpu_millis": incremental_nodes * policy.node_cpu_millis,
-        "incremental_memory_mib": incremental_nodes * policy.node_memory_mib,
-        "incremental_storage_mib": incremental_nodes * policy.node_storage_mib,
+        "incremental_vcpu_millis": incremental_nodes * raw.cpu_millis,
+        "incremental_memory_mib": incremental_nodes * raw.memory_mib,
+        "incremental_storage_mib": incremental_nodes * raw.storage_mib,
         "decision_reason": decision_reason,
         "authorized_at": current_time.isoformat(),
     }
@@ -582,9 +750,9 @@ async def reserve_execution_provisioning(
         requested_memory_mib=requested_memory,
         requested_storage_mib=requested_storage,
         incremental_nodes=incremental_nodes,
-        incremental_vcpu_millis=incremental_nodes * policy.node_cpu_millis,
-        incremental_memory_mib=incremental_nodes * policy.node_memory_mib,
-        incremental_storage_mib=incremental_nodes * policy.node_storage_mib,
+        incremental_vcpu_millis=incremental_nodes * raw.cpu_millis,
+        incremental_memory_mib=incremental_nodes * raw.memory_mib,
+        incremental_storage_mib=incremental_nodes * raw.storage_mib,
         decision_reason=decision_reason,
         authorization_sha256=canonical_digest(payload),
         state="authorized",
@@ -675,6 +843,8 @@ async def fetch_execution_capacity_status(
         elif not observation_is_fresh:
             blockers.append("execution_capacity_observation_stale")
         if observation is not None:
+            if not observation.observation_json.get("placement"):
+                blockers.append("execution_capacity_placement_unavailable")
             if observation.provider_capacity_state == "insufficient":
                 blockers.append("execution_capacity_physical_capacity_unavailable")
             elif observation.provider_capacity_state == "unknown":
@@ -762,6 +932,10 @@ async def fetch_execution_capacity_status(
                 "observation": (
                     {
                         "id": str(observation.id),
+                        "placement_available": bool(observation.observation_json.get("placement")),
+                        "native_node_group": (
+                            observation.observation_json.get("placement") or {}
+                        ).get("node_group"),
                         "source": observation.source,
                         "source_version": observation.source_version,
                         "observed_at": observation.observed_at.isoformat(),
