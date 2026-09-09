@@ -268,3 +268,32 @@ def test_builder_diagnostics_bound_output_and_remove_credentials(monkeypatch):
 
 def test_builder_diagnostics_remain_bounded_after_redaction_expands_lines():
     assert len(candidate.sanitize_diagnostic("password\n" * 3000)) <= 16_384
+
+
+def test_oci_scan_layout_reuses_native_archive_and_cleans_up(tmp_path: Path) -> None:
+    archive = oci_fixture(tmp_path)
+    layout = tmp_path / "runtime.release.oci"
+    with candidate.oci_scan_layout(archive, layout) as scan_input:
+        index = json.loads((scan_input / "index.json").read_text())
+        digest = index["manifests"][0]["digest"]
+        assert (scan_input / "blobs/sha256" / digest.split(":")[1]).is_file()
+        assert scan_input == layout
+    assert not layout.exists()
+    assert archive.is_file()
+
+
+def test_oci_scan_layout_rejects_archive_path_escape(tmp_path: Path) -> None:
+    import io
+    import tarfile
+
+    archive = tmp_path / "bad.oci.tar"
+    with tarfile.open(archive, "w") as bundle:
+        entry = tarfile.TarInfo("../outside")
+        entry.size = 1
+        bundle.addfile(entry, io.BytesIO(b"x"))
+    layout = tmp_path / "scan"
+    with pytest.raises(tarfile.FilterError):
+        with candidate.oci_scan_layout(archive, layout):
+            pytest.fail("unsafe archive was extracted")
+    assert not layout.exists()
+    assert not (tmp_path / "outside").exists()

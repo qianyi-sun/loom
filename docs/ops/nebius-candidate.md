@@ -103,3 +103,5 @@ Required follow-up acceptance: provision the restricted GitHub environment and
 publisher IAM/trust bindings, publish an exact merged integration commit, verify
 registry readback, and deploy that publication bundle through the independent platform
 renderer/deployer. Publication requires no cluster bootstrap.
+
+The publisher exports one OCI archive per image. It extracts that archive into a temporary OCI layout directory for Trivy vulnerability and SBOM reports, then pushes the original archive with Skopeo. Trivy accepts an OCI layout directory through `--input`; an OCI tar archive is not a Docker-save archive. The temporary layout is removed after scanning. The existing scan policy and scanned-to-published digest check are unchanged.
