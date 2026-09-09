@@ -88,7 +88,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/download_registered.go",
-        "sha256": "249925fb798b9c59fa9f6f6dce7e8c9104043bca2636f600c443ef7287f2f256"
+        "sha256": "4bda818f705beea18426b6952e15c48294aaf11c30b0b980b502646681b2ced4"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/download_registered_test.go",
@@ -116,7 +116,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/main.go",
-        "sha256": "ba30e7c1f5c052f64854122dd46bd4575b3f93eda3178f8fc7d6893f3221e7b1"
+        "sha256": "8374e379012ab9ec6147ad3beb993f9c4a6950f0a63cd4d0ae582615bcd3fce7"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/main_test.go",
@@ -132,7 +132,15 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/orchestrator.go",
-        "sha256": "0767965c9aa978304b2ebed60abe886fcb3acf0f3ef0b7a4b6ce7ae65dea95fb"
+        "sha256": "1cdb860bc826163f3b023c87564c36b27a96d11e1f00113e397590e11ac3beec"
+      },
+      {
+        "path": "cmd/loom-task-image-builder-supervisor/orchestrator_join_test.go",
+        "sha256": "8c4c20bfd79e132d338e7eaf37e8f39870dfe09abdfd09b0e3e8d800d60f6fa5"
+      },
+      {
+        "path": "cmd/loom-task-image-builder-supervisor/orchestrator_registered_test.go",
+        "sha256": "05649aa3a79c871496826f8a4fcd53124409d24b74577b57d9e1b604830e9683"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/orchestrator_test.go",
@@ -156,7 +164,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/prebuild_registered.go",
-        "sha256": "d6e28e8e502fd35a4380a09aa25cc0b87ea780ed8f68b8041a331708b4002c44"
+        "sha256": "960d1a7b0e50195b3dc37e00ccb2a0c5db12d172dca2cb7df850662d5ddca8a3"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/prebuild_registered_test.go",
@@ -248,15 +256,23 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/registry_credential_fix_test.go",
-        "sha256": "c5baa1f16a47d198a37a33600176d8bc3a71a319a467a3d5ce9a875919d203c7"
+        "sha256": "7fc93603c08e242fb7d5736911b11c108bf6c21995663a5e8b2dfdbc577f7d42"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/registry_credential_test.go",
         "sha256": "7e30c70ea9bf09af0db2da3a6e6c6bac9d7efb51ca1d564fb90266b3218e0c93"
       },
       {
+        "path": "cmd/loom-task-image-builder-supervisor/registry_request_lifetime.go",
+        "sha256": "0ed50e77da59d67e30e19fe3d7db50203ce830a4a199ddab2bd87345a633645e"
+      },
+      {
+        "path": "cmd/loom-task-image-builder-supervisor/registry_request_lifetime_test.go",
+        "sha256": "9c1c4edcad385b49f662a2c29eb963a2a54ba3ca03485ac539322beb8923a05f"
+      },
+      {
         "path": "cmd/loom-task-image-builder-supervisor/registry_upload.go",
-        "sha256": "033d4bb8a4701749ca87c66d15574c191250c66ec6116454f8952a96a4e1d034"
+        "sha256": "024afd6f57ed9669f67eb59bde81afce37c208296f27fc1b966b66b31cdd2eb7"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/registry_upload_test.go",
@@ -264,11 +280,15 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/secret.go",
-        "sha256": "3e414846dbb5e4cc555f758c70cd4b7f4fe1f80d0b0fe2a8248f83422a264666"
+        "sha256": "d2bb61210659bd85fea439099e3dab25817ee7e1e15f0f5b1d2b3f7915b7ac93"
+      },
+      {
+        "path": "cmd/loom-task-image-builder-supervisor/secret_mapping_test.go",
+        "sha256": "d4d8377bd6e5e1025b50bbe8ffc2e10865164c29b256a080cce499771c369f8c"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/secret_test.go",
-        "sha256": "14ba19fc28f52c38e71ecc43c46028da5387ee88528cde0deb52bcef24eaae4b"
+        "sha256": "69c59c215c0c94392433107f1781a2082193cbbb578afc40a1b012177ea358be"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/session.go",
@@ -276,7 +296,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/session_publication_test.go",
-        "sha256": "a685e2cb701a3d2a0c8c49e6c9b80346141b4a945e4f02f2aa37e34151feddef"
+        "sha256": "291715398c952f06f4519d20c9428db9100d6685f5d126f0f4ce32c83707483d"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/session_snapshot_test.go",
@@ -284,12 +304,12 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/session_test.go",
-        "sha256": "62d5b28ef528529915480cff9fc53bc3e2c83b1b5a6af621167b958cc44f66a7"
+        "sha256": "7c4a8113cb0efbbfd971bd6bad9eebb90431a9e2c65fd2a70dc3d8fee8ca5a50"
       }
     ],
     "sha256": {
-      "x86_64": "8f4d811d6d182cb00d6cefe04c0496b11e093dfec67163b54fb43a81fd9ff3d3",
-      "aarch64": "6890a40b54cbc43fd1a6b0ab84bfed275775e8f1037a0b5ab5a0b32f905631df"
+      "x86_64": "4b26116f69bacb3b3158b0772bd4550403e5eaeaddecb20863f6db95e37dc719",
+      "aarch64": "78e31e832f77be22712da8ad733ae255430dda4897ceb1bd220a8841e1ee00ac"
     }
   },
   "configs": [
