@@ -75,6 +75,7 @@ values in environment JSON, rendered YAML, evidence bundles or command lines.
 | platform | `loom-platform-auth` | `jwt-signing-key`, `secret-store-master-key` |
 | platform | `loom-model-provider` | `api-key` for the configured `local_yibu` Gateway provider |
 | platform | `loom-platform-collector` | `token`, a stable `loom_ecc_` token |
+| platform | `loom-platform-batch-runner` | `token`, a distinct stable `loom_br_` token with only `submit:batch` scope |
 | execution | `loom-execution-actuator-db` | `db-url`, `ca.crt`; matching only the actuator role |
 | execution | `loom-execution-capacity-collector-nebius` | `credentials.json`, existing collector service-account credential format |
 | execution | `loom-execution-capacity-collector-control-plane` | `token`, identical to the platform collector token |
@@ -88,6 +89,21 @@ the bootstrap converts the admin connection to psycopg. The database certificate
 must cover that exact service DNS name. The PostgreSQL superuser is `postgres`;
 the four application usernames are `loom_service`, `loom_control_plane`,
 `loom_gateway`, and `loom_actuator`.
+
+Generate the batch-runner token once as `loom_br_` plus at least 32 random
+URL-safe bytes and keep it in the protected Secret provisioning input. On a
+fresh install, database bootstrap registers it as a non-expiring worker token
+with only `submit:batch` scope and no team binding. The migration Job reads
+`LOOM_BATCH_RUNNER_TOKEN`; Service reads the same required Secret through
+`LOOM_SVC_BATCH_RUNNER_CP_TOKEN`. Without it, Service accepts Batches but cannot
+create their Trials. Do not reuse the collector or admin token.
+
+For an existing installation, the authenticated CP endpoint
+`POST /admin/batch-runner-tokens` with an empty JSON object can mint the same
+non-expiring credential contract. Store its returned token directly in the
+protected Secret input without logging it. Future bootstrap runs preserve that
+token and reject revoked identities or different scopes, expiry or team binding;
+rotation requires a newly issued token and a Service rollout.
 
 Applications receive their own DB URL through `secretKeyRef` and mount **only**
 the CA key, never the DB Secret's other passwords. Gateway and actuator have an
@@ -113,8 +129,8 @@ API endpoint before applying anything. Apply only the generated files:
    wait for `StatefulSet/loom-postgres`.
 4. `30-migrate.yaml`: candidate-specific migration Job; wait for completion.
    It creates/reconciles roles, applies the actual Alembic head, grants current
-   table permissions and registers the collector token without reviving a
-   revoked identity.
+   table permissions and registers the collector and batch-runner tokens without
+   reviving revoked identities or changing their authority.
 5. `40-services.yaml`: service, CP, Gateway and web; wait for readiness.
 6. `50-configure.yaml`: register only this environment's execution catalog,
    capacity/admission policies and new-target operator intent. It does not

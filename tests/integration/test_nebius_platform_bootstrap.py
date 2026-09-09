@@ -106,6 +106,8 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
     monkeypatch.setenv("LOOM_DB_URL", platform_database)
     token = "loom_ecc_" + "f" * 64
     monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", token)
+    batch_token = "loom_br_" + "b" * 64
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", batch_token)
     for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
         monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", "test-password-" + role + "-" * 30)
     config = {"namespace": "loom-nebius-platform"}
@@ -117,6 +119,11 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             (hashlib.sha256(token.encode()).digest(),),
         ).fetchone()
         assert row == (1,)
+        batch_hash = hashlib.sha256(batch_token.encode()).digest()
+        assert connection.execute(
+            "SELECT type, scopes, team_id, expires_at, revoked_at FROM tokens WHERE token_hash=%s",
+            (batch_hash,),
+        ).fetchall() == [("worker", ["submit:batch"], None, None, None)]
         roles = connection.execute(
             "SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls FROM pg_roles WHERE rolname = ANY(%s) ORDER BY rolname",
             (["loom_service", "loom_control_plane", "loom_gateway", "loom_actuator"],),
@@ -188,6 +195,38 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             "SELECT enabled FROM execution_target_price_bindings WHERE target_id=%s",
             (environment["target_id"],),
         ).fetchone() == (True,)
+    # Replaying bootstrap must not rebind, broaden, extend or revive a token.
+    with psycopg.connect(platform_database) as connection:
+        connection.execute(
+            "INSERT INTO teams (id, name) VALUES ('11111111-1111-1111-1111-111111111111', 'other-authority')"
+        )
+    for update in (
+        "scopes=ARRAY['submit:batch', 'admin:tokens']",
+        "type='team'",
+        "expires_at=now() + interval '1 day'",
+        "revoked_at=now()",
+        "team_id='11111111-1111-1111-1111-111111111111'",
+    ):
+        with psycopg.connect(platform_database) as connection:
+            connection.execute(
+                "UPDATE tokens SET " + update + " WHERE token_hash=%s", (batch_hash,)
+            )
+            previous = connection.execute(
+                "SELECT * FROM tokens WHERE token_hash=%s", (batch_hash,)
+            ).fetchone()
+        with pytest.raises(ValueError, match=r"batch runner token.*another authority"):
+            bootstrap.bootstrap_database(config)
+        with psycopg.connect(platform_database) as connection:
+            assert (
+                connection.execute(
+                    "SELECT * FROM tokens WHERE token_hash=%s", (batch_hash,)
+                ).fetchone()
+                == previous
+            )
+            connection.execute(
+                "UPDATE tokens SET type='worker', scopes=ARRAY['submit:batch'], team_id=NULL, expires_at=NULL, revoked_at=NULL WHERE token_hash=%s",
+                (batch_hash,),
+            )
     # A revoked collector identity must not be silently revived on upgrade.
     with psycopg.connect(platform_database) as connection:
         connection.execute(

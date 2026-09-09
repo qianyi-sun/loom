@@ -671,6 +671,10 @@ def build_platform(
                 _secret_env("LOOM_COLLECTOR_TOKEN", "loom-platform-collector", "token"),
             ]
         )
+        if phase == "database":
+            container["env"].append(
+                _secret_env("LOOM_BATCH_RUNNER_TOKEN", "loom-platform-batch-runner", "token")
+            )
         for component in ("service", "control-plane", "gateway", "actuator"):
             container["env"].append(
                 _secret_env(
@@ -764,6 +768,9 @@ def build_platform(
                 }
             )
         elif component == "service":
+            env.append(
+                _secret_env("LOOM_SVC_BATCH_RUNNER_CP_TOKEN", "loom-platform-batch-runner", "token")
+            )
             env += _env(
                 {
                     "LOOM_SVC_CONTROL_PLANE_URL": f"http://loom-control-plane.{ns}.svc:8080",

@@ -115,9 +115,18 @@ def database_url(value: str, namespace: str) -> str:
 
 def bootstrap_database(config: dict[str, Any]) -> None:
     connection_url = database_url(os.environ["LOOM_DB_URL"], config["namespace"])
-    token = os.environ["LOOM_COLLECTOR_TOKEN"]
-    if not token.startswith("loom_ecc_") or len(token) < 40:
-        raise ValueError("collector token has an invalid identity")
+    tokens = (
+        (
+            "collector",
+            os.environ["LOOM_COLLECTOR_TOKEN"],
+            "loom_ecc_",
+            "execution:capacity:observe",
+        ),
+        ("batch runner", os.environ["LOOM_BATCH_RUNNER_TOKEN"], "loom_br_", "submit:batch"),
+    )
+    for name, token, prefix, _scope in tokens:
+        if not token.startswith(prefix) or len(token) < 40:
+            raise ValueError(f"{name} token has an invalid identity")
     roles = {
         "loom_" + name: os.environ["LOOM_DB_" + name.upper() + "_PASSWORD"]
         for name in ("service", "control_plane", "gateway", "actuator")
@@ -236,17 +245,18 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {}"
                         ).format(identifier)
                     )
-            token_hash = hashlib.sha256(token.encode()).digest()
-            cursor.execute(
-                "INSERT INTO tokens (token_hash, type, scopes, team_id, issued_at, expires_at) VALUES (%s, 'worker', ARRAY['execution:capacity:observe'], NULL, now(), NULL) ON CONFLICT (token_hash) DO NOTHING",
-                (token_hash,),
-            )
-            cursor.execute(
-                "SELECT type, scopes, team_id, expires_at, revoked_at FROM tokens WHERE token_hash=%s",
-                (token_hash,),
-            )
-            if cursor.fetchone() != ("worker", ["execution:capacity:observe"], None, None, None):
-                raise ValueError("collector token is revoked or bound to another authority")
+            for name, token, _prefix, scope in tokens:
+                token_hash = hashlib.sha256(token.encode()).digest()
+                cursor.execute(
+                    "INSERT INTO tokens (token_hash, type, scopes, team_id, issued_at, expires_at) VALUES (%s, 'worker', %s, NULL, now(), NULL) ON CONFLICT (token_hash) DO NOTHING",
+                    (token_hash, [scope]),
+                )
+                cursor.execute(
+                    "SELECT type, scopes, team_id, expires_at, revoked_at FROM tokens WHERE token_hash=%s",
+                    (token_hash,),
+                )
+                if cursor.fetchone() != ("worker", [scope], None, None, None):
+                    raise ValueError(f"{name} token is revoked or bound to another authority")
 
 
 def configure_platform(
@@ -353,13 +363,9 @@ def upload_backup(config: dict[str, Any]) -> None:
     # S3 user metadata names are case-insensitive. Nebius returns "Sha256"
     # through boto3; require one unambiguous, exact digest regardless of case.
     checksums = [
-        value for name, value in observed.get("Metadata", {}).items()
-        if name.lower() == "sha256"
+        value for name, value in observed.get("Metadata", {}).items() if name.lower() == "sha256"
     ]
-    if (
-        observed["ContentLength"] != path.stat().st_size
-        or checksums != [checksum]
-    ):
+    if observed["ContentLength"] != path.stat().st_size or checksums != [checksum]:
         raise ValueError("database backup upload readback mismatch")
     print(json.dumps({"backup_key": key, "sha256": checksum, "bytes": path.stat().st_size}))
 
