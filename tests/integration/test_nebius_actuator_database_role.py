@@ -196,16 +196,14 @@ async def test_restricted_actuator_creates_reconciles_and_releases_without_polic
             password="restricted-role-password-" + "a" * 32,
         )
         with psycopg.connect(restricted_url.render_as_string(hide_password=False)) as connection:
-            # This is the same claimed -> terminal projection performed by
-            # finalize_committed_service_execution, including its quota trigger.
-            assert connection.execute(
-                "SELECT in_flight_count FROM team_quotas WHERE team_id=%s", (trial.team_id,)
-            ).fetchone() == (0 if infra_retry else 1,)
-            if not infra_retry:
-                connection.execute("UPDATE trials SET state='failed' WHERE id=%s", (trial_id,))
+            # The restricted actuator itself completes cancellation and releases
+            # the counter; an infrastructure retry remains queued and also releases it.
             assert connection.execute(
                 "SELECT in_flight_count FROM team_quotas WHERE team_id=%s", (trial.team_id,)
             ).fetchone() == (0,)
+            assert connection.execute(
+                "SELECT state FROM trials WHERE id=%s", (trial_id,)
+            ).fetchone() == ("queued" if infra_retry else "cancelled",)
             connection.commit()
             for statement in (
                 "UPDATE execution_capacity_policies SET max_nodes=21",

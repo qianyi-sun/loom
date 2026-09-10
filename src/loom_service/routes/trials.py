@@ -1300,10 +1300,14 @@ async def cancel_trial(
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
+    if ctx.auth_kind == "session":
+        # Release the session-auth row lock before the CP revalidates that row.
+        await s.commit()
     resp = await forward(
         request.app.state.http_client,
         method="POST",
         path=f"/trials/{trial_id}/cancel",
         authorization=authorization,
+        cancellation_request=request,
     )
     return propagate(resp)

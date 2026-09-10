@@ -102,6 +102,7 @@ class ExecutionActuator:
             commands = await claim_execution_commands(
                 session,
                 consumer_id=self._controller_id,
+                target_id=self._target.target_id,
                 limit=self._command_limit,
                 lease_seconds=self._command_lease_seconds,
                 now=current_time,
@@ -452,7 +453,13 @@ class ExecutionActuator:
         for lease in leases:
             if str(lease.id) in by_lease:
                 continue
-            if lease.job_uid is None or lease.desired_state == "deleted":
+            if lease.desired_state == "deleted":
+                continue
+            if lease.job_uid is None and (
+                lease.desired_state not in _CLEANUP_DESIRED_STATES or inventory.rejected_count
+            ):
+                # An unstarted create is not missing. Cleanup can converge without
+                # a recorded UID only when the namespace inventory is authoritative.
                 continue
             drift += 1
             missing = KubernetesJobObservation(
