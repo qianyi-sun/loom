@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -154,7 +155,7 @@ async def _accepted_release_witness(
         "inventory_sequence": intent.inventory_sequence,
         "terminal_kind": intent.terminal_kind,
         "terminal_identity": intent.terminal_identity,
-        "released_at": intent.released_at.isoformat(),
+        "released_at": intent.released_at.astimezone(UTC).isoformat(),
     }
 
 
@@ -324,7 +325,7 @@ async def _legacy_shape_witness(
         "release_digest": digest,
         "protected_digest": protected.acknowledgement_digest,
         "inventory_digest": observation.inventory_digest,
-        "released_at": shape.released_at.isoformat(),
+        "released_at": shape.released_at.astimezone(UTC).isoformat(),
     }
 
 
@@ -375,7 +376,7 @@ async def _legacy_release_witness(
         "tranche_id": str(tranche.id),
         "proposal_digest": tranche.proposal_digest,
         "closure_reason": tranche.closure_reason,
-        "closed_at": tranche.closed_at.isoformat(),
+        "closed_at": tranche.closed_at.astimezone(UTC).isoformat(),
         "shapes": witnesses,
     }
 
@@ -495,7 +496,7 @@ async def predecessor_release_sha256(
                 "kind": "never-accepted-executable",
                 "intent_id": str(intent.intent_id),
                 "binding_digest": intent.binding_digest,
-                "released_at": intent.released_at.isoformat(),
+                "released_at": intent.released_at.astimezone(UTC).isoformat(),
             }
         )
     payload = {

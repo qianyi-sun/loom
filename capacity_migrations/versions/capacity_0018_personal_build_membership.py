@@ -4,7 +4,7 @@ Revision ID: capacity_0018
 Revises: capacity_0017
 
 Typed build lifecycle events may be recorded with pending generation evidence.
-Recreation and V4 executable admission remain interlocked.
+Recreation verifies durable release; V4 executable admission remains interlocked.
 """
 
 from __future__ import annotations
@@ -20,6 +20,253 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _EXTENSION_SCHEMA = "capacity_build_extensions"
+
+
+def _install_release_proof_helpers() -> None:
+    # These invoker-only readers grant no mutation authority. The insertion guard
+    # calls them under its existing shared authority lock and serializable write.
+    op.execute("""
+    -- Release witness keys include release_digest/released_at. Locale-sensitive
+    -- ordering can invert those keys; wire hashes require ASCII key ordering.
+    CREATE FUNCTION public.capacity_personal_release_json_text(p_value jsonb)
+    RETURNS text LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
+      SELECT CASE jsonb_typeof(p_value)
+        WHEN 'object' THEN (SELECT '{' || coalesce(string_agg(to_jsonb(e.key)::text || ':' ||
+          public.capacity_personal_release_json_text(e.value),',' ORDER BY e.key COLLATE "C"),'') || '}' FROM jsonb_each(p_value) e)
+        WHEN 'array' THEN (SELECT '[' || coalesce(string_agg(public.capacity_personal_release_json_text(e.value),',' ORDER BY e.n),'') || ']'
+          FROM jsonb_array_elements(p_value) WITH ORDINALITY e(value,n))
+        ELSE p_value::text END
+    $$;
+    REVOKE ALL ON FUNCTION public.capacity_personal_release_json_text(jsonb) FROM PUBLIC;
+    CREATE FUNCTION public.capacity_personal_release_json_digest(p_value jsonb)
+    RETURNS text LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
+      SELECT encode(sha256(convert_to(public.capacity_personal_release_json_text(p_value),'UTF8')),'hex')
+    $$;
+    REVOKE ALL ON FUNCTION public.capacity_personal_release_json_digest(jsonb) FROM PUBLIC;
+    CREATE FUNCTION public.capacity_personal_release_timestamp(p_at timestamptz)
+    RETURNS text LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
+      SELECT to_char(p_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS') ||
+        CASE WHEN extract(microseconds FROM p_at AT TIME ZONE 'UTC')::bigint % 1000000 = 0
+          THEN '' ELSE '.' || to_char(p_at AT TIME ZONE 'UTC','US') END || '+00:00'
+    $$;
+    REVOKE ALL ON FUNCTION public.capacity_personal_release_timestamp(timestamptz) FROM PUBLIC;
+    CREATE FUNCTION public.capacity_personal_predecessor_release_digest(p_subject uuid,p_incarnation uuid)
+    RETURNS text LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+    DECLARE
+      tranche record; shape record; legacy_intent record; release_record record;
+      protected record; observation record; intent record; terminal record;
+      witnesses jsonb := '[]'::jsonb; shapes jsonb; ownership jsonb;
+      payload jsonb; binding jsonb; item jsonb; kind text; terminal_digest text;
+    BEGIN
+      IF p_subject IS NULL OR p_incarnation IS NULL THEN
+        RAISE EXCEPTION 'predecessor release identity is absent' USING ERRCODE='23514';
+      END IF;
+      IF EXISTS (SELECT 1 FROM public.capacity_observed_commitments o
+          WHERE (o.subject_id=p_subject AND o.subject_incarnation=p_incarnation)
+            OR (o.binding_payload #>> '{observed_contract,subject_id}'=p_subject::text
+              AND o.binding_payload #>> '{observed_contract,subject_incarnation}'=p_incarnation::text)) THEN
+        RAISE EXCEPTION 'predecessor has unreleased observed commitments' USING ERRCODE='23514';
+      END IF;
+      FOR tranche IN SELECT * FROM public.capacity_reservation_tranches
+          WHERE subject_id=p_subject AND subject_incarnation=p_incarnation ORDER BY id LOOP
+        IF tranche.state IS DISTINCT FROM 'closed' OR tranche.closed_at IS NULL THEN
+          RAISE EXCEPTION 'predecessor has unreleased legacy reservations' USING ERRCODE='23514';
+        END IF;
+        shapes := '[]'::jsonb;
+        IF tranche.accepted_at IS NULL THEN
+          IF tranche.closure_reason IS NULL OR tranche.closure_reason NOT IN ('proposal-expired','proposal-superseded')
+             OR EXISTS (SELECT 1 FROM public.capacity_reservation_shapes WHERE tranche_id=tranche.id)
+             OR EXISTS (SELECT 1 FROM public.capacity_submission_intents WHERE tranche_id=tranche.id) THEN
+            RAISE EXCEPTION 'legacy predecessor unaccepted closure changed' USING ERRCODE='23514';
+          END IF;
+          kind := 'never-accepted-legacy';
+        ELSE
+          IF tranche.closure_reason IS DISTINCT FROM 'fully-released'
+             OR NOT EXISTS (SELECT 1 FROM public.capacity_reservation_shapes WHERE tranche_id=tranche.id)
+             OR EXISTS (SELECT 1 FROM public.capacity_submission_intents i WHERE i.tranche_id=tranche.id
+               AND NOT EXISTS (SELECT 1 FROM public.capacity_reservation_shapes s WHERE s.tranche_id=tranche.id AND s.intent_id=i.id)) THEN
+            RAISE EXCEPTION 'legacy predecessor released shape set changed' USING ERRCODE='23514';
+          END IF;
+          FOR shape IN SELECT * FROM public.capacity_reservation_shapes WHERE tranche_id=tranche.id ORDER BY shape_instance_id COLLATE "C" LOOP
+            SELECT * INTO legacy_intent FROM public.capacity_submission_intents WHERE id=shape.intent_id AND tranche_id=tranche.id;
+            IF NOT FOUND OR shape.state IS DISTINCT FROM 'released' OR shape.released_at IS NULL
+               OR legacy_intent.state IS DISTINCT FROM 'closed' OR legacy_intent.shape_instance_id IS DISTINCT FROM shape.shape_instance_id
+               OR legacy_intent.executor_id IS DISTINCT FROM tranche.executor_id
+               OR legacy_intent.executor_incarnation IS DISTINCT FROM tranche.executor_incarnation THEN
+              RAISE EXCEPTION 'legacy predecessor release witness changed' USING ERRCODE='23514';
+            END IF;
+            ownership := jsonb_build_object('schema_version',1,'executable',false,
+              'authority_incarnation',tranche.authority_incarnation,'writer_epoch',tranche.writer_epoch,
+              'configuration_epoch',tranche.configuration_epoch,'allocation_epoch',tranche.allocation_epoch,
+              'tranche_id',tranche.id,'intent_id',shape.intent_id,'shape_instance_id',shape.shape_instance_id,
+              'subject_id',p_subject,'subject_incarnation',p_incarnation,'account_id',tranche.account_id,
+              'tier_id',tranche.tier_id,'candidate_generation',tranche.candidate_generation,
+              'deployment_generation',tranche.deployment_generation,'pool_id',tranche.pool_id,'pool_generation',tranche.pool_generation,
+              'shape_id',shape.shape_id,'profile_id',shape.profile_id,'profile_generation',shape.profile_generation,
+              'profile_digest',shape.profile_digest,'concurrency_slots',shape.concurrency_slots,
+              'resources',shape.resource_vector,'node_ids',shape.node_ids,'executor_id',tranche.executor_id,'executor_incarnation',tranche.executor_incarnation);
+            IF public.capacity_personal_release_json_digest(ownership) IS DISTINCT FROM legacy_intent.ownership_metadata_sha256 THEN
+              RAISE EXCEPTION 'legacy predecessor ownership changed' USING ERRCODE='23514';
+            END IF;
+            SELECT * INTO release_record FROM public.capacity_reservation_release_evidence WHERE shape_instance_id=shape.shape_instance_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'legacy predecessor release witness is absent' USING ERRCODE='23514'; END IF;
+            SELECT * INTO protected FROM public.capacity_protected_release_acknowledgements WHERE shape_instance_id=shape.shape_instance_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'legacy predecessor protected witness is absent' USING ERRCODE='23514'; END IF;
+            payload := (to_jsonb(release_record) - ARRAY['id','evidence_digest','received_at']) || jsonb_build_object('executable',false);
+            IF public.capacity_personal_release_json_digest(payload) IS DISTINCT FROM release_record.evidence_digest
+               OR shape.release_evidence_digest IS DISTINCT FROM release_record.evidence_digest
+               OR release_record.tranche_id IS DISTINCT FROM tranche.id OR release_record.intent_id IS DISTINCT FROM legacy_intent.id
+               OR release_record.executor_id IS DISTINCT FROM tranche.executor_id OR release_record.executor_incarnation IS DISTINCT FROM tranche.executor_incarnation
+               OR release_record.bootstrap_revoked IS DISTINCT FROM true
+               OR public.capacity_personal_release_json_digest((to_jsonb(protected) - ARRAY['id','idempotency_key','acknowledgement_digest','actor_id','received_at'])
+                    || jsonb_build_object('schema_version',1)) IS DISTINCT FROM protected.acknowledgement_digest
+               OR protected.tranche_id IS DISTINCT FROM tranche.id OR protected.intent_id IS DISTINCT FROM legacy_intent.id
+               OR protected.authority_incarnation IS DISTINCT FROM tranche.authority_incarnation OR protected.writer_epoch IS DISTINCT FROM tranche.writer_epoch
+               OR protected.configuration_epoch IS DISTINCT FROM tranche.configuration_epoch OR protected.allocation_epoch IS DISTINCT FROM tranche.allocation_epoch
+               OR protected.subject_id IS DISTINCT FROM p_subject OR protected.subject_incarnation IS DISTINCT FROM p_incarnation
+               OR protected.deployment_generation IS DISTINCT FROM tranche.deployment_generation
+               OR protected.pool_id IS DISTINCT FROM tranche.pool_id OR protected.pool_generation IS DISTINCT FROM tranche.pool_generation
+               OR protected.bootstrap_registration_epoch IS DISTINCT FROM coalesce(legacy_intent.bootstrap_registration_epoch,0)
+               OR protected.protected_registration_epoch IS DISTINCT FROM release_record.protected_registration_epoch
+               OR protected.protected_release_sha256 IS DISTINCT FROM release_record.protected_release_sha256
+               OR protected.bootstrap_revoked IS DISTINCT FROM true OR protected.executable IS DISTINCT FROM false THEN
+              RAISE EXCEPTION 'legacy predecessor release witness changed' USING ERRCODE='23514';
+            END IF;
+            SELECT * INTO observation FROM public.capacity_executor_observations
+              WHERE executor_incarnation=tranche.executor_incarnation AND inventory_sequence=release_record.inventory_sequence;
+            IF NOT FOUND OR observation.validity IS DISTINCT FROM 'valid' THEN
+              RAISE EXCEPTION 'legacy predecessor inventory witness is absent' USING ERRCODE='23514';
+            END IF;
+            payload := observation.payload;
+            IF public.capacity_personal_release_json_digest(payload) IS DISTINCT FROM observation.inventory_digest
+               OR payload ->> 'executor_id' IS DISTINCT FROM tranche.executor_id
+               OR payload ->> 'executor_incarnation' IS DISTINCT FROM tranche.executor_incarnation::text
+               OR payload -> 'inventory_sequence' IS DISTINCT FROM to_jsonb(observation.inventory_sequence)
+               OR payload ->> 'pool_id' IS DISTINCT FROM tranche.pool_id OR observation.pool_id IS DISTINCT FROM tranche.pool_id
+               OR payload -> 'pool_generation' IS DISTINCT FROM to_jsonb(tranche.pool_generation) OR observation.pool_generation IS DISTINCT FROM tranche.pool_generation
+               OR payload -> 'journal_sequence' IS DISTINCT FROM to_jsonb(observation.journal_sequence)
+               OR payload ->> 'journal_digest' IS DISTINCT FROM observation.journal_digest THEN
+              RAISE EXCEPTION 'legacy predecessor inventory witness changed' USING ERRCODE='23514';
+            END IF;
+            IF release_record.terminal_kind='unused' THEN
+              IF release_record.terminal_identity IS DISTINCT FROM shape.shape_instance_id
+                 OR release_record.terminal_evidence_sha256 IS DISTINCT FROM observation.inventory_digest
+                 OR EXISTS (SELECT 1 FROM jsonb_array_elements(payload -> 'records') r WHERE
+                   r #>> '{ownership_proof,metadata,intent_id}'=legacy_intent.id::text
+                   OR r #>> '{ownership_proof,metadata,shape_instance_id}'=shape.shape_instance_id) THEN
+                RAISE EXCEPTION 'legacy predecessor unused witness changed' USING ERRCODE='23514';
+              END IF;
+            ELSE
+              SELECT value INTO item FROM jsonb_array_elements(payload -> 'records') WHERE value ->> 'physical_identity'=release_record.terminal_identity;
+              IF NOT FOUND OR item ->> 'state' IS DISTINCT FROM 'terminal'
+                 OR item ->> 'physical_kind' IS DISTINCT FROM release_record.terminal_kind
+                 OR item ->> 'terminal_evidence_sha256' IS DISTINCT FROM release_record.terminal_evidence_sha256
+                 OR item #> '{ownership_proof,metadata}' IS DISTINCT FROM ownership
+                 OR (SELECT c.value ->> 'classification' FROM jsonb_array_elements(observation.classification_payload) WITH ORDINALITY c(value,n)
+                    WHERE c.value ->> 'physical_identity'=release_record.terminal_identity ORDER BY c.n LIMIT 1) IS DISTINCT FROM 'authenticated' THEN
+                RAISE EXCEPTION 'legacy predecessor physical witness changed' USING ERRCODE='23514';
+              END IF;
+            END IF;
+            shapes := shapes || jsonb_build_array(jsonb_build_object('shape_instance_id',shape.shape_instance_id,
+              'intent_id',legacy_intent.id,'ownership_digest',legacy_intent.ownership_metadata_sha256,
+              'release_digest',release_record.evidence_digest,'protected_digest',protected.acknowledgement_digest,
+              'inventory_digest',observation.inventory_digest,'released_at',public.capacity_personal_release_timestamp(shape.released_at)));
+          END LOOP;
+          kind := 'accepted-legacy';
+        END IF;
+        witnesses := witnesses || jsonb_build_array(jsonb_build_object('kind',kind,'tranche_id',tranche.id,
+          'proposal_digest',tranche.proposal_digest,'closure_reason',tranche.closure_reason,
+          'closed_at',public.capacity_personal_release_timestamp(tranche.closed_at),'shapes',shapes));
+      END LOOP;
+      FOR intent IN SELECT * FROM public.capacity_executable_intents
+          WHERE subject_id=p_subject AND subject_incarnation=p_incarnation ORDER BY intent_id LOOP
+        IF intent.state IS DISTINCT FROM 'released' OR intent.released_at IS NULL THEN
+          RAISE EXCEPTION 'predecessor has unreleased executable intents' USING ERRCODE='23514';
+        END IF;
+        binding := intent.binding_payload;
+        IF binding ->> 'subject_id' IS DISTINCT FROM p_subject::text OR binding ->> 'subject_incarnation' IS DISTINCT FROM p_incarnation::text
+           OR binding ->> 'intent_id' IS DISTINCT FROM intent.intent_id::text OR binding ->> 'shape_instance_id' IS DISTINCT FROM intent.shape_instance_id
+           OR binding #> '{execution,execution_epoch}' IS DISTINCT FROM to_jsonb(intent.execution_epoch)
+           OR binding #>> '{execution,execution_manifest_sha256}' IS DISTINCT FROM intent.execution_manifest_sha256
+           OR public.capacity_personal_release_json_digest(binding) IS DISTINCT FROM intent.binding_digest THEN
+          RAISE EXCEPTION 'predecessor release binding changed' USING ERRCODE='23514';
+        END IF;
+        IF intent.accepted_at IS NULL THEN
+          IF intent.bootstrap_registration_epoch IS NOT NULL OR intent.bootstrap_evidence_sha256 IS NOT NULL
+             OR intent.permit_id IS NOT NULL OR intent.permit_consumed_at IS NOT NULL OR intent.inventory_sequence IS NOT NULL
+             OR intent.terminal_kind IS NOT NULL OR intent.observed_state IS NOT NULL THEN
+            RAISE EXCEPTION 'predecessor unaccepted release witness changed' USING ERRCODE='23514';
+          END IF;
+          item := jsonb_build_object('kind','never-accepted-executable','intent_id',intent.intent_id,
+            'binding_digest',intent.binding_digest,'released_at',public.capacity_personal_release_timestamp(intent.released_at));
+        ELSE
+          SELECT * INTO protected FROM public.capacity_executable_protected_release_receipts
+            WHERE intent_id=intent.intent_id ORDER BY protected_registration_epoch LIMIT 1;
+          IF NOT FOUND THEN RAISE EXCEPTION 'predecessor protected release witness is absent' USING ERRCODE='23514'; END IF;
+          IF protected.release_payload IS DISTINCT FROM jsonb_build_object('schema_version',2,'executable',true,'binding',binding,
+                'reporter_incarnation',protected.reporter_incarnation,'bootstrap_registration_epoch',intent.bootstrap_registration_epoch,
+                'protected_registration_epoch',protected.protected_registration_epoch,'bootstrap_revoked',true,'protected_release_sha256',protected.protected_release_sha256)
+             OR protected.bootstrap_registration_epoch IS DISTINCT FROM intent.bootstrap_registration_epoch
+             OR protected.execution_epoch IS DISTINCT FROM intent.execution_epoch OR protected.execution_manifest_sha256 IS DISTINCT FROM intent.execution_manifest_sha256
+             OR public.capacity_personal_release_json_digest(protected.release_payload) IS DISTINCT FROM protected.acknowledgement_digest
+             OR intent.inventory_sequence IS NULL OR intent.terminal_evidence_sha256 IS NULL THEN
+            RAISE EXCEPTION 'predecessor protected release witness changed' USING ERRCODE='23514';
+          END IF;
+          terminal_digest := intent.terminal_evidence_sha256;
+          IF intent.terminal_kind='unused' THEN
+            IF intent.permit_consumed_at IS NOT NULL OR intent.terminal_identity IS DISTINCT FROM intent.shape_instance_id THEN
+              RAISE EXCEPTION 'predecessor unused release witness changed' USING ERRCODE='23514';
+            END IF;
+          ELSE
+            SELECT * INTO terminal FROM public.capacity_executable_terminal_inventory_evidence WHERE intent_id=intent.intent_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'predecessor terminal release witness is absent' USING ERRCODE='23514'; END IF;
+            payload := terminal.evidence_payload;
+            item := payload -> 'record';
+            IF public.capacity_personal_release_json_text(payload) IS DISTINCT FROM public.capacity_personal_release_json_text(jsonb_build_object(
+                 'schema_version',2,'executable',true,'binding',binding,
+                 'inventory_execution',(binding -> 'execution') - ARRAY['allocation_epoch','executable'],
+                 'inventory_sequence',terminal.inventory_sequence,'inventory_digest',terminal.inventory_digest,
+                 'journal_sequence',terminal.journal_sequence,'journal_digest',terminal.journal_digest,
+                 'record',item,'observed_at',payload -> 'observed_at'))
+               OR public.capacity_personal_release_json_text(item) IS DISTINCT FROM public.capacity_personal_release_json_text(jsonb_build_object(
+                 'schema_version',2,'physical_identity',terminal.physical_identity,'physical_kind',terminal.physical_kind,
+                 'authority_scope','dedicated-loom-association','state','terminal','resources',binding -> 'resources','node_ids',binding -> 'node_ids',
+                 'controller_evidence_sha256',terminal.controller_evidence_sha256,'ownership_proof',item -> 'ownership_proof',
+                 'terminal_evidence_sha256',terminal.terminal_evidence_sha256))
+               OR item #> '{ownership_proof,metadata,binding}' IS DISTINCT FROM binding
+               OR (terminal.journal_sequence=0) IS DISTINCT FROM (terminal.journal_digest=repeat('0',64))
+               OR payload -> 'binding' IS DISTINCT FROM binding
+               OR payload -> 'inventory_sequence' IS DISTINCT FROM to_jsonb(intent.inventory_sequence)
+               OR payload #>> '{record,physical_kind}' IS DISTINCT FROM intent.terminal_kind
+               OR payload #>> '{record,physical_identity}' IS DISTINCT FROM intent.terminal_identity
+               OR payload #>> '{record,terminal_evidence_sha256}' IS DISTINCT FROM intent.terminal_evidence_sha256
+               OR terminal.subject_id IS DISTINCT FROM p_subject OR terminal.subject_incarnation IS DISTINCT FROM p_incarnation
+               OR terminal.execution_epoch IS DISTINCT FROM intent.execution_epoch OR terminal.execution_manifest_sha256 IS DISTINCT FROM intent.execution_manifest_sha256
+               OR terminal.executor_id IS DISTINCT FROM binding ->> 'executor_id' OR terminal.executor_incarnation::text IS DISTINCT FROM binding ->> 'executor_incarnation'
+               OR terminal.pool_id IS DISTINCT FROM binding ->> 'pool_id' OR to_jsonb(terminal.pool_generation) IS DISTINCT FROM binding -> 'pool_generation'
+               OR terminal.inventory_sequence IS DISTINCT FROM intent.inventory_sequence
+               OR terminal.inventory_digest IS DISTINCT FROM payload ->> 'inventory_digest'
+               OR to_jsonb(terminal.journal_sequence) IS DISTINCT FROM payload -> 'journal_sequence' OR terminal.journal_digest IS DISTINCT FROM payload ->> 'journal_digest'
+               OR terminal.physical_kind IS DISTINCT FROM intent.terminal_kind OR terminal.physical_identity IS DISTINCT FROM intent.terminal_identity
+               OR terminal.controller_evidence_sha256 IS DISTINCT FROM payload #>> '{record,controller_evidence_sha256}'
+               OR terminal.terminal_evidence_sha256 IS DISTINCT FROM intent.terminal_evidence_sha256
+               OR terminal.observed_at IS DISTINCT FROM (payload ->> 'observed_at')::timestamptz
+               OR public.capacity_personal_release_json_digest(payload) IS DISTINCT FROM terminal.evidence_digest THEN
+              RAISE EXCEPTION 'predecessor terminal release witness changed' USING ERRCODE='23514';
+            END IF;
+            terminal_digest := terminal.evidence_digest;
+          END IF;
+          item := jsonb_build_object('kind','accepted-executable','intent_id',intent.intent_id,'binding_digest',intent.binding_digest,
+            'protected_witness',protected.acknowledgement_digest,'terminal_witness',terminal_digest,'inventory_sequence',intent.inventory_sequence,
+            'terminal_kind',intent.terminal_kind,'terminal_identity',intent.terminal_identity,'released_at',public.capacity_personal_release_timestamp(intent.released_at));
+        END IF;
+        witnesses := witnesses || jsonb_build_array(item);
+      END LOOP;
+      RETURN public.capacity_personal_release_json_digest(jsonb_build_object('schema_version',1,
+        'subject_id',p_subject,'subject_incarnation',p_incarnation,'witnesses',witnesses));
+    END $$;
+    REVOKE ALL ON FUNCTION public.capacity_personal_predecessor_release_digest(uuid,uuid) FROM PUBLIC;
+    """)
 
 
 def _install_initial_build_guard() -> None:
@@ -91,6 +338,9 @@ def _install_initial_build_guard() -> None:
       base_installation jsonb;
       base_reference jsonb;
       base_epoch record;
+      proof jsonb;
+      origin_reference jsonb;
+      first_config jsonb;
       mutation_kind text;
       member_purpose text;
       expected_projection jsonb;
@@ -303,7 +553,7 @@ def _install_initial_build_guard() -> None:
          OR config IS DISTINCT FROM expected_config
          OR member IS DISTINCT FROM jsonb_build_object('schema_version',1,'purpose',member_purpose,
               'revision',NEW.revision,'owner_id',NEW.owner_id::text,'configuration',expected_config,
-              'acknowledgement',ack,'reincarnation',NULL)
+              'acknowledgement',ack,'reincarnation',member -> 'reincarnation')
          OR ack IS DISTINCT FROM jsonb_build_object('schema_version',2,'subject_id',NEW.subject_id::text,
               'subject_incarnation',NEW.subject_incarnation::text,'configuration_generation',NEW.configuration_generation,
               'deployment_generation',NEW.deployment_generation,'candidate',candidate,'reporter_incarnation',NEW.reporter_incarnation::text,
@@ -343,16 +593,15 @@ def _install_initial_build_guard() -> None:
         base_config := base_origin -> 'configuration';
         base_projection := base_origin -> 'base_projection';
         base_installation := base_origin -> 'installation_projection';
-        IF member_purpose<>'personal-application' OR mutation_kind='create'
+        IF member_purpose<>'personal-application'
            OR (SELECT count(*) FROM jsonb_array_elements(preparation -> 'managed_application_origins') value
                 WHERE value #>> '{configuration,subject_id}'=NEW.subject_id::text)<>1
            OR NOT coalesce(policy -> 'managed_base_subject_ids' @> jsonb_build_array(NEW.subject_id::text),false)
-           OR base_config ->> 'subject_incarnation' IS DISTINCT FROM NEW.subject_incarnation::text
            OR base_config ->> 'account_id' IS DISTINCT FROM derived_account_id
            OR base_config ->> 'display_name' IS DISTINCT FROM expected_config ->> 'display_name'
            OR base_projection ->> 'owner_id' IS DISTINCT FROM NEW.owner_id::text
            OR base_projection ->> 'subject_id' IS DISTINCT FROM NEW.subject_id::text
-           OR base_projection ->> 'subject_incarnation' IS DISTINCT FROM NEW.subject_incarnation::text
+           OR base_projection ->> 'subject_incarnation' IS DISTINCT FROM base_config ->> 'subject_incarnation'
            OR base_projection ->> 'environment_name' IS DISTINCT FROM projection ->> 'environment_name'
            OR base_installation ->> 'operation_kind' NOT IN ('create','update')
            OR (base_installation ->> 'expected_configuration_epoch')::bigint > (base_projection ->> 'expected_configuration_epoch')::bigint
@@ -381,13 +630,14 @@ def _install_initial_build_guard() -> None:
         SELECT value INTO base_reference FROM jsonb_array_elements(base_epoch.subject_generation_manifest)
           WHERE value ->> 'subject_id'=NEW.subject_id::text;
         IF NOT FOUND OR NOT public.capacity_personal_build_json_exact(base_reference,jsonb_build_object(
-              'schema_version',1,'scope','subject','subject_id',NEW.subject_id::text,'subject_incarnation',NEW.subject_incarnation::text,
+              'schema_version',1,'scope','subject','subject_id',NEW.subject_id::text,'subject_incarnation',base_config -> 'subject_incarnation',
               'generation',base_config -> 'configuration_generation',
               'digest',encode(sha256(convert_to(public.capacity_executable_canonical_jsonb_text(base_config),'UTF8')),'hex')))
            OR NOT EXISTS (SELECT 1 FROM public.capacity_config_generations g WHERE g.scope='subject' AND g.subject_id=NEW.subject_id
-                AND g.subject_incarnation=NEW.subject_incarnation AND g.scope_generation=(base_config ->> 'configuration_generation')::bigint
+                AND g.subject_incarnation=(base_config ->> 'subject_incarnation')::uuid AND g.scope_generation=(base_config ->> 'configuration_generation')::bigint
                 AND g.digest=base_reference ->> 'digest' AND public.capacity_personal_build_json_exact(g.payload,base_config))
            OR NOT public.capacity_personal_build_json_exact(base_config,expected_config || jsonb_build_object(
+                'subject_incarnation',base_config -> 'subject_incarnation',
                 'min_slots',CASE WHEN base_projection ->> 'operation_kind'='destroy' THEN '0'::jsonb ELSE base_projection -> 'min_slots' END,
                 'max_slots',CASE WHEN base_projection ->> 'operation_kind'='destroy' THEN '0'::jsonb ELSE base_projection -> 'max_slots' END,
                 'lifecycle_state',CASE WHEN base_projection ->> 'operation_kind'='destroy' THEN 'disabled' ELSE 'active' END,
@@ -420,11 +670,50 @@ def _install_initial_build_guard() -> None:
         old_ack := base_origin -> 'acknowledgement';
       END IF;
       IF mutation_kind='create' THEN
-        IF old_config IS NOT NULL OR service_candidate_generation<>1 OR NEW.deployment_generation<>1
-           OR EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.subject_id=NEW.subject_id) THEN
-          RAISE EXCEPTION 'typed build create cannot recreate retained membership' USING ERRCODE = '23514';
+        IF service_candidate_generation<>1 OR NEW.deployment_generation<>1 THEN
+          RAISE EXCEPTION 'typed recreation deployment must start at one' USING ERRCODE='23514';
+        END IF;
+        proof := nullif(member -> 'reincarnation','null'::jsonb);
+        IF old_config IS NULL THEN
+          IF proof IS NOT NULL OR EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.subject_id=NEW.subject_id) THEN
+            RAISE EXCEPTION 'typed fresh create has retained membership' USING ERRCODE='23514';
+          END IF;
+        ELSE
+          IF old_member IS NULL OR proof IS NULL OR old_config ->> 'lifecycle_state' IS DISTINCT FROM 'disabled'
+             OR old_config -> 'min_slots' IS DISTINCT FROM '0'::jsonb OR old_config -> 'max_slots' IS DISTINCT FROM '0'::jsonb
+             OR old_config ->> 'subject_incarnation'=NEW.subject_incarnation::text
+             OR (old_config ->> 'configuration_generation')::bigint >= NEW.configuration_generation
+             OR old_config ->> 'display_name' IS DISTINCT FROM config ->> 'display_name'
+             OR EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.subject_incarnation=NEW.subject_incarnation)
+             OR EXISTS (SELECT 1 FROM public.capacity_config_generations g WHERE g.subject_incarnation=NEW.subject_incarnation)
+             OR EXISTS (SELECT 1 FROM public.capacity_candidates c WHERE c.subject_incarnation=NEW.subject_incarnation
+                  AND (c.subject_id<>NEW.subject_id OR c.candidate_generation<>service_candidate_generation))
+             OR EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_incarnation=NEW.subject_incarnation
+                  AND (r.subject_id<>NEW.subject_id OR r.reporter_incarnation<>NEW.reporter_incarnation))
+             OR EXISTS (SELECT 1 FROM public.capacity_subjects s WHERE s.subject_incarnation=NEW.subject_incarnation
+                  AND (s.configuration_epoch<>epoch_record.configuration_epoch OR s.subject_id<>NEW.subject_id)) THEN
+            RAISE EXCEPTION 'typed recreation predecessor or successor identity changed' USING ERRCODE='23514';
+          END IF;
+          origin_reference := coalesce(nullif(old_member #> '{reincarnation,origin}','null'::jsonb),base_reference);
+          IF origin_reference IS NULL THEN
+            SELECT e.result_payload #> '{member,configuration}' INTO first_config FROM public.capacity_personal_membership_events e
+              WHERE e.execution_epoch=NEW.execution_epoch AND e.subject_id=NEW.subject_id ORDER BY e.revision LIMIT 1;
+            origin_reference := jsonb_build_object('schema_version',1,'scope','subject','subject_id',NEW.subject_id,
+              'subject_incarnation',first_config -> 'subject_incarnation','generation',first_config -> 'configuration_generation',
+              'digest',public.capacity_membership_json_digest(first_config));
+          END IF;
+          IF NOT public.capacity_personal_build_json_exact(proof,jsonb_build_object('schema_version',1,'namespace_id',NEW.namespace_id,
+              'execution_manifest_sha256',NEW.execution_manifest_sha256,'origin',origin_reference,'predecessor',old_config,
+              'predecessor_revision',prior_subject.revision,'predecessor_head_sha256',prior_subject.head_sha256,
+              'admission_revision',NEW.revision,'successor_incarnation',NEW.subject_incarnation,
+              'release_set_sha256',public.capacity_personal_predecessor_release_digest(NEW.subject_id,(old_config ->> 'subject_incarnation')::uuid))) THEN
+            RAISE EXCEPTION 'typed recreation release certificate changed' USING ERRCODE='23514';
+          END IF;
         END IF;
       ELSE
+        IF NOT public.capacity_personal_build_json_exact(member -> 'reincarnation',coalesce(old_member -> 'reincarnation','null'::jsonb)) THEN
+          RAISE EXCEPTION 'typed recreation certificate must be retained' USING ERRCODE='23514';
+        END IF;
         IF old_config IS NULL OR old_config ->> 'subject_incarnation' IS DISTINCT FROM NEW.subject_incarnation::text
            OR (old_config ->> 'configuration_generation')::bigint >= NEW.configuration_generation
            OR old_config ->> 'display_name' IS DISTINCT FROM expected_config ->> 'display_name'
@@ -463,15 +752,16 @@ def _install_initial_build_guard() -> None:
             e.subject_id<>NEW.subject_id AND (e.subject_incarnation=NEW.subject_incarnation
               OR e.result_payload #>> '{member,configuration,display_name}' = expected_config ->> 'display_name'))
          OR EXISTS (SELECT 1 FROM public.capacity_personal_membership_events e WHERE e.subject_id=NEW.subject_id
-              AND (e.subject_incarnation<>NEW.subject_incarnation OR e.owner_id<>NEW.owner_id
+              AND ((e.subject_incarnation<>NEW.subject_incarnation AND nullif(member -> 'reincarnation','null'::jsonb) IS NULL) OR e.owner_id<>NEW.owner_id
                 OR coalesce(e.request_payload #>> '{command,purpose}','personal-application')<>member_purpose
                 OR e.result_payload #>> '{member,configuration,display_name}' IS DISTINCT FROM expected_config ->> 'display_name'))
          OR EXISTS (SELECT 1 FROM public.capacity_config_generations g WHERE
               (g.subject_id = NEW.subject_id OR g.subject_incarnation = NEW.subject_incarnation)
-              AND (base_origin IS NULL OR g.subject_id IS DISTINCT FROM NEW.subject_id OR g.subject_incarnation IS DISTINCT FROM NEW.subject_incarnation
+              AND (base_origin IS NULL OR g.subject_id IS DISTINCT FROM NEW.subject_id OR g.subject_incarnation IS DISTINCT FROM (base_config ->> 'subject_incarnation')::uuid
                 OR g.payload ->> 'account_id' IS DISTINCT FROM derived_account_id OR g.payload ->> 'display_name' IS DISTINCT FROM expected_config ->> 'display_name'))
          OR EXISTS (SELECT 1 FROM public.capacity_subjects s WHERE
-              (s.subject_id = NEW.subject_id AND (s.subject_incarnation <> NEW.subject_incarnation
+              (s.subject_id = NEW.subject_id AND ((s.subject_incarnation <> NEW.subject_incarnation AND
+                  (nullif(member -> 'reincarnation','null'::jsonb) IS NULL OR s.subject_incarnation::text IS DISTINCT FROM base_config ->> 'subject_incarnation'))
                 OR (s.configuration_epoch <> epoch_record.configuration_epoch AND base_origin IS NULL)
                 OR s.account_id<>derived_account_id OR s.display_name<>expected_config ->> 'display_name'))
               OR (s.subject_id <> NEW.subject_id AND (s.subject_incarnation = NEW.subject_incarnation
@@ -606,7 +896,7 @@ def _install_initial_build_guard() -> None:
           FROM public.capacity_personal_membership_events e WHERE e.execution_epoch=NEW.execution_epoch AND e.subject_id=NEW.subject_id
             AND e.reporter_incarnation=(base_config ->> 'demand_reporter_incarnation')::uuid ORDER BY e.revision DESC LIMIT 1;
         IF NOT FOUND THEN old_config := base_config; old_projection := base_projection; END IF;
-        IF NOT EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_id=NEW.subject_id AND r.subject_incarnation=NEW.subject_incarnation
+        IF NOT EXISTS (SELECT 1 FROM public.capacity_demand_reporters r WHERE r.subject_id=NEW.subject_id AND r.subject_incarnation=(old_config ->> 'subject_incarnation')::uuid
             AND r.reporter_incarnation=(old_config ->> 'demand_reporter_incarnation')::uuid AND r.state='fenced'
             AND r.configuration_generation=(old_config ->> 'configuration_generation')::bigint
             AND r.deployment_generation=(old_config ->> 'deployment_generation')::bigint
@@ -671,6 +961,7 @@ def upgrade() -> None:
         REVOKE EXECUTE ON FUNCTION public.capacity_personal_build_subject_id(uuid,uuid) FROM PUBLIC;
         """
     )
+    _install_release_proof_helpers()
     _install_initial_build_guard()
 
 
@@ -690,6 +981,10 @@ def downgrade() -> None:
     CREATE TRIGGER capacity_personal_membership_insert_guard BEFORE INSERT ON public.capacity_personal_membership_events
       FOR EACH ROW EXECUTE FUNCTION public.capacity_personal_membership_insert_guard();
     DROP FUNCTION public.capacity_personal_build_initial_insert_guard();
+    DROP FUNCTION public.capacity_personal_predecessor_release_digest(uuid,uuid);
+    DROP FUNCTION public.capacity_personal_release_timestamp(timestamptz);
+    DROP FUNCTION public.capacity_personal_release_json_digest(jsonb);
+    DROP FUNCTION public.capacity_personal_release_json_text(jsonb);
     DROP FUNCTION public.capacity_personal_application_installation_matches(jsonb,jsonb);
     DROP FUNCTION public.capacity_personal_build_json_exact(jsonb,jsonb);
     DROP FUNCTION public.capacity_personal_build_subject_id(uuid,uuid);

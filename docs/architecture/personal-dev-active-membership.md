@@ -700,8 +700,9 @@ real activated/drained/retired evidence, the exact final history, and unchanged
 materialized subjects, accounts and reporters. Existing installation records are
 reused; fresh and updated applications are not passed through shadow installation
 creation again. Static candidates remain bound to their pinned acknowledgements.
-Disabled applications are retained, and any build history is rejected until the
-build successor contract is connected. The helper composes ordinary configuration
+Disabled applications are retained. Build history and recreated applications are
+rejected until successor import can preserve purpose and original incarnation
+lineage. The helper composes ordinary configuration
 proposals and activation in one transaction; its key identifies that derived
 configuration activation, not a separate import receipt. Replay is historical and
 is unavailable while execution is active. It does not activate V4 execution or
@@ -721,7 +722,7 @@ Persisted typed-history reads now verify these roots and installation records
 even at revision zero, without consulting mutable shadow projection rows for
 origin authority. Current materialization reuses the immutable base reader;
 managed application overlays replace the base exactly once after authenticated
-lifecycle validation. Static-base takeover and durable recreation remain rejected.
+lifecycle validation. Static-base takeover remains rejected.
 The pure typed event validator now checks an adopted application's first
 update/capacity/destroy against that pinned base, without inventing a create
 event. It preserves identity and non-deployment service evidence, requires update
@@ -733,9 +734,13 @@ validator alone grants no adoption.
 Pure application recreation validation now mirrors build history: the successor
 must have a fresh incarnation/reporter, restart service generations at one, and
 bind its certificate to the exact disabled predecessor event and first immutable
-origin. Later mutations must retain that certificate. These structural checks
-do not authenticate release facts; durable typed recreation remains closed until
-the transactional release-ledger reader and SQL guard enforce the transition.
+origin. Later mutations must retain that certificate. The durable transaction and
+SQL insertion guard independently verify the predecessor's actual released ledger
+across execution epochs before accepting recreation. Observed or quarantined work
+blocks it; accepted workers require protected and terminal release witnesses.
+Release reads refresh retained ORM objects, reject unflushed ledger edits without
+discarding them, normalize timestamps to UTC, and hash witness keys in fixed ASCII
+order rather than database-locale order. This does not activate V4 execution.
 
 The retained application reader exposes installation-only validation separately
 from reporter validation. Historical installation reads still verify exact
@@ -777,7 +782,7 @@ generation, fleet-derived base, original candidate/deployment/profile evidence
 and reporter fencing. First capacity/teardown retains the original installation
 attestation; first update fences the base reporter at its last base generation.
 Global identity conflicts remain enforced with only exact same-identity base
-exceptions. This is not build execution admission; recreation remains blocked.
+exceptions and certified recreation lineage. This is not build execution admission.
 
 SQL UUID5 uses the standard `uuid-ossp` extension at its existing schema, or
 installs it in a new private `capacity_build_extensions` schema if absent.
@@ -803,7 +808,9 @@ each reporter, including reporters fenced by a later update. Destroy disables ne
 subject capacity but retains the current reporter/token and demand high-water for
 cleanup; it does not certify physical release or erase charges. Earlier receipts
 remain replayable after update or destroy. This internal transaction is not yet
-exposed as runtime admission, and recreation remains unfinished. Managed bases
+exposed as runtime admission. Recreation retains installation evidence keyed by
+subject, incarnation and deployment generation, so restarting generation one does
+not overwrite the predecessor's installation. Managed bases
 are adopted without a synthetic create event and without double-counting their
 allocation. Applications and builds share revision/replay identities,
 owner live-subject limits and the same serializable transaction retry behavior.

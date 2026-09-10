@@ -2,8 +2,8 @@
 
 The caller supplies an already authenticated management principal. This store
 checks its pinned delegation against current durable authority, never a caller
-preparation/fleet. Fresh/managed application and pending-build lifecycle are
-supported; recreation and executable V4 admission remain closed.
+preparation/fleet. Fresh/managed application and pending-build lifecycle include
+release-gated recreation; executable V4 admission remains closed.
 """
 
 from __future__ import annotations
@@ -43,8 +43,12 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionAuthorityV2,
     canonical_executable_digest,
 )
-from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
+from loom_capacity_manager.membership_contracts import (
+    PersonalApplicationMemberV1,
+    PersonalReincarnationEvidenceV1,
+)
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
+from loom_capacity_manager.membership_release import predecessor_release_sha256
 from loom_capacity_manager.membership_store import (
     CapacityMembershipStore,
     PersonalMembershipRevisionConflictError,
@@ -52,6 +56,7 @@ from loom_capacity_manager.membership_store import (
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAuthorityState,
+    CapacityCandidate,
     CapacityConfigGeneration,
     CapacityConfigurationEpoch,
     CapacityDemandReporter,
@@ -163,8 +168,8 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
         latest: dict[UUID, PersonalMembershipResultV2] = {}
         latest_requests: dict[UUID, PersonalMembershipMutationV2] = {}
         reporters: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalBuildMemberV1 | PersonalApplicationMemberV1]] = {}
-        application_origins: dict[tuple[UUID, int], DynamicDevelopmentSubjectProjectionV1] = {
-            (origin.configuration.subject_id, origin.configuration.deployment_generation): origin.installation_projection
+        application_origins: dict[tuple[UUID, UUID, int], DynamicDevelopmentSubjectProjectionV1] = {
+            (origin.configuration.subject_id, origin.configuration.subject_incarnation, origin.configuration.deployment_generation): origin.installation_projection
             for origin in preparation.managed_application_origins
         }
         reporter_bindings = {origin.configuration.demand_reporter_incarnation:
@@ -172,10 +177,13 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
             for origin in preparation.managed_application_origins}
         for event, result in zip(events, results, strict=True):
             original = parse_typed_membership_mutation(json.dumps(event.request_payload))
-            if result.member.reincarnation is not None:
-                raise ConfigurationConflictError("typed membership history lifecycle is not yet admitted")
+            evidence = result.member.reincarnation
+            previous_result = latest.get(event.subject_id)
+            if evidence is not None and (previous_result is None or previous_result.member.configuration.subject_incarnation != event.subject_incarnation):
+                if evidence.release_set_sha256 != await predecessor_release_sha256(session, evidence.predecessor):
+                    raise ConfigurationConflictError("typed recreation predecessor release evidence changed")
             if isinstance(original.command, PersonalApplicationCommandV2) and original.command.projection.operation_kind in {"create", "update"}:
-                application_origins[(event.subject_id, event.deployment_generation)] = original.command.projection
+                application_origins[(event.subject_id, event.subject_incarnation, event.deployment_generation)] = original.command.projection
             latest[event.subject_id] = result
             latest_requests[event.subject_id] = original
             reporters[event.reporter_incarnation] = (original, result.member)
@@ -184,7 +192,7 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
             if isinstance(member, PersonalBuildMemberV1):
                 await _require_build_installation_facts(session, member, preparation)
             else:
-                origin = application_origins.get((member.configuration.subject_id, member.configuration.deployment_generation))
+                origin = application_origins.get((member.configuration.subject_id, member.configuration.subject_incarnation, member.configuration.deployment_generation))
                 if origin is None or not isinstance(original.command, PersonalApplicationCommandV2):
                     raise ConfigurationConflictError("typed application installation origin is unavailable")
                 await require_application_installation_evidence(session, ManagedApplicationOriginV1(
@@ -281,11 +289,14 @@ async def _validated_materialization(
         base = origins.get(identity)
         if (
             not isinstance(member, PersonalApplicationMemberV1) or base is None
-            or member.configuration.subject_incarnation != base.configuration.subject_incarnation
             or member.owner_id != base.base_projection.owner_id
             or member.configuration.display_name != base.configuration.display_name
             or member.configuration.configuration_generation <= base.configuration.configuration_generation
-            or member.reincarnation is not None
+            or (member.reincarnation is None and member.configuration.subject_incarnation != base.configuration.subject_incarnation)
+            or (member.reincarnation is not None and member.reincarnation.origin != ConfigurationGenerationRefV1(
+                scope="subject", subject_id=base.configuration.subject_id,
+                subject_incarnation=base.configuration.subject_incarnation,
+                generation=base.configuration.configuration_generation, digest=canonical_digest(base.configuration)))
         ):
             raise ConfigurationConflictError("typed membership cannot replace the pinned managed base identity")
     expected.update({identity: result.member.configuration for identity, result in latest.items()})
@@ -408,8 +419,30 @@ class CapacityTypedMembershipStore:
         previous = previous_result.member if previous_result is not None else None
         if previous is not None and previous.purpose != member.purpose:
             raise ConfigurationConflictError("typed membership cannot change subject purpose")
+        evidence = None if previous is None else previous.reincarnation
         if previous is not None and projection.operation_kind == "create":
-            raise ConfigurationConflictError("typed membership recreation requires authenticated release and is not yet admitted")
+            old = previous.configuration
+            if old.lifecycle_state != "disabled" or old.min_slots != 0 or old.max_slots != 0:
+                raise ConfigurationConflictError("typed recreation requires a disabled predecessor")
+            for model in (CapacityPersonalMembershipEvent, CapacityConfigGeneration, CapacitySubject, CapacityCandidate, CapacityDemandReporter):
+                if await session.scalar(select(model.id).where(
+                    model.subject_incarnation == subject.subject_incarnation).limit(1)) is not None:
+                    raise ConfigurationConflictError("typed recreation incarnation was already used")
+            previous_event = next(event for event in reversed(events) if event.subject_id == subject.subject_id)
+            base_configuration = next((origin.configuration for origin in preparation.managed_application_origins if origin.configuration.subject_id == subject.subject_id), None)
+            origin_configuration = base_configuration or next(result.member.configuration for result in results if result.member.configuration.subject_id == subject.subject_id)
+            evidence = PersonalReincarnationEvidenceV1(namespace_id=request.namespace_id,
+                execution_manifest_sha256=epoch.execution_manifest_sha256,
+                origin=previous.reincarnation.origin if previous.reincarnation is not None else ConfigurationGenerationRefV1(
+                    scope="subject", subject_id=origin_configuration.subject_id,
+                    subject_incarnation=origin_configuration.subject_incarnation,
+                    generation=origin_configuration.configuration_generation, digest=canonical_digest(origin_configuration)),
+                predecessor=old, predecessor_revision=previous_event.revision, predecessor_head_sha256=previous_event.head_sha256,
+                admission_revision=revision + 1, successor_incarnation=subject.subject_incarnation,
+                release_set_sha256=await predecessor_release_sha256(session, old))
+        if evidence is not None:
+            member = (derive_build_member(request, preparation, fleet, reincarnation=evidence)
+                if isinstance(request.command, PersonalBuildCommandV2) else derive_application_member(request, preparation, fleet, reincarnation=evidence))
         if previous is None:
             base = next((origin for origin in preparation.managed_application_origins
                 if origin.configuration.subject_id == subject.subject_id), None)

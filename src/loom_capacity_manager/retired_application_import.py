@@ -129,6 +129,8 @@ async def import_retired_applications(
                 raise ConfigurationConflictError("application import requires the complete final snapshot")
             if any(not isinstance(result.member, PersonalApplicationMemberV1) for result in history.results):
                 raise ConfigurationConflictError("build membership successor import is not yet supported")
+            if any(result.member.reincarnation is not None for result in history.results):
+                raise ConfigurationConflictError("application successor import must preserve recreation lineage and is not yet supported")
 
             subjects = await _load_base_configurations(session, epoch)
             subjects.update({identity: result.member.configuration for identity, result in history.latest.items()})
