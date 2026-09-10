@@ -145,6 +145,13 @@ secrets.
   only merge authority: `dev` requires no human approval, no CODEOWNER
   approval, and no conversation resolution. Do not hand-merge an eligible
   `dev` PR just because CI is green.
+- Every non-draft PR event, including description edits and unrelated label
+  changes, starts a complete required-check cycle. A newer filtered metadata
+  workflow can leave native auto-merge blocked even when older checks on the
+  same head are green. The changed-path planner still selects the applicable
+  work; reporting all four gates does not force every heavy lane. Finish PR
+  description and label updates before the final CI cycle to avoid restarting
+  validation. Draft events remain filtered and cannot authorize a merge.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   multi-arch image validation when the changed paths do not already require it.
@@ -203,7 +210,7 @@ assertion with an unconditional "whatever the current head is" check.
 
 When CI fails, inspect the current head's failing source job and fix a
 deterministic error before requesting another attempt. Distinguish an actual
-failure from a cancelled superseded run or a filtered metadata event. Repeating
+failure from a cancelled superseded run or a filtered draft event. Repeating
 the same failing head uses runner capacity without resolving the defect. These
 are developer verification practices, not a fifth required check or an
 additional approval gate.

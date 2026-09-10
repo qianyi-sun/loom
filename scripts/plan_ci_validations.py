@@ -196,16 +196,13 @@ def _pull_request_gate_mode(
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
-    Head, base, readiness, and supported validation-selector changes emit the
-    four protected contexts. Drafts and unrelated metadata events are filtered
-    before checkout. Unknown actions remain fail-closed and run the full gate.
+    Every non-draft PR event emits the four protected contexts. A newer filtered
+    metadata suite can leave native auto-merge blocked despite older successful
+    checks on the same head. Only drafts are filtered before checkout; changed
+    paths and the current labels still select the actual validation work.
     """
 
     if draft or action == "converted_to_draft":
-        return False, False, "filtered"
-    if action == "edited" and not base_changed:
-        return False, False, "filtered"
-    if action in {"labeled", "unlabeled"} and action_label not in LABEL_TO_CHECK:
         return False, False, "filtered"
     return True, True, "full"
 
