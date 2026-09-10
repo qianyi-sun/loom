@@ -27,6 +27,7 @@ def typed_executor(tmp_path, *, pool="oldlab", purpose="personal-build-worker", 
         }
     )
     policy = context.policy if policy_change is None else policy_change(context.policy)
+    manager.registration = registration
     try:
         runtime = ExecutablePoolExecutor(
             registration,
@@ -180,6 +181,36 @@ async def test_typed_runtime_interlock_precedes_restart_or_replay_calls(tmp_path
         runtime.client.executable_checkpoint.assert_not_awaited()
         assert runtime.client.central_requests == []
         assert journal.head == head
+    finally:
+        journal.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize("terminal", (False, True))
+@pytest.mark.parametrize("pool", ("oldlab", "gb10"))
+async def test_typed_inventory_preserves_proof_through_publication_and_local_readback(tmp_path, terminal, pool):
+    from tests.unit.test_capacity_executor_executable import _job_from_launch, _terminal_from_job
+    from loom_capacity_manager.typed_inventory_contracts import ExecutableExecutorInventoryV3
+    runtime, journal, context = typed_executor(tmp_path, pool=pool)
+    try:
+        subject = facts(context)
+        rendered = runtime.render_launch(context.binding, launch_subject=subject)
+        runtime._remember_launch(rendered, launch_subject=subject,
+            bootstrap_registration_epoch=1, event="slurm-submit-confirmed")
+        job = _job_from_launch(context, rendered_request=rendered.request, job_id="101")
+        if terminal:
+            runtime.slurm.terminal_jobs = (_terminal_from_job(job),)
+        else:
+            runtime.slurm.jobs = [job]
+        result = await runtime._publish_inventory(await runtime.client.executable_checkpoint())
+        assert result.status == "inventory-published"
+        inventory = runtime.client.inventories[-1]
+        assert type(inventory) is ExecutableExecutorInventoryV3
+        assert len(inventory.records) == 1
+        assert inventory.records[0].ownership_proof == rendered.ownership_proof
+        assert inventory.records[0].state == ("terminal" if terminal else "active")
+        runtime._assert_inventory_binding(inventory)
+        if terminal:
+            assert runtime._confirmed_terminal_inventory_record(context.binding) == inventory.records[0]
     finally:
         journal.__exit__(None, None, None)
 
