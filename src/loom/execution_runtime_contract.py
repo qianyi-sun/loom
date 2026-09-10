@@ -119,6 +119,7 @@ class SidecarContainerV1(_Strict):
     startup_probe: ProbeV1
     readiness_probe: ProbeV1
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
+    private_sandbox: bool = False
 
     @field_validator("image_ref")
     @classmethod
@@ -205,6 +206,7 @@ class ExecutionRuntimePlanV1(_Strict):
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     composition: RuntimeComposition
     task_image_ref: str
+    agent_image_ref: str | None = None
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -235,8 +237,20 @@ class ExecutionRuntimePlanV1(_Strict):
             raise ValueError("runtime plan images must be digest-pinned")
         return value
 
+    @field_validator("agent_image_ref")
+    @classmethod
+    def _agent_image_is_immutable(cls, value: str | None) -> str | None:
+        if value is not None:
+            cls._images_are_immutable(value)
+        return value
+
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
+        if (
+            any(sidecar.private_sandbox for sidecar in self.sidecars)
+            and self.agent_image_ref is None
+        ):
+            raise ValueError("private sandboxes require a separate agent image reference")
         if any(phase.role != "setup" for phase in self.setup):
             raise ValueError("runtime phase roles do not match their positions")
         if self.execution_role == "attempt":
@@ -260,6 +274,16 @@ class ExecutionRuntimePlanV1(_Strict):
             raise ValueError("sidecar role name collides with a reserved container role")
         known: set[str] = set()
         for sidecar in self.sidecars:
+            if sidecar.private_sandbox and sidecar.role_name not in {
+                "task-sandbox",
+                "verifier-sandbox",
+            }:
+                raise ValueError("private sandbox role must be task-sandbox or verifier-sandbox")
+            if (
+                sidecar.role_name in {"task-sandbox", "verifier-sandbox"}
+                and not sidecar.private_sandbox
+            ):
+                raise ValueError("sandbox roles require private mounts")
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
@@ -272,7 +296,32 @@ class ExecutionRuntimePlanV1(_Strict):
         return self
 
     def canonical_payload(self) -> dict[str, object]:
-        return self.model_dump(mode="json")
+        payload = self.model_dump(mode="json")
+        # Keep existing published plans byte-compatible when new fields are unused.
+        if self.agent_image_ref is None:
+            payload.pop("agent_image_ref")
+        for sidecar in payload["sidecars"]:
+            if not sidecar["private_sandbox"]:
+                sidecar.pop("private_sandbox")
+        return payload
+
+
+def runtime_pod_resources(plan: ExecutionRuntimePlanV1) -> ContainerResourcesV1:
+    """Effective Kubernetes request: materializer runs before native sidecars."""
+
+    return ContainerResourcesV1(
+        cpu_millis=max(
+            50, plan.task_resources.cpu_millis + sum(s.resources.cpu_millis for s in plan.sidecars)
+        ),
+        memory_mib=max(
+            64, plan.task_resources.memory_mib + sum(s.resources.memory_mib for s in plan.sidecars)
+        ),
+        ephemeral_storage_mib=max(
+            32,
+            plan.task_resources.ephemeral_storage_mib
+            + sum(s.resources.ephemeral_storage_mib for s in plan.sidecars),
+        ),
+    )
 
 
 class RuntimeStreamEvidenceV1(_Strict):
@@ -392,7 +441,7 @@ def validate_runtime_plan_requirements(
     )
     if expected_resources != actual_resources:
         raise ValueError("runtime plan resources do not match workload requirements")
-    if requirements.sidecar_count != len(plan.sidecars):
+    if requirements.sidecar_count != sum(not sidecar.private_sandbox for sidecar in plan.sidecars):
         raise ValueError("runtime plan sidecars do not match workload requirements")
     if plan.execution_role == "verifier":
         if plan.verifier_execution != VerifierExecution.SKIPPED:

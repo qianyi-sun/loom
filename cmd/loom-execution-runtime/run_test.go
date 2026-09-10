@@ -255,6 +255,9 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 		Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: workspace, TimeoutSeconds: 1,
 	})
 	p.RuntimeBinarySHA256 = "sha256:" + hex.EncodeToString(digest[:])
+	p.AgentImageRef = &p.TaskImageRef
+	probe := probe{Kind: "exec", Argv: []string{"/loom/bin/loom-sandbox-runtime", "--check-socket", "/loom/sandboxes/task-sandbox/sandbox.sock"}, TimeoutSeconds: 2, PeriodSeconds: 2, FailureThreshold: 30}
+	p.Sidecars = []sidecar{{RoleName: "task-sandbox", PrivateSandbox: true, ImageRef: p.TaskImageRef, Argv: []string{"/loom/bin/loom-sandbox-runtime", "--socket", "/loom/sandboxes/task-sandbox/sandbox.sock"}, Resources: p.TaskResources, StartupProbe: probe, ReadinessProbe: probe}}
 	payload, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -262,15 +265,27 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 	destination := t.TempDir()
 	runtimePath := filepath.Join(destination, "runtime")
 	planPath := filepath.Join(destination, "plan.json")
+	sandboxPath := filepath.Join(destination, "sandbox")
+	sandboxSource := filepath.Join(destination, "sandbox-source")
+	if err := os.WriteFile(sandboxSource, []byte("bundled sandbox binary"), 0555); err != nil {
+		t.Fatal(err)
+	}
 	err = materialize([]string{
 		"--encoded-plan", base64.RawURLEncoding.EncodeToString(payload),
 		"--runtime-dest", runtimePath, "--plan-dest", planPath,
+		"--sandbox-source", sandboxSource, "--sandbox-dest", sandboxPath,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(runtimePath); err != nil || info.Mode().Perm() != 0o555 {
 		t.Fatalf("runtime mode mismatch: info=%v err=%v", info, err)
+	}
+	if info, err := os.Stat(sandboxPath); err != nil || info.Mode().Perm() != 0o555 {
+		t.Fatalf("sandbox mode mismatch: info=%v err=%v", info, err)
+	}
+	if data, err := os.ReadFile(sandboxPath); err != nil || string(data) != "bundled sandbox binary" {
+		t.Fatalf("sandbox materialization failed: %v", err)
 	}
 	if err := materialize([]string{
 		"--encoded-plan", base64.RawURLEncoding.EncodeToString(payload),

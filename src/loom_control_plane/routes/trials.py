@@ -27,9 +27,9 @@ from loom.db.schema import (
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
 from loom.db.task_set_visibility import visible_tasks
+from loom.llm_call_ledger import serialize_llm_call
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
-from loom.request_params import coerce_request_params
 from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
@@ -897,35 +897,7 @@ async def get_trial_llm_calls(
             .scalars()
             .all()
         )
-    return {
-        "items": [
-            {
-                "id": str(r.id),
-                "trial_id": str(r.trial_id),
-                "step_id": r.step_id,
-                "dialect": r.dialect,
-                "model": r.model,
-                "input_tokens": r.input_tokens,
-                "output_tokens": r.output_tokens,
-                "provider_extras": r.provider_extras,
-                "request_params": coerce_request_params(r.request_params),
-                "cost_usd": float(r.cost_usd),
-                "rate_card_hash": r.rate_card_hash,
-                "captured_at": r.captured_at.isoformat(),
-                # #298 Slice B: gateway-internal retry attempt that
-                # produced this row. Defaults to 1 for pre-#298 rows.
-                "attempt": r.attempt,
-                "client_call_id": str(r.client_call_id) if r.client_call_id else None,
-                "episode": r.episode,
-                "call_ordinal": r.call_ordinal,
-                "requested_model": r.requested_model,
-                "response_model": r.response_model,
-                "role": r.role,
-                "correlation_status": r.correlation_status,
-            }
-            for r in rows
-        ],
-    }
+    return {"items": [serialize_llm_call(row) for row in rows]}
 
 
 class _TerminusReclaimBody(BaseModel):

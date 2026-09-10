@@ -353,3 +353,96 @@ def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes(audience: 
         for mount in container["volumeMounts"]
     )
     assert {item["name"] for item in pod["volumes"]} == expected_volumes
+
+
+def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request() -> None:
+    from loom.execution_runtime_contract import runtime_pod_resources
+
+    lease = _lease()
+    plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+    agent_image = "registry.example/agent@sha256:" + "e" * 64
+    sidecars = []
+    for role in ("task-sandbox", "verifier-sandbox"):
+        probe = ProbeV1(
+            kind="exec",
+            argv=(
+                "/loom/bin/loom-sandbox-runtime",
+                "--check-socket",
+                f"/loom/sandboxes/{role}/sandbox.sock",
+            ),
+        )
+        sidecars.append(
+            SidecarContainerV1(
+                role_name=role,
+                private_sandbox=True,
+                image_ref=plan.task_image_ref,
+                argv=(
+                    "/loom/bin/loom-sandbox-runtime",
+                    "--socket",
+                    f"/loom/sandboxes/{role}/sandbox.sock",
+                ),
+                resources=plan.task_resources,
+                startup_probe=probe,
+                readiness_probe=probe,
+            )
+        )
+    plan = ExecutionRuntimePlanV1.model_validate(
+        {
+            **plan.canonical_payload(),
+            "agent_image_ref": agent_image,
+            "sidecars": [s.model_dump(mode="json") for s in sidecars],
+            "image_admission": signed_image_admission_bundle(
+                (plan.task_image_ref, plan.runtime_image_ref, agent_image)
+            ),
+        }
+    )
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+    assert lease.workload_requirements_json["sidecar_count"] == 0
+    pod = render_execution_job(
+        lease,
+        target=ExecutionTargetRuntime(
+            target_id=lease.target_id,
+            namespace=lease.namespace_name,
+            pod_identity_audience="loom-execution",
+        ),
+    )["spec"]["template"]["spec"]
+    assert pod["shareProcessNamespace"] is False
+    assert pod["automountServiceAccountToken"] is False
+    execution = pod["containers"][0]
+    assert execution["image"] == agent_image
+    for sidecar in pod["initContainers"][1:]:
+        mounts = sidecar["volumeMounts"]
+        assert {m["name"] for m in mounts} == {"runtime", f"{sidecar['name']}-socket"}
+        binary = next(m for m in mounts if m["name"] == "runtime")
+        assert binary == {
+            "name": "runtime",
+            "mountPath": "/loom/bin/loom-sandbox-runtime",
+            "subPath": "loom-sandbox-runtime",
+            "readOnly": True,
+        }
+        assert sidecar["securityContext"]["readOnlyRootFilesystem"] is False
+        assert sidecar["securityContext"]["runAsNonRoot"] is True
+        assert sidecar["securityContext"]["capabilities"]["drop"] == ["ALL"]
+        assert sidecar["restartPolicy"] == "Always"
+        assert (
+            len([m for m in execution["volumeMounts"] if m["name"] == f"{sidecar['name']}-socket"])
+            == 1
+        )
+    resources = runtime_pod_resources(plan)
+    assert resources.cpu_millis == 3 * plan.task_resources.cpu_millis
+    assert resources.memory_mib == 3 * plan.task_resources.memory_mib
+    assert (
+        sum(
+            int(c["resources"]["requests"]["cpu"][:-1])
+            for c in [execution, *pod["initContainers"][1:]]
+        )
+        == resources.cpu_millis
+    )
+    assert (
+        sum(
+            int(c["resources"]["requests"]["memory"][:-2])
+            for c in [execution, *pod["initContainers"][1:]]
+        )
+        == resources.memory_mib
+    )

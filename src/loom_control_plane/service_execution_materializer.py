@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
 from loom.data_lifecycle_registry import (
     ensure_artifact_lifecycle_authority,
     ensure_trial_event_lifecycle_authority,
@@ -42,6 +43,7 @@ from loom.models.trajectory import (
     LLMCallEvent,
     StepEndEvent,
     StepStartEvent,
+    Terminus2TurnEvent,
     TrajectoryEvent,
     TrialEndEvent,
     TrialErrorEvent,
@@ -57,6 +59,7 @@ from loom.pipeline.artifact_commit import (
     ArtifactManifestV1,
 )
 from loom.pipeline.keys import canonical_document
+from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
 from loom.trajectory.atif import project_to_atif
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
@@ -200,6 +203,14 @@ def validate_usage_accounting(
         document = json.loads(usage_body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MaterializationIntegrityError("usage_output_invalid") from exc
+    if trial_config.agent_name == "terminus-2":
+        try:
+            events = parse_terminus_events(trace_body, trial=trial_config)
+        except ValueError as exc:
+            raise MaterializationIntegrityError("trajectory_invalid") from exc
+        if document != terminus_usage(events, trial_config):
+            raise MaterializationIntegrityError("usage_output_identity_drift")
+        return
     calls = _parse_trace_calls(trace_body)
     usages = [call.get("usage") for call in calls]
     if (
@@ -250,9 +261,15 @@ def build_canonical_events(
 ) -> tuple[TrajectoryEvent, ...]:
     """Validate the lossless source trace and project it to Loom event rows."""
 
-    calls = _parse_trace_calls(trace_body)
-
-    step_id = task_config.steps[0].name if task_config.steps else "main"
+    terminus = trial_config.agent_name == "terminus-2"
+    calls = [] if terminus else _parse_trace_calls(trace_body)
+    try:
+        native_events = parse_terminus_events(
+            trace_body, trial=trial_config, trial_id=trial_id,
+        ) if terminus else []
+    except ValueError as exc:
+        raise MaterializationIntegrityError("trajectory_invalid") from exc
+    step_id = "agent" if terminus else task_config.steps[0].name if task_config.steps else "main"
     emitted = runtime_result.started_at
     events: list[TrajectoryEvent] = [
         TrialStartEvent(
@@ -272,6 +289,8 @@ def build_canonical_events(
             instruction_excerpt=(task_config.task.description or task_config.task.name)[:500],
         ),
     ]
+    for event in native_events:
+        events.append(event.model_copy(update={"seq": len(events)}))
     for call in calls:
         request = call.get("request")
         usage = call.get("usage")
@@ -336,7 +355,7 @@ def build_canonical_events(
             trial_id=trial_id,
             step_id=step_id,
             seq=len(events),
-            summary={"llm_calls": float(len(calls))},
+            summary={"llm_calls": float(sum(isinstance(e, LLMCallEvent) for e in events))},
             error_phase=error_phase,
         )
     )
@@ -400,6 +419,40 @@ def build_canonical_events(
         )
     )
     return tuple(events)
+
+
+def build_canonical_atif(
+    events: Sequence[TrajectoryEvent], *, task_id: str, agent_name: str, agent_version: str,
+) -> bytes:
+    """Use the existing per-turn Harbor exporter for Terminus execution.
+
+    Generic Loom ATIF intentionally aggregates LLM calls by task step. Its
+    synthetic Gateway call events do not contain Terminus prompts or shell
+    commands, which live in typed Harbor events. Reuse the established Harbor
+    mapper instead of dropping those semantics during canonical publication.
+    """
+    generic = project_to_atif(
+        events, task_id=task_id, agent_name=agent_name, agent_version=agent_version,
+    )
+    if agent_name != "terminus-2":
+        return generic.model_dump_json(indent=2).encode("utf-8")
+    if generic.metadata.final_state == "succeeded":
+        if (
+            not any(isinstance(event, Terminus2TurnEvent) for event in events)
+            or Terminus2TrajectoryMapper.validate_turn_joins(events)
+        ):
+            raise MaterializationIntegrityError("terminus_turn_join_invalid")
+    # Failed/cancelled attempts retain honest partial traces, including a turn
+    # interrupted before its final observation; do not erase them as bad input.
+    document = Terminus2TrajectoryMapper.project_to_atif(
+        events, task_id=task_id, agent_name=agent_name, agent_version=agent_version,
+    )
+    document.update({
+        "trajectory_id": generic.trajectory_id,
+        "session_id": generic.session_id,
+        "metadata": generic.metadata.model_dump(mode="json"),
+    })
+    return json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 class ServiceExecutionMaterializer:
@@ -779,13 +832,12 @@ class ServiceExecutionMaterializer:
             verifier_body=derivation_inputs.get(_VERIFIER_PATH),
         )
         events_body = _canonical_jsonl(events)
-        atif = project_to_atif(
+        atif_body = build_canonical_atif(
             events,
             task_id=trial_task_id,
             agent_name=trial_config.agent_name,
             agent_version=task_config.agent.version or "service-execution-v1",
         )
-        atif_body = atif.model_dump_json(indent=2).encode("utf-8")
         identity = TrajectoryObjectIdentity(
             bucket=self._trajectories_bucket,
             team_id=cast(UUID, lease_data["team_id"]),
@@ -927,8 +979,13 @@ class ServiceExecutionMaterializer:
                 "atif_sha256": result.atif_sha256.removeprefix("sha256:"),
                 "atif_size_bytes": len(result.atif_body),
                 "atif_version_id": None,
-                "atif_schema_version": "1.7",
-                "artifacts": [],
+                "atif_schema_version": json.loads(result.atif_body)["schema_version"],
+                "attempt": lease.attempt,
+                # Replace the complete index for this materialized attempt.
+                # Never accumulate files from earlier Trial retries.
+                "artifacts": file_rows if any(
+                    isinstance(event, Terminus2TurnEvent) for event in result.events
+                ) else [],
             }
             artifact_authority_id = await ensure_artifact_lifecycle_authority(
                 session,

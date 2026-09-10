@@ -224,6 +224,7 @@ async def materialize_workspace(
     policy: WorkspaceStagingPolicy | None = None,
     phase: WorkspacePhase = "agent",
     trusted_private_paths: tuple[str, ...] = (),
+    excluded_paths: tuple[str, ...] = (),
 ) -> int:
     """Recursively upload every regular file under `task_dir` to `dst`
     inside the sandbox, preserving the relative path layout. Returns
@@ -244,6 +245,8 @@ async def materialize_workspace(
         if not src.is_file():
             continue
         rel = src.relative_to(task_dir)
+        if any(fnmatchcase(rel.as_posix(), pattern) for pattern in excluded_paths):
+            continue
         # Skip if ANY path segment matches a skip name (catches both
         # top-level `.git/` AND nested `src/__pycache__/`).
         if any(part in _SKIP_NAMES for part in rel.parts):

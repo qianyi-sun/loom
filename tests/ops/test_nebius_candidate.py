@@ -189,9 +189,12 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
     assert parsed.candidate_sha == manifest["candidate_sha"]
     assert parsed.task_image_ref == manifest["images"]["service"]["image_ref"]
     assert parsed.runtime_image_ref == manifest["images"]["execution_runtime"]["image_ref"]
+    assert parsed.agent_image_ref == manifest["images"]["worker"]["image_ref"]
     verify_execution_image_admission(
         parsed.image_admission,
-        required_image_refs=(parsed.task_image_ref, parsed.runtime_image_ref),
+        required_image_refs=tuple(
+            manifest["images"][key]["image_ref"] for key in candidate.EXECUTION_COMPONENTS
+        ),
         keyring=ImageAdmissionKeyring.from_json(trust),
     )
     other = tmp_path / "other"
@@ -203,6 +206,22 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
         )
     private.chmod(0o644)
     with pytest.raises(ValueError, match="owner-only"):
+        candidate.create_candidate(
+            document, signing_key=private, signing_key_id="publisher", keyring_json=trust
+        )
+
+
+def test_historical_candidate_is_readable_but_new_publication_requires_execution_images(
+    tmp_path: Path,
+) -> None:
+    document, private, trust = inputs(tmp_path)
+    document["images"] = {
+        key: value
+        for key, value in document["images"].items()
+        if key in candidate.LEGACY_COMPONENTS
+    }
+    candidate.validate_identity(document)
+    with pytest.raises(ValueError, match="configured platform and execution images"):
         candidate.create_candidate(
             document, signing_key=private, signing_key_id="publisher", keyring_json=trust
         )

@@ -11,6 +11,8 @@ ci_lanes = [
   "tests-root",
 ]
 ci_ignored_paths = [
+  # Original benchmark assertion body executes only in the isolated verifier.
+  "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/tests/test_outputs.py",
   "tests/ops/test_ci_critical_path_routing.py",
   "src/loom_cli/dev_cmd.py",
   "src/loom_cli/inference_cmd.py",
@@ -502,6 +504,7 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "cmd/loom-execution-runtime/**",
+  "cmd/loom-sandbox-runtime/**",
   "deploy/Dockerfile.execution-runtime",
   "go.mod",
   "go.sum",
@@ -745,6 +748,7 @@ source_paths = [
   ".dockerignore",
   "README.md",
   "deploy/Dockerfile.worker",
+  "deploy/patches/**",
   "packages/**",
   "pyproject.toml",
   "src/**",
@@ -788,6 +792,28 @@ dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world
 build_context = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world"
 source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/**"]
 smoke_owner = "gb10-catalog-smoke"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "nebius-terminal-bench"
+kind = "runtime-payload-image"
+dockerfile = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile"
+build_context = "deploy/catalog/nebius-terminal-bench/file-archive-manifest"
+source_paths = ["deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile", "deploy/catalog/nebius-terminal-bench/file-archive-manifest/.dockerignore"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "nebius-terminal-bench-original"
+kind = "runtime-payload-image"
+dockerfile = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/environment/Dockerfile"
+build_context = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original"
+source_paths = ["deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/**"]
+smoke_owner = "task-fixture-conformance"
 scan_owner = "runtime-payload-scan"
 attestation_owner = "runtime-payload-provenance"
 runtime_policy = "runtime-payload"

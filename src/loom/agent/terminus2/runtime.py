@@ -577,7 +577,7 @@ class LoomTerminus2Runtime:
             session_id=str(self.trial_id),
             record_terminal_session=True,
             enable_summarize=False,
-            llm_kwargs={"api_key": step_token},
+            llm_kwargs={**sanitize_request_extras(self.request_params), "api_key": step_token},
         )
         # LiteLLM already received the step JWT via constructor kwargs copy.
         # Strip it from Harbor's trajectory dump field for single- and

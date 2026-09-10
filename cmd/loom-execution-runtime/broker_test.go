@@ -20,6 +20,72 @@ import (
 	"time"
 )
 
+func TestLoopbackLedgerBindsPodIdentityAndRejectsCallerScope(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "pod-token")
+	if err := os.WriteFile(tokenFile, []byte("pod-bound-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/internal/service-execution/llm-calls" || r.URL.RawQuery != "" ||
+			r.Header.Get("Authorization") != "Bearer pod-bound-token" ||
+			r.Header.Get("X-Loom-Execution-Lease-Id") != "bound-lease" ||
+			r.Header.Get("X-Loom-Execution-Generation") != "3" ||
+			r.Header.Get("X-Loom-Execution-Role") != "attempt" {
+			t.Errorf("ledger request identity was not broker-owned")
+		}
+		_, _ = w.Write([]byte(`{"trial_id":"bound-trial","team_id":"bound-team","step_id":"agent","items":[]}`))
+	}))
+	defer server.Close()
+	root, _ := url.Parse(server.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: server.Client(), podTokenFile: tokenFile,
+		identity: workloadIdentity{LeaseID: "bound-lease", Generation: 3, ExecutionRole: "attempt"}}
+	proxy, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	for _, test := range []struct {
+		method, suffix string
+		status         int
+	}{
+		{http.MethodGet, "", http.StatusOK},
+		{http.MethodGet, "?trial_id=foreign", http.StatusForbidden},
+		{http.MethodPost, "", http.StatusForbidden},
+	} {
+		request, _ := http.NewRequest(test.method, proxy+"/internal/loom/llm-calls"+test.suffix, nil)
+		request.Header.Set("Authorization", "Bearer attacker-token")
+		request.Header.Set("X-Loom-Execution-Lease-Id", "foreign-lease")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != test.status {
+			t.Errorf("%s %s: got %d", test.method, test.suffix, response.StatusCode)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("unscoped requests reached broker: %d", calls)
+	}
+}
+
+func TestLoopbackLedgerDoesNotExposeUpstreamErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private-upstream-detail", http.StatusForbidden)
+	}))
+	defer server.Close()
+	root, _ := url.Parse(server.URL)
+	broker := &workloadBroker{root: root, client: server.Client(), identity: workloadIdentity{ExecutionRole: "attempt"}}
+	request := httptest.NewRequest(http.MethodGet, "/internal/loom/llm-calls", nil)
+	response := httptest.NewRecorder()
+	broker.serveCallLedger(response, request)
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "private-upstream-detail") {
+		t.Fatal("ledger leaked upstream failure details")
+	}
+}
+
 func TestModelProxyWaitsBeyondBrokerOperationTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

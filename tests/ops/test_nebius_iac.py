@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,43 @@ from scripts.check_nebius_iac import ContractError, check_nebius_iac
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPO_ROOT / "deploy" / "terraform" / "nebius"
+
+
+@pytest.mark.parametrize("missing_agent", [False, True])
+def test_runtime_apply_accepts_catalog_admissions_with_required_agent_coverage(
+    tmp_path: Path, missing_agent: bool
+) -> None:
+    source = (REPO_ROOT / "scripts/ops/apply_nebius_development_runtime.sh").read_text()
+    block = source.split("python3 - \"$service_execution_runtime_profile\" <<'PY'\n", 1)[1].split(
+        "\nPY\n", 1
+    )[0]
+
+    def image(name: str) -> str:
+        return f"registry.example/{name}@sha256:" + "a" * 64
+
+    images = [image("task"), image("runtime"), image("tb90")]
+    if not missing_agent:
+        images.append(image("agent"))
+    profile = {
+        "schema_version": "loom.service-execution-runtime-profile.v1",
+        "logical_pool_id": "nebius-cpu",
+        "candidate_sha": "a" * 40,
+        "execution_class_id": "linux-amd64-cpu-pod-v1",
+        "task_image_ref": image("task"),
+        "runtime_image_ref": image("runtime"),
+        "agent_image_ref": image("agent"),
+        "runtime_binary_sha256": "sha256:" + "b" * 64,
+        "image_admission": {
+            "schema_version": "loom.execution-image-admission.v1",
+            "admissions": [{"statement": {"image_ref": value}} for value in images],
+        },
+    }
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    result = subprocess.run(
+        [sys.executable, "-c", block, str(path)], capture_output=True, text=True
+    )
+    assert result.returncode == (1 if missing_agent else 0), result.stderr
 
 
 def test_gateway_bootstrap_has_operator_recovery_without_public_database() -> None:

@@ -53,6 +53,7 @@ type probe struct {
 }
 
 type sidecar struct {
+	PrivateSandbox bool              `json:"private_sandbox,omitempty"`
 	RoleName       string            `json:"role_name"`
 	ImageRef       string            `json:"image_ref"`
 	Argv           []string          `json:"argv"`
@@ -110,6 +111,7 @@ type plan struct {
 	ExecutionClassID      string                  `json:"execution_class_id"`
 	Composition           string                  `json:"composition"`
 	TaskImageRef          string                  `json:"task_image_ref"`
+	AgentImageRef         *string                 `json:"agent_image_ref,omitempty"`
 	RuntimeImageRef       string                  `json:"runtime_image_ref"`
 	RuntimeBinarySHA256   string                  `json:"runtime_binary_sha256"`
 	ImageAdmission        executionImageAdmission `json:"image_admission"`
@@ -176,6 +178,9 @@ func (p plan) validate() error {
 	}
 	if !digestImage.MatchString(p.TaskImageRef) || !digestImage.MatchString(p.RuntimeImageRef) {
 		return fmt.Errorf("images must be digest-pinned")
+	}
+	if p.AgentImageRef != nil && !digestImage.MatchString(*p.AgentImageRef) {
+		return fmt.Errorf("agent image must be digest-pinned")
 	}
 	if p.RunAsUser <= 0 || p.RunAsUser > 2_147_483_647 ||
 		p.RunAsGroup <= 0 || p.RunAsGroup > 2_147_483_647 ||
@@ -252,12 +257,18 @@ func (p plan) validate() error {
 	}
 	known := map[string]bool{}
 	for _, item := range p.Sidecars {
+		if item.PrivateSandbox && p.AgentImageRef == nil {
+			return fmt.Errorf("private sandboxes require an agent image reference")
+		}
 		if err := item.validate(known); err != nil {
 			return err
 		}
 		known[item.RoleName] = true
 	}
 	requiredImages := []string{p.TaskImageRef, p.RuntimeImageRef}
+	if p.AgentImageRef != nil {
+		requiredImages = append(requiredImages, *p.AgentImageRef)
+	}
 	for _, item := range p.Sidecars {
 		requiredImages = append(requiredImages, item.ImageRef)
 	}
@@ -379,6 +390,9 @@ func (p phase) validate() error {
 }
 
 func (s sidecar) validate(known map[string]bool) error {
+	if s.PrivateSandbox != (s.RoleName == "task-sandbox" || s.RoleName == "verifier-sandbox") {
+		return fmt.Errorf("sandbox roles require private mounts")
+	}
 	if !roleName.MatchString(s.RoleName) ||
 		s.RoleName == "execution" || s.RoleName == "runtime-materializer" ||
 		s.RoleName == "setup" || s.RoleName == "agent" || s.RoleName == "verifier" {

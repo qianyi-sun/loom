@@ -44,6 +44,7 @@ from loom.execution_image_admission import (
 from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     ExecutionRuntimeResultV1,
+    runtime_pod_resources,
     validate_runtime_plan_requirements,
 )
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
@@ -564,6 +565,11 @@ async def reserve_trial_execution(
             required_image_refs=(
                 runtime_contract.task_image_ref,
                 runtime_contract.runtime_image_ref,
+                *(
+                    [runtime_contract.agent_image_ref]
+                    if runtime_contract.agent_image_ref is not None
+                    else []
+                ),
                 *(sidecar.image_ref for sidecar in runtime_contract.sidecars),
             ),
             keyring=image_admission_keyring,
@@ -653,7 +659,15 @@ async def reserve_trial_execution(
     if runtime_contract.execution_class_id != execution_class_id:
         raise ServiceExecutionConflict("runtime plan binds a different execution class")
     class_contract = ExecutionClassV1.model_validate(execution_class.spec_json)
-    admission = evaluate_execution_admission(requirements, class_contract)
+    pod_resources = runtime_pod_resources(runtime_contract)
+    admission_requirements = requirements.model_copy(
+        update={
+            "cpu_millis": pod_resources.cpu_millis,
+            "memory_mib": pod_resources.memory_mib,
+            "ephemeral_storage_mib": pod_resources.ephemeral_storage_mib,
+        }
+    )
+    admission = evaluate_execution_admission(admission_requirements, class_contract)
     if not admission.compatible:
         reason_codes = ",".join(reason.code for reason in admission.reasons)
         raise ServiceExecutionConflict(f"workload is not admitted: {reason_codes}")
