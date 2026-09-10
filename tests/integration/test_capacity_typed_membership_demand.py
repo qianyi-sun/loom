@@ -15,7 +15,7 @@ from loom_capacity_manager.models import (
     CapacitySubject,
     CapacityWorkerProfile,
 )
-from loom_capacity_manager.store import ConfigurationConflictError, UnknownReporterError
+from loom_capacity_manager.store import ConfigurationConflictError, ReportEquivocationError, UnknownReporterError
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
@@ -51,6 +51,23 @@ async def test_two_fresh_typed_owners_publish_demand_without_losing_build_accoun
         accepted = await management.ingest_demand_snapshot(capacity_session, report(member.configuration), actor="owner-agent")
         assert accepted.sequence == 1
     assert await capacity_session.scalar(select(func.count()).select_from(CapacityDemandSnapshot)) == 2
+
+
+async def test_equivocal_owner_does_not_block_another_owners_demand(capacity_session):
+    management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    owners = []
+    for index, owner in enumerate((88010, 88011)):
+        result = await apply(capacity_session, application_request(preparation, execution, owner=owner, revision=index), key=112000 + index)
+        owners.append(result.member.configuration)
+        await management.ingest_demand_snapshot(capacity_session, report(owners[-1]), actor="owner-agent")
+    conflicting = report(owners[0]).model_copy(update={"pending_unassigned": ()})
+    with pytest.raises(ReportEquivocationError):
+        await management.ingest_demand_snapshot(capacity_session, conflicting, actor="owner-a")
+    with pytest.raises(UnknownReporterError):
+        await management.ingest_demand_snapshot(capacity_session, report(owners[0], sequence=2), actor="owner-a")
+    accepted = await management.ingest_demand_snapshot(capacity_session, report(owners[1], sequence=2), actor="owner-b")
+    assert accepted.sequence == 2
+    assert await capacity_session.scalar(select(func.count()).select_from(CapacityDemandSnapshot)) == 3
 
 
 @pytest.mark.parametrize("operation", ("capacity", "update", "destroy"))
