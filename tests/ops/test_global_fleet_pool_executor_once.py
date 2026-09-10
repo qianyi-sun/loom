@@ -41,6 +41,47 @@ from loom_capacity_pool_executor.slurm_inventory import SlurmInventoryPolicy
 _REGISTRATION_NAMESPACE = UUID("0dbdb949-f40e-5ae4-92ac-ee986992a3a2")
 
 
+async def test_active_runtime_replays_lost_inventory_before_new_heartbeat(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
+
+    executor, journal, manager, _, _, _ = executor_fixture(tmp_path, work=None)
+    try:
+        config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
+        config = replace(config, execution=executor.registration.execution)
+        monkeypatch.setattr(once, "_assert_executable_runtime", lambda *_args: None)
+        executor.slurm.validate_authority = AsyncMock()
+        sent = []
+        ingest = manager.ingest_executable_inventory
+
+        async def lost(value):
+            sent.append(value)
+            await ingest(value)
+            raise ConnectionError("response lost")
+
+        async def heartbeat(value):
+            manager.journal_sequence = value.journal_sequence
+            manager.journal_digest = value.journal_digest
+            return SimpleNamespace(heartbeat_sequence=value.heartbeat_sequence,
+                lease_expires_at=datetime.now(UTC) + timedelta(minutes=5), replayed=False, executable=True)
+
+        manager.heartbeat_executable_executor = heartbeat
+        manager.ingest_executable_inventory = lost
+        await ExecutableHeartbeatLoop(executor.registration, journal, manager).heartbeat()
+        with pytest.raises(ConnectionError):
+            await executor._publish_inventory(await manager.executable_checkpoint())
+        manager.ingest_executable_inventory = ingest
+        executor.slurm.inventory = AsyncMock(side_effect=AssertionError("must replay before resampling"))
+        result = await run_executor_once(config, client=manager,
+            authority=executor.registration.execution, executor=executor)
+        assert result.mode == "scale-up"
+        assert manager.inventories[-1] == sent[0]
+        assert not journal.pending_requests()
+    finally:
+        journal.close()
+
+
 @pytest.mark.parametrize("maintenance", ("not-needed", "compacted", "capacity-constrained"))
 async def test_journal_maintenance_routes_before_new_work(tmp_path, monkeypatch, maintenance):
     from unittest.mock import AsyncMock
