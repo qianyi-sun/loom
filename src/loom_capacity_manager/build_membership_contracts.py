@@ -11,10 +11,6 @@ from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
-from loom_capacity_manager.application_origin_contracts import (
-    ManagedApplicationOriginV1,
-    validate_managed_application_origins,
-)
 from loom_capacity_manager.build_value_contracts import (
     PersonalBuildMemberV1 as PersonalBuildMemberV1,
 )
@@ -48,6 +44,14 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_manager.membership_contracts import (
     PersonalMembershipPolicyV1,
 )
+from loom_capacity_manager.retired_member_origin_contracts import (
+    RetiredMembershipSnapshotReferenceV1,
+)
+from loom_capacity_manager.successor_origin_contracts import (
+    ManagedApplicationOrigin,
+    ManagedBuildOriginV1,
+    validate_managed_member_origins,
+)
 
 
 class ExecutionPreparationPolicyV4(ExecutionPreparationPolicyV2):
@@ -56,17 +60,26 @@ class ExecutionPreparationPolicyV4(ExecutionPreparationPolicyV2):
     schema_version: Literal[4] = 4  # type: ignore[assignment]
     personal_membership: PersonalMembershipPolicyV1
     personal_builds: PersonalBuildTemplateV1
-    managed_application_origins: Annotated[tuple[ManagedApplicationOriginV1, ...], Field(max_length=MAX_SUBJECTS)] = ()
+    managed_application_origins: Annotated[tuple[ManagedApplicationOrigin, ...], Field(max_length=MAX_SUBJECTS)] = ()
+    managed_build_origins: Annotated[tuple[ManagedBuildOriginV1, ...], Field(max_length=MAX_SUBJECTS)] = ()
+    retired_source: RetiredMembershipSnapshotReferenceV1 | None = None
 
     @field_validator("managed_application_origins")
     @classmethod
-    def _canonical_origins(cls, values: tuple[ManagedApplicationOriginV1, ...]) -> tuple[ManagedApplicationOriginV1, ...]:
+    def _canonical_origins(cls, values: tuple[ManagedApplicationOrigin, ...]) -> tuple[ManagedApplicationOrigin, ...]:
+        return tuple(sorted(values, key=lambda item: item.configuration.subject_id.int))
+
+    @field_validator("managed_build_origins")
+    @classmethod
+    def _canonical_build_origins(cls, values: tuple[ManagedBuildOriginV1, ...]) -> tuple[ManagedBuildOriginV1, ...]:
         return tuple(sorted(values, key=lambda item: item.configuration.subject_id.int))
 
     @model_validator(mode="after")
     def _managed_origins(self) -> ExecutionPreparationPolicyV4:
-        validate_managed_application_origins(self.managed_application_origins,
-            self.personal_membership.managed_base_subject_ids, self.subject_acknowledgements)
+        validate_managed_member_origins(self.managed_application_origins, self.managed_build_origins,
+            self.personal_membership.managed_base_subject_ids, self.subject_acknowledgements,
+            namespace_id=self.personal_membership.namespace_id, source=self.retired_source,
+            template=self.personal_builds, trusted_release=self.trusted_fleet_release_sha256)
         return self
 
     @field_validator("schema_version", mode="before")
@@ -81,17 +94,26 @@ class ExecutionPreparationV4(ExecutionPreparationV2):
     schema_version: Literal[4] = 4  # type: ignore[assignment]
     personal_membership: PersonalMembershipPolicyV1
     personal_builds: PersonalBuildTemplateV1
-    managed_application_origins: Annotated[tuple[ManagedApplicationOriginV1, ...], Field(max_length=MAX_SUBJECTS)] = ()
+    managed_application_origins: Annotated[tuple[ManagedApplicationOrigin, ...], Field(max_length=MAX_SUBJECTS)] = ()
+    managed_build_origins: Annotated[tuple[ManagedBuildOriginV1, ...], Field(max_length=MAX_SUBJECTS)] = ()
+    retired_source: RetiredMembershipSnapshotReferenceV1 | None = None
 
     @field_validator("managed_application_origins")
     @classmethod
-    def _canonical_origins(cls, values: tuple[ManagedApplicationOriginV1, ...]) -> tuple[ManagedApplicationOriginV1, ...]:
+    def _canonical_origins(cls, values: tuple[ManagedApplicationOrigin, ...]) -> tuple[ManagedApplicationOrigin, ...]:
         return ExecutionPreparationPolicyV4._canonical_origins(values)
+
+    @field_validator("managed_build_origins")
+    @classmethod
+    def _canonical_build_origins(cls, values: tuple[ManagedBuildOriginV1, ...]) -> tuple[ManagedBuildOriginV1, ...]:
+        return ExecutionPreparationPolicyV4._canonical_build_origins(values)
 
     @model_validator(mode="after")
     def _managed_origins(self) -> ExecutionPreparationV4:
-        validate_managed_application_origins(self.managed_application_origins,
+        validate_managed_member_origins(self.managed_application_origins, self.managed_build_origins,
             self.personal_membership.managed_base_subject_ids, self.subject_acknowledgements,
+            namespace_id=self.personal_membership.namespace_id, source=self.retired_source,
+            template=self.personal_builds, trusted_release=self.trusted_fleet_release_sha256,
             configuration_epoch=self.configuration_epoch)
         return self
 

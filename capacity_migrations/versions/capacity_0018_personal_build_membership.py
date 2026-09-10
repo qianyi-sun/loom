@@ -418,6 +418,12 @@ def _install_initial_build_guard() -> None:
         RAISE EXCEPTION 'typed membership execution authority changed' USING ERRCODE = '23514';
       END IF;
       preparation := epoch_record.manifest_payload;
+      IF nullif(preparation -> 'retired_source','null'::jsonb) IS NOT NULL
+         OR coalesce(preparation -> 'managed_build_origins','[]'::jsonb) <> '[]'::jsonb
+         OR EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(preparation -> 'managed_application_origins','[]'::jsonb)) value
+              WHERE value -> 'schema_version' IS DISTINCT FROM '1'::jsonb) THEN
+        RAISE EXCEPTION 'typed successor source graph authentication is not yet connected' USING ERRCODE = '23514';
+      END IF;
       policy := preparation -> 'personal_membership';
       template := preparation -> 'personal_builds';
       IF preparation -> 'schema_version' IS DISTINCT FROM '4'::jsonb

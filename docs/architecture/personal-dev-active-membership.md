@@ -723,9 +723,17 @@ original installation and latest service projections; it cannot claim readiness.
 The inherited source's final global head is distinct from the subject's own event
 head. Old recreation certificates retain their original epoch and revision inside
 that provenance, never rewritten as a successor epoch's certificate. Structural
-contracts represent empty-epoch inheritance, but durable recursive source-graph
-validation, successor preparation consumers and complete typed import are still
-unconnected. These new origins do not remove the import or execution interlocks.
+contracts represent empty-epoch inheritance. V4 policy/preparation now represent
+`managed_build_origins` and an explicit `retired_source`, alongside a discriminated
+V1/V2 application-origin union that cannot strip inherited fields. All managed
+identities have exactly one origin and matching acknowledgement; build origins
+must retain the exact template and trusted runtime release. The immediate source
+is explicit even when there are no membership events or inherited member fields.
+These additions revise unpublished, unactivated V4 documents only; published
+V1/V2/V3 documents keep their original bytes. Durable source-graph authentication,
+purpose-aware successor consumers and complete typed import remain unconnected.
+The typed history reader explicitly rejects these source-bearing preparations
+until those checks are connected; import and execution interlocks remain closed.
 
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete

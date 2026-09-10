@@ -96,6 +96,7 @@ def test_successor_operator_policy_retains_the_same_complete_origins():
 
 async def test_durable_reader_cannot_ignore_an_unconnected_source_graph():
     from unittest.mock import AsyncMock
+
     from loom_capacity_manager.models import CapacityExecutionEpoch
     from loom_capacity_manager.store import ConfigurationConflictError
     from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history

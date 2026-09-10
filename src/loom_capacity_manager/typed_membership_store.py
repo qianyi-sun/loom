@@ -125,6 +125,8 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
         raise ExecutionConflictError("typed membership execution is unavailable")
     try:
         preparation = ExecutionPreparationV4.model_validate_json(json.dumps(epoch.manifest_payload))
+        if preparation.retired_source is not None:
+            raise ConfigurationConflictError("typed successor source graph authentication is not yet connected")
         _require_values(epoch, {
             "execution_manifest_sha256": canonical_executable_digest(preparation),
             "authority_incarnation": preparation.authority_incarnation,
