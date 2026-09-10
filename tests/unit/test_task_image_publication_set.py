@@ -185,3 +185,19 @@ def test_model_constructor_and_expected_collection_bypasses_are_revalidated(chan
         data["expected"] = (expected[0], expected[0])
     with pytest.raises(ValueError):
         module().verify_publication_set(**data)
+
+
+@pytest.mark.parametrize("change", ["windows", "duplicate-build-name", "build-prebuilt-collision"])
+def test_frozen_task_cannot_collapse_distinct_sidecars_or_change_operating_system(change):
+    data = fixture()
+    task = data["task"].model_dump(mode="json")
+    if change == "windows":
+        task["environment"]["os"] = "windows"
+    else:
+        sidecar = {"name": "db", "dockerfile": "different/Dockerfile"}
+        if change == "build-prebuilt-collision":
+            sidecar = {"name": "db", "docker_image": "different/image@sha256:" + "b" * 64}
+        task["environment"]["sidecars"].append(sidecar)
+    data["task"] = type(data["task"]).model_validate(task)
+    with pytest.raises(ValueError):
+        module().verify_publication_set(**data)
