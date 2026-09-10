@@ -5,6 +5,7 @@ from copy import deepcopy
 from importlib import import_module
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import allocate_shadow
@@ -13,6 +14,8 @@ from loom_capacity_manager.membership_launch_authority import resolve_allocation
 from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuthorityState,
+    CapacityCandidate,
+    CapacityExecutableIntent,
     CapacityExecutionEpoch,
 )
 from loom_capacity_manager.reconciler import _commit_reconciled_epoch
@@ -21,6 +24,7 @@ from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
     ExecutionConflictError,
+    ReportEquivocationError,
     WriterFence,
 )
 from tests.capacity_build_membership_fixtures import (
@@ -158,6 +162,37 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                         await resolve_allocation_launch_subject(reader, epoch, row,
                             subject_id=member.configuration.subject_id, require_current=True)
             selected = sealed.membership.members[1]
+            # Missing work from an equivocal owner must not block another
+            # owner's global rank, but corrupt provenance must still fail shut.
+            first_subject = sealed.hypothetical_launch_rank[0].subject_id
+            next_owner_rank = next(rank for rank in sealed.hypothetical_launch_rank
+                if rank.subject_id != first_subject)
+            target = CapacityExecutableIntent(
+                execution_epoch=epoch.execution_epoch, allocation_epoch=row.allocation_epoch,
+                launch_rank=next_owner_rank.rank)
+            with pytest.raises(ExecutionConflictError, match="earlier global launch"):
+                await CapacityExecutionStore._assert_central_launch_order(reader, (), target)
+            savepoint = await reader.begin_nested()
+            first_member = next(member for member in sealed.membership.members
+                if member.configuration.subject_id == first_subject)
+            with pytest.raises(ReportEquivocationError):
+                await management.ingest_demand_snapshot(reader,
+                    report(first_member.configuration).model_copy(update={"pending_unassigned": ()}),
+                    actor="equivocal-owner")
+            assert not await CapacityExecutionStore._membership_target_current(
+                reader, epoch, row, subject_id=first_subject)
+            assert await CapacityExecutionStore._membership_target_current(
+                reader, epoch, row, subject_id=next_owner_rank.subject_id)
+            with pytest.raises(ExecutionConflictError):
+                await resolve_allocation_launch_subject(reader, epoch, row,
+                    subject_id=first_subject, require_current=True)
+            await CapacityExecutionStore._assert_central_launch_order(reader, (), target)
+            await reader.execute(update(CapacityCandidate).where(
+                CapacityCandidate.subject_id == first_subject).values(
+                    source_payload={"publication_sha256": "f" * 64}))
+            with pytest.raises(ExecutionConflictError):
+                await CapacityExecutionStore._assert_central_launch_order(reader, (), target)
+            await savepoint.rollback()
             for tamper in ("snapshot-head", "legacy-downgrade"):
                 changed = CapacityAllocationEpoch(**{column.key: getattr(row, column.key) for column in row.__table__.columns})
                 changed.complete_payload = deepcopy(row.complete_payload)
