@@ -18,7 +18,6 @@ from loom_capacity_manager.contracts import SubjectConfigurationV1
 from loom_capacity_manager.executable_contracts import (
     ExecutableIntentBindingV2,
     ExecutableProtectedReleaseV2,
-    ExecutableTerminalInventoryEvidenceV2,
     canonical_executable_digest,
 )
 from loom_capacity_manager.grant_contracts import (
@@ -42,6 +41,7 @@ from loom_capacity_manager.models import (
     CapacitySubmissionIntent,
 )
 from loom_capacity_manager.store import ConfigurationConflictError
+from loom_capacity_manager.typed_inventory_contracts import parse_terminal_inventory_evidence
 
 
 async def _accepted_release_witness(
@@ -101,7 +101,9 @@ async def _accepted_release_witness(
     else:
         terminal_row = (
             await session.execute(
-                select(CapacityExecutableTerminalInventoryEvidence).execution_options(populate_existing=True).where(
+                select(CapacityExecutableTerminalInventoryEvidence)
+                .execution_options(populate_existing=True)
+                .where(
                     CapacityExecutableTerminalInventoryEvidence.intent_id == intent.intent_id,
                 )
             )
@@ -109,9 +111,7 @@ async def _accepted_release_witness(
         if terminal_row is None:
             raise ConfigurationConflictError("predecessor terminal release witness is absent")
         try:
-            terminal = ExecutableTerminalInventoryEvidenceV2.model_validate_json(
-                json.dumps(terminal_row.evidence_payload)
-            )
+            terminal = parse_terminal_inventory_evidence(json.dumps(terminal_row.evidence_payload))
         except ValueError as exc:
             raise ConfigurationConflictError(
                 "predecessor terminal release witness is invalid"
@@ -179,14 +179,16 @@ async def _legacy_shape_witness(
         raise ConfigurationConflictError(error)
     evidence = (
         await session.execute(
-            select(CapacityReservationReleaseEvidence).execution_options(populate_existing=True).where(
-                CapacityReservationReleaseEvidence.shape_instance_id == shape.shape_instance_id
-            )
+            select(CapacityReservationReleaseEvidence)
+            .execution_options(populate_existing=True)
+            .where(CapacityReservationReleaseEvidence.shape_instance_id == shape.shape_instance_id)
         )
     ).scalar_one_or_none()
     protected = (
         await session.execute(
-            select(CapacityProtectedReleaseAcknowledgement).execution_options(populate_existing=True).where(
+            select(CapacityProtectedReleaseAcknowledgement)
+            .execution_options(populate_existing=True)
+            .where(
                 CapacityProtectedReleaseAcknowledgement.shape_instance_id == shape.shape_instance_id
             )
         )
@@ -246,7 +248,9 @@ async def _legacy_shape_witness(
         raise ConfigurationConflictError(error)
     observation = (
         await session.execute(
-            select(CapacityExecutorObservation).execution_options(populate_existing=True).where(
+            select(CapacityExecutorObservation)
+            .execution_options(populate_existing=True)
+            .where(
                 CapacityExecutorObservation.executor_incarnation == tranche.executor_incarnation,
                 CapacityExecutorObservation.inventory_sequence == item.inventory_sequence,
             )
@@ -344,9 +348,9 @@ async def _legacy_release_witness(
     ).all()
     intents = (
         await session.scalars(
-            select(CapacitySubmissionIntent).execution_options(populate_existing=True).where(
-                CapacitySubmissionIntent.tranche_id == tranche.id
-            )
+            select(CapacitySubmissionIntent)
+            .execution_options(populate_existing=True)
+            .where(CapacitySubmissionIntent.tranche_id == tranche.id)
         )
     ).all()
     witnesses = []
@@ -407,7 +411,9 @@ async def predecessor_release_sha256(
         CapacitySubmissionIntent,
     )
     if any(isinstance(row, ledger_models) for row in session.new | session.dirty | session.deleted):
-        raise ConfigurationConflictError("predecessor executable or legacy release witness has unflushed changes")
+        raise ConfigurationConflictError(
+            "predecessor executable or legacy release witness has unflushed changes"
+        )
     identity = (predecessor.subject_id, predecessor.subject_incarnation)
     observed = (
         await session.execute(

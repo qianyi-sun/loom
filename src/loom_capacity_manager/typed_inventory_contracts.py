@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -25,10 +26,15 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorInventoryV2,
+    ExecutableIntentBindingV2,
+    ExecutableInventoryRecordV2,
+    ExecutableTerminalInventoryEvidenceV2,
     ExecutionContextV2,
     StrictV2Model,
+    _utc_time,
     _validate_journal_head,
     canonical_executable_bytes,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.typed_ownership_contracts import (
     SignedExecutableOwnershipProofV3,
@@ -136,6 +142,54 @@ class ExecutableExecutorInventoryV3(_StrictInventoryV3):
         return self
 
 
+ExecutorInventory = ExecutableExecutorInventoryV2 | ExecutableExecutorInventoryV3
+InventoryRecord = ExecutableInventoryRecordV2 | ExecutableInventoryRecordV3
+
+
+class ExecutableTerminalInventoryEvidenceV3(_StrictInventoryV3):
+    binding: ExecutableIntentBindingV2
+    inventory_execution: ExecutionContextV2
+    inventory_sequence: PositiveQuantity
+    inventory_digest: Digest
+    journal_sequence: Quantity
+    journal_digest: Digest
+    record: ExecutableInventoryRecordV3
+    observed_at: datetime
+    executable: Literal[True] = True
+
+    _observed_at_utc = field_validator("observed_at")(_utc_time)
+
+    @model_validator(mode="after")
+    def _exact_terminal_binding(self) -> ExecutableTerminalInventoryEvidenceV3:
+        _validate_journal_head(self.journal_sequence, self.journal_digest)
+        proof = self.record.ownership_proof
+        if (
+            self.record.state != "terminal"
+            or self.record.terminal_evidence_sha256 is None
+            or proof is None
+            or self.record.authority_scope != "dedicated-loom-association"
+        ):
+            raise ValueError(
+                "terminal inventory evidence requires one authenticated terminal record"
+            )
+        if (
+            proof.metadata.binding != self.binding
+            or self.inventory_execution.model_dump(mode="python")
+            != self.binding.execution.model_dump(
+                mode="python", exclude={"allocation_epoch", "executable"}
+            )
+            or self.record.resources != self.binding.resources
+            or self.record.node_ids != self.binding.node_ids
+        ):
+            raise ValueError("terminal inventory evidence binding changed")
+        return self
+
+
+TerminalInventoryEvidence = (
+    ExecutableTerminalInventoryEvidenceV2 | ExecutableTerminalInventoryEvidenceV3
+)
+
+
 def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -145,21 +199,40 @@ def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def parse_executor_inventory(
-    payload: bytes | str,
-) -> ExecutableExecutorInventoryV2 | ExecutableExecutorInventoryV3:
+def _versioned_inventory_payload(payload: bytes | str) -> tuple[bytes, int]:
     encoded = payload.encode("utf-8") if isinstance(payload, str) else payload
     if not isinstance(encoded, bytes) or len(encoded) > MAX_CONTRACT_BYTES:
         raise ValueError("inventory exceeds its byte bound")
     value = json.loads(encoded, object_pairs_hook=_unique_pairs)
     if not isinstance(value, dict) or type(value.get("schema_version")) is not int:
         raise ValueError("inventory schema must be an exact integer")
-    if value["schema_version"] == 2:
-        return ExecutableExecutorInventoryV2.model_validate_json(encoded)
-    if value["schema_version"] != 3:
+    if value["schema_version"] not in (2, 3):
         raise ValueError("unsupported executor inventory schema")
-    _exact_schema_types(value)
+    if value["schema_version"] == 3:
+        _exact_schema_types(value)
+    return encoded, value["schema_version"]
+
+
+def parse_executor_inventory(payload: bytes | str) -> ExecutorInventory:
+    encoded, version = _versioned_inventory_payload(payload)
+    if version == 2:
+        return ExecutableExecutorInventoryV2.model_validate_json(encoded)
     return ExecutableExecutorInventoryV3.model_validate_json(encoded)
+
+
+def parse_terminal_inventory_evidence(payload: bytes | str) -> TerminalInventoryEvidence:
+    encoded, version = _versioned_inventory_payload(payload)
+    if version == 2:
+        return ExecutableTerminalInventoryEvidenceV2.model_validate_json(encoded)
+    return ExecutableTerminalInventoryEvidenceV3.model_validate_json(encoded)
+
+
+def inventory_confirmation_journal_head(inventory: ExecutorInventory) -> tuple[int, str]:
+    if type(inventory) is ExecutableExecutorInventoryV3:
+        return typed_inventory_confirmation_journal_head(inventory)
+    if type(inventory) is ExecutableExecutorInventoryV2:
+        return canonical_inventory_confirmation_journal_head(inventory)
+    raise ValueError("unsupported inventory confirmation contract")
 
 
 def typed_inventory_confirmation_journal_head(

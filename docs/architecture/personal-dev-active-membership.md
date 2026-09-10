@@ -1043,14 +1043,30 @@ Launch preparation fetches, renders and retains facts before permit consumption.
 Replay reconstructs the original bounded facts, verifies their digest and signed
 references, and re-renders against the registered operator policy without querying
 the current manager subject. Every submission and physical-binding envelope keeps
-the same facts. Typed operation and inventory admission remain explicitly closed
-until purpose-aware inventory, cleanup and bootstrap consumers are connected.
+the same facts. Public typed operation remains explicitly closed until the
+database, protected cleanup and bootstrap consumers are connected.
 The interlock runs before public tick, drain and recovery entrypoints can replay
 any retained command. Separate schema-3 inventory records preserve the typed
 proof and immutable executor binding, with exact version parsing and journal
-confirmation hashes over their actual bytes. Legacy inventory parsing and the
-legacy durable ingestion method reject these records; structural contracts alone
-do not authenticate historical allocation provenance or open inventory admission.
+confirmation hashes over their actual bytes. The authenticated
+`PUT /v3/executors/{pool_id}/inventory` route accepts only exact schema-3 inventory
+for an exact schema-4 execution manifest. Its durable ingestion checks the
+operator policy, executor registration and lease before updating telemetry.
+Ownership verification joins the signed proof to the historical allocation,
+configuration, whole acknowledgement, candidate and purpose-specific member
+event. Superseded owners remain accountable for cleanup; historical verification
+does not authorize new work. The legacy route and ingestion method remain exact
+schema 2.
+
+Prepared schema-4 authority readback authenticates immutable history without
+requiring activation, rejects active membership events, and retains a zero
+capacity ceiling. Active reporter currentness still requires activated history;
+this readback does not enable preparation or activation. Manager readback and
+internal executor inventory publication preserve versioned terminal evidence.
+Database terminal/release guards and protected-agent import remain downstream
+implementation boundaries, so schema-3 telemetry is not proof of working
+terminal cleanup. Complete inventory journal records also retain their existing
+size limit; bounded large-inventory retention is required before live operation.
 
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.

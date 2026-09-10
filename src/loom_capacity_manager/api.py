@@ -172,6 +172,11 @@ from loom_capacity_manager.store import (
     UnknownReporterError,
     WriterFence,
 )
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutableExecutorInventoryV3,
+    ExecutorInventory,
+    parse_executor_inventory,
+)
 
 _ContractT = TypeVar("_ContractT", bound=BaseModel)
 
@@ -337,15 +342,15 @@ def _manager_execution_blockers(authority: CapacityAuthorityState) -> list[str]:
 
 def _validated_executable_inventory(
     row: CapacityExecutableExecutorState,
-) -> ExecutableExecutorInventoryV2 | None:
+) -> ExecutorInventory | None:
     payload = row.inventory_payload
     if payload is None or row.last_inventory_digest is None:
         return None
     try:
         # JSONB returns UUID values as strings; validate through the wire form
         # so the strict executable contracts restore their exact UUID types.
-        inventory = ExecutableExecutorInventoryV2.model_validate_json(json.dumps(payload))
-    except ValidationError:
+        inventory = parse_executor_inventory(json.dumps(payload))
+    except ValueError:
         return None
     if (
         inventory.execution.execution_epoch != row.execution_epoch
@@ -366,7 +371,7 @@ def _executor_status_item(
     *,
     now: datetime,
     freshness_seconds: int,
-) -> tuple[dict[str, Any], ExecutableExecutorInventoryV2 | None]:
+) -> tuple[dict[str, Any], ExecutorInventory | None]:
     inventory = _validated_executable_inventory(row)
     blockers: list[str] = []
     if row.state != "current":
@@ -644,6 +649,16 @@ def create_app(
     protected_release_acknowledgement_body = contract_body(DryRunProtectedReleaseAcknowledgementV1)
     executable_heartbeat_body = contract_body(ExecutableExecutorHeartbeatV2)
     executable_inventory_body = contract_body(ExecutableExecutorInventoryV2)
+
+    async def typed_inventory_body(request: Request) -> ExecutableExecutorInventoryV3:
+        try:
+            value = parse_executor_inventory(await request.body())
+            if type(value) is not ExecutableExecutorInventoryV3:
+                raise ValueError("typed inventory requires schema 3")
+            return value
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid capacity contract") from exc
+
     execution_preparation_body = contract_body(ExecutionPreparationV2)
     execution_registration_body = contract_body(ExecutableExecutorRegistrationV2)
     execution_abort_body = contract_body(ExecutionPreparationAbortV2)
@@ -1595,7 +1610,9 @@ def create_app(
 
     @app.get("/v3/executors/{pool_id}/intents/{intent_id}/launch-subject")
     async def executable_launch_subject(
-        pool_id: str, intent_id: UUID, request: Request,
+        pool_id: str,
+        intent_id: UUID,
+        request: Request,
         actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
     ) -> Response:
         executor = executor_binding(actor, pool_id=pool_id)
@@ -1603,9 +1620,12 @@ def create_app(
         _sessions, management, _writer = runtime(request)
         try:
             async with session_factory() as session:
-                result = await executions.launch_subject(session, executor,
-                    intent_id=intent_id, management=management)
-            return Response(content=canonical_launch_subject_bytes(result), media_type="application/json")
+                result = await executions.launch_subject(
+                    session, executor, intent_id=intent_id, management=management
+                )
+            return Response(
+                content=canonical_launch_subject_bytes(result), media_type="application/json"
+            )
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
@@ -1644,6 +1664,33 @@ def create_app(
         try:
             async with session_factory() as session:
                 result = await executions.ingest_executor_inventory(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v3/executors/{pool_id}/inventory")
+    async def ingest_typed_executable_inventory(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableExecutorInventoryV3 = Depends(typed_inventory_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        _sessions, management, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.ingest_typed_executor_inventory(
+                    session, value, management=management
+                )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc

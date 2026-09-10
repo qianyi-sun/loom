@@ -57,6 +57,10 @@ from loom_capacity_manager.launch_subject_contracts import (
     ExecutableLaunchSubjectV3,
     parse_launch_subject,
 )
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutableExecutorInventoryV3,
+    ExecutorInventory,
+)
 
 _MAX_CREDENTIAL_BYTES = MAX_BEARER_TOKEN_BYTES
 _MAX_RECEIPT_BYTES = 64 * 1024
@@ -642,7 +646,11 @@ class ExecutableCapacityExecutorClient:
         execution = binding.execution if binding is not None else getattr(value, "execution", None)
         epoch_context = isinstance(
             value,
-            (ExecutableExecutorHeartbeatV2, ExecutableExecutorInventoryV2),
+            (
+                ExecutableExecutorHeartbeatV2,
+                ExecutableExecutorInventoryV2,
+                ExecutableExecutorInventoryV3,
+            ),
         )
         if epoch_context:
             if not isinstance(execution, ExecutionContextV2):
@@ -777,14 +785,22 @@ class ExecutableCapacityExecutorClient:
     async def launch_subject(self, binding: ExecutableIntentBindingV2) -> ExecutableLaunchSubjectV3:
         """Fetch exact current manager facts; this does not consume a permit."""
         self._assert_contract_binding(binding)
-        status_code, content = await _stream_response_bounded(self._http, "GET",
+        status_code, content = await _stream_response_bounded(
+            self._http,
+            "GET",
             f"{self._manager_origin}/v3/executors/{self.registration.pool_id}/intents/{binding.intent_id}/launch-subject",
-            headers={"Authorization": f"Bearer {self._bearer_token}"}, body_label="launch subject",
-            max_bytes=MAX_LAUNCH_SUBJECT_BYTES)
+            headers={"Authorization": f"Bearer {self._bearer_token}"},
+            body_label="launch subject",
+            max_bytes=MAX_LAUNCH_SUBJECT_BYTES,
+        )
         if 400 <= status_code < 500:
-            raise ExecutorRejectedError(f"capacity manager rejected launch subject with status {status_code}")
+            raise ExecutorRejectedError(
+                f"capacity manager rejected launch subject with status {status_code}"
+            )
         if status_code != 200:
-            raise ExecutorTransportError(f"capacity manager launch subject failed with status {status_code}")
+            raise ExecutorTransportError(
+                f"capacity manager launch subject failed with status {status_code}"
+            )
         try:
             value = parse_launch_subject(content)
         except ValueError as exc:
@@ -913,11 +929,14 @@ class ExecutableCapacityExecutorClient:
 
     async def ingest_executable_inventory(
         self,
-        value: ExecutableExecutorInventoryV2,
+        value: ExecutorInventory,
     ) -> ExecutableInventoryReceiptV2:
+        if type(value) not in (ExecutableExecutorInventoryV2, ExecutableExecutorInventoryV3):
+            raise ExecutorTransportError("unsupported executable inventory contract")
+        version = "v3" if isinstance(value, ExecutableExecutorInventoryV3) else "v2"
         receipt = await self._request(
             "PUT",
-            f"/v2/executors/{self.registration.pool_id}/inventory",
+            f"/{version}/executors/{self.registration.pool_id}/inventory",
             ExecutableInventoryReceiptV2,
             contract=value,
         )

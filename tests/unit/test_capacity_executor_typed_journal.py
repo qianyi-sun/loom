@@ -187,15 +187,22 @@ async def test_typed_runtime_interlock_precedes_restart_or_replay_calls(tmp_path
 
 @pytest.mark.parametrize("terminal", (False, True))
 @pytest.mark.parametrize("pool", ("oldlab", "gb10"))
-async def test_typed_inventory_preserves_proof_through_publication_and_local_readback(tmp_path, terminal, pool):
-    from tests.unit.test_capacity_executor_executable import _job_from_launch, _terminal_from_job
+async def test_typed_inventory_preserves_proof_through_publication_and_local_readback(
+    tmp_path, terminal, pool
+):
     from loom_capacity_manager.typed_inventory_contracts import ExecutableExecutorInventoryV3
+    from tests.unit.test_capacity_executor_executable import _job_from_launch, _terminal_from_job
+
     runtime, journal, context = typed_executor(tmp_path, pool=pool)
     try:
         subject = facts(context)
         rendered = runtime.render_launch(context.binding, launch_subject=subject)
-        runtime._remember_launch(rendered, launch_subject=subject,
-            bootstrap_registration_epoch=1, event="slurm-submit-confirmed")
+        runtime._remember_launch(
+            rendered,
+            launch_subject=subject,
+            bootstrap_registration_epoch=1,
+            event="slurm-submit-confirmed",
+        )
         job = _job_from_launch(context, rendered_request=rendered.request, job_id="101")
         if terminal:
             runtime.slurm.terminal_jobs = (_terminal_from_job(job),)
@@ -210,7 +217,10 @@ async def test_typed_inventory_preserves_proof_through_publication_and_local_rea
         assert inventory.records[0].state == ("terminal" if terminal else "active")
         runtime._assert_inventory_binding(inventory)
         if terminal:
-            assert runtime._confirmed_terminal_inventory_record(context.binding) == inventory.records[0]
+            assert (
+                runtime._confirmed_terminal_inventory_record(context.binding)
+                == inventory.records[0]
+            )
     finally:
         journal.__exit__(None, None, None)
 

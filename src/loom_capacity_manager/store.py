@@ -46,7 +46,6 @@ from loom_capacity_manager.contracts import (
     checked_sum,
 )
 from loom_capacity_manager.executable_contracts import (
-    ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
     ExecutionActivationV2,
     ExecutionAuthorityV2,
@@ -58,7 +57,6 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionRetirementV2,
     LegacyWriterFenceV2,
     canonical_executable_digest,
-    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.fleet_state import (
     FleetStateError,
@@ -102,6 +100,10 @@ from loom_capacity_manager.models import (
 from loom_capacity_manager.preparation_readiness import (
     _load_prepared_execution_readiness,
     canonical_prepared_readiness_digest,
+)
+from loom_capacity_manager.typed_inventory_contracts import (
+    inventory_confirmation_journal_head,
+    parse_executor_inventory,
 )
 
 
@@ -3215,11 +3217,11 @@ class CapacityManagementStore:
                     else state.inventory_payload.get("journal_digest")
                 )
                 try:
-                    inventory_contract = ExecutableExecutorInventoryV2.model_validate_json(
+                    inventory_contract = parse_executor_inventory(
                         json.dumps(state.inventory_payload)
                     )
                     confirmation_sequence, confirmation_digest = (
-                        canonical_inventory_confirmation_journal_head(inventory_contract)
+                        inventory_confirmation_journal_head(inventory_contract)
                     )
                 except ValueError:
                     confirmation_sequence, confirmation_digest = -1, ""
@@ -3335,12 +3337,25 @@ class CapacityManagementStore:
         preparation: ExecutionPreparationV2
         try:
             if row.manifest_payload.get("schema_version") == 4:
-                # Authenticate retained active typed authority for allocation.
-                # Preparation/activation and legacy runtime parsers stay closed
-                # until their purpose-aware consumers are connected.
-                from loom_capacity_manager.typed_membership_store import _load_typed_history
+                # Prepared telemetry authenticates an immutable fresh manifest,
+                # not activated reporter currentness. Mutation/current-demand
+                # readers remain active-only; this never creates or activates it.
+                from loom_capacity_manager.typed_membership_store import (
+                    _load_typed_history,
+                    _load_typed_immutable_history,
+                )
 
-                preparation = (await _load_typed_history(session, row.execution_epoch)).preparation
+                if row.state == "prepared":
+                    history = await _load_typed_immutable_history(session, row.execution_epoch)
+                    if history.events:
+                        raise ExecutionConflictError(
+                            "prepared typed authority has active membership history"
+                        )
+                    preparation = history.preparation
+                else:
+                    preparation = (
+                        await _load_typed_history(session, row.execution_epoch)
+                    ).preparation
             else:
                 preparation = self._execution_preparation_from_row(row)
             await self._validate_execution_preparation(
@@ -3356,7 +3371,11 @@ class CapacityManagementStore:
                     row,
                     preparation,
                 )
-        except (ExecutionConflictError, ExecutionPreparationDisabledError, ConfigurationConflictError) as exc:
+        except (
+            ExecutionConflictError,
+            ExecutionPreparationDisabledError,
+            ConfigurationConflictError,
+        ) as exc:
             raise AuthorityRecoveryError(
                 "active execution authority executor binding or owner policy changed"
             ) from exc
@@ -3515,9 +3534,13 @@ class CapacityManagementStore:
             raise ExecutionConflictError("execution preparation and policy versions differ")
         if isinstance(request, ExecutionPreparationV4):
             if not isinstance(policy, ExecutionPreparationPolicyV4) or any(
-                getattr(request, name) != getattr(policy, name) for name in (
-                    "personal_membership", "personal_builds", "managed_application_origins",
-                    "managed_build_origins", "retired_source",
+                getattr(request, name) != getattr(policy, name)
+                for name in (
+                    "personal_membership",
+                    "personal_builds",
+                    "managed_application_origins",
+                    "managed_build_origins",
+                    "retired_source",
                 )
             ):
                 raise ExecutionConflictError("typed membership policy is not configured exactly")
@@ -4236,7 +4259,8 @@ class CapacityManagementStore:
     ) -> AllocationInputV1:
         authority = (
             await session.execute(
-                select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
+                select(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
                 .execution_options(populate_existing=True)
             )
         ).scalar_one()
@@ -4305,15 +4329,28 @@ class CapacityManagementStore:
                     _validated_materialization,
                 )
 
-                typed_history = await _load_typed_history(session, execution_epoch_row.execution_epoch)
-                if typed_history.epoch.configuration_epoch != active.configuration_epoch:
-                    raise ConfigurationConflictError("typed membership active configuration changed")
-                typed_rows, _accounts = await _validated_materialization(
-                    session, typed_history.epoch, typed_history.fleet, typed_history.latest,
+                typed_history = await _load_typed_history(
+                    session, execution_epoch_row.execution_epoch
                 )
-                subjects = tuple(_parse_contract(SubjectConfigurationV1, row.payload) for row in typed_rows)
-                managed_ids = set(typed_history.preparation.personal_membership.managed_base_subject_ids)
-                managed_base_subjects = tuple(value for value in base_subjects if value.subject_id in managed_ids)
+                if typed_history.epoch.configuration_epoch != active.configuration_epoch:
+                    raise ConfigurationConflictError(
+                        "typed membership active configuration changed"
+                    )
+                typed_rows, _accounts = await _validated_materialization(
+                    session,
+                    typed_history.epoch,
+                    typed_history.fleet,
+                    typed_history.latest,
+                )
+                subjects = tuple(
+                    _parse_contract(SubjectConfigurationV1, row.payload) for row in typed_rows
+                )
+                managed_ids = set(
+                    typed_history.preparation.personal_membership.managed_base_subject_ids
+                )
+                managed_base_subjects = tuple(
+                    value for value in base_subjects if value.subject_id in managed_ids
+                )
                 parsed_preparation = None
             else:
                 parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
@@ -4556,8 +4593,10 @@ class CapacityManagementStore:
             from loom_capacity_manager.membership import resolved_subject_references
 
             typed_value = DelegatedAllocationInputV3(
-                **values, preparation=typed_history.preparation,
-                managed_base_subjects=managed_base_subjects, membership=typed_history.snapshot(),
+                **values,
+                preparation=typed_history.preparation,
+                managed_base_subjects=managed_base_subjects,
+                membership=typed_history.snapshot(),
             )
             resolved_subject_references(typed_value)
             return typed_value
