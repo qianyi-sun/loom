@@ -91,6 +91,37 @@ async def test_empty_release_set_is_stable_and_identity_bound(
     assert first != await release_digest(capacity_session, changed)
 
 
+@pytest.mark.parametrize("pending", ("new", "dirty", "deleted"))
+async def test_release_proof_preserves_and_rejects_unflushed_ledger_edits(
+    capacity_session: AsyncSession, pending: str
+) -> None:
+    active, _ = await _active_plan(capacity_session)
+    store = CapacityExecutionStore()
+    await _heartbeat(store, capacity_session, active, pool_id="gb10")
+    await store.next_pool_work(capacity_session, executor_binding("gb10"))
+    intent = (await capacity_session.scalars(select(CapacityExecutableIntent))).first()
+    assert intent is not None
+    subject = (
+        await capacity_session.scalars(
+            select(CapacitySubject).where(CapacitySubject.subject_id == intent.subject_id)
+        )
+    ).one()
+    configuration = SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload))
+    if pending == "new":
+        # Deliberately incomplete: a proof must not flush callers' pending work.
+        capacity_session.add(CapacityObservedCommitment(commitment_identity="pending-proof"))
+    elif pending == "dirty":
+        intent.state = "released"
+    else:
+        await capacity_session.delete(intent)
+    before = (set(capacity_session.new), set(capacity_session.dirty), set(capacity_session.deleted))
+    with capacity_session.no_autoflush:
+        with pytest.raises(ConfigurationConflictError, match="witness has unflushed changes"):
+            await release_digest(capacity_session, configuration)
+    assert before == (set(capacity_session.new), set(capacity_session.dirty), set(capacity_session.deleted))
+    assert intent.state == ("released" if pending == "dirty" else "proposed")
+
+
 @pytest.mark.parametrize("same_predecessor", (False, True))
 async def test_quarantined_payload_attribution_blocks_only_its_exact_predecessor(
     capacity_session: AsyncSession, same_predecessor: bool
