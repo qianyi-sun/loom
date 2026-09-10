@@ -1,0 +1,25 @@
+"""The launch facts route authenticates pool executors before querying evidence."""
+
+from unittest.mock import AsyncMock
+
+from loom_capacity_manager.launch_subject_contracts import canonical_launch_subject_bytes
+from tests.integration.test_capacity_manager_api import (
+    _v2_executor_headers,
+    execution_preparation_api_context as execution_preparation_api_context,
+)
+from tests.unit.test_capacity_launch_subject_contract import response
+
+
+def test_launch_subject_route_requires_pool_actor_and_returns_canonical_facts(execution_preparation_api_context, monkeypatch):
+    client, app, *_ = execution_preparation_api_context
+    value = response()
+    resolve = AsyncMock(return_value=value)
+    monkeypatch.setattr(app.state.execution_store, "launch_subject", resolve, raising=False)
+    path = f"/v3/executors/oldlab/intents/{value.binding.intent_id}/launch-subject"
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=_v2_executor_headers("gb10")).status_code == 403
+    resolve.assert_not_awaited()
+    actual = client.get(path, headers=_v2_executor_headers("oldlab"))
+    assert actual.status_code == 200, actual.text
+    assert actual.content == canonical_launch_subject_bytes(value)
+    assert resolve.await_args.kwargs["intent_id"] == value.binding.intent_id
