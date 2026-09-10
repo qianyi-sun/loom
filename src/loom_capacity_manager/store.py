@@ -1366,6 +1366,8 @@ class CapacityManagementStore:
         self,
         session: AsyncSession,
         subject: SubjectConfigurationV1,
+        *,
+        allow_equivocal: bool = False,
     ) -> None:
         candidate = (
             await session.execute(
@@ -1401,7 +1403,9 @@ class CapacityManagementStore:
                     CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
                     CapacityDemandReporter.reporter_incarnation
                     == subject.demand_reporter_incarnation,
-                    CapacityDemandReporter.state == "current",
+                    CapacityDemandReporter.state.in_(
+                        ("current", "equivocal") if allow_equivocal else ("current",)
+                    ),
                 )
             )
         ).scalar_one_or_none()

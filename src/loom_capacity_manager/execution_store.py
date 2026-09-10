@@ -108,6 +108,7 @@ from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
+    ConfigurationConflictError,
     ExecutionConflictError,
 )
 from loom_capacity_manager.topology import TopologyInfeasible, TopologySearchLimit, pack_topology
@@ -4124,10 +4125,7 @@ class CapacityExecutionStore:
         if (
             epoch is None
             or allocation is None
-            or not isinstance(
-                CapacityManagementStore._execution_preparation_from_row(epoch),
-                ExecutionPreparationV3,
-            )
+            or not await CapacityExecutionStore._has_authenticated_membership(session, epoch)
         ):
             raise ExecutionConflictError("an earlier global launch is unresolved")
         try:
@@ -4155,9 +4153,7 @@ class CapacityExecutionStore:
         epoch: CapacityExecutionEpoch,
         allocation: CapacityAllocation,
     ) -> CapacitySubject:
-        if isinstance(
-            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
-        ):
+        if await CapacityExecutionStore._has_authenticated_membership(session, epoch):
             allocation_epoch = await session.get(
                 CapacityAllocationEpoch, allocation.allocation_epoch
             )
@@ -4207,6 +4203,22 @@ class CapacityExecutionStore:
         return allocation
 
     @staticmethod
+    async def _has_authenticated_membership(
+        session: AsyncSession, epoch: CapacityExecutionEpoch,
+    ) -> bool:
+        if epoch.manifest_payload.get("schema_version") == 4:
+            from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
+
+            try:
+                await _load_typed_immutable_history(session, epoch.execution_epoch)
+            except (ValueError, ConfigurationConflictError) as exc:
+                raise ExecutionConflictError("typed membership history is invalid") from exc
+            return True
+        return isinstance(
+            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
+        )
+
+    @staticmethod
     async def _membership_target_current(
         session: AsyncSession,
         epoch: CapacityExecutionEpoch,
@@ -4214,9 +4226,7 @@ class CapacityExecutionStore:
         *,
         subject_id: UUID,
     ) -> bool:
-        if not isinstance(
-            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
-        ):
+        if not await CapacityExecutionStore._has_authenticated_membership(session, epoch):
             return True
         if epoch.state != "active":
             return False
@@ -4289,10 +4299,7 @@ class CapacityExecutionStore:
             )
             if epoch is None:
                 raise ExecutionConflictError(f"{operation} historical execution is unavailable")
-            if isinstance(
-                CapacityManagementStore._execution_preparation_from_row(epoch),
-                ExecutionPreparationV3,
-            ):
+            if await CapacityExecutionStore._has_authenticated_membership(session, epoch):
                 allocation = await CapacityExecutionStore._allocation_for_binding(
                     session, historical_binding
                 )

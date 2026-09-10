@@ -56,6 +56,16 @@ New subjects use the same protected personal-name and owner derivation rules.
 Changing the delegate, template, fleet or executor trust roots requires a new
 reviewed execution preparation, not a membership operation.
 
+Typed allocation execution readers authenticate the exact immutable membership
+history before testing current eligibility or resolving a retained cleanup
+reporter. A superseded generation cannot launch; its authenticated fenced reporter
+can still identify retained work. An equivocal current reporter is ineligible and
+does not block another owner's missing-predecessor launch rank. That comparison
+still validates candidate, profile, deployment and materialized membership
+evidence; corruption is an error, not permission to skip work. Normal launch and
+demand readers remain strict. This reader support does not enable typed runtime
+activation or native submission.
+
 The log binds authority incarnation, writer/execution epoch, manifest digest,
 namespace, global membership revision, previous digest, actor, idempotency key,
 request digest, subject identity and complete resulting subject evidence.
