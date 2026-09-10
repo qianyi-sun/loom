@@ -80,7 +80,7 @@ def test_both_native_proposals_bind_exact_durable_work(tmp_path, pool):
     "empty", "missing-request", "duplicate-request", "cancelled", "source", "runtime", "expired-parent",
     "expired-proposal", "fence", "disabled", "reporter", "protected-admission", "foreign-attempt",
     "account", "subject", "candidate", "generation", "pool-generation", "profile", "executor",
-    "node", "protocol", "shape", "manifest", "fleet-release",
+    "node", "protocol", "shape", "manifest", "fleet-release", "zero-capacity", "drain-only",
 ))
 def test_admission_rejects_identity_and_authority_drift(tmp_path, boundary):
     values = admission_input(tmp_path)
@@ -104,6 +104,16 @@ def test_admission_rejects_identity_and_authority_drift(tmp_path, boundary):
         values["now"] = proposal.lease_not_after
     elif boundary == "fence":
         values["execution"] = values["execution"].model_copy(update={"allocation_epoch": 999})
+    elif boundary == "drain-only":
+        fence = values["execution"].model_copy(update={"execution_state": "drain-only",
+            "executable_new_capacity_ceiling": 0, "executable_new_capacity_rate_per_minute": 0})
+        values["execution"] = fence
+        shape = proposal.shapes[0]
+        proposal = proposal.model_copy(update={"shapes": (shape.model_copy(update={
+            "binding": shape.binding.model_copy(update={"execution": fence})}),)})
+    elif boundary == "zero-capacity":
+        values["member"] = values["member"].model_copy(update={"configuration": values["member"].configuration.model_copy(
+            update={"max_slots": 0})})
     elif boundary == "disabled":
         values["member"] = values["member"].model_copy(update={"configuration": values["member"].configuration.model_copy(
             update={"lifecycle_state": "disabled", "max_slots": 0})})
