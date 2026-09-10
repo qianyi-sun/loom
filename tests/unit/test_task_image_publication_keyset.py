@@ -4,13 +4,17 @@ import base64
 import copy
 import hashlib
 import importlib
+import json
 from dataclasses import replace
 from datetime import timedelta
+from uuid import UUID
 
 import pytest
 import rfc8785
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from loom_task_image_authority.registry_token import publication_repository
 from tests.unit.test_task_image_publication_signing import NOW, setup_signing
 
 DOMAIN = b"loom-task-image-publication-keyset-v1\x00"
@@ -40,7 +44,7 @@ def _sign(payload, execution_key, *, domain=DOMAIN):
 
 
 def fixture():
-    c, s, private, key, state, distribution, unsigned, reply = setup_signing()
+    _c, _s, _private, key, state, _distribution, unsigned, reply = setup_signing()
     execution_key = Ed25519PrivateKey.generate()
     root = module().ExecutionGrantTrustRoot(
         key_id="execution-1", environment="production",
@@ -77,10 +81,11 @@ def test_exact_signed_keyset_and_publication_chain_verifies_without_distribution
 def test_every_keyset_field_is_bound_by_execution_key(field):
     m = module()
     private, root, payload, state, *_ = fixture()
-    import json
     envelope = json.loads(_sign(payload, private))
     payload[field] = "substitution"
     canonical = rfc8785.dumps(payload)
+    with pytest.raises(InvalidSignature):
+        private.public_key().verify(base64.urlsafe_b64decode(envelope["signature"] + "=="), DOMAIN + canonical)
     envelope.update(canonical_keyset=canonical.decode(), keyset_sha256=hashlib.sha256(canonical).hexdigest())
     with pytest.raises(ValueError):
         m.verify_publication_keyset(rfc8785.dumps(envelope), trust_root=root, expected_state=state, now=NOW)
@@ -177,9 +182,102 @@ def test_worker_binds_exact_publication_and_allows_only_valid_routine_rotation(c
         state = replace(state, keyset_version=4)
     wire = _sign(payload, private)
     digest = "0" * 64 if change == "snapshot-digest" else hashlib.sha256(wire).hexdigest()
-    kwargs = dict(keyset_wire=wire, trust_root=root, expected_state=state, expected_snapshot_sha256=digest, expected_unsigned=expected, now=NOW)
+    kwargs = dict(keyset_wire=wire, trust_root=root, expected_state=state, expected_snapshot_sha256=digest, expected_unsigned=expected, now=NOW + timedelta(seconds=2) if change == "rotation" else NOW)
     if change == "rotation":
         assert m.verify_keyset_publication(publication, **kwargs).statement.unsigned_input() == unsigned
     else:
         with pytest.raises(ValueError):
             m.verify_keyset_publication(publication, **kwargs)
+
+
+@pytest.mark.parametrize("change", ["signature-bits", "public-key-bits", "inner-duplicate", "inner-noncanonical", "unsorted", "unknown-key-field"])
+def test_nested_wire_and_base64_are_canonical_not_merely_decodable(change):
+    m = module()
+    private, root, payload, state, *_ = fixture()
+    if change == "public-key-bits":
+        value = payload["keys"][0]["public_key"]
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        payload["keys"][0]["public_key"] = value[:-1] + alphabet[alphabet.index(value[-1]) + 1]
+    elif change == "unsorted":
+        second = copy.deepcopy(payload["keys"][0])
+        second.update(key_id="aaa", public_key=_b64(Ed25519PrivateKey.generate().public_key().public_bytes_raw()))
+        payload["keys"].append(second)
+    elif change == "unknown-key-field":
+        payload["keys"][0]["secret"] = "not-a-keyset-field"
+    envelope = json.loads(_sign(payload, private))
+    if change == "signature-bits":
+        value = envelope["signature"]
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        envelope["signature"] = value[:-1] + alphabet[alphabet.index(value[-1]) + 1]
+    elif change in {"inner-duplicate", "inner-noncanonical"}:
+        raw = envelope["canonical_keyset"].encode()
+        raw = raw.replace(b'"keyset_version":3', b'"keyset_version":3,"keyset_version":3') if change == "inner-duplicate" else raw + b" "
+        envelope.update(canonical_keyset=raw.decode(), keyset_sha256=hashlib.sha256(raw).hexdigest(), signature=_b64(private.sign(DOMAIN + raw)))
+    with pytest.raises(ValueError):
+        m.verify_publication_keyset(rfc8785.dumps(envelope), trust_root=root, expected_state=state, now=NOW)
+
+
+@pytest.mark.parametrize("field", ["task_id", "task_checksum", "component", "platform", "environment", "purpose", "materialization_id", "materialization_key", "attempt_id", "lease_epoch", "repository", "frozen_plan_sha256"])
+def test_every_expected_execution_binding_is_checked(field):
+    m = module()
+    private, root, payload, state, unsigned, publication = fixture()
+    wire = _sign(payload, private)
+    payload = unsigned.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if field in {"component", "repository"}:
+        payload["component"] = "sidecar:db"
+    elif field == "platform":
+        payload.update(platform="linux/amd64", slurm_cluster_id="oldlab")
+    elif field == "purpose":
+        payload.update(purpose="shadow", shadow_campaign_id="11111111-1111-4111-8111-111111111111")
+    else:
+        payload[field] = {
+            "task_id": "different-task", "task_checksum": "c" * 64,
+            "environment": "staging", "materialization_key": "c" * 64,
+            "materialization_id": "11111111-1111-4111-8111-111111111111",
+            "attempt_id": "11111111-1111-4111-8111-111111111111", "lease_epoch": 3,
+            "frozen_plan_sha256": "c" * 64,
+        }[field]
+    payload["repository"] = publication_repository(purpose="production", shadow_campaign_id=None, cpu_arch="arm64" if payload["platform"] == "linux/arm64" else "x86_64", attempt_id=UUID(payload["attempt_id"]), component=payload["component"])
+    if payload["purpose"] == "shadow":
+        payload["repository"] = payload["repository"].replace("loom-task-image-attempts/", "loom-task-image-shadow/" + payload["shadow_campaign_id"] + "/")
+    # These alternatives are independently well-formed. Failure must come from
+    # exact execution binding, not an unrelated malformed-model check.
+    changed = type(unsigned).model_validate(payload)
+    with pytest.raises(ValueError):
+        m.verify_keyset_publication(publication, keyset_wire=wire, trust_root=root, expected_state=state, expected_snapshot_sha256=hashlib.sha256(wire).hexdigest(), expected_unsigned=changed, now=NOW)
+
+
+def test_new_epoch_from_unrelated_revocation_preserves_nonrevoked_publication():
+    m = module()
+    private, root, payload, state, unsigned, publication = fixture()
+    payload.update(keyset_version=4, revocation_epoch=3)
+    state = replace(state, keyset_version=4, revocation_epoch=3)
+    wire = _sign(payload, private)
+    result = m.verify_keyset_publication(publication, keyset_wire=wire, trust_root=root, expected_state=state, expected_snapshot_sha256=hashlib.sha256(wire).hexdigest(), expected_unsigned=unsigned, now=NOW)
+    assert result.statement.revocation_epoch == 2
+
+
+def test_signature_does_not_refresh_original_expiry():
+    m = module()
+    private, root, payload, state, *_ = fixture()
+    wire = _sign(payload, private)
+    initial = m.verify_publication_keyset(wire, trust_root=root, expected_state=state, now=NOW)
+    later = m.verify_publication_keyset(wire, trust_root=root, expected_state=state, now=NOW + timedelta(minutes=4))
+    assert initial == later
+    with pytest.raises(ValueError):
+        m.verify_publication_keyset(wire, trust_root=root, expected_state=state, now=NOW + timedelta(minutes=5))
+
+
+@pytest.mark.parametrize("change", ["retirement-boundary", "key-public-bytes"])
+def test_valid_keyset_cannot_hide_publication_interval_or_signature_mismatch(change):
+    m = module()
+    private, root, payload, state, unsigned, publication = fixture()
+    if change == "retirement-boundary":
+        payload["keys"][0].update(status="verify_only", retired_at=_time(NOW))
+    else:
+        payload["keys"][0]["public_key"] = _b64(Ed25519PrivateKey.generate().public_key().public_bytes_raw())
+    wire = _sign(payload, private)
+    # The keyset itself is authentic and valid; its key cannot verify this image.
+    m.verify_publication_keyset(wire, trust_root=root, expected_state=state, now=NOW + timedelta(seconds=2))
+    with pytest.raises(ValueError):
+        m.verify_keyset_publication(publication, keyset_wire=wire, trust_root=root, expected_state=state, expected_snapshot_sha256=hashlib.sha256(wire).hexdigest(), expected_unsigned=unsigned, now=NOW + timedelta(seconds=2))
