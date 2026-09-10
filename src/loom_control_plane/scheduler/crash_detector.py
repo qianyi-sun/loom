@@ -61,6 +61,12 @@ UPDATE trials
        SELECT id FROM workers
         WHERE last_seen_at < NOW() - INTERVAL '1 second' * (:expiry_sec)::int
    )
+   AND NOT EXISTS (
+       SELECT 1 FROM execution_leases lease
+        WHERE lease.trial_id = trials.id
+          AND lease.execution_role = 'attempt'
+          AND lease.attempt = trials.attempt_count
+   )
  RETURNING id;
 """)
 
@@ -82,6 +88,12 @@ UPDATE trials
    AND started_at IS NULL
    AND claimed_at IS NOT NULL
    AND COALESCE(pre_start_heartbeat_at, claimed_at) < NOW() - INTERVAL '1 second' * (:expiry_sec)::int
+   AND NOT EXISTS (
+       SELECT 1 FROM execution_leases lease
+        WHERE lease.trial_id = trials.id
+          AND lease.execution_role = 'attempt'
+          AND lease.attempt = trials.attempt_count
+   )
  RETURNING id;
 """)
 

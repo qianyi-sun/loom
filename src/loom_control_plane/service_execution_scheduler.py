@@ -41,6 +41,7 @@ SELECT t.id,
   JOIN tasks task_definition ON task_definition.id = t.task_id
   JOIN team_quotas q ON q.team_id = t.team_id
  WHERE t.state = 'queued'
+   AND t.cancellation_requested_at IS NULL
    AND t.attempt_count < q.max_attempts_ceiling
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL

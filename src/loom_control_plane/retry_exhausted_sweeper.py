@@ -37,11 +37,14 @@ UPDATE trials
    SET state          = 'failed',
        failure_reason = 'retry_exhausted',
        finished_at    = NOW()
- WHERE id IN (
+ WHERE state = 'queued'
+   AND cancellation_requested_at IS NULL
+   AND id IN (
        SELECT t.id
          FROM trials t
          JOIN team_quotas q ON q.team_id = t.team_id
         WHERE t.state        = 'queued'
+          AND t.cancellation_requested_at IS NULL
           AND t.attempt_count >= q.max_attempts_ceiling
         LIMIT 100
    )

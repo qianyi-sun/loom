@@ -14,7 +14,7 @@ from loom_control_plane.service_execution import request_trial_execution_cancell
 _REQUEST_CANCEL_SQL = text("""
 UPDATE trials
    SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END,
-       cancellation_requested_at = NOW(),
+       cancellation_requested_at = COALESCE(cancellation_requested_at, NOW()),
        cancellation_observed_at = CASE WHEN state = 'queued' THEN NOW()
                                        ELSE cancellation_observed_at END,
        finished_at = CASE WHEN state = 'queued' THEN COALESCE(finished_at, NOW())
@@ -22,7 +22,7 @@ UPDATE trials
  WHERE id = (:trial_id)::uuid
    AND ((:team_id)::uuid IS NULL OR team_id = (:team_id)::uuid)
    AND state IN ('queued', 'claimed', 'running')
-   AND cancellation_requested_at IS NULL
+   AND (cancellation_requested_at IS NULL OR state = 'queued')
  RETURNING id, state;
 """)
 
