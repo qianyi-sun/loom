@@ -2,7 +2,7 @@
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from loom_capacity_manager.executable_contracts import ExecutableExecutorHeartbeatV2
 from loom_capacity_manager.execution_store import CapacityExecutionStore
@@ -128,3 +128,33 @@ async def test_typed_inventory_downgrade_retains_evidence_and_fences_new_writes(
           FROM pg_proc WHERE oid = 'public.capacity_executor_inventory_version_guard()'::regprocedure
     """))).one()
     assert row[0] and "search_path=pg_catalog" in row[1] and not row[2]
+
+
+@pytest.mark.parametrize("retained_payload", (None, '{"schema_version":2}'))
+async def test_inventory_upgrade_refuses_missing_or_mismatched_retained_version(capacity_session, retained_payload):
+    from alembic import command
+
+    from tests.integration.test_capacity_build_membership_sql import _config
+
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    binding = preparation.executors[0]
+    await CapacityExecutionStore().heartbeat_executor(capacity_session,
+        ExecutableExecutorHeartbeatV2(execution=execution, executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation, pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation, journal_sequence=0,
+            journal_digest="0" * 64, heartbeat_sequence=1))
+    connection = await capacity_session.connection()
+    await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0018"))
+    await capacity_session.execute(text("""
+        UPDATE capacity_executable_executor_states
+           SET inventory_high_water = 1, last_inventory_digest = repeat('a', 64),
+               inventory_payload = CAST(:payload AS jsonb)
+         WHERE executor_incarnation = :executor
+    """), {"executor": binding.executor_incarnation, "payload": retained_payload})
+    with pytest.raises(DBAPIError, match="retained inventory version differs"):
+        async with capacity_session.begin_nested():
+            connection = await capacity_session.connection()
+            await connection.run_sync(lambda sync: command.upgrade(_config(sync), "capacity_0019"))
+    assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0018"
+    assert await capacity_session.scalar(text(
+        "SELECT to_regprocedure('public.capacity_executor_inventory_version_guard()')")) is None

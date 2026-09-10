@@ -66,6 +66,14 @@ evidence; corruption is an error, not permission to skip work. Normal launch and
 demand readers remain strict. This reader support does not enable typed runtime
 activation or native submission.
 
+Migration `capacity_0019` pairs executor inventory V3 only with a V4 execution
+manifest (V2 inventory remains paired with V2/V3 manifests). Typed retirement
+keeps the exact inventory digest, executor identity, journal confirmation and
+post-inventory heartbeat requirements. Downgrade refuses retained typed
+inventory and installs a persistent legacy-only fence before removing its
+version trigger. This does not yet complete typed terminal-evidence insertion,
+predecessor release or executable SQL admission.
+
 The log binds authority incarnation, writer/execution epoch, manifest digest,
 namespace, global membership revision, previous digest, actor, idempotency key,
 request digest, subject identity and complete resulting subject evidence.

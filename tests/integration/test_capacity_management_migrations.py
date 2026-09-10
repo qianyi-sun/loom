@@ -457,7 +457,7 @@ def test_forward_migration_replaces_existing_0008_retirement_constraint(
                     "effective_rate_per_minute, state, actor, idempotency_key, "
                     "request_digest) VALUES "
                     "(:execution_epoch, :authority, 1, 1, :configuration_epoch, 1, "
-                    "repeat('1', 64), repeat('4', 64), '{}'::jsonb, repeat('5', 64), "
+                    "repeat('1', 64), repeat('4', 64), jsonb_build_object('schema_version', 2), repeat('5', 64), "
                     "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
                     "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
                     "'gb10-executor', :gb10_incarnation, 'gb10', 1, "
@@ -2658,12 +2658,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0018")
+            ).scalar_one() == ("capacity_0019")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0018"
+            assert environment_revision != "capacity_0019"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -2685,7 +2685,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 18
+    assert await assert_capacity_schema_at_head(capacity_engine) == 19
 
 
 def test_capacity_0015_terminal_inventory_evidence_is_append_only_and_reversible(

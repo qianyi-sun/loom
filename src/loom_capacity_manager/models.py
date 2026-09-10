@@ -1929,7 +1929,7 @@ class CapacityExecutableExecutorState(Base):
             "AND jsonb_typeof(inventory_payload) = 'object' "
             "AND last_inventory_at IS NOT NULL "
             "AND last_heartbeat_at > last_inventory_at "
-            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'schema_version' IN ('2'::jsonb, '3'::jsonb) "
             "AND inventory_payload -> 'inventory_sequence' "
             "= to_jsonb(inventory_high_water) "
             "AND inventory_payload ->> 'executor_id' = executor_id "
