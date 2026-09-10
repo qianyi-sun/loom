@@ -1,8 +1,8 @@
 """Runtime retention keeps recovery evidence while reclaiming repeated telemetry."""
 
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from importlib import import_module
-from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -72,7 +72,8 @@ async def test_runtime_checkpoint_rejects_known_telemetry_with_unknown_object_bi
         journal.close()
 
 
-async def test_runtime_checkpoint_maintenance_republishes_retirement_inventory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lost_inventory_response", (False, True))
+async def test_runtime_checkpoint_maintenance_republishes_retirement_inventory(tmp_path, monkeypatch, lost_inventory_response):
     runtime, journal, manager, _, _, _ = executor_fixture(tmp_path, work=None)
     try:
         module = import_module("loom_capacity_executor.journal_retention")
@@ -89,6 +90,23 @@ async def test_runtime_checkpoint_maintenance_republishes_retirement_inventory(t
         manager.heartbeat_executable_executor = heartbeat
         for _ in range(6):
             await runtime._publish_inventory(await manager.executable_checkpoint())
+        if lost_inventory_response:
+            publish = manager.ingest_executable_inventory
+
+            async def lose_reply(value):
+                await publish(value)
+                raise ConnectionError("inventory response lost")
+
+            manager.ingest_executable_inventory = lose_reply
+            with pytest.raises(ConnectionError):
+                await module.maintain_runtime_journal(runtime)
+            manager.ingest_executable_inventory = publish
+            assert journal.pending_checkpoint() is None
+            # The normal size trigger is no reason to skip unfinished final
+            # inventory replay after the checkpoint itself has been published.
+            monkeypatch.setattr(module, "CHECKPOINT_TRIGGER_BYTES", 64 * 1024 * 1024)
+            assert await module.maintain_runtime_journal(runtime) == "compacted"
+            monkeypatch.setattr(module, "CHECKPOINT_TRIGGER_BYTES", 0)
         for _ in range(3):
             previous_sequence = manager.inventory_sequence
             assert await module.maintain_runtime_journal(runtime) == "compacted"
