@@ -1,5 +1,6 @@
 """The management build ledger has no application-runtime write authority."""
 
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -68,3 +69,28 @@ def test_build_guard_refuses_privileged_agent(build_guard_database):
         connection.exec_driver_sql(f"ALTER ROLE {engine.dialect.identifier_preparer.quote(agent)} CREATEDB")
     with pytest.raises(RuntimeError, match="least-privileged"):
         command.upgrade(config, "head")
+
+
+def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_database):
+    config, engine, owner, _agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"SET LOCAL ROLE {engine.dialect.identifier_preparer.quote(owner)}")
+        connection.execute(text("""INSERT INTO loom_capacity_build_guard.installations
+            (id, owner_user_id, subject_id, subject_incarnation, deployment_generation,
+             reporter_incarnation, payload, wire_payload, payload_sha256)
+            VALUES (:id, :owner, :subject, :incarnation, 1, :reporter, '{}'::jsonb, :wire, :digest)
+        """), {"id": uuid4(), "owner": uuid4(), "subject": uuid4(), "incarnation": uuid4(),
+            "reporter": uuid4(), "wire": b"{}", "digest": sha256(b"{}").hexdigest()})
+    for statement in (
+        "UPDATE loom_capacity_build_guard.installations SET deployment_generation=2",
+        "DELETE FROM loom_capacity_build_guard.installations",
+        "TRUNCATE loom_capacity_build_guard.installations CASCADE",
+    ):
+        with engine.begin() as connection, pytest.raises(DBAPIError, match="append-only"):
+            connection.execute(text(statement))
+    with pytest.raises(DBAPIError, match="retained evidence"):
+        command.downgrade(config, "base")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0001"
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 1
