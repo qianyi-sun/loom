@@ -85,6 +85,17 @@ inherited source graphs remain interlocked. Rollback refuses retained typed
 intents and restores the prior functions and privilege boundaries. This is
 database lifecycle support, not proof of native submission or live acceptance.
 
+The build runtime installation resolver joins the independently approved native
+publication to the V4 build template and both complete purpose-tagged pool policy
+sets. Each set must match its prepared controller root; the selected build profile
+must match the template's generation, shape, resources and eligible domains, the
+trusted launcher release, and the publication's exact architecture-specific agent
+image. Its paired builder image is retained from that same publication. Partial
+sets, cross-architecture images and substituted profiles are rejected. These pure
+installation facts need no running worker and grant no readiness or capacity:
+management still must prove its allocation-contained admission adapter is actually
+installed before a cold build service can become ready.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
