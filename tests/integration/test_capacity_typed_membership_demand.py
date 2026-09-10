@@ -68,6 +68,13 @@ async def test_equivocal_owner_does_not_block_another_owners_demand(capacity_ses
     accepted = await management.ingest_demand_snapshot(capacity_session, report(owners[1], sequence=2), actor="owner-b")
     assert accepted.sequence == 2
     assert await capacity_session.scalar(select(func.count()).select_from(CapacityDemandSnapshot)) == 3
+    # Recovery rotates the bad reporter; it must not leave an equivocal
+    # historical tip that poisons the next owner's history validation.
+    original = application_request(preparation, execution, owner=88010, revision=0)
+    recovered = await apply(capacity_session, transition(original, "update", revision=2), key=112010)
+    accepted = await management.ingest_demand_snapshot(capacity_session, report(recovered.member.configuration), actor="owner-a-recovered")
+    assert accepted.sequence == 1
+    assert (await management.ingest_demand_snapshot(capacity_session, report(owners[1], sequence=3), actor="owner-b")).sequence == 3
 
 
 @pytest.mark.parametrize("operation", ("capacity", "update", "destroy"))
