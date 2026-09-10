@@ -1029,6 +1029,29 @@ launch-facts limit; other receipt limits remain unchanged. Runtime submission
 still requires the purpose-preserving journal and inventory consumers; this
 read endpoint does not open typed activation or authorize scheduler submission.
 
+The pool runtime accepts a typed policy only after validating the complete
+operator profile set against its registered controller root. Its typed journal
+envelopes retain the exact subject facts in digest-addressed 32 KiB chunks within
+the existing locked, hash-chained, fsync'd journal. The full missing-chunk write
+is capacity-checked before the first append, preserving a recovery allowance of
+at least 8 MiB and increasing it with retained job count. Exhausted capacity
+rejects the new retention without consuming its permit or filling that allowance;
+this is backpressure, not journal garbage collection or unlimited retention.
+Existing per-record and journal size limits remain unchanged.
+
+Launch preparation fetches, renders and retains facts before permit consumption.
+Replay reconstructs the original bounded facts, verifies their digest and signed
+references, and re-renders against the registered operator policy without querying
+the current manager subject. Every submission and physical-binding envelope keeps
+the same facts. Typed operation and inventory admission remain explicitly closed
+until purpose-aware inventory, cleanup and bootstrap consumers are connected.
+The interlock runs before public tick, drain and recovery entrypoints can replay
+any retained command. Separate schema-3 inventory records preserve the typed
+proof and immutable executor binding, with exact version parsing and journal
+confirmation hashes over their actual bytes. Legacy inventory parsing and the
+legacy durable ingestion method reject these records; structural contracts alone
+do not authenticate historical allocation provenance or open inventory admission.
+
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,

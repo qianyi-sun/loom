@@ -143,21 +143,38 @@ async def test_typed_runtime_operations_remain_closed_until_consumers_are_ready(
 
 @pytest.mark.parametrize("entrypoint", ("tick", "tick_drain_only", "recover"))
 async def test_typed_runtime_interlock_precedes_restart_or_replay_calls(tmp_path, entrypoint):
-    from unittest.mock import AsyncMock
     from hashlib import sha256
+    from unittest.mock import AsyncMock
+
     from loom_capacity_executor.runtime_profiles import RuntimeAssemblyError
-    from loom_capacity_manager.executable_contracts import ExecutablePermitConsumptionV2, canonical_executable_bytes, canonical_executable_digest
+    from loom_capacity_manager.executable_contracts import (
+        ExecutablePermitConsumptionV2,
+        canonical_executable_bytes,
+        canonical_executable_digest,
+    )
     from tests.unit.test_capacity_executor_executable import permit_fixture
+
     runtime, journal, context = typed_executor(tmp_path)
     try:
         permit = permit_fixture(context.binding)
-        consumption = ExecutablePermitConsumptionV2(binding=context.binding, permit_id=permit.permit_id,
-            permit_digest=canonical_executable_digest(permit), command_sequence=1)
+        consumption = ExecutablePermitConsumptionV2(
+            binding=context.binding,
+            permit_id=permit.permit_id,
+            permit_digest=canonical_executable_digest(permit),
+            command_sequence=1,
+        )
         payload = canonical_executable_bytes(consumption)
-        journal.append("permit-consume-requested", sha256(payload).hexdigest(),
-            object_kind="intent", object_id=str(context.binding.intent_id), payload=payload)
+        journal.append(
+            "permit-consume-requested",
+            sha256(payload).hexdigest(),
+            object_kind="intent",
+            object_id=str(context.binding.intent_id),
+            payload=payload,
+        )
         head = journal.head
-        runtime.client.executable_checkpoint = AsyncMock(side_effect=AssertionError("interlock must precede manager access"))
+        runtime.client.executable_checkpoint = AsyncMock(
+            side_effect=AssertionError("interlock must precede manager access")
+        )
         with pytest.raises(RuntimeAssemblyError, match="consumers"):
             await getattr(runtime, entrypoint)()
         runtime.client.executable_checkpoint.assert_not_awaited()

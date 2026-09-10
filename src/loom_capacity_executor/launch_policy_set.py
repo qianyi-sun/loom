@@ -79,24 +79,19 @@ def canonical_pool_launch_policy_digest(policy: PoolLaunchPolicyV3) -> str:
     return _digest(checked.model_dump(mode="json"))
 
 
-def resolve_typed_runtime_profile(
-    binding: ExecutableIntentBindingV2, profiles: tuple[OperatorLaunchProfileV2, ...], *,
-    policy: PoolLaunchPolicyV3, purpose: LaunchPurpose, controller_authority_sha256: str,
-) -> OperatorLaunchProfileV2:
-    """Resolve one profile after verifying complete set membership and exact intent."""
+def validate_typed_runtime_profiles(
+    profiles: tuple[OperatorLaunchProfileV2, ...], *,
+    policy: PoolLaunchPolicyV3, controller_authority_sha256: str,
+) -> None:
+    """Validate the complete operator profile set before accepting typed runtime."""
     root = canonical_pool_launch_policy_digest(policy)
     if (
-        root != controller_authority_sha256 or purpose not in ("application-worker", "personal-build-worker")
-        or not isinstance(binding, ExecutableIntentBindingV2)
+        root != controller_authority_sha256
         or not isinstance(profiles, tuple) or not 0 < len(profiles) <= _MAX_PROFILE_ENTRIES
     ):
         raise ValueError("typed launch authority or purpose is invalid")
-    binding = ExecutableIntentBindingV2.model_validate_json(binding.model_dump_json())
-    if binding.pool_id != policy.pool_id or binding.pool_generation != policy.pool_generation:
-        raise ValueError("typed launch policy pool binding changed")
     entries = {entry.profile_sha256: entry.purpose for entry in policy.entries}
     observed: set[str] = set()
-    matches = []
     for profile in profiles:
         digest = full_launch_profile_digest(profile)
         if (
@@ -106,6 +101,26 @@ def resolve_typed_runtime_profile(
         ):
             raise ValueError("typed launch profile set differs from controller policy")
         observed.add(digest)
+    if observed != set(entries):
+        raise ValueError("typed launch profile set is incomplete")
+
+
+def resolve_typed_runtime_profile(
+    binding: ExecutableIntentBindingV2, profiles: tuple[OperatorLaunchProfileV2, ...], *,
+    policy: PoolLaunchPolicyV3, purpose: LaunchPurpose, controller_authority_sha256: str,
+) -> OperatorLaunchProfileV2:
+    """Resolve one profile after verifying complete set membership and exact intent."""
+    validate_typed_runtime_profiles(profiles, policy=policy,
+        controller_authority_sha256=controller_authority_sha256)
+    if not isinstance(binding, ExecutableIntentBindingV2) or purpose not in ("application-worker", "personal-build-worker"):
+        raise ValueError("typed launch binding or purpose is invalid")
+    binding = ExecutableIntentBindingV2.model_validate_json(binding.model_dump_json())
+    if binding.pool_id != policy.pool_id or binding.pool_generation != policy.pool_generation:
+        raise ValueError("typed launch policy pool binding changed")
+    entries = {entry.profile_sha256: entry.purpose for entry in policy.entries}
+    matches = []
+    for profile in profiles:
+        digest = full_launch_profile_digest(profile)
         if (
             entries[digest] == purpose
             and profile.profile_id == binding.profile_id
@@ -118,6 +133,6 @@ def resolve_typed_runtime_profile(
             and sum(set(binding.node_ids) <= set(domain.node_ids) for domain in profile.resource_domains) == 1
         ):
             matches.append(profile)
-    if observed != set(entries) or len(matches) != 1:
+    if len(matches) != 1:
         raise ValueError("typed launch intent does not resolve to one approved purpose profile")
     return matches[0]

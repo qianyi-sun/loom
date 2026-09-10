@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID, uuid5
@@ -43,6 +43,15 @@ from loom_capacity_executor.journal import (
     JournalRegressionError,
 )
 from loom_capacity_executor.keys import ExecutorOwnershipKey
+from loom_capacity_executor.launch_facts_journal import (
+    LaunchFactsReferenceV3,
+    load_launch_facts,
+    retain_launch_facts,
+)
+from loom_capacity_executor.launch_policy_set import (
+    PoolLaunchPolicyV3,
+    validate_typed_runtime_profiles,
+)
 from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
     RenderedTrustedLaunchV2,
@@ -60,6 +69,11 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmLaunchRequestV2,
     SlurmSubmissionV2,
     SlurmTerminalEvidenceV2,
+)
+from loom_capacity_executor.typed_launch_renderer import (
+    RenderedTrustedLaunchV3,
+    TrustedLaunchContextV3,
+    render_typed_signed_launch,
 )
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -84,7 +98,10 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
     retained_prepared_activation_matches,
 )
+from loom_capacity_manager.launch_subject_contracts import ExecutableLaunchSubjectV3
+from loom_capacity_manager.membership_launch_authority import ResolvedAllocationLaunchSubject
 from loom_capacity_manager.ownership import OwnershipKeyring, verify_executable_ownership
+from loom_capacity_manager.typed_ownership_contracts import parse_typed_executable_ownership
 
 _OPERATION_NAMESPACE = UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d")
 _RECOVERY_LOOKBACK = timedelta(days=8)
@@ -92,6 +109,8 @@ _BOOTSTRAP_PROPOSAL_TTL = timedelta(minutes=10)
 
 
 class _ManagerClient(Protocol):
+    async def launch_subject(self, binding: ExecutableIntentBindingV2) -> ExecutableLaunchSubjectV3: ...
+
     async def executable_checkpoint(self) -> ExecutableCheckpointReceiptV2: ...
 
     async def next_executable_work(self, command_sequence: int) -> ExecutablePoolWorkV2 | None: ...
@@ -196,8 +215,9 @@ class ExecutorTickResult:
 
 @dataclass(frozen=True, slots=True)
 class _LaunchEnvelope:
-    rendered: RenderedTrustedLaunchV2
+    rendered: RenderedTrustedLaunchV2 | RenderedTrustedLaunchV3
     bootstrap_registration_epoch: int
+    launch_subject: ExecutableLaunchSubjectV3 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +345,7 @@ class ExecutablePoolExecutor:
         controller_authority: PoolControllerAuthorityV2,
         ownership_key: ExecutorOwnershipKey,
         profiles: tuple[OperatorLaunchProfileV2, ...] | None = None,
+        typed_policy: PoolLaunchPolicyV3 | None = None,
         now: Callable[[], datetime] | None = None,
         bootstrap_handoff_store: BootstrapHandoffStore | None = None,
     ) -> None:
@@ -332,7 +353,7 @@ class ExecutablePoolExecutor:
             raise TypeError("executable executor requires its exact registration")
         if not isinstance(journal, ExecutorJournal):
             raise TypeError("executable executor requires its locked journal")
-        approved_profiles = profiles or (profile,)
+        approved_profiles = (profile,) if profiles is None else profiles
         if not approved_profiles:
             raise ValueError("executable runtime requires at least one launch profile")
         if profile not in approved_profiles:
@@ -342,14 +363,17 @@ class ExecutablePoolExecutor:
             != controller_authority.controller_authority_sha256
         ):
             raise ValueError("executor launch authority differs from registration")
+        if typed_policy is not None:
+            validate_typed_runtime_profiles(approved_profiles, policy=typed_policy,
+                controller_authority_sha256=registration.controller_authority_sha256)
         for approved_profile in approved_profiles:
             if (
                 registration.pool_id != approved_profile.pool_id
                 or registration.pool_generation != approved_profile.pool_generation
                 or approved_profile.controller_authority_sha256
                 != controller_authority.controller_authority_sha256
-                or canonical_launch_policy_digest(approved_profile)
-                != controller_authority.controller_authority_sha256
+                or (typed_policy is None and canonical_launch_policy_digest(approved_profile)
+                != controller_authority.controller_authority_sha256)
             ):
                 raise ValueError("executor launch authority differs from approved profiles")
         if (
@@ -368,6 +392,7 @@ class ExecutablePoolExecutor:
         )
         self.profile = profile
         self.profiles = tuple(approved_profiles)
+        self.typed_policy = typed_policy
         self.controller_authority = controller_authority
         self.ownership_key = ownership_key
         self._now = now or (lambda: datetime.now(UTC))
@@ -472,8 +497,25 @@ class ExecutablePoolExecutor:
         )
         return result
 
-    def render_launch(self, binding: ExecutableIntentBindingV2) -> RenderedTrustedLaunchV2:
+    def render_launch(
+        self, binding: ExecutableIntentBindingV2, *,
+        launch_subject: ExecutableLaunchSubjectV3 | None = None,
+    ) -> RenderedTrustedLaunchV2 | RenderedTrustedLaunchV3:
         self._assert_binding(binding)
+        if self.typed_policy is not None:
+            if launch_subject is None or launch_subject.binding != binding:
+                raise ValueError("typed runtime requires exact authenticated launch subject")
+            rendered_typed = render_typed_signed_launch(TrustedLaunchContextV3(binding=binding,
+                subject=ResolvedAllocationLaunchSubject(configuration=launch_subject.configuration,
+                    acknowledgement=launch_subject.acknowledgement, authority=launch_subject.authority),
+                profiles=self.profiles, policy=self.typed_policy,
+                controller_authority=self.controller_authority, ownership_key=self.ownership_key,
+                submitted_at=self._now()))
+            reference = self._handoff_reference(binding)
+            return replace(rendered_typed, request=rendered_typed.request.model_copy(
+                update={"bootstrap_handoff_reference": reference})) if reference is not None else rendered_typed
+        if launch_subject is not None:
+            raise ValueError("legacy runtime cannot consume typed launch subject")
         profile = self._profile_for(binding)
         rendered = render_signed_launch(
             TrustedLaunchContextV2(
@@ -497,15 +539,38 @@ class ExecutablePoolExecutor:
             return None
         return self._bootstrap_handoff_store.reference_for(binding)
 
+    async def _prepare_launch(
+        self, binding: ExecutableIntentBindingV2, *, bootstrap_registration_epoch: int,
+    ) -> _LaunchEnvelope:
+        """Resolve/render/retain before permit consumption, never during replay."""
+        self._assert_binding(binding)
+        subject = await self.client.launch_subject(binding) if self.typed_policy is not None else None
+        rendered = self.render_launch(binding, launch_subject=subject)
+        if subject is not None:
+            retain_launch_facts(self.journal, subject)
+        return _LaunchEnvelope(rendered, bootstrap_registration_epoch, subject)
+
     def _remember_launch(
         self,
-        rendered: RenderedTrustedLaunchV2,
+        rendered: RenderedTrustedLaunchV2 | RenderedTrustedLaunchV3,
         *,
         bootstrap_registration_epoch: int,
         event: str,
+        launch_subject: ExecutableLaunchSubjectV3 | None = None,
     ) -> None:
+        extra: dict[str, object] = {}
+        if isinstance(rendered, RenderedTrustedLaunchV3):
+            if launch_subject is None:
+                raise ValueError("typed launch journal requires retained subject")
+            self._validate_stored_launch(rendered.request.operation_id,
+                _LaunchEnvelope(rendered, bootstrap_registration_epoch, launch_subject))
+            reference = retain_launch_facts(self.journal, launch_subject)
+            extra = {"schema_version": 3, "launch_facts": reference.model_dump(mode="json")}
+        elif launch_subject is not None:
+            raise ValueError("legacy launch journal cannot retain typed subject")
         payload = json.dumps(
             {
+                **extra,
                 "bootstrap_registration_epoch": bootstrap_registration_epoch,
                 "ownership_proof": rendered.ownership_proof.model_dump(
                     mode="json", exclude_none=False
@@ -544,6 +609,19 @@ class ExecutablePoolExecutor:
         if payload is None:
             raise JournalRegressionError("signed launch envelope is absent from journal")
         value = json.loads(payload.decode("ascii"))
+        if "schema_version" in value:
+            if (type(value["schema_version"]) is not int or value["schema_version"] != 3
+                or set(value) != {"schema_version", "launch_facts", "bootstrap_registration_epoch", "ownership_proof", "request"}
+                or type(value["bootstrap_registration_epoch"]) is not int or value["bootstrap_registration_epoch"] <= 0):
+                raise JournalRegressionError("typed launch envelope schema or fields changed")
+            subject = load_launch_facts(self.journal, LaunchFactsReferenceV3.model_validate_json(json.dumps(value["launch_facts"])))
+            envelope = _LaunchEnvelope(rendered=RenderedTrustedLaunchV3(
+                request=SlurmLaunchRequestV2.model_validate_json(json.dumps(value["request"])),
+                ownership_proof=parse_typed_executable_ownership(json.dumps(value["ownership_proof"],
+                    sort_keys=True, separators=(",", ":")).encode("ascii"))),
+                bootstrap_registration_epoch=value["bootstrap_registration_epoch"], launch_subject=subject)
+            self._validate_stored_launch(intent_id, envelope)
+            return envelope
         envelope = _LaunchEnvelope(
             rendered=RenderedTrustedLaunchV2(
                 request=SlurmLaunchRequestV2.model_validate_json(json.dumps(value["request"])),
@@ -571,6 +649,11 @@ class ExecutablePoolExecutor:
 
     def _validate_stored_launch(self, intent_id: UUID, envelope: _LaunchEnvelope) -> None:
         rendered = envelope.rendered
+        if isinstance(rendered, RenderedTrustedLaunchV3):
+            self._validate_typed_stored_launch(intent_id, envelope, rendered)
+            return
+        if self.typed_policy is not None or envelope.launch_subject is not None:
+            raise JournalRegressionError("legacy launch evidence cannot enter typed runtime")
         proof = rendered.ownership_proof
         request = rendered.request
         keyring = OwnershipKeyring(
@@ -615,6 +698,32 @@ class ExecutablePoolExecutor:
             or request != expected.request
         ):
             raise JournalRegressionError("stored ownership request and proof are not coherent")
+
+    def _validate_typed_stored_launch(
+        self, intent_id: UUID, envelope: _LaunchEnvelope, rendered: RenderedTrustedLaunchV3,
+    ) -> None:
+        proof, subject = rendered.ownership_proof, envelope.launch_subject
+        if self.typed_policy is None or subject is None or subject.binding != proof.metadata.binding:
+            raise JournalRegressionError("typed launch subject or policy is absent or changed")
+        keyring = OwnershipKeyring({self.ownership_key.signing_key_id: self.ownership_key.private_key.public_key()})
+        if not keyring.verify_typed_executable(proof, expected_public_key_sha256=self.registration.signing_key_sha256):
+            raise JournalRegressionError("stored typed ownership proof is not authentic")
+        try:
+            self._assert_binding(proof.metadata.binding)
+            expected = render_typed_signed_launch(TrustedLaunchContextV3(binding=subject.binding,
+                subject=ResolvedAllocationLaunchSubject(configuration=subject.configuration,
+                    acknowledgement=subject.acknowledgement, authority=subject.authority),
+                profiles=self.profiles, policy=self.typed_policy,
+                controller_authority=self.controller_authority, ownership_key=self.ownership_key,
+                submitted_at=proof.metadata.submitted_at))
+            reference = self._handoff_reference(subject.binding)
+            if reference is not None:
+                expected = replace(expected, request=expected.request.model_copy(update={"bootstrap_handoff_reference": reference}))
+        except (TypeError, ValueError, RuntimeAssemblyError) as exc:
+            raise JournalRegressionError("stored typed launch facts differ from authority") from exc
+        if (rendered != expected or rendered.request.operation_id != intent_id
+            or proof.signing_key_id != self.registration.signing_key_id):
+            raise JournalRegressionError("stored typed launch request and proof are not coherent")
 
     def _retained_bootstrap_proposal(
         self,
@@ -806,7 +915,12 @@ class ExecutablePoolExecutor:
             raise JournalRegressionError("bootstrap handoff admission route is invalid")
         return value
 
+    def _assert_operation_consumers_ready(self) -> None:
+        if self.typed_policy is not None:
+            raise RuntimeAssemblyError("typed runtime operation consumers are not ready")
+
     async def tick(self) -> ExecutorTickResult:
+        self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
         if replayed_local is not None:
@@ -863,6 +977,7 @@ class ExecutablePoolExecutor:
     async def tick_drain_only(self) -> ExecutorTickResult:
         """Apply one structurally drain-only operation without new capacity work."""
 
+        self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
         if replayed_local is not None:
@@ -1308,6 +1423,8 @@ class ExecutablePoolExecutor:
         work: ExecutablePoolWorkV2,
         checkpoint: ExecutableCheckpointReceiptV2,
     ) -> ExecutorTickResult:
+        if self.typed_policy is not None:
+            raise RuntimeAssemblyError("typed runtime operation consumers are not ready")
         if isinstance(work, ExecutableReservationProposalV2):
             acceptance = ExecutableReservationAcceptanceV2(
                 execution=work.execution,
@@ -1345,6 +1462,7 @@ class ExecutablePoolExecutor:
             if observation.bootstrap_registration_epoch != work.bootstrap_registration_epoch:
                 raise JournalRegressionError("protected bootstrap observation differs from permit")
             bootstrap_epoch = work.bootstrap_registration_epoch
+            envelope = await self._prepare_launch(work.binding, bootstrap_registration_epoch=bootstrap_epoch)
             consumption = ExecutablePermitConsumptionV2(
                 permit_id=work.permit_id,
                 permit_digest=canonical_executable_digest(work),
@@ -1356,7 +1474,7 @@ class ExecutablePoolExecutor:
                 event="permit-consume",
                 operation=lambda: self.client.consume_executable_permit(consumption),
             )
-            rendered = self.render_launch(work.binding)
+            rendered = envelope.rendered
             if self._bootstrap_handoff_store is not None:
                 bind_bootstrap_handoff_ownership(
                     self._bootstrap_handoff_store.directory,
@@ -1373,6 +1491,7 @@ class ExecutablePoolExecutor:
                 rendered,
                 bootstrap_registration_epoch=bootstrap_epoch,
                 event="slurm-submit-requested",
+                launch_subject=envelope.launch_subject,
             )
             try:
                 submission = await self.slurm.submit(rendered.request)
@@ -1381,15 +1500,17 @@ class ExecutablePoolExecutor:
                     rendered,
                     bootstrap_registration_epoch=bootstrap_epoch,
                     event="slurm-submit-unknown",
+                    launch_subject=envelope.launch_subject,
                 )
                 raise
             self._remember_launch(
                 rendered,
                 bootstrap_registration_epoch=bootstrap_epoch,
                 event="slurm-submit-confirmed",
+                launch_subject=envelope.launch_subject,
             )
             await self._bind_physical(
-                envelope=_LaunchEnvelope(rendered, bootstrap_epoch), job_id=submission.job_id
+                envelope=envelope, job_id=submission.job_id
             )
             return ExecutorTickResult("submitted", work.binding.intent_id, submission.job_id)
         if isinstance(work, ExecutableIntentCloseV2):
@@ -1435,6 +1556,7 @@ class ExecutablePoolExecutor:
                 envelope.rendered,
                 bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
                 event="physical-bind-confirmed",
+                launch_subject=envelope.launch_subject,
             )
             return
         latest = self.journal.latest("intent", str(request.binding.intent_id))
@@ -1460,6 +1582,7 @@ class ExecutablePoolExecutor:
                     envelope.rendered,
                     bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
                     event="physical-bind-confirmed",
+                    launch_subject=envelope.launch_subject,
                 )
                 return
         else:
@@ -1489,6 +1612,7 @@ class ExecutablePoolExecutor:
             envelope.rendered,
             bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
             event="physical-bind-confirmed",
+            launch_subject=envelope.launch_subject,
         )
 
     def _physical_binding(
@@ -2258,6 +2382,7 @@ class ExecutablePoolExecutor:
         ).hexdigest()
 
     async def recover(self) -> ExecutorTickResult:
+        self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
         if replayed_local is not None:
@@ -2336,6 +2461,8 @@ class ExecutablePoolExecutor:
         jobs: tuple[SlurmJobObservationV2, ...] | None = None,
         quarantine_all: bool = False,
     ) -> ExecutorTickResult:
+        if self.typed_policy is not None:
+            raise RuntimeAssemblyError("typed runtime inventory consumers are not ready")
         replayed = await self._replay_inventory_request(checkpoint)
         if replayed is not None:
             return replayed
@@ -2354,16 +2481,19 @@ class ExecutablePoolExecutor:
                     envelope = self._load_launch(UUID(record.object_id))
                 except (ValueError, JournalRegressionError):
                     continue
+                retained_proof = None if envelope is None else envelope.rendered.ownership_proof
+                if retained_proof is not None and not isinstance(retained_proof, SignedExecutableOwnershipProofV2):
+                    raise JournalRegressionError("typed ownership cannot enter legacy inventory")
                 matches = self._exact_matches(envelope, observed)
-                if envelope is not None and len(matches) == 1:
-                    proofs[matches[0].job_id] = envelope.rendered.ownership_proof
+                if retained_proof is not None and len(matches) == 1:
+                    proofs[matches[0].job_id] = retained_proof
                 else:
                     bound_matches = self._bound_live_matches(envelope, observed)
-                    if envelope is not None and len(bound_matches) == 1:
-                        proofs[bound_matches[0].job_id] = envelope.rendered.ownership_proof
+                    if retained_proof is not None and len(bound_matches) == 1:
+                        proofs[bound_matches[0].job_id] = retained_proof
                 terminal_matches = self._exact_terminal_matches(envelope, terminals)
-                if envelope is not None and len(terminal_matches) == 1:
-                    terminal_proofs[terminal_matches[0].job_id] = envelope.rendered.ownership_proof
+                if retained_proof is not None and len(terminal_matches) == 1:
+                    terminal_proofs[terminal_matches[0].job_id] = retained_proof
 
         def live_record(item: SlurmJobObservationV2) -> ExecutableInventoryRecordV2:
             proof = proofs.get(item.job_id)

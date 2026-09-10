@@ -719,6 +719,8 @@ class CapacityExecutionStore:
         session: AsyncSession,
         inventory: ExecutableExecutorInventoryV2,
     ) -> IngestedExecutableInventory:
+        if type(inventory) is not ExecutableExecutorInventoryV2:
+            raise ExecutionConflictError("unsupported executable inventory contract")
         digest = canonical_executable_digest(inventory)
         async with _write_transaction(session):
             authority, epoch, registration = await self._locked_epoch_and_registration(

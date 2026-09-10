@@ -322,6 +322,32 @@ class ExecutorJournal:
             payload_base64=payload_base64,
         )
 
+    def assert_payload_capacity(
+        self, payload_sizes: tuple[int, ...], *, reserved_bytes: int,
+    ) -> None:
+        """Preflight a bounded write batch under the held journal lock.
+
+        Reserve the caller's recovery budget. The framing allowance is a
+        conservative bound for validated identifiers, hashes and sequence fields;
+        this never promises a write on a journal that append itself would reject.
+        No bytes or high-water state change on rejection.
+        """
+        if self._journal_fd is None:
+            raise JournalLockError("executor journal is not open")
+        if type(reserved_bytes) is not int or reserved_bytes < 0:
+            raise ValueError("journal capacity reserve is invalid")
+        encoded_sizes = []
+        for size in payload_sizes:
+            if type(size) is not int or size <= 0:
+                raise ValueError("journal capacity payload size is invalid")
+            encoded_size = 4 * ((size + 2) // 3) + 1024
+            if encoded_size > _MAX_RECORD_BYTES:
+                raise ValueError("journal capacity record exceeds its size bound")
+            encoded_sizes.append(encoded_size)
+        if (self._head.sequence + len(payload_sizes) > _MAX_RECORDS
+            or os.fstat(self._journal_fd).st_size + sum(encoded_sizes) + reserved_bytes > _MAX_JOURNAL_BYTES):
+            raise JournalError("executor journal capacity cannot preserve recovery reserve")
+
     def append(
         self,
         event_kind: str,
