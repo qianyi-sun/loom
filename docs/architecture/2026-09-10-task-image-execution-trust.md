@@ -287,7 +287,7 @@ its signature envelope at most 512 KiB. The envelope carries `canonical_grant`,
 `grant_sha256` (inner digest), `key_id`, fixed `Ed25519`, and canonical unpadded
 base64url signature. The signing preimage is `loom-task-image-execution-grant-v2`,
 one NUL byte, and original canonical grant bytes. The verified result's
-`grant_sha256` identifies the **complete envelope**, not the inner digest.
+`envelope_sha256` identifies the **complete envelope**, not the inner digest.
 
 Both claim variants bind trial/team/worker-registration UUIDs, actual worker lease
 epoch and trial attempt count. The explicitly discriminated protected variant

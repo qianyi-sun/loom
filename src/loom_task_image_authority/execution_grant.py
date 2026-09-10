@@ -231,7 +231,7 @@ def _decode(wire: bytes, model: type[_WireModel], maximum: int) -> _WireModel:
 @dataclass(frozen=True)
 class VerifiedExecutionGrant:
     grant: TaskImageExecutionGrantV2
-    grant_sha256: str
+    envelope_sha256: str
     publication_set: VerifiedPublicationSet
 
     @property
