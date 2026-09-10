@@ -118,9 +118,9 @@ def test_join_requires_every_allocator_eligible_domain(tmp_path):
     publication, preparation, configs = installation_input(tmp_path)
     reference = preparation.personal_builds.profiles[0]
     shape = reference.worker_shapes[0].model_copy(update={
-        "compatible_domain_ids": (*reference.worker_shapes[0].compatible_domain_ids, "extra-domain")})
+        "compatible_domain_ids": (*reference.worker_shapes[0].compatible_domain_ids, "zz-domain")})
     reference = reference.model_copy(update={"worker_shapes": (shape,),
-        "eligible_resource_domains": (*reference.eligible_resource_domains, "extra-domain")})
+        "eligible_resource_domains": (*reference.eligible_resource_domains, "zz-domain")})
     reference = reference.model_copy(update={"profile_digest": canonical_digest_excluding(reference, "profile_digest")})
     preparation = preparation.model_copy(update={"personal_builds": preparation.personal_builds.model_copy(update={
         "profiles": (reference, preparation.personal_builds.profiles[1])})})
