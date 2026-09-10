@@ -1,10 +1,12 @@
 """Native lease operations retain registered inputs through fresh and replay paths."""
 
+import hashlib
 from datetime import timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import rfc8785
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -226,3 +228,46 @@ async def test_registry_consumers_recheck_source_and_preflight_before_autoflush(
         await session.rollback()
     async with journal() as session:
         assert await session.get(Task, pending.id) is None
+
+
+@pytest.mark.parametrize("operation", ["claim", "start", "heartbeat", "start-replay", "heartbeat-replay", "plan"])
+@pytest.mark.parametrize("drift", ["manifest", "component", "downgrade"])
+async def test_validly_hashed_retained_receipt_must_match_admitted_frozen_inputs(journal, tmp_path, operation, drift):
+    authorization, _spec, _ticket, image_id = await _setup(journal, tmp_path)
+    async with journal.begin() as session:
+        _image, plan = await _claim(session, authorization)
+        attempt = await _attempt(session)
+        arguments = dict(
+            authorization=authorization, materialization_id=image_id, attempt_id=attempt.id,
+            lease_epoch=attempt.lease_epoch, now=NOW + timedelta(seconds=11),
+        )
+    operation_id = uuid4()
+    if operation.endswith("-replay"):
+        async with journal.begin() as session:
+            method = native.start_session_materialization if operation.startswith("start") else native.heartbeat_session_materialization
+            await method(session, operation_id=operation_id, **arguments)
+    payload = plan.model_dump(mode="json")
+    if drift == "manifest":
+        payload["bundle_content_manifest_sha256"] = "f" * 64
+        payload["bundle_prefix"] = "replacement/" + "f" * 64 + "/"
+    elif drift == "component":
+        payload["components"][0]["dockerfile_path"] = "another-Dockerfile"
+    else:
+        del payload["bundle_content_manifest_sha256"]
+        payload["schema_version"] = "loom.task-image-build-plan.v1"
+    async with journal.begin() as session:
+        stored = await _attempt(session)
+        # These fields have no immutable trigger: exercise the actual retained
+        # receipt boundary without disabling database protections.
+        stored.claim_plan_json = payload
+        stored.claim_plan_sha256 = hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
+    async with journal() as session:
+        with pytest.raises(native.TaskImageSessionMaterializationConflictError, match="frozen"):
+            if operation == "claim":
+                await _claim(session, authorization)
+            elif operation == "plan":
+                await native.get_session_materialization_build_plan(session, **arguments)
+            else:
+                method = native.start_session_materialization if operation.startswith("start") else native.heartbeat_session_materialization
+                await method(session, operation_id=operation_id, **arguments)
+        await session.rollback()
