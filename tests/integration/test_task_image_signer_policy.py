@@ -312,7 +312,10 @@ async def test_provider_result_is_independently_authenticated_before_return(data
 
 
 async def test_real_tls_policy_database_bootstrap_commit_and_publication_chain(database, tmp_path):
-    from loom_task_image_authority.publication_transport import HTTPSKeysetSigner, HTTPSPublicationSigner
+    from loom_task_image_authority.publication_transport import (
+        HTTPSKeysetSigner,
+        HTTPSPublicationSigner,
+    )
     from tests.unit.test_task_image_signer_server import service
 
     result = await setup(database)
