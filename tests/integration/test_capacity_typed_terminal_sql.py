@@ -112,7 +112,7 @@ async def test_typed_terminal_release_matches_python_and_sql_before_recreation(c
     await assert_sql_release_matches(capacity_session, member.configuration)
 
 
-@pytest.mark.parametrize("tamper", ("purpose", "owner", "member-head", "configuration", "ack", "version"))
+@pytest.mark.parametrize("tamper", ("purpose", "owner", "member-head", "configuration", "ack", "version", "decimal-version", "decimal-revision"))
 async def test_sql_terminal_subject_authentication_rejects_provenance_substitution(capacity_session, tamper):
     _store, _preparation, _member, binding, inventory = await terminal_inventory(capacity_session)
     proof = inventory.records[0].ownership_proof.model_dump(mode="json")
@@ -131,6 +131,10 @@ async def test_sql_terminal_subject_authentication_rejects_provenance_substituti
         authority["configuration"]["digest"] = "f" * 64
     elif tamper == "ack":
         authority["acknowledgement_sha256"] = "f" * 64
+    elif tamper == "decimal-version":
+        changed["metadata"]["schema_version"] = 3.0
+    elif tamper == "decimal-revision":
+        authority["membership"]["revision"] = float(authority["membership"]["revision"])
     else:
         changed["metadata"]["schema_version"] = 2
     assert await capacity_session.scalar(query, parameters | {"proof": json.dumps(changed)}) is False
