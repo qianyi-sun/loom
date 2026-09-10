@@ -233,6 +233,24 @@ async def test_never_accepted_proposal_uses_existing_release_path(
         != "0" * 64
     )
 
+    # Keep the released ORM instance alive while the actual ledger changes.
+    # A retained session must not authorize recreation from its identity map.
+    await _test_only_update_without_guard(
+        capacity_session,
+        table_name="capacity_executable_intents",
+        trigger_name="capacity_executable_intent_mutation_guard",
+        statement=update(CapacityExecutableIntent)
+        .where(CapacityExecutableIntent.intent_id == row.intent_id)
+        .values(state="quarantined")
+        .execution_options(synchronize_session=False),
+    )
+    assert row.state == "released"
+    with pytest.raises(ConfigurationConflictError, match="unreleased executable intents"):
+        await release_digest(
+            capacity_session,
+            SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload)),
+        )
+
 
 @pytest.mark.parametrize(
     ("physical", "tamper"),
