@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -1031,11 +1032,16 @@ async def claim_execution_commands(
     session: AsyncSession,
     *,
     consumer_id: str,
+    target_id: str,
     limit: int,
     lease_seconds: int,
     now: datetime | None = None,
 ) -> tuple[ClaimedExecutionCommand, ...]:
+    """Lease commands only for one target, filtering before limit and row locking."""
+
     current_time = now or datetime.now(UTC)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", target_id):
+        raise ServiceExecutionConflict("invalid command target identity")
     if not consumer_id or len(consumer_id) > 120:
         raise ServiceExecutionConflict("invalid command consumer identity")
     if limit < 1 or limit > 100 or lease_seconds < 5 or lease_seconds > 300:
@@ -1045,6 +1051,11 @@ async def claim_execution_commands(
             await session.execute(
                 select(ServiceExecutionCommand)
                 .where(
+                    ServiceExecutionCommand.lease_id.in_(
+                        select(ServiceExecutionLease.id).where(
+                            ServiceExecutionLease.target_id == target_id
+                        )
+                    ),
                     or_(
                         ServiceExecutionCommand.state == CommandState.PENDING,
                         (
@@ -1360,6 +1371,33 @@ async def record_execution_event(
     )
     session.add(event)
     advances_projection = ordinal > lease.last_event_ordinal
+    completes_cancellation = (
+        advances_projection
+        and lease.desired_state == "cancel"
+        and lease.finalized_at is None
+        and lease.execution_role == "attempt"
+        and lease.output_commit_state in {"committed", "unavailable"}
+        and (
+            event_kind == "deleted"
+            or (
+                event_kind == "kubernetes_observed" and payload.get("normalized_state") == "deleted"
+            )
+        )
+    )
+    if completes_cancellation:
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+        if (
+            trial is not None
+            and trial.attempt_count == lease.attempt
+            and trial.state in {"claimed", "running"}
+        ):
+            # The fenced deletion event closes this attempt; its raw result and
+            # usage remain intact. Existing DB triggers release the team counter.
+            trial.state = "cancelled"
+            trial.finished_at = observed_at
+            trial.failure_reason = "cancelled"
+            trial.failure_message = "service execution cancelled"
+            lease.finalized_at = observed_at
     if advances_projection:
         lease.last_event_ordinal = ordinal
     if event_kind == "heartbeat" and advances_projection:

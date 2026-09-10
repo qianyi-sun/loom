@@ -20,6 +20,7 @@ from loom.db.schema import (
     Batch,
     LlmCall,
     ProviderConnection,
+    Team,
     TeamQuota,
     TrialTaskImageMaterialization,
 )
@@ -50,6 +51,12 @@ from loom_control_plane.protected_worker_session import (
 )
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
+from loom_service.auth_guards import require_human_or_admin, require_scope
+from loom_service.session_auth import (
+    is_staging_admin_browser_session,
+    verify_csrf,
+    verify_session_cookie,
+)
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
@@ -728,6 +735,20 @@ async def cancel_trial(
             admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
             allow_family_orchestrator=True,
         )
+        if not authorization:
+            cookie = request.cookies.get("loom_session")
+            if is_staging_admin_browser_session(cookie):
+                raise HTTPException(status_code=403, detail="validation-only browser session")
+            ctx = require_human_or_admin(await verify_session_cookie(session, cookie))
+            verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
+            require_scope(ctx, "submit")
+            if ctx.team_id is not None and not is_admin(ctx):
+                disabled_at = (await session.execute(
+                    select(Team.disabled_at).where(Team.id == ctx.team_id),
+                )).scalar_one_or_none()
+                if disabled_at is not None:
+                    raise HTTPException(status_code=403, detail="team is disabled")
+            await session.commit()
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     caller_is_admin = is_admin(ctx)

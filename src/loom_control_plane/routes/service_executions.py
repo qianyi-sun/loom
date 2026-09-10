@@ -77,6 +77,7 @@ class TransitionBody(_StrictBody):
 
 
 class CommandClaimBody(_StrictBody):
+    target_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     consumer_id: str = Field(min_length=1, max_length=120)
     limit: int = Field(default=20, ge=1, le=100)
     lease_seconds: int = Field(default=60, ge=5, le=300)
@@ -272,6 +273,7 @@ async def claim_commands(
             commands = await claim_execution_commands(
                 session,
                 consumer_id=body.consumer_id,
+                target_id=body.target_id,
                 limit=body.limit,
                 lease_seconds=body.lease_seconds,
             )

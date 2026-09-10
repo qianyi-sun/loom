@@ -130,6 +130,28 @@ system services from elastic execution node pools. Keep environment identities,
 database/storage scopes and resource policies separate. Shared-cluster failure
 domain limits must be explicit; another cluster requires a concrete requirement.
 
+The owner's 2026-09-10 priority is stable operation in the primary region
+(`eu-north1`). Cross-region acceptance is deferred until primary resources are
+insufficient; it does not gate the initial single-region service. Keep secondary
+routing disabled while paused. Existing regional resources and implementation
+are retained for a later decision, not silently deleted or treated as accepted.
+Focus current validation on ordinary-user submission, progress, cancellation,
+durable results, native scale-to-zero, upgrades and recovery in the primary
+region. #1897 owns the command-consumption and cancellation defects found during
+the bounded rollout; #1884 retains the deferred regional expansion work.
+
+Execution commands belong to one target. Each actuator, including callers of
+`POST /admin/service-execution/commands/claim`, supplies its `target_id`; the
+claim transaction selects only leases for that target before locking commands.
+There is no default global consumer. Cancellation also covers an attempt that
+never created a Job: authoritative namespace reconciliation must finish its
+existing cleanup path without treating an active create as deleted.
+
+Browser-session cancellation carries the session and CSRF credentials to the
+control plane, which independently validates the caller's submit scope and team.
+Bearer-token cancellation retains the same authority checks. Neither path may
+substitute an administrator credential for the ordinary user.
+
 Expose a stable public HTTPS application endpoint with DNS, TLS, authentication
 and team permissions. Browser, CLI and SDK users on an ordinary internet
 connection must not need OLDLAB access, a VPN, SSH tunnels or port forwarding.

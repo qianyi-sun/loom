@@ -2187,7 +2187,12 @@ async def test_command_redelivery_and_acknowledgement_are_replay_safe(
 
         async with sessions() as session:
             first = await claim_execution_commands(
-                session, consumer_id="actuator-a", limit=1, lease_seconds=5, now=now
+                session,
+                consumer_id="actuator-a",
+                target_id=target.target_id,
+                limit=1,
+                lease_seconds=5,
+                now=now,
             )
             await session.commit()
             assert len(first) == 1
@@ -2197,6 +2202,7 @@ async def test_command_redelivery_and_acknowledgement_are_replay_safe(
             second = await claim_execution_commands(
                 session,
                 consumer_id="actuator-b",
+                target_id=target.target_id,
                 limit=1,
                 lease_seconds=5,
                 now=now + timedelta(seconds=6),

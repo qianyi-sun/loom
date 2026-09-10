@@ -2876,12 +2876,16 @@ async def cancel_batch(
     # The Control Plane owns the trial cancellation transition for every
     # backend. In protected staging this is also the only path that can move a
     # live claim to cancel-pending without releasing its concurrency lease.
+    if ctx.auth_kind == "session":
+        # CP session revalidation must not wait on this request's auth-row lock.
+        await s.commit()
     for trial_id in active_trial_ids:
         response = await forward(
             request.app.state.http_client,
             method="POST",
             path=f"/trials/{trial_id}/cancel",
             authorization=authorization,
+            cancellation_request=request,
         )
         if response.status_code not in {200, 409}:
             return propagate(response)
