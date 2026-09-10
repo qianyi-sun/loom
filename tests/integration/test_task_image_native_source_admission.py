@@ -1,0 +1,162 @@
+"""Native lease operations retain registered inputs through fresh and replay paths."""
+
+from datetime import timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from loom.db.schema import Task, TaskBundleSourceReference, TaskImageMaterialization
+from loom.task_bundle_registration import prepare_task_bundle_registration
+from loom.task_bundle_source import TaskBundleSourceSpecV1
+from loom.task_image_materialization import ensure_task_image_materializations
+from loom_task_image_authority import materializations as native
+from tests.integration.test_task_bundle_source_admission import _task
+from tests.integration.test_task_bundle_source_admission import journal as journal
+from tests.integration.test_task_bundle_source_journal import _module, _publish, _receipts, _upload
+from tests.integration.test_task_image_authority_materializations import (
+    CLAIM_ID,
+    NOW,
+    _active_authorization,
+    _attempt,
+)
+from tests.unit.test_task_bundle_registration import _bundle
+
+
+async def _setup(factory, tmp_path):
+    directory = _bundle(tmp_path)
+    config = directory / "task.toml"
+    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "arm64"'))
+    spec = TaskBundleSourceSpecV1.from_registration(
+        prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
+        bucket="task-sources",
+    )
+    ticket = await _upload(factory, spec)
+    await _receipts(factory, ticket)
+    await _publish(factory, ticket)
+    async with factory.begin() as session:
+        authorization, *_ = await _active_authorization(session)
+        image = (await ensure_task_image_materializations(session, task_row=_task(spec)))[0]
+        image_id = image.id
+    return authorization, spec, ticket, image_id
+
+
+async def _claim(session, authorization):
+    return await native.claim_session_materialization(
+        session, authorization=authorization, claim_id=CLAIM_ID,
+        now=NOW + timedelta(seconds=10), lease_seconds=300,
+    )
+
+
+async def _release_source(factory, spec, ticket, image_id, *, retire):
+    async with factory.begin() as session:
+        await session.scalar(select(TaskImageMaterialization).where(
+            TaskImageMaterialization.id == image_id,
+        ).with_for_update())
+        await _module().release_task_bundle_reference(
+            session, source_id=spec.id, reference_kind="materialization", owner_id=str(image_id),
+        )
+        if retire:
+            await _module().release_task_bundle_reference(
+                session, source_id=spec.id, reference_kind="catalog", owner_id="catalog",
+            )
+            assert await _module().retire_task_bundle_source(
+                session, incarnation_id=ticket.incarnation_id, now=NOW,
+            )
+
+
+@pytest.mark.parametrize("operation", [
+    "claim", "claim-replay", "start", "start-replay", "heartbeat", "heartbeat-replay", "plan",
+])
+@pytest.mark.parametrize("retired", [False, True])
+async def test_native_source_admission_on_fresh_and_replayed_authority(journal, tmp_path, operation, retired):
+    authorization, spec, ticket, image_id = await _setup(journal, tmp_path)
+    operation_id = uuid4()
+    arguments = {}
+    original_plan = None
+    if operation != "claim":
+        async with journal.begin() as session:
+            _image, original_plan = await _claim(session, authorization)
+            attempt = await _attempt(session)
+            arguments = dict(
+                authorization=authorization, materialization_id=image_id, attempt_id=attempt.id,
+                lease_epoch=attempt.lease_epoch, now=NOW + timedelta(seconds=11),
+            )
+        if operation in {"start-replay", "heartbeat-replay"}:
+            async with journal.begin() as session:
+                method = native.start_session_materialization if operation == "start-replay" else native.heartbeat_session_materialization
+                await method(session, operation_id=operation_id, **arguments)
+    await _release_source(journal, spec, ticket, image_id, retire=retired)
+
+    async def admit(session):
+        if operation in {"claim", "claim-replay"}:
+            result = await _claim(session, authorization)
+            assert result[1].content_manifest_digest == spec.manifest.digest
+            if original_plan is not None:
+                assert result[1].model_dump_json() == original_plan.model_dump_json()
+            return result
+        if operation == "plan":
+            return await native.get_session_materialization_build_plan(session, **arguments)
+        method = native.start_session_materialization if operation.startswith("start") else native.heartbeat_session_materialization
+        return await method(session, operation_id=operation_id, **arguments)
+
+    async with journal() as session:
+        if retired:
+            with pytest.raises(native.TaskImageSessionMaterializationConflictError, match="source"):
+                await admit(session)
+            await session.rollback()
+        else:
+            assert await admit(session) is not None
+            await session.commit()
+    async with journal() as session:
+        reference = await session.get(TaskBundleSourceReference, (spec.id, "materialization", str(image_id)))
+        assert (reference is None) == retired
+
+
+@pytest.mark.parametrize("operation", ["claim", "start", "heartbeat", "plan"])
+@pytest.mark.parametrize("isolation", ["AUTOCOMMIT", "REPEATABLE READ", "SERIALIZABLE"])
+async def test_native_preflight_rejects_unsafe_transaction_before_unrelated_autoflush(journal, tmp_path, operation, isolation):
+    authorization, _spec, _ticket, image_id = await _setup(journal, tmp_path)
+    arguments = {}
+    if operation != "claim":
+        async with journal.begin() as session:
+            await _claim(session, authorization)
+            attempt = await _attempt(session)
+            arguments = dict(
+                authorization=authorization, materialization_id=image_id, attempt_id=attempt.id,
+                lease_epoch=attempt.lease_epoch, now=NOW + timedelta(seconds=11),
+            )
+    sessions = async_sessionmaker(journal.kw["bind"].execution_options(isolation_level=isolation), expire_on_commit=False)
+    pending = Task(id="pending-" + uuid4().hex, checksum="f" * 64, config={})
+    async with sessions() as session:
+        session.add(pending)
+        with pytest.raises((ValueError, native.TaskImageSessionMaterializationConflictError), match="READ COMMITTED"):
+            if operation == "claim":
+                await _claim(session, authorization)
+            elif operation == "plan":
+                await native.get_session_materialization_build_plan(session, **arguments)
+            else:
+                method = native.start_session_materialization if operation == "start" else native.heartbeat_session_materialization
+                await method(session, operation_id=uuid4(), **arguments)
+        assert pending in session.new
+        await session.rollback()
+    async with journal() as session:
+        assert await session.get(Task, pending.id) is None
+
+
+@pytest.mark.parametrize("containment", [False, True])
+async def test_cleanup_remains_usable_after_source_retirement_in_serializable_transaction(journal, tmp_path, containment):
+    authorization, spec, ticket, image_id = await _setup(journal, tmp_path)
+    async with journal.begin() as session:
+        await _claim(session, authorization)
+        attempt = await _attempt(session)
+    await _release_source(journal, spec, ticket, image_id, retire=True)
+    sessions = async_sessionmaker(journal.kw["bind"].execution_options(isolation_level="SERIALIZABLE"), expire_on_commit=False)
+    async with sessions.begin() as session:
+        method = native.release_containment_failed_session_materialization if containment else native.release_session_materialization
+        result = await method(
+            session, authorization=authorization, materialization_id=image_id, attempt_id=attempt.id,
+            lease_epoch=attempt.lease_epoch, operation_id=uuid4(), now=NOW + timedelta(seconds=12),
+        )
+        assert result.state == "queued"
