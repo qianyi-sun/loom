@@ -270,6 +270,8 @@ function buildAdvancedConfig(
         jitter: jitter,
       },
     };
+  } else {
+    out.retry = { max_attempts: 1, retry_on: [] };
   }
 
   const prio = numOrErr(s.submitPriority, "Submit priority", { min: 0, max: 1000 });
