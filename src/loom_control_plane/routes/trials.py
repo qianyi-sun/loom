@@ -34,6 +34,7 @@ from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_I
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
+    runtime_profile_rejections,
 )
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
@@ -374,7 +375,7 @@ async def submit_trial(
         )
         automatic_compatible = (
             profile is not None
-            and task_config.environment.docker_image == profile.task_image_ref
+            and not runtime_profile_rejections(task_config, trial_config, profile)
             and not automatic_service_execution_rejections(
                 task_config,
                 trial_config,

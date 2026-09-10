@@ -158,23 +158,48 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
         assert "submitted_at" in body
 
 
+@pytest.mark.parametrize(
+    ("agent_name", "separate_task_image", "admit_task_image", "has_controller", "expected_status"),
+    [
+        ("direct-completion", False, True, False, 201),
+        ("terminus-2", True, True, True, 201),
+        ("terminus-2", True, False, True, 400),
+        ("terminus-2", True, True, False, 400),
+        ("direct-completion", True, True, True, 400),
+    ],
+)
 def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
     app,
     seed_team: tuple[UUID, str],
     postgres_url: str,
+    agent_name: str,
+    separate_task_image: bool,
+    admit_task_image: bool,
+    has_controller: bool,
+    expected_status: int,
 ) -> None:
     team_id, raw = seed_team
     task_id = "automatic-nebius-submit"
     batch_id = uuid4()
     task_image = "registry.example/task@sha256:" + "a" * 64
     runtime_image = "registry.example/runtime@sha256:" + "b" * 64
+    default_task_image = task_image
+    controller_image = "registry.example/worker@sha256:" + "9" * 64
+    if separate_task_image:
+        task_image = "registry.example/terminal-bench@sha256:" + "f" * 64
+    admitted_images = [default_task_image, runtime_image]
+    if admit_task_image and separate_task_image:
+        admitted_images.append(task_image)
+    if has_controller:
+        admitted_images.append(controller_image)
     profile = ServiceExecutionRuntimeProfileV1(
         candidate_sha="1" * 40,
         execution_class_id="linux-amd64-cpu-pod-v1",
-        task_image_ref=task_image,
+        task_image_ref=default_task_image,
+        agent_image_ref=controller_image if has_controller else None,
         runtime_image_ref=runtime_image,
         runtime_binary_sha256="sha256:" + "e" * 64,
-        image_admission=signed_image_admission_bundle((task_image, runtime_image)),
+        image_admission=signed_image_admission_bundle(tuple(admitted_images)),
     )
     profile_json = json.dumps(
         profile.model_dump(mode="json"),
@@ -213,7 +238,7 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                             "baseline_network_policy": {"kind": "gateway-only"},
                             "network_policies_supported": ["gateway-only"],
                         },
-                        "agent": {"name": "direct-completion"},
+                        "agent": {"name": agent_name},
                         "verifier": {
                             "name": "script",
                             "args": {"script_path": "verifier/check.sh"},
@@ -255,7 +280,7 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                     "task_id": task_id,
                     "batch_id": str(batch_id),
                     "config": {
-                        "agent_name": "direct-completion",
+                        "agent_name": agent_name,
                         "agent_model": {
                             "provider": "openai",
                             "name": "gpt-5",
@@ -265,7 +290,13 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                 },
             )
 
-        assert response.status_code == 201, response.text
+        assert response.status_code == expected_status, response.text
+        if expected_status != 201:
+            with sessions() as session:
+                assert session.scalar(
+                    select(func.count()).select_from(Trial).where(Trial.batch_id == batch_id)
+                ) == 0
+            return
         with sessions() as session:
             trial = session.get(Trial, UUID(response.json()["trial_id"]))
             assert trial is not None
