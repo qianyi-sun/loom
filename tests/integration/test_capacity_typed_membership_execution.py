@@ -135,6 +135,14 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                     from loom_capacity_manager.execution_store import CapacityExecutionStore
 
                     verifier = CapacityExecutionStore()
+                    assert await verifier._membership_target_current(
+                        reader, epoch, row, subject_id=member.configuration.subject_id)
+                    reporter = await verifier._exact_subject_reporter(
+                        reader, subject_id=context.binding.subject_id,
+                        subject_incarnation=context.binding.subject_incarnation,
+                        reporter_incarnation=member.acknowledgement.reporter_incarnation,
+                        operation="typed-cleanup", historical_binding=context.binding)
+                    assert reporter.reporter_incarnation == member.acknowledgement.reporter_incarnation
                     assert await verifier._inventory_subject_authority_matches(
                         reader, epoch, context.binding, proof)
                     changed_authority = proof.metadata.subject_authority.model_copy(update={
@@ -178,5 +186,13 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
             old_proof = render_typed_signed_launch(old_context).ownership_proof
             assert await CapacityExecutionStore()._inventory_subject_authority_matches(
                 reader, epoch, old_context.binding, old_proof)
+            assert not await CapacityExecutionStore._membership_target_current(
+                reader, epoch, row, subject_id=selected.configuration.subject_id)
+            reporter = await CapacityExecutionStore._exact_subject_reporter(
+                reader, subject_id=old_context.binding.subject_id,
+                subject_incarnation=old_context.binding.subject_incarnation,
+                reporter_incarnation=historical.acknowledgement.reporter_incarnation,
+                operation="typed-cleanup", historical_binding=old_context.binding)
+            assert reporter.state == "fenced"
     finally:
         await engine.dispose()
