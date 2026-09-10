@@ -87,3 +87,33 @@ def test_legacy_certificate_cannot_relabel_source_revision_as_local():
     payload["schema_version"] = 1
     with pytest.raises(ValueError, match="predecessor binding"):
         PersonalReincarnationEvidenceV1.model_validate_json(json.dumps(payload))
+
+
+def test_legacy_evidence_type_rejects_new_python_instance():
+    payload = inherited_evidence_payload()
+    payload["admission_revision"] = 3
+    value = parse(payload)
+    with pytest.raises(ValueError):
+        PersonalReincarnationEvidenceV1.model_validate(value)
+
+
+def test_legacy_serialization_cannot_truncate_new_evidence_fields():
+    from pydantic import TypeAdapter
+    from pydantic_core import PydanticSerializationError
+    value = parse(inherited_evidence_payload())
+    with pytest.raises(PydanticSerializationError):
+        TypeAdapter(PersonalReincarnationEvidenceV1).dump_json(value)
+    assert value.model_dump(mode="json")["source"] == inherited_evidence_payload()["source"]
+
+
+@pytest.mark.parametrize("field", ("digest", "subject_incarnation"))
+def test_new_evidence_equal_generation_root_is_exact(field):
+    payload = inherited_evidence_payload()
+    from loom_capacity_manager.contracts import SubjectConfigurationV1, canonical_digest
+    predecessor = SubjectConfigurationV1.model_validate_json(json.dumps(payload["predecessor"]))
+    payload["origin"].update(generation=predecessor.configuration_generation,
+        digest=canonical_digest(predecessor), subject_incarnation=str(predecessor.subject_incarnation))
+    parse(payload)
+    payload["origin"][field] = "e" * 64 if field == "digest" else str(UUID(int=99702))
+    with pytest.raises(ValueError):
+        parse(payload)
