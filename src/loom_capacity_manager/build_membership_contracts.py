@@ -159,7 +159,7 @@ class PersonalMembershipSnapshotV2(_StrictBuildV1):
 
 
 class DelegatedAllocationInputV3(AllocationInputV1):
-    """Pure V4 preparation composition; executable promotion remains disabled."""
+    """Typed allocation input; executable sealing retains both member purposes."""
 
     schema_version: Literal[3] = 3  # type: ignore[assignment]
     preparation: ExecutionPreparationV4

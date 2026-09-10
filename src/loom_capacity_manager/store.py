@@ -15,6 +15,10 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.build_membership_contracts import (
+    ExecutionPreparationPolicyV4,
+    ExecutionPreparationV4,
+)
 from loom_capacity_manager.contracts import (
     AccountPolicyV1,
     AllocationInputV1,
@@ -3328,13 +3332,23 @@ class CapacityManagementStore:
             or row.effective_ceiling != authority.executable_new_capacity_ceiling
         ):
             raise AuthorityRecoveryError("execution authority database binding changed")
+        preparation: ExecutionPreparationV2
         try:
-            preparation = self._execution_preparation_from_row(row)
+            if row.manifest_payload.get("schema_version") == 4:
+                # Authenticate retained active typed authority for allocation.
+                # Preparation/activation and legacy runtime parsers stay closed
+                # until their purpose-aware consumers are connected.
+                from loom_capacity_manager.typed_membership_store import _load_typed_history
+
+                preparation = (await _load_typed_history(session, row.execution_epoch)).preparation
+            else:
+                preparation = self._execution_preparation_from_row(row)
             await self._validate_execution_preparation(
                 session,
                 authority,
                 preparation,
                 require_writer_binding=row.state != "drain-only",
+                allow_typed_readback=True,
             )
             if row.state in {"active", "drain-only"}:
                 await self._validate_execution_executor_bindings(
@@ -3342,7 +3356,7 @@ class CapacityManagementStore:
                     row,
                     preparation,
                 )
-        except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
+        except (ExecutionConflictError, ExecutionPreparationDisabledError, ConfigurationConflictError) as exc:
             raise AuthorityRecoveryError(
                 "active execution authority executor binding or owner policy changed"
             ) from exc
@@ -3454,6 +3468,7 @@ class CapacityManagementStore:
         request: ExecutionPreparationV2,
         *,
         require_writer_binding: bool = True,
+        allow_typed_readback: bool = False,
     ) -> None:
         policy = self._execution_policy
         if policy is None:
@@ -3462,6 +3477,9 @@ class CapacityManagementStore:
             )
         supported_requests = {ExecutionPreparationV2: 2, ExecutionPreparationV3: 3}
         supported_policies = {ExecutionPreparationPolicyV2: 2, ExecutionPreparationPolicyV3: 3}
+        if allow_typed_readback:
+            supported_requests[ExecutionPreparationV4] = 4
+            supported_policies[ExecutionPreparationPolicyV4] = 4
         if (
             type(request.schema_version) is not int
             or supported_requests.get(type(request)) != request.schema_version
@@ -3493,6 +3511,16 @@ class CapacityManagementStore:
             raise ExecutionConflictError("execution configuration or fleet changed")
         if request.trusted_fleet_release_sha256 != policy.trusted_fleet_release_sha256:
             raise ExecutionConflictError("trusted fleet release is not configured exactly")
+        if request.schema_version != policy.schema_version:
+            raise ExecutionConflictError("execution preparation and policy versions differ")
+        if isinstance(request, ExecutionPreparationV4):
+            if not isinstance(policy, ExecutionPreparationPolicyV4) or any(
+                getattr(request, name) != getattr(policy, name) for name in (
+                    "personal_membership", "personal_builds", "managed_application_origins",
+                    "managed_build_origins", "retired_source",
+                )
+            ):
+                raise ExecutionConflictError("typed membership policy is not configured exactly")
         if isinstance(request, ExecutionPreparationV3) != isinstance(
             policy, ExecutionPreparationPolicyV3
         ) or (

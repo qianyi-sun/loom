@@ -1,17 +1,28 @@
 """Fresh typed demand reaches sealed allocation; runtime activation is separate."""
 
 import json
+from copy import deepcopy
 from importlib import import_module
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import allocate_shadow
-from loom_capacity_manager.membership_launch_authority import resolve_allocation_launch_subject
 from loom_capacity_manager.build_membership_contracts import ExecutionPreparationPolicyV4
-from loom_capacity_manager.models import CapacityAllocationEpoch, CapacityAuthorityState, CapacityExecutionEpoch
+from loom_capacity_manager.membership_launch_authority import resolve_allocation_launch_subject
+from loom_capacity_manager.models import (
+    CapacityAllocationEpoch,
+    CapacityAuthorityState,
+    CapacityExecutionEpoch,
+)
 from loom_capacity_manager.reconciler import _commit_reconciled_epoch
-from loom_capacity_manager.store import AuthorityRecoveryError, CapacityManagementStore, CapacityStoreError, WriterFence
+from loom_capacity_manager.store import (
+    AuthorityRecoveryError,
+    CapacityManagementStore,
+    CapacityStoreError,
+    ExecutionConflictError,
+    WriterFence,
+)
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
@@ -19,7 +30,7 @@ from tests.capacity_build_membership_fixtures import (
 )
 from tests.capacity_execution_fixtures import execution_policy
 from tests.capacity_fixtures import pool_observation
-from tests.integration.test_capacity_mixed_membership_store import apply
+from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_typed_membership_demand import report
 
 
@@ -108,5 +119,32 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                 assert resolved.authority.membership.revision == member.revision
                 if member.revision != sealed.membership.revision:
                     assert resolved.authority.membership.head_sha256 != sealed.membership.head_sha256
+                if member.purpose == "personal-build-worker":
+                    with pytest.raises(ExecutionConflictError):
+                        await resolve_allocation_launch_subject(reader, epoch, row,
+                            subject_id=member.configuration.subject_id, require_current=True)
+            selected = sealed.membership.members[1]
+            for tamper in ("snapshot-head", "legacy-downgrade"):
+                changed = CapacityAllocationEpoch(**{column.key: getattr(row, column.key) for column in row.__table__.columns})
+                changed.complete_payload = deepcopy(row.complete_payload)
+                if tamper == "snapshot-head":
+                    changed.complete_payload["membership"]["head_sha256"] = "f" * 64
+                else:
+                    changed.complete_payload["schema_version"] = 2
+                    del changed.complete_payload["membership"]
+                with pytest.raises(ExecutionConflictError):
+                    await resolve_allocation_launch_subject(reader, epoch, changed,
+                        subject_id=selected.configuration.subject_id, require_current=False)
+            # A real generation rotation invalidates old launch authority but
+            # preserves its exact purpose/event for accounting and cleanup.
+            original = application_request(preparation, execution, owner=88010, revision=1)
+            await apply(reader, transition(original, "update", revision=4), key=111010)
+            with pytest.raises(ExecutionConflictError):
+                await resolve_allocation_launch_subject(reader, epoch, row,
+                    subject_id=selected.configuration.subject_id, require_current=True)
+            historical = await resolve_allocation_launch_subject(reader, epoch, row,
+                subject_id=selected.configuration.subject_id, require_current=False)
+            assert historical.configuration == selected.configuration
+            assert historical.authority.membership.revision == selected.revision
     finally:
         await engine.dispose()

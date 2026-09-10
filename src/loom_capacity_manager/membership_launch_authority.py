@@ -1,17 +1,19 @@
 """Derive launch provenance from authenticated immutable allocation history.
 
-This producer currently supports application V2/V3 allocations only. It does
-not add build membership, sign a launch, or expand any execution endpoint.
+This producer preserves typed build/application provenance as well as legacy
+application evidence. It does not sign a launch or expand execution endpoints.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.build_membership_contracts import PersonalMembershipSnapshotV2
 from loom_capacity_manager.contracts import (
     ConfigurationGenerationRefV1,
     SubjectConfigurationV1,
@@ -21,7 +23,12 @@ from loom_capacity_manager.executable_contracts import (
     SubjectExecutionAcknowledgementV2,
     canonical_executable_digest,
 )
-from loom_capacity_manager.membership_execution import ExecutableEpochV3, parse_executable_epoch
+from loom_capacity_manager.membership_contracts import PersonalMembershipSnapshotV1
+from loom_capacity_manager.membership_execution import (
+    ExecutableEpochV3,
+    ExecutableEpochV4,
+    parse_executable_epoch,
+)
 from loom_capacity_manager.membership_execution_store import resolve_allocation_subject
 from loom_capacity_manager.membership_store import CapacityMembershipStore
 from loom_capacity_manager.models import CapacityAllocationEpoch, CapacityExecutionEpoch
@@ -67,15 +74,24 @@ the intent, not merely the configuration's candidate generation.
         )
         payload = parse_executable_epoch(json.dumps(allocation.complete_payload))
         event = None
-        if isinstance(payload, ExecutableEpochV3):
+        purpose: Literal["application-worker", "personal-build-worker"] = "application-worker"
+        if isinstance(payload, (ExecutableEpochV3, ExecutableEpochV4)):
             member = next((item for item in payload.membership.members if item.configuration.subject_id == subject_id), None)
             if member is not None:
                 # The allocation reader authenticates its complete snapshot. Read
                 # the selected member's own prefix to retain that event's head,
                 # independent of unrelated later membership changes.
-                history = await CapacityMembershipStore(CapacityManagementStore()).snapshot(
-                    session, epoch, through_revision=member.revision,
-                )
+                history: PersonalMembershipSnapshotV1 | PersonalMembershipSnapshotV2
+                if isinstance(payload, ExecutableEpochV4):
+                    from loom_capacity_manager.typed_membership_store import (
+                        CapacityTypedMembershipStore,
+                    )
+
+                    history = await CapacityTypedMembershipStore().snapshot(session, epoch, through_revision=member.revision)
+                else:
+                    history = await CapacityMembershipStore(CapacityManagementStore()).snapshot(
+                        session, epoch, through_revision=member.revision,
+                    )
                 selected = next((item for item in history.members if item.configuration.subject_id == subject_id), None)
                 if (
                     selected != member or history.namespace_id != payload.membership.namespace_id
@@ -87,9 +103,11 @@ the intent, not merely the configuration's candidate generation.
                     revision=member.revision, head_sha256=history.head_sha256,
                     execution_manifest_sha256=epoch.execution_manifest_sha256,
                 )
+                if member.purpose == "personal-build-worker":
+                    purpose = "personal-build-worker"
         authority = ExecutableSubjectAuthorityV3(
             source="immutable-base" if event is None else "personal-membership",
-            purpose="application-worker",
+            purpose=purpose,
             configuration=ConfigurationGenerationRefV1(
                 scope="subject", subject_id=configuration.subject_id,
                 subject_incarnation=configuration.subject_incarnation,

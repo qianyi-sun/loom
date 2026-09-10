@@ -940,20 +940,23 @@ The current-subject/demand consumer resolves fresh typed application members fro
 that authenticated history and exact materialization, including independent owner
 accounts and generation supersession. It retains the legacy deployment-readiness
 check: pending build services cannot publish executable demand. Source-bearing
-epochs and V4 execution preparation/promotion remain closed. Disposable SQL-only
+epochs and V4 execution preparation/activation remain closed. Disposable SQL-only
 execution fixtures exercise this demand boundary, not operational activation.
 Allocation input loading explicitly returns the typed input with base applications
 and owner build services, reusing the existing demand, pool, reservation, physical
 commitment and fairness readers. Disabled build services and old physical jobs
 remain represented for accounting. Cached writer authority is refreshed before
-accepting a writer fence. This is an accounting read path, not executable V4
-admission: the reconciler still rejects promotion of this typed input.
+accepting a writer fence. Under authenticated active typed authority and an exact
+operator V4 policy, the reconciler seals this input as `ExecutableEpochV4`, retaining
+both purposes and the original immutable base. Writer/input CAS, pool freshness,
+executor registrations and increase-freeze checks still apply. A legacy operator
+policy cannot authorize typed promotion, and a typed allocation cannot be read as
+a legacy executable artifact.
 
-These new contracts are deliberately not accepted by execution preparation or
-promotion yet. Direct preparation-store calls reject V4 as well as wire endpoints, and the
-reconciler rejects the new input rather than dropping its membership into a
-legacy executable epoch. The shared allocator can exercise pure accounting and
-native routing while the remaining typed admission/execution consumers are built.
+This does not activate V4 execution. Direct preparation-store calls, wire
+endpoints and legacy runtime parsers remain closed while the purpose-aware
+admission/execution consumers are connected. SQL-only active fixtures verify
+sealing and authenticated provenance, not production preparation or activation.
 
 Management translates source attempts into build-capability demand buckets.
 The existing global allocator and charged intent ledger handle placement and
@@ -993,13 +996,15 @@ must authenticate base/member selection and join the configuration, actual
 candidate acknowledgement and event before signing. These contracts do not yet
 enable typed rendering, journal/inventory adoption or build execution.
 
-The application-only launch-subject producer now derives those references through
+The launch-subject producer now derives those references through
 the existing authenticated allocation/history reader. It returns the exact full
 configuration and acknowledgement, chooses immutable-base versus member origin
 from durable evidence, and binds a member's own event head rather than the latest
 shared log head. Current resolution rejects configuration supersession even when
 deployment generation is unchanged; historical resolution retains old evidence
-for accounting and cleanup. It does not accept build allocations or replace
+for accounting and cleanup. Typed builds retain `personal-build-worker` purpose
+and their own authenticated member event; pending build installations cannot
+pass current launch resolution. The producer does not sign, submit, or replace
 operation-specific intent, pool, executor and current-authority checks.
 
 The initial management demand projector emits one cold slot per explicitly
