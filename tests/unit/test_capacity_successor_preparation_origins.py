@@ -77,3 +77,32 @@ def test_empty_successor_source_is_explicit_even_without_inherited_member_fields
     assert value.retired_source.revision == 0
     assert all(origin.schema_version == 1 for origin in value.managed_application_origins)
     assert not value.managed_build_origins
+
+
+def test_successor_operator_policy_retains_the_same_complete_origins():
+    from loom_capacity_manager.build_membership_contracts import ExecutionPreparationPolicyV4
+    from tests.capacity_execution_fixtures import execution_policy
+    preparation = parse(preparation_payload())
+    payload = execution_policy().model_dump(mode="json")
+    for field in ("managed_application_origins", "managed_build_origins", "retired_source",
+        "personal_membership", "personal_builds", "subject_acknowledgements", "trusted_fleet_release_sha256"):
+        payload[field] = preparation.model_dump(mode="json")[field]
+    payload["schema_version"] = 4
+    value = ExecutionPreparationPolicyV4.model_validate_json(json.dumps(payload))
+    assert value.managed_application_origins == preparation.managed_application_origins
+    assert value.managed_build_origins == preparation.managed_build_origins
+    assert value.retired_source == preparation.retired_source
+
+
+async def test_durable_reader_cannot_ignore_an_unconnected_source_graph():
+    from unittest.mock import AsyncMock
+    from loom_capacity_manager.models import CapacityExecutionEpoch
+    from loom_capacity_manager.store import ConfigurationConflictError
+    from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
+    preparation = parse(preparation_payload())
+    session = AsyncMock()
+    session.get.return_value = CapacityExecutionEpoch(execution_epoch=43,
+        manifest_payload=preparation.model_dump(mode="json"))
+    with pytest.raises(ConfigurationConflictError, match="source graph"):
+        await _load_typed_immutable_history(session, 43)
+    session.scalars.assert_not_awaited()
