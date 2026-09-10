@@ -19,8 +19,9 @@ from tests.unit.test_capacity_executor_typed_journal import facts, typed_executo
 
 @pytest.mark.parametrize("typed", (False, True))
 @pytest.mark.parametrize("compact", (False, True))
+@pytest.mark.parametrize("later_empty", (False, True))
 @pytest.mark.parametrize("tamper", ("none", "sequence", "digest", "live", "binding", "duplicate-terminal"))
-async def test_delayed_release_requires_exact_historical_terminal_and_protected_fences(tmp_path, typed, compact, tamper):
+async def test_delayed_release_requires_exact_historical_terminal_and_protected_fences(tmp_path, typed, compact, later_empty, tamper):
     if typed:
         runtime, journal, context = typed_executor(tmp_path)
         subject = facts(context)
@@ -41,8 +42,9 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
         inventory = runtime.client.inventories[-1]
         assert inventory.records[0].state == "terminal"
         runtime.slurm.terminal_jobs = ()
-        await runtime._publish_inventory(await runtime.client.executable_checkpoint())
-        assert runtime.client.inventories[-1].records == ()
+        if later_empty:
+            await runtime._publish_inventory(await runtime.client.executable_checkpoint())
+            assert runtime.client.inventories[-1].records == ()
         if compact:
             from loom_capacity_executor.journal_retention import plan_runtime_checkpoint
 
@@ -82,6 +84,12 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
         assert result.status == ("released" if tamper == "none" else "quarantined")
         assert len(runtime.client.releases) == (tamper == "none")
         if compact and tamper == "none":
+            from loom_capacity_executor.journal import JournalRegressionError
+
+            runtime.client.command_sequence -= 1
+            with pytest.raises(JournalRegressionError, match="command high-water"):
+                plan_runtime_checkpoint(runtime, await runtime.client.executable_checkpoint())
+            runtime.client.command_sequence += 1
             plan = plan_runtime_checkpoint(runtime, await runtime.client.executable_checkpoint())
             retained = set(plan.retained_sequences)
             assert not any(record.sequence in retained for record in journal.latest_records("job"))
@@ -90,5 +98,12 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
             journal.commit_checkpoint(central_sequence=checkpoint.sequence,
                 central_digest=checkpoint.record_digest)
             assert runtime._load_launch(context.binding.intent_id) is None
+            runtime.client.journal_sequence = checkpoint.sequence
+            runtime.client.journal_digest = checkpoint.record_digest
+            await runtime._publish_inventory(await runtime.client.executable_checkpoint())
+            plan = plan_runtime_checkpoint(runtime, await runtime.client.executable_checkpoint())
+            # Once even the latest inventory no longer references released
+            # ownership, neither terminal history nor its release tombstone grows.
+            assert len(plan.retained_sequences) == 2
     finally:
         journal.close()
