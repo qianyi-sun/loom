@@ -10,7 +10,12 @@ import rfc8785
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from loom.db.schema import Task, TaskBundleSourceReference, TaskImageBuildProjection, TaskImageMaterialization
+from loom.db.schema import (
+    Task,
+    TaskBundleSourceReference,
+    TaskImageBuildProjection,
+    TaskImageMaterialization,
+)
 from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1
 from loom.task_image_materialization import (

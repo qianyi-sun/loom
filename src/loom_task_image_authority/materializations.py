@@ -209,7 +209,10 @@ def _reject_pending_materialization_authority(session: AsyncSession) -> None:
     # Check before any SELECT can autoflush a later retention/parent write.
     # Refreshing locked rows must not silently discard caller-owned edits when
     # autoflush is suppressed, either. Reads require committed/flushed authority.
-    models = (TaskImageAttemptRetention, TaskImageMaterialization, TaskImageMaterializationAttempt)
+    models = (
+        TaskImageBuildGrant, TaskImageBuildProjection, TaskImageBuildSessionGeneration,
+        TaskImageAttemptRetention, TaskImageMaterialization, TaskImageMaterializationAttempt,
+    )
     if any(
         isinstance(row, models)
         for row in (*session.new, *session.dirty, *session.deleted)
@@ -243,6 +246,7 @@ async def lock_current_task_image_build_session_authority(
     grant = await session.scalar(
         select(TaskImageBuildGrant)
         .where(TaskImageBuildGrant.id == authorization.grant_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     authority_spec = grant.authority_spec if grant is not None else {}
@@ -273,6 +277,7 @@ async def lock_current_task_image_build_session_authority(
     projection = await session.scalar(
         select(TaskImageBuildProjection)
         .where(TaskImageBuildProjection.grant_id == authorization.grant_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if (
@@ -302,6 +307,7 @@ async def lock_current_task_image_build_session_authority(
             TaskImageBuildSessionGeneration.generation == authorization.session_generation,
             TaskImageBuildSessionGeneration.session_id == authorization.session_id,
         )
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if (

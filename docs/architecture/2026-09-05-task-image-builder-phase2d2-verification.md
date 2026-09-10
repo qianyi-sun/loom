@@ -1305,8 +1305,9 @@ remain unchanged; the synchronous V1 bundle provider still refuses V2 input.
 Fresh/replayed claims, start/heartbeat operations including replay, live-plan
 reads, and shared registry credential/candidate admission retain the source under
 image → attempt → source locking. A retained READ COMMITTED transaction is checked
-before authority reads can autoflush caller-owned state. Locked image reads
-refresh cached ownership. Cleanup-only release and containment failure do not
+before authority reads can autoflush caller-owned state. Locked image and session
+parent reads refresh cached ownership and reject pending edits before refresh.
+Cleanup-only release and containment failure do not
 require available input and retain their non-admitting SERIALIZABLE route.
 
 Every continuing attempt compares its retained canonical claim against the
