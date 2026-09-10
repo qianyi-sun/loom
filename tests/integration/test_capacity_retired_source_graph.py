@@ -30,7 +30,7 @@ from tests.integration.test_capacity_manager_execution_epoch import (
 from tests.integration.test_capacity_successor_source_verification import successor, verify
 
 
-async def seed_empty_successor(session, candidate, *, epoch):
+async def seed_active_successor(session, candidate, *, epoch):
     """Use ordinary configuration activation, then the existing SQL-only harness."""
     source = await session.get(CapacityExecutionEpoch, candidate.retired_source.execution_epoch)
     subjects = await _load_base_configurations(session, source)
@@ -57,6 +57,11 @@ async def seed_empty_successor(session, candidate, *, epoch):
     writer = WriterFence(authority_incarnation=candidate.authority_incarnation, writer_epoch=candidate.expected_writer_epoch)
     fixture = PreparedExecutionFixture(store=management, writer=writer, request=candidate)
     active = await seed_typed_sql_execution(session, fixture, candidate, execution_epoch=epoch)
+    return management, candidate, active
+
+
+async def seed_empty_successor(session, candidate, *, epoch):
+    management, candidate, active = await seed_active_successor(session, candidate, epoch=epoch)
     from loom_capacity_manager.execution_store import CapacityExecutionStore
     store = CapacityExecutionStore()
     for binding in candidate.executors:

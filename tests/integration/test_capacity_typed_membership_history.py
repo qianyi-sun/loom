@@ -53,6 +53,53 @@ async def test_typed_history_empty_and_two_owner_prefixes(capacity_session):
     assert await store.snapshot(capacity_session, execution.execution_epoch, through_revision=0) == empty
 
 
+@pytest.mark.parametrize("purpose", ("application", "build"))
+@pytest.mark.parametrize("changed", (None, "configuration_generation", "deployment_generation", "token_sha256", "state", "missing"))
+async def test_inherited_reporter_currentness_uses_both_purpose_bases(capacity_session, monkeypatch, purpose, changed):
+    """Exercise the currentness consumer with a real authenticated source graph.
+
+    SQL-only execution seeding and injecting the independently authenticated
+    history do not prove public successor admission, which remains closed.
+    """
+    from loom_capacity_manager import typed_membership_store as module
+    from loom_capacity_manager.models import CapacityDemandReporter
+    from loom_capacity_manager.retired_source_graph import load_retired_source_graph
+    from tests.integration.test_capacity_retired_source_graph import seed_active_successor
+    from tests.integration.test_capacity_successor_source_verification import successor
+
+    candidate, exported = await successor(capacity_session, resized=True)
+    source_history = await load_retired_source_graph(capacity_session, exported.source)
+    _management, candidate, execution = await seed_active_successor(capacity_session, candidate, epoch=43)
+    history = await module._load_typed_history_node(capacity_session, 43, source_history=source_history)
+    assert history.events == () and history.latest == {}
+    with pytest.raises(ConfigurationConflictError, match="source graph authentication"):
+        await module._load_typed_history(capacity_session, 43)
+
+    async def authenticated_history(session, epoch):
+        assert session is capacity_session and epoch == execution.execution_epoch
+        return history
+
+    monkeypatch.setattr(module, "_load_typed_immutable_history", authenticated_history)
+    origins = candidate.managed_build_origins if purpose == "build" else candidate.managed_application_origins
+    subject = origins[0].configuration
+    row = (await capacity_session.scalars(select(CapacityDemandReporter).where(
+        CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation))).one()
+    if changed == "missing":
+        await capacity_session.delete(row)
+    elif changed is not None:
+        before = getattr(row, changed)
+        after = (before + 1 if changed.endswith("generation") else
+            "fenced" if changed == "state" else "f" * 64)
+        assert before != after
+        setattr(row, changed, after)
+    await capacity_session.flush()
+    if changed is None:
+        assert await module._load_typed_history(capacity_session, 43) is history
+    else:
+        with pytest.raises(ConfigurationConflictError, match="current reporter evidence changed"):
+            await module._load_typed_history(capacity_session, 43)
+
+
 @pytest.mark.parametrize("application", (False, True))
 @pytest.mark.parametrize("changed", ("generation", "token", "state"))
 async def test_typed_historical_evidence_does_not_claim_mutable_reporter_currentness(capacity_session, application, changed):
