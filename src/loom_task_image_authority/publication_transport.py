@@ -55,6 +55,9 @@ def _check_raw_framing(raw_head: bytes) -> None:
     # h11 coalesces identical Content-Length fields/comma lists, and permits
     # Transfer-Encoding to override Content-Length. Reject that ambiguity before
     # parser normalization; one short-lived signing reply needs no folded fields.
+    unfolded = raw_head.replace(b"\r\n", b"")
+    if b"\r" in unfolded or b"\n" in unfolded:
+        raise ValueError("bare newline in response framing")
     framing: dict[bytes, bytes] = {}
     for line in raw_head.split(b"\r\n")[1:]:
         if not line or line[:1] in {b" ", b"\t"}:
