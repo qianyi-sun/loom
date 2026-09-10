@@ -12,6 +12,10 @@ and admission mechanism. Its candidate has `images.worker` and `images.tb90_task
 the runtime profile uses the worker as `agent_image_ref`. The compiler chooses
 the task's admitted image independently. Direct-completion continues using the
 existing service image. No separate Nebius runner or CI gate is required.
+Batch admission, Control Plane Trial creation and the execution compiler share
+the runtime profile's image compatibility check: a Terminus task image may
+differ from the default task image, but both it and the controller must be
+present in the published profile's admitted images.
 
 For a local environment check, build from the repository root:
 
