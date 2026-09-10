@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -14,6 +15,45 @@ from loom_control_plane.elastic_slurm_worker_controller import build_sbatch_requ
 from tests.unit.test_elastic_slurm_worker_controller import _config
 
 pytestmark = pytest.mark.docker
+
+
+@pytest.mark.parametrize("credential_source", ["environment", "env-file", "absent"])
+def test_remote_compose_delivers_executor_credential(
+    tmp_path: Path, credential_source: str,
+) -> None:
+    """Compose must not drop the credential already issued by the trusted launcher."""
+    credential_key = "LOOM_EXECUTOR_WORKER_CREDENTIAL"
+    credential = "test-executor-issued-worker-credential"
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("LOOM_", "COMPOSE_"))
+    }
+    worker_env = {
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://control-plane:8080",
+        "LOOM_WORKER_GATEWAY_URL": "http://gateway:9100",
+        "LOOM_WORKER_TOKEN": "test-fleet-worker-token",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://minio:9000",
+        "LOOM_WORKER_MINIO_ACCESS_KEY": "test-access",
+        "LOOM_WORKER_MINIO_SECRET_KEY": "test-secret",
+        "LOOM_WORKER_TRAJECTORIES_BUCKET": "test-trajectories",
+        "LOOM_WORKER_ARTIFACTS_BUCKET": "test-artifacts",
+    }
+    if credential_source == "environment":
+        environment[credential_key] = credential
+    elif credential_source == "env-file":
+        worker_env[credential_key] = credential
+    env_file = tmp_path / "worker.env"
+    env_file.write_text("\n".join(f"{key}={value}" for key, value in worker_env.items()))
+    compose_path = Path(__file__).resolve().parents[2] / "deploy/docker-compose.remote-worker.yml"
+    result = subprocess.run(
+        ["docker", "compose", "--env-file", str(env_file), "-f", str(compose_path),
+         "config", "--format", "json"],
+        env=environment, capture_output=True, text=True, check=True, timeout=15,
+    )
+    rendered_env = json.loads(result.stdout)["services"]["worker"]["environment"]
+    assert rendered_env.get(credential_key) == (
+        None if credential_source == "absent" else credential
+    )
 
 
 @pytest.mark.parametrize("worker_exit", [0, 17, None], ids=["success", "failure", "cancel"])
