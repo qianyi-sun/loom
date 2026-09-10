@@ -263,12 +263,7 @@ async def test_typed_sql_prefix_authenticates_lifecycle_after_rehashed_corruptio
                 await capacity_session.scalar(query, {"epoch": execution.execution_epoch})
 
 
-async def test_typed_sql_admission_closure_accepts_membership_only_supersession(capacity_session):
-    from tests.integration.test_capacity_manager_execution_store import (
-        _insert_direct_admission_closure_acknowledgement,
-        _manager_closed_admission_closure_acknowledgement,
-    )
-
+async def typed_admission_plan(capacity_session):
     store, executor, preparation, execution, members = await reservation_ready(capacity_session)
     proposal = await store.next_pool_work(capacity_session, executor)
     assert isinstance(proposal, ExecutableReservationProposalV2)
@@ -291,6 +286,18 @@ async def test_typed_sql_admission_closure_accepts_membership_only_supersession(
         reporter_incarnation=selected.acknowledgement.reporter_incarnation)
     plan = await store.next_subject_admission_plan(capacity_session, **identity)
     assert isinstance(plan, ExecutableAdmissionPlanProposalV2)
+    return store, executor, preparation, execution, selected, plan
+
+
+async def test_typed_sql_admission_closure_accepts_membership_only_supersession(capacity_session):
+    from tests.integration.test_capacity_manager_execution_store import (
+        _insert_direct_admission_closure_acknowledgement,
+        _manager_closed_admission_closure_acknowledgement,
+    )
+
+    store, _executor, preparation, execution, selected, plan = await typed_admission_plan(capacity_session)
+    identity = dict(subject_id=selected.configuration.subject_id, subject_incarnation=selected.configuration.subject_incarnation,
+        reporter_incarnation=selected.acknowledgement.reporter_incarnation)
     original = application_request(preparation, execution, owner=selected.owner_id.int, revision=selected.revision - 1)
     await apply(capacity_session, transition(original, "capacity", revision=4), key=122002)
     closure = await store.next_subject_admission_plan(capacity_session, **identity)
