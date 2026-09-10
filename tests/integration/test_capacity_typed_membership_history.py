@@ -241,7 +241,7 @@ async def test_typed_teardown_keeps_old_generation_physical_charge_in_allocation
     assert not shadow.executable
 
 
-async def test_typed_durable_input_cannot_be_committed_as_legacy_executable(isolated_capacity_postgres_url):
+async def test_typed_durable_input_cannot_be_committed_with_legacy_operator_policy(isolated_capacity_postgres_url):
     engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -252,7 +252,7 @@ async def test_typed_durable_input_cannot_be_committed_as_legacy_executable(isol
             value = await management.load_allocation_input(session, writer)
             shadow = allocate_shadow(value)
         async with sessions() as session:
-            with pytest.raises(CapacityStoreError, match="unsupported executable allocation input"):
+            with pytest.raises(CapacityStoreError, match="executor binding or owner policy changed"):
                 await _commit_reconciled_epoch(session, management, writer, shadow)
         async with sessions() as session:
             assert await session.scalar(select(func.count()).select_from(CapacityAllocationEpoch)) == 0

@@ -4,20 +4,21 @@ import json
 from importlib import import_module
 
 import pytest
-from loom_capacity_manager.build_membership_contracts import ExecutionPreparationPolicyV4
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import allocate_shadow
-from loom_capacity_manager.models import CapacityAllocationEpoch
+from loom_capacity_manager.membership_launch_authority import resolve_allocation_launch_subject
+from loom_capacity_manager.build_membership_contracts import ExecutionPreparationPolicyV4
+from loom_capacity_manager.models import CapacityAllocationEpoch, CapacityAuthorityState, CapacityExecutionEpoch
 from loom_capacity_manager.reconciler import _commit_reconciled_epoch
-from loom_capacity_manager.store import AuthorityRecoveryError, CapacityManagementStore, WriterFence
+from loom_capacity_manager.store import AuthorityRecoveryError, CapacityManagementStore, CapacityStoreError, WriterFence
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
     typed_sql_execution,
 )
-from tests.capacity_fixtures import pool_observation
 from tests.capacity_execution_fixtures import execution_policy
+from tests.capacity_fixtures import pool_observation
 from tests.integration.test_capacity_mixed_membership_store import apply
 from tests.integration.test_capacity_typed_membership_demand import report
 
@@ -54,7 +55,8 @@ async def test_typed_allocation_authority_requires_exact_operator_and_executor_e
             await management.execution_authority(capacity_session)
 
 
-async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership(isolated_capacity_postgres_url):
+@pytest.mark.parametrize("frozen", (False, True))
+async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership(isolated_capacity_postgres_url, frozen):
     module = import_module("loom_capacity_manager.membership_execution")
     engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -62,6 +64,11 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
         async with sessions() as session, session.begin():
             management, preparation, _fleet, execution = await typed_sql_execution(session)
             management = typed_management(preparation)
+            # Complete the SQL-only active fixture; production activation still
+            # owns unfreezing and remains disabled for V4 until runtime is wired.
+            authority = await session.get(CapacityAuthorityState, 1)
+            authority.increase_freeze = frozen
+            authority.increase_freeze_reason = "test-freeze" if frozen else None
             builds = []
             for index, owner in enumerate((88010, 88011)):
                 build = await apply(session, build_request(preparation, execution, owner=owner, revision=index * 2), key=111000 + index * 2)
@@ -74,6 +81,10 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
         async with sessions() as reader, reader.begin():
             value = await management.load_allocation_input(reader, writer)
         async with sessions() as committer:
+            if frozen:
+                with pytest.raises(CapacityStoreError, match="increases are frozen"):
+                    await _commit_reconciled_epoch(committer, management, writer, allocate_shadow(value))
+                return
             allocation_id, sealed = await _commit_reconciled_epoch(committer, management, writer, allocate_shadow(value))
         assert sealed.schema_version == 4
         assert sealed.membership == value.membership
@@ -86,5 +97,16 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
             row = await reader.get(CapacityAllocationEpoch, allocation_id)
             assert row.sealed and row.executable
             assert module.parse_executable_epoch(json.dumps(row.complete_payload)) == sealed
+            epoch = await reader.get(CapacityExecutionEpoch, execution.execution_epoch)
+            for member in sealed.membership.members:
+                resolved = await resolve_allocation_launch_subject(reader, epoch, row,
+                    subject_id=member.configuration.subject_id, require_current=member.purpose == "personal-application")
+                assert resolved.configuration == member.configuration
+                assert resolved.acknowledgement == member.acknowledgement
+                assert resolved.authority.purpose == ("application-worker" if member.purpose == "personal-application" else "personal-build-worker")
+                assert resolved.authority.membership.owner_id == member.owner_id
+                assert resolved.authority.membership.revision == member.revision
+                if member.revision != sealed.membership.revision:
+                    assert resolved.authority.membership.head_sha256 != sealed.membership.head_sha256
     finally:
         await engine.dispose()

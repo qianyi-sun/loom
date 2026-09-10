@@ -388,7 +388,7 @@ async def test_direct_v4_preparation_is_rejected_before_legacy_validation(policy
     session.execute.assert_not_awaited()
 
 
-async def test_direct_v4_reconciliation_cannot_drop_membership_into_v2_epoch():
+async def test_direct_v4_reconciliation_requires_active_execution_authority():
     from loom_capacity_manager.reconciler import _commit_reconciled_epoch
     from loom_capacity_manager.store import CapacityStoreError
     value = build_membership_input()
@@ -402,8 +402,8 @@ async def test_direct_v4_reconciliation_cannot_drop_membership_into_v2_epoch():
     query = MagicMock()
     query.scalar_one_or_none.return_value = SimpleNamespace(authority_incarnation=writer.authority_incarnation, writer_epoch=1)
     session.execute = AsyncMock(return_value=query)
-    store = SimpleNamespace(load_allocation_input=AsyncMock(return_value=value), execution_authority=AsyncMock())
-    with pytest.raises(CapacityStoreError, match="unsupported executable allocation input schema"):
+    store = SimpleNamespace(load_allocation_input=AsyncMock(return_value=value), execution_authority=AsyncMock(return_value=None))
+    with pytest.raises(CapacityStoreError, match="active execution authority changed"):
         await _commit_reconciled_epoch(session, store, writer, shadow)
-    store.execution_authority.assert_not_awaited()
+    store.execution_authority.assert_awaited_once()
     session.add.assert_not_called()
