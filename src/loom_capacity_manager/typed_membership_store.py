@@ -118,6 +118,17 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
     lifecycle structure. A later epoch may have advanced mutable reporter rows.
     Current consumers must use _load_typed_history under their authority fence.
     """
+    return await _load_typed_history_node(session, execution_epoch)
+
+
+async def _load_typed_history_node(
+    session: AsyncSession, execution_epoch: int, *, source_history: _TypedHistory | None = None,
+) -> _TypedHistory:
+    """Internal graph node; inherited history must already be authenticated.
+
+    Only read-only graph traversal supplies a source node. Ordinary runtime
+    consumers remain fenced until all purpose-aware mutation paths are connected.
+    """
     if type(execution_epoch) is not int or execution_epoch <= 0:
         raise ConfigurationConflictError("typed membership execution epoch is invalid")
     epoch = await session.get(CapacityExecutionEpoch, execution_epoch, populate_existing=True)
@@ -126,7 +137,12 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
     try:
         preparation = ExecutionPreparationV4.model_validate_json(json.dumps(epoch.manifest_payload))
         if preparation.retired_source is not None:
-            raise ConfigurationConflictError("typed successor source graph authentication is not yet connected")
+            if source_history is None:
+                raise ConfigurationConflictError("typed successor source graph authentication is not yet connected")
+            from loom_capacity_manager.retired_source_graph import _authenticate_source_edge
+            _authenticate_source_edge(preparation, execution_epoch, source_history)
+        elif source_history is not None:
+            raise ConfigurationConflictError("typed history has an unexpected inherited source")
         _require_values(epoch, {
             "execution_manifest_sha256": canonical_executable_digest(preparation),
             "authority_incarnation": preparation.authority_incarnation,
@@ -162,7 +178,24 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
             derived = _derive_development_subject(fleet, pinned_origin.base_projection)
             if canonical_bytes(derived) != canonical_bytes(base):
                 raise ConfigurationConflictError("typed managed base differs from pinned fleet projection")
-            await require_application_installation_evidence(session, pinned_origin)
+            # Source lineage was independently matched above. Installation reader
+            # retains the original V1 installation contract, not inherited fields.
+            await require_application_installation_evidence(session, ManagedApplicationOriginV1(
+                configuration=pinned_origin.configuration, acknowledgement=pinned_origin.acknowledgement,
+                base_projection=pinned_origin.base_projection, installation_projection=pinned_origin.installation_projection))
+        for build_origin in preparation.managed_build_origins:
+            from loom_capacity_manager.membership import _validate_build_configuration
+            base = bases.get(build_origin.configuration.subject_id)
+            member = build_origin.inherited.anchor.member
+            if (base is None or not isinstance(member, PersonalBuildMemberV1)
+                or canonical_bytes(base) != canonical_bytes(build_origin.configuration)):
+                raise ConfigurationConflictError("typed managed build differs from immutable base generation")
+            _validate_build_configuration(member, preparation.personal_membership.namespace_id,
+                preparation.personal_builds, _derive_owner_account(fleet, member.owner_id))
+            await _require_build_installation_facts(session, member, preparation)
+        if source_history is not None and await session.scalar(select(CapacityPersonalMembershipEvent.id).where(
+            CapacityPersonalMembershipEvent.execution_epoch == execution_epoch).limit(1)) is not None:
+            raise ConfigurationConflictError("source-bearing typed event consumers are not yet connected")
         events = tuple((await session.scalars(select(CapacityPersonalMembershipEvent).where(
             CapacityPersonalMembershipEvent.execution_epoch == execution_epoch,
         ).order_by(CapacityPersonalMembershipEvent.revision).execution_options(populate_existing=True))).all())
@@ -177,6 +210,9 @@ async def _load_typed_immutable_history(session: AsyncSession, execution_epoch: 
         reporter_bindings = {origin.configuration.demand_reporter_incarnation:
             (origin.configuration, origin.base_projection.demand_reporter_token_sha256)
             for origin in preparation.managed_application_origins}
+        reporter_bindings.update({origin.configuration.demand_reporter_incarnation:
+            (origin.configuration, origin.base_projection.demand_reporter_token_sha256)
+            for origin in preparation.managed_build_origins})
         for event, result in zip(events, results, strict=True):
             original = parse_typed_membership_mutation(json.dumps(event.request_payload))
             evidence = result.member.reincarnation

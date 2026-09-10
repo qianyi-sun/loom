@@ -730,19 +730,38 @@ identities have exactly one origin and matching acknowledgement; build origins
 must retain the exact template and trusted runtime release. The immediate source
 is explicit even when there are no membership events or inherited member fields.
 These additions revise unpublished, unactivated V4 documents only; published
-V1/V2/V3 documents keep their original bytes. Durable source-graph authentication,
-purpose-aware successor consumers and complete typed import remain unconnected.
-The typed history reader explicitly rejects these source-bearing preparations
-until those checks are connected; import and execution interlocks remain closed.
+V1/V2/V3 documents keep their original bytes. Historical source-graph verification
+works through the separate read-only preflight described below. Purpose-aware
+runtime successor consumers and complete typed import remain unconnected.
+The ordinary typed history reader still rejects source-bearing preparations;
+import and execution interlocks remain closed.
 
-The internal `verify_successor_source` preflight authenticates an initial retired
-source edge and compares the proposed origins against the complete durable export.
+The internal `verify_successor_source` preflight authenticates a retired source
+chain and compares the proposed origins against the complete durable export.
 Removing an application, build service, or every managed member remains invalid
 even when the proposed policy and acknowledgements are internally consistent.
 Source epochs must strictly descend; configuration advances without substituting
 the fleet, namespace, development template or trusted build runtime. This preflight
-is historical evidence only, not a receipt or admission path, and source-bearing
-history remains rejected until iterative graph validation is connected.
+is historical evidence only, not a receipt or admission path.
+
+`load_retired_source_graph` follows one strictly descending immediate source per
+epoch, then authenticates complete membership sets and immutable installations
+from oldest to newest under the common SERIALIZABLE authority lock. Empty inherited
+epochs preserve all application/build origins; untouched members change only the
+immediate source reference, retaining the real own-event anchor and original root.
+Historical reporter rows need not remain current. There is no global cache or
+recursive Python traversal. Limits are 1,024 epochs, 64 MiB of canonical manifests,
+65,536 oldest-leaf events and 64 MiB of stored event request/result JSON text.
+Event payload sizes are streamed as scalar values before loading the leaf log;
+exceeding a bound rejects the read. These are explicit read-work limits, not
+retention/garbage-collection authority.
+
+This graph reader is limited to inherited epochs with no local membership events.
+It rejects any such event using an existence query before loading the log.
+Ordinary typed runtime readers and SQL insertion continue rejecting source-bearing
+preparations until purpose-aware mutation, allocation and admission consumers are
+connected. Read-only graph verification does not activate a successor or complete
+the development runtime acceptance criteria.
 
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
