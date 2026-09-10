@@ -75,10 +75,13 @@ async def test_typed_inventory_sql_rejects_legacy_version_under_typed_manifest(c
     await store.ingest_typed_executor_inventory(capacity_session,
         ExecutableExecutorInventoryV3(**common, inventory_sequence=1),
         management=typed_management(preparation))
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="inventory version differs from execution manifest"):
         async with capacity_session.begin_nested():
             await capacity_session.execute(text("""
                 UPDATE capacity_executable_executor_states
-                   SET inventory_payload = jsonb_set(inventory_payload, '{schema_version}', '2')
+                   SET inventory_payload = jsonb_set(
+                         jsonb_set(inventory_payload, '{schema_version}', '2'),
+                         '{inventory_sequence}', to_jsonb(inventory_high_water + 1)),
+                       inventory_high_water = inventory_high_water + 1
                  WHERE executor_incarnation = :executor
             """), {"executor": binding.executor_incarnation})
