@@ -1,6 +1,8 @@
 """Typed inventory is admitted only under authenticated matching V4 authority."""
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from loom_capacity_manager.executable_contracts import ExecutableExecutorHeartbeatV2
 from loom_capacity_manager.execution_store import CapacityExecutionStore
@@ -59,3 +61,24 @@ async def test_typed_inventory_admission_preserves_operator_and_executor_fences(
             assert context.executable_new_capacity_ceiling == 0
             with pytest.raises(CapacityStoreError, match="current activated authority"):
                 await _load_typed_history(capacity_session, execution.execution_epoch)
+
+
+async def test_typed_inventory_sql_rejects_legacy_version_under_typed_manifest(capacity_session):
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    binding = preparation.executors[0]
+    store = CapacityExecutionStore()
+    common = dict(execution=execution, executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation, pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation, journal_sequence=0, journal_digest="0" * 64)
+    await store.heartbeat_executor(capacity_session,
+        ExecutableExecutorHeartbeatV2(**common, heartbeat_sequence=1))
+    await store.ingest_typed_executor_inventory(capacity_session,
+        ExecutableExecutorInventoryV3(**common, inventory_sequence=1),
+        management=typed_management(preparation))
+    with pytest.raises(IntegrityError):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(text("""
+                UPDATE capacity_executable_executor_states
+                   SET inventory_payload = jsonb_set(inventory_payload, '{schema_version}', '2')
+                 WHERE executor_incarnation = :executor
+            """), {"executor": binding.executor_incarnation})
