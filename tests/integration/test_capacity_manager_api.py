@@ -3195,11 +3195,13 @@ def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledge
     assert received_key == idempotency_key
 
 
+@pytest.mark.parametrize("version", ("v2", "v3"))
 def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
     api_context_v2_executor_generation: tuple[
         TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
     ],
     monkeypatch: pytest.MonkeyPatch,
+    version: str,
 ) -> None:
     """A reporter for another subject or an executor must not read recovery proof."""
 
@@ -3229,7 +3231,7 @@ def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
     reporter_headers = {"Authorization": f"Bearer {DEMAND_TOKEN}"}
     executor_headers = {"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"}
     endpoint = (
-        f"/v2/subjects/{SUBJECT_ID}/intents/{evidence.binding.intent_id}/"
+        f"/{version}/subjects/{SUBJECT_ID}/intents/{evidence.binding.intent_id}/"
         "terminal-inventory-evidence"
     )
 
@@ -3240,7 +3242,7 @@ def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
         response.content
     ) == evidence
     missing = client.get(
-        f"/v2/subjects/{SUBJECT_ID}/intents/{UUID(int=999)}/"
+        f"/{version}/subjects/{SUBJECT_ID}/intents/{UUID(int=999)}/"
         "terminal-inventory-evidence",
         headers=reporter_headers,
     )
@@ -3248,7 +3250,7 @@ def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
     assert missing.json() is None
     assert (
         client.get(
-            f"/v2/subjects/{UUID(int=999)}/intents/{evidence.binding.intent_id}/"
+            f"/{version}/subjects/{UUID(int=999)}/intents/{evidence.binding.intent_id}/"
             "terminal-inventory-evidence",
             headers=reporter_headers,
         ).status_code
