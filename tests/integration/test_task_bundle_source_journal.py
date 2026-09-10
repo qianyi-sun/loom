@@ -442,29 +442,56 @@ async def test_inventory_restart_preserves_receipts_and_invalidates_old_inflight
 
 
 @pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE", "AUTOCOMMIT"])
-async def test_source_admission_rejects_fixed_or_nontransactional_snapshots(journal, tmp_path, isolation):
+async def test_source_admission_rejects_fixed_or_nontransactional_snapshots(
+    journal, tmp_path, isolation
+):
     module, spec = _module(), _spec(tmp_path)
     ticket = await _upload(journal, spec)
     await _receipts(journal, ticket)
     await _publish(journal, ticket)
     async with journal() as snapshot:
         await snapshot.connection(execution_options={"isolation_level": isolation})
-        assert await snapshot.scalar(text("SELECT state FROM task_bundle_source_incarnations WHERE id=:id"), {"id": ticket.incarnation_id}) == "available"
+        assert (
+            await snapshot.scalar(
+                text("SELECT state FROM task_bundle_source_incarnations WHERE id=:id"),
+                {"id": ticket.incarnation_id},
+            )
+            == "available"
+        )
         async with journal.begin() as session:
-            await module.release_task_bundle_reference(session, source_id=spec.id, reference_kind="catalog", owner_id="catalog")
-            assert await module.retire_task_bundle_source(session, incarnation_id=ticket.incarnation_id, now=NOW)
+            await module.release_task_bundle_reference(
+                session, source_id=spec.id, reference_kind="catalog", owner_id="catalog"
+            )
+            assert await module.retire_task_bundle_source(
+                session, incarnation_id=ticket.incarnation_id, now=NOW
+            )
         with pytest.raises(ValueError, match="READ COMMITTED"):
-            await module.attach_task_bundle_reference(snapshot, source_id=spec.id, reference_kind="trial", owner_id="stale-snapshot")
+            await module.attach_task_bundle_reference(
+                snapshot, source_id=spec.id, reference_kind="trial", owner_id="stale-snapshot"
+            )
         await snapshot.rollback()
 
 
 @pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE", "AUTOCOMMIT"])
-async def test_upload_refuses_unsafe_transaction_before_creating_any_authority(journal, tmp_path, isolation):
+async def test_upload_refuses_unsafe_transaction_before_creating_any_authority(
+    journal, tmp_path, isolation
+):
     module, spec = _module(), _spec(tmp_path)
     async with journal() as session:
         await session.connection(execution_options={"isolation_level": isolation})
         with pytest.raises(ValueError, match="READ COMMITTED"):
-            await module.begin_task_bundle_upload(session, spec=spec, upload_id=uuid4(), now=NOW, expires_at=NOW + timedelta(minutes=5))
+            await module.begin_task_bundle_upload(
+                session,
+                spec=spec,
+                upload_id=uuid4(),
+                now=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            )
         await session.rollback()
     async with journal() as session:
-        assert await session.scalar(text("SELECT count(*) FROM task_bundle_sources WHERE id=:id"), {"id": spec.id}) == 0
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM task_bundle_sources WHERE id=:id"), {"id": spec.id}
+            )
+            == 0
+        )

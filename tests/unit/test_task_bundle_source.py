@@ -22,7 +22,9 @@ def test_source_reader_caches_only_immutable_inventory_not_authored_bytes(tmp_pa
         return original(self)
 
     monkeypatch.setattr(TaskBundleSourceSpecV1, "service_manifest", property(count))
-    expected = {item.object_key: spec.read_object(task_dir, item.object_key) for item in spec.objects}
+    expected = {
+        item.object_key: spec.read_object(task_dir, item.object_key) for item in spec.objects
+    }
     for key, body in expected.items():
         assert spec.read_object(task_dir, key) == body
     assert calls <= 1, "preparation rebuilds the whole manifest per authored file"

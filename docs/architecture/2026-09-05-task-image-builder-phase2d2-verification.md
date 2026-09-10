@@ -1148,9 +1148,67 @@ Disposable TLS MinIO tests cover disabled/suspended versioning, a delayed first
 PUT arriving after its retry was deleted and an identical new publication was
 created, exact-version cleanup preserving that new publication, and resumable
 inventory across foreign versions and delete markers. These are storage-boundary
-tests, not durable lifecycle or activation acceptance. The source-incarnation and
-reference journal, its retirement/admission locks, producer composition and V2
-claim switching remain required; these helpers enable none of those defaults.
+tests, not activation acceptance.
+
+### Durable source publication and recovery
+
+Migration `0137` adds an initially empty logical-source, upload-incarnation,
+write-intent, exact-version and reference journal. It neither discovers historical
+objects nor upgrades legacy authority. Logical identity uses the catalog ID and
+captured manifest; data and auxiliary service-input manifest locations are stable
+across generation replacement and upload retries, outside taskset generation
+roots. The immutable source specification binds normalized config and provenance.
+Physical upload IDs and object versions never enter materialization identity.
+
+The logical source row is the common publication/reference/retirement lock.
+Callers acquire their catalog/trial/materialization locks first, then logical
+sources in sorted order. Source retirement never acquires those caller locks in
+reverse. All journal transitions use caller-owned database transactions with no
+storage I/O. Each requires an explicit READ COMMITTED transaction: an unchanged
+logical-source lock cannot refresh a fixed snapshot of separate incarnation and
+reference rows. A post-lock assigned-transaction-ID check also rejects AUTOCOMMIT;
+new upload preparation checks ownership before inserting any authority.
+Publication needs a complete set of issued exact-version receipts
+and attaches its reference atomically; competing complete uploads pin the first
+available incarnation and retire only the losing upload. Retired incarnations
+never revive. An available preparation ticket is not a reference: if retirement
+wins before publication, the caller must roll back and prepare again, resolving
+the current incarnation. Retries of an uploading incarnation preserve its
+original deadline rather than extending its lifetime.
+
+`TaskBundleSourcePublisher` commits intent issuance before verified file reads
+and retrying PUTs, then commits each exact receipt. It returns a prepared ticket,
+not a catalog publication. It caches immutable transport manifests and authored
+key lookup, but rereads and verifies authored file descriptors on each upload.
+Exceptions leave recoverable intent records, never prefix-delete compensation.
+
+Recovery commits an inventory fence before first-page I/O, checkpoints receipts
+and continuation atomically with an epoch comparison, and retains every observed
+version. An explicit restart drops only the cursor and advances the epoch, making
+older in-flight pages stale. Deletion claims wait for that incarnation's active
+inventory passes; scans wait for its outstanding deletion claims. Shared keys
+can also contain other sources' versions and markers: this is not a bucket-wide
+snapshot or deletion fence. A pinned MinIO diagnostic resumed after deleting a
+marker; production reconciliation must still support restart and periodic fresh
+scans. An observed end is never proof that a timed-out writer has terminated.
+
+`TaskBundleSourceRecovery` commits exact deletion claims before storage I/O and
+records completion only after exact-version absence. A lost response can be
+retried without deleting a newer publication at the same key. Global content
+manifests have separately owned exact versions per upload; no source owns or
+deletes their shared key. SQL identity/retirement guards reject mutation and
+DELETE/TRUNCATE of recovery records; downgrade uses NOWAIT and refuses any
+populated source journal. Compact tombstones are retained until a future explicit
+writer-termination/compaction protocol can prove them unnecessary.
+
+Real PostgreSQL and TLS MinIO composition tests cover committed intent-before-PUT,
+publication rollback, competing publications, reference/retirement lock contention,
+unversioned rejection, lost upload receipts, interrupted deletion, late writes,
+new identical publications, and shared-manifest ownership. Migration tests cover
+empty roundtrip, ORM parity and refusal to discard populated recovery authority.
+Producer integration, materialization/trial admission and release, both taskset
+GC paths, scheduled reconciliation, and V2 claim switching remain required.
+These journal APIs do not enable registration or native builder defaults.
 
 ## Completion and subsequent activation
 

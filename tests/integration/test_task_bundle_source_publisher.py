@@ -98,7 +98,8 @@ async def test_publisher_commits_intent_before_put_and_attaches_only_with_catalo
 
     monkeypatch.setattr(store, "put_object_with_metadata", checked_put)
     writer_sessions = async_sessionmaker(
-        journal.kw["bind"].execution_options(isolation_level=factory_isolation), expire_on_commit=False
+        journal.kw["bind"].execution_options(isolation_level=factory_isolation),
+        expire_on_commit=False,
     )
     publisher = TaskBundleSourcePublisher(writer_sessions, store, clock=lambda: NOW)
     ticket = await publisher.prepare(spec, task_dir)
