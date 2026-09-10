@@ -21,7 +21,7 @@ def module():
     return importlib.import_module(name)
 
 
-def fixture(*, change=None):
+def fixture(*, change=None, all_change=None):
     m = module()
     c, s, private, key, state, distribution, original, _ = setup_signing()
     task = _task_config(cpu_arch="arm64", dockerfile="Dockerfile", sidecars=[
@@ -44,13 +44,19 @@ def fixture(*, change=None):
     for component in ("sidecar:db", "task"):
         payload = original.model_dump(mode="json", by_alias=True, exclude_none=True)
         payload.update(component=component, task_id=task.task.id)
+        if all_change is not None:
+            payload.update(all_change)
         if component == "task" and change is not None:
             payload.update(change)
         arch = "arm64" if payload["platform"] == "linux/arm64" else "x86_64"
         payload["repository"] = publication_repository(
-            purpose=payload["purpose"], shadow_campaign_id=UUID(payload["shadow_campaign_id"]) if payload.get("shadow_campaign_id") else None,
+            purpose="production", shadow_campaign_id=None,
             cpu_arch=arch, attempt_id=UUID(payload["attempt_id"]), component=component,
         )
+        if payload["purpose"] == "shadow":
+            payload["repository"] = payload["repository"].replace(
+                "loom-task-image-attempts/", f"loom-task-image-shadow/{payload['shadow_campaign_id']}/",
+            )
         unsigned = c.decode_unsigned_input(rfc8785.dumps(payload))
         statement = s.prepare_publication_statement(unsigned, key=key, state=state, distribution=distribution, signer_now=NOW)
         canonical = c.canonical_publication_bytes(statement)
@@ -134,5 +140,48 @@ def test_incomplete_ambiguous_or_unbound_sets_are_refused(change):
 def test_individually_signed_components_cannot_mix_build_authorities(change):
     data = fixture(change=change)
     # All signatures/pins are valid. Only complete-set coherence rejects these.
+    with pytest.raises(ValueError):
+        module().verify_publication_set(**data)
+
+
+def test_distinct_component_graphs_preserve_native_manifest_not_index_reference():
+    data = fixture(change={
+        "root": {"media_type": "application/vnd.oci.image.index.v1+json", "digest": "sha256:" + "b" * 64, "size": 256},
+        "layers": [], "observed_base_digests": ["sha256:" + "c" * 64],
+    })
+    result = module().verify_publication_set(**data)
+    assert result.registry_images[1][1].endswith("@sha256:" + "1" * 64)
+    assert result.publications[1].statement.root.digest == "sha256:" + "b" * 64
+
+
+def test_valid_shadow_set_stays_shadow_and_grants_no_production_authority():
+    data = fixture(all_change={"purpose": "shadow", "shadow_campaign_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"})
+    result = module().verify_publication_set(**data)
+    assert all("/loom-task-image-shadow/" in image for _, image in result.registry_images)
+    assert all(item.statement.purpose == "shadow" for item in result.publications)
+
+
+@pytest.mark.parametrize("change", ["constructed-unsigned", "constructed-pin", "constructed-task", "wrong-expected-type", "duplicate-expected"])
+def test_model_constructor_and_expected_collection_bypasses_are_revalidated(change):
+    from dataclasses import replace
+    data = fixture()
+    expected = data["expected"]
+    if change == "constructed-unsigned":
+        invalid = expected[0].unsigned.model_copy(update={"lease_epoch": True})
+        # Bypass both constructors deliberately; verification must not trust it.
+        entry = object.__new__(module().ExpectedPublication)
+        object.__setattr__(entry, "unsigned", invalid)
+        object.__setattr__(entry, "envelope_sha256", expected[0].envelope_sha256)
+        data["expected"] = (entry, expected[1])
+    elif change == "constructed-pin":
+        entry = replace(expected[0])
+        object.__setattr__(entry, "envelope_sha256", "not-a-digest")
+        data["expected"] = (entry, expected[1])
+    elif change == "constructed-task":
+        data["task"] = data["task"].model_copy(update={"environment": {"os": "invalid"}})
+    elif change == "wrong-expected-type":
+        data["expected"] = (expected[0].unsigned, expected[1])
+    else:
+        data["expected"] = (expected[0], expected[0])
     with pytest.raises(ValueError):
         module().verify_publication_set(**data)

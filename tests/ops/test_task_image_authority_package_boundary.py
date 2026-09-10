@@ -60,6 +60,7 @@ ALLOWED_AUTHORITY_IMPORTS = {
 # Reviewed D2 adapters only: no ambient SDK session/client or general storage
 # composition becomes available to the authority API or its other modules.
 ALLOWED_AUTHORITY_MODULE_IMPORTS = {
+    "publication_set.py": {"loom.models.task"},
     "bundle_capability.py": {"loom.task_image_bundle_manifest"},
     "bundle_s3_backend.py": {"loom.task_image_bundle_manifest", "loom.trajectory.storage"},
     "bundle_s3_listing.py": {"xml.parsers"},

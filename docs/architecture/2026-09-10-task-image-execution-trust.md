@@ -71,7 +71,7 @@ key retires. A revocation epoch increase for another key does not itself invalid
 an unaffected historical publication: its key must remain present and nonrevoked.
 Publication issued exactly at its key's retirement boundary is rejected.
 
-This is deliberately one-component verification, not proof of a complete image
+The keyset helper is deliberately one-component verification, not proof of a complete image
 set or a current claim. The future worker reader must bind all expected components
 and exact envelopes into its versioned execution grant, verify the immutable task
 source and enforce reader capability gating. Immediately before the first task
@@ -236,6 +236,30 @@ Disposable tests exercise this complete startup-to-signature path with an actual
 restricted login, owner-only key files and mTLS. This is not a production key
 ceremony or native activation. There is still no installed service account, live
 listener, worker delivery, complete execution grant or one-use start evidence.
+
+## Complete publication-set verification
+
+`verify_publication_set` composes the existing keyset/publication verifier over
+the exact Dockerfile-backed component set derived from a frozen `TaskConfig`.
+Its expected full unsigned identities, original envelope SHA-256 pins, task
+snapshot and keyset counters/digest must come from an independently authenticated
+execution grant; they are not inferred from the envelopes under examination.
+Prebuilt-only sidecars are not extra builder components.
+
+The bounded inputs require unique lexical component ordering and common native
+task/materialization, attempt/lease/grant/session, frozen-plan, environment,
+purpose/campaign and build/containment provenance. Component graphs, repository
+names and observed bases may differ. Missing, extra, repeated or reordered
+components and mixed otherwise-valid signed build authorities are refused.
+Each pin hashes the complete original publication envelope, not its inner
+statement or image digest. The immutable output uses verified native manifest
+references, matching publication completion even when a root is an OCI index.
+
+This pure helper is not runtime-composed and returns no readiness or start
+authority. Signed versioned trial grants, actual immutable task-source byte
+verification, old-worker capability gating and online one-use start serialized
+with revocation remain required before any Phase 2 trial runtime. A verified
+shadow set remains shadow evidence, never production execution authority.
 
 ## Evidence and remaining activation gates
 
