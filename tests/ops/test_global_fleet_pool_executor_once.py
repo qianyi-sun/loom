@@ -41,6 +41,41 @@ from loom_capacity_pool_executor.slurm_inventory import SlurmInventoryPolicy
 _REGISTRATION_NAMESPACE = UUID("0dbdb949-f40e-5ae4-92ac-ee986992a3a2")
 
 
+@pytest.mark.parametrize("maintenance", ("not-needed", "compacted", "capacity-constrained"))
+async def test_journal_maintenance_routes_before_new_work(tmp_path, monkeypatch, maintenance):
+    from unittest.mock import AsyncMock
+
+    executor, journal, manager, _, _, _ = executor_fixture(tmp_path, work=None)
+    try:
+        config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
+        config = replace(config, execution=executor.registration.execution)
+        # Authority/artifact validation has its own exact-binding matrix below;
+        # this test isolates dispatch after that boundary has accepted runtime.
+        monkeypatch.setattr(once, "_assert_executable_runtime", lambda *_args: None)
+        executor.slurm.validate_authority = AsyncMock()
+        executor.tick = AsyncMock(return_value=SimpleNamespace(status="idle"))
+        executor.tick_drain_only = AsyncMock(return_value=SimpleNamespace(status="idle"))
+        maintain = AsyncMock(return_value=maintenance)
+        monkeypatch.setattr(once, "maintain_runtime_journal", maintain, raising=False)
+
+        class Heartbeats:
+            def __init__(self, *_args):
+                pass
+
+            async def heartbeat(self):
+                return None
+
+        monkeypatch.setattr(once, "ExecutableHeartbeatLoop", Heartbeats)
+        result = await run_executor_once(config, client=manager,
+            authority=executor.registration.execution, executor=executor)
+        maintain.assert_awaited_once_with(executor)
+        assert executor.tick.await_count == (maintenance == "not-needed")
+        assert executor.tick_drain_only.await_count == (maintenance == "capacity-constrained")
+        assert result.mode == ("drain-only" if maintenance == "capacity-constrained" else "scale-up")
+    finally:
+        journal.close()
+
+
 @dataclass
 class InventoryClient:
     inventory_sequence: int = 0
