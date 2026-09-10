@@ -52,6 +52,7 @@ from loom_capacity_agent.store import (
     read_agent_lifecycle_demand_observation,
     read_agent_reporter_high_water,
 )
+from loom_capacity_agent.terminal_inventory import application_terminal_evidence
 from loom_capacity_manager.contracts import DemandSnapshotV1
 from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionAcknowledgementV2,
@@ -60,8 +61,8 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
-    ExecutableTerminalInventoryEvidenceV2,
 )
+from loom_capacity_manager.typed_inventory_contracts import TerminalInventoryEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class DemandPublisher(Protocol):
     async def get_executable_terminal_inventory_evidence(
         self,
         intent_id: UUID,
-    ) -> ExecutableTerminalInventoryEvidenceV2 | None: ...
+    ) -> TerminalInventoryEvidence | None: ...
 
     async def publish_executable_bootstrap_acknowledgement(
         self,
@@ -525,6 +526,7 @@ class ExecutableTerminalInventoryEvidenceRecoveryRuntime:
                     intent_id
                 )
                 if evidence is not None:
+                    evidence = application_terminal_evidence(evidence)
                     async with self._session_factory() as session, session.begin():
                         await self._import_evidence(
                             session,

@@ -21,6 +21,7 @@ from loom_capacity_agent.admission import (
     PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.contracts import ReporterConfigurationV1
+from loom_capacity_agent.terminal_inventory import application_terminal_evidence
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import (
@@ -40,7 +41,6 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableProtectedReleaseV2,
-    ExecutableTerminalInventoryEvidenceV2,
     canonical_executable_bytes,
     canonical_executable_digest,
     validate_executable_admission_work_size,
@@ -48,6 +48,11 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
     canonical_grant_digest,
+)
+from loom_capacity_manager.typed_inventory_contracts import (
+    MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES,
+    TerminalInventoryEvidence,
+    parse_terminal_inventory_evidence,
 )
 
 _MAX_CREDENTIAL_BYTES = MAX_BEARER_TOKEN_BYTES
@@ -428,44 +433,52 @@ class DemandReporterClient:
     async def get_executable_terminal_inventory_evidence(
         self,
         intent_id: UUID,
-    ) -> ExecutableTerminalInventoryEvidenceV2 | None:
+    ) -> TerminalInventoryEvidence | None:
         """Fetch one manager-verified physical terminal witness for this subject."""
 
         if not isinstance(intent_id, UUID):
             raise DemandPublishError("terminal inventory intent id must be a UUID")
         endpoint = (
-            f"{self._manager_origin}/v2/subjects/{self._configuration.subject_id}/"
+            f"{self._manager_origin}/v3/subjects/{self._configuration.subject_id}/"
             f"intents/{intent_id}/terminal-inventory-evidence"
         )
         try:
-            response = await self._http.get(
+            async with self._http.stream(
+                "GET",
                 endpoint,
                 headers={"Authorization": f"Bearer {self._bearer_token}"},
                 follow_redirects=False,
-            )
+            ) as response:
+                if response.status_code != 200:
+                    raise DemandPublishError(
+                        "capacity manager rejected terminal inventory evidence with status "
+                        f"{response.status_code}"
+                    )
+                bounded_content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    remaining = MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES + 1 - len(bounded_content)
+                    bounded_content.extend(chunk[:remaining])
+                    if len(bounded_content) > MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES:
+                        raise DemandPublishError(
+                            "capacity manager terminal inventory evidence exceeds its byte bound"
+                        )
         except httpx.HTTPError:
             raise DemandPublishError(
                 "capacity manager terminal inventory evidence transport failed"
             ) from None
-        if response.status_code != 200:
-            raise DemandPublishError(
-                "capacity manager rejected terminal inventory evidence with status "
-                f"{response.status_code}"
-            )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise DemandPublishError(
-                "capacity manager terminal inventory evidence exceeds its byte bound"
-            )
-        if response.content == b"null":
+        response_content = bytes(bounded_content)
+        if response_content == b"null":
             return None
         try:
-            evidence = ExecutableTerminalInventoryEvidenceV2.model_validate_json(
-                response.content
-            )
+            evidence = parse_terminal_inventory_evidence(response_content)
         except (ValidationError, ValueError) as exc:
             raise DemandPublishError(
                 "capacity manager returned invalid terminal inventory evidence"
             ) from exc
+        try:
+            evidence = application_terminal_evidence(evidence)
+        except ValueError as exc:
+            raise DemandPublishError("application terminal inventory evidence is invalid") from exc
         binding = evidence.binding
         if (
             binding.intent_id != intent_id

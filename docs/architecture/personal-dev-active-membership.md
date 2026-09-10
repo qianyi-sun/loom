@@ -1068,6 +1068,17 @@ implementation boundaries, so schema-3 telemetry is not proof of working
 terminal cleanup. Complete inventory journal records also retain their existing
 size limit; bounded large-inventory retention is required before live operation.
 
+Terminal recovery has an explicit versioned read endpoint:
+`GET /v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence`
+returns legacy or typed evidence with the same exact reporter authorization.
+The old V2 endpoint remains legacy-only and returns a conflict for typed evidence,
+never a down-converted proof. The updated application agent uses the V3 endpoint;
+its client, recovery loop and store revalidate typed evidence and reject
+`personal-build-worker` purpose before importing anything. Canonical bytes and
+digests are preserved through the protected SQL call. This is an application
+cleanup consumer, not build admission; the protected SQL import still requires
+its successor migration before typed cleanup can execute.
+
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,

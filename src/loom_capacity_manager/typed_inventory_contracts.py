@@ -41,6 +41,8 @@ from loom_capacity_manager.typed_ownership_contracts import (
     _exact_schema_types,
 )
 
+MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES = MAX_CONTRACT_BYTES
+
 
 class _StrictInventoryV3(StrictV2Model):
     schema_version: Literal[3] = 3  # type: ignore[assignment]
@@ -221,6 +223,9 @@ def parse_executor_inventory(payload: bytes | str) -> ExecutorInventory:
 
 
 def parse_terminal_inventory_evidence(payload: bytes | str) -> TerminalInventoryEvidence:
+    encoded = payload.encode("utf-8") if isinstance(payload, str) else payload
+    if not isinstance(encoded, bytes) or len(encoded) > MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES:
+        raise ValueError("terminal inventory evidence exceeds its byte bound")
     encoded, version = _versioned_inventory_payload(payload)
     if version == 2:
         return ExecutableTerminalInventoryEvidenceV2.model_validate_json(encoded)

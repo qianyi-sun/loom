@@ -146,7 +146,7 @@ async def test_agent_typed_terminal_store_preserves_bytes_and_rejects_build_befo
 @pytest.mark.parametrize("purpose", ("application-worker", "personal-build-worker"))
 async def test_runtime_checks_purpose_before_importing_from_any_publisher(purpose):
     from loom_capacity_agent.runtime import ExecutableTerminalInventoryEvidenceRecoveryRuntime
-    from tests.unit.test_capacity_agent_runtime import _Factory, _assigned_observation
+    from tests.unit.test_capacity_agent_runtime import _assigned_observation, _Factory
 
     configuration, evidence = typed_terminal(purpose=purpose)
     attempt = UUID(int=876004)

@@ -175,6 +175,7 @@ from loom_capacity_manager.store import (
 from loom_capacity_manager.typed_inventory_contracts import (
     ExecutableExecutorInventoryV3,
     ExecutorInventory,
+    TerminalInventoryEvidence,
     parse_executor_inventory,
 )
 
@@ -1814,6 +1815,32 @@ def create_app(
         request: Request,
         actor: CapacityPrincipal = Depends(subject_agent_principal),
     ) -> Response:
+        result = await read_subject_terminal_inventory_evidence(subject_id, intent_id, request, actor)
+        if result is not None and type(result) is not ExecutableTerminalInventoryEvidenceV2:
+            raise HTTPException(status_code=409, detail="typed terminal evidence requires v3")
+        payload = b"null" if result is None else canonical_executable_bytes(result)
+        return Response(content=payload, media_type="application/json")
+
+    @app.get(
+        "/v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence",
+        response_model=TerminalInventoryEvidence | None,
+    )
+    async def get_versioned_subject_terminal_inventory_evidence(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
+    ) -> Response:
+        result = await read_subject_terminal_inventory_evidence(subject_id, intent_id, request, actor)
+        payload = b"null" if result is None else canonical_executable_bytes(result)
+        return Response(content=payload, media_type="application/json")
+
+    async def read_subject_terminal_inventory_evidence(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal,
+    ) -> TerminalInventoryEvidence | None:
         if (
             actor.subject_id != subject_id
             or actor.subject_incarnation is None
@@ -1830,8 +1857,7 @@ def create_app(
                     reporter_incarnation=actor.demand_reporter_incarnation,
                     intent_id=intent_id,
                 )
-            payload = b"null" if result is None else canonical_executable_bytes(result)
-            return Response(content=payload, media_type="application/json")
+            return result
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

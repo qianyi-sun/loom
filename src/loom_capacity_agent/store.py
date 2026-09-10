@@ -22,14 +22,15 @@ from loom_capacity_agent.contracts import (
     GuardDemandObservationV1,
     GuardLifecycleDemandObservationV2,
 )
+from loom_capacity_agent.terminal_inventory import application_terminal_evidence
 from loom_capacity_guard.contracts import canonical_bytes, canonical_digest
 from loom_capacity_guard.store import CapacityGuardStore
 from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
-    ExecutableTerminalInventoryEvidenceV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
+from loom_capacity_manager.typed_inventory_contracts import TerminalInventoryEvidence
 
 _SCHEMA = "loom_capacity_guard"
 _ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -552,7 +553,7 @@ async def import_executable_terminal_inventory_evidence(
     *,
     registration: AgentRegistrationV1,
     protected_attempt_id: UUID,
-    evidence: ExecutableTerminalInventoryEvidenceV2,
+    evidence: TerminalInventoryEvidence,
 ) -> ExecutableTerminalInventoryImportReceiptV2:
     """Import one exact manager-authenticated terminal witness through the guard."""
 
@@ -560,8 +561,10 @@ async def import_executable_terminal_inventory_evidence(
         raise TypeError("terminal inventory import registration is invalid")
     if not isinstance(protected_attempt_id, UUID):
         raise TypeError("terminal inventory protected attempt id must be a UUID")
-    if not isinstance(evidence, ExecutableTerminalInventoryEvidenceV2):
-        raise TypeError("terminal inventory evidence is invalid")
+    try:
+        evidence = application_terminal_evidence(evidence)
+    except ValueError as exc:
+        raise CapacityAgentStoreError("application terminal inventory evidence is invalid") from exc
     binding = evidence.binding
     if (
         binding.subject_id != registration.subject_id
