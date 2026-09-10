@@ -429,6 +429,9 @@ async def test_accepted_release_requires_exact_durable_witnesses(
     elif tamper is None:
         original_digest = await release_digest(capacity_session, configuration)
         await assert_sql_release_matches(capacity_session, configuration)
+        await capacity_session.execute(text("SET LOCAL TIME ZONE 'America/Toronto'"))
+        assert await release_digest(capacity_session, configuration) == original_digest
+        await assert_sql_release_matches(capacity_session, configuration)
         assert original_digest != "0" * 64
         await store.acknowledge_protected_release(
             capacity_session,

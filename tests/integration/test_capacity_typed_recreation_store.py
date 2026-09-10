@@ -9,8 +9,14 @@ from loom_capacity_manager.membership_release import predecessor_release_sha256
 from loom_capacity_manager.models import CapacityCandidate, CapacityDemandReporter
 from loom_capacity_manager.store import ConfigurationConflictError, WriterFence
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
-from tests.capacity_build_membership_fixtures import application_request, build_request, typed_sql_execution
+from tests.capacity_build_membership_fixtures import (
+    application_request,
+    build_request,
+    managed_application_request,
+    typed_sql_execution,
+)
 from tests.integration.test_capacity_mixed_membership_store import apply, transition
+from tests.integration.test_capacity_typed_managed_base_history import prepared
 
 
 def recreate(request, *, revision):
@@ -26,10 +32,10 @@ def recreate(request, *, revision):
     return result.model_copy(update={"command": result.command.model_copy(update={"projection": projection, "acknowledgement": acknowledgement})})
 
 
-@pytest.mark.parametrize("build", (False, True))
-async def test_typed_recreation_generates_release_evidence_and_retains_old_installations(capacity_session, build):
-    management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
-    request = (build_request if build else application_request)(preparation, execution)
+@pytest.mark.parametrize("kind", ("application", "build", "managed"))
+async def test_typed_recreation_generates_release_evidence_and_retains_old_installations(capacity_session, kind):
+    management, preparation, _fleet, execution = await (prepared if kind == "managed" else typed_sql_execution)(capacity_session)
+    request = {"build": build_request, "application": application_request, "managed": managed_application_request}[kind](preparation, execution)
     created = await apply(capacity_session, request)
     disabled_request = transition(request, "destroy", revision=1)
     disabled = await apply(capacity_session, disabled_request, key=940001)
@@ -42,7 +48,8 @@ async def test_typed_recreation_generates_release_evidence_and_retains_old_insta
     assert proof.predecessor_revision == disabled.revision and proof.predecessor_head_sha256 == disabled.head_sha256
     assert proof.origin.subject_incarnation == created.member.configuration.subject_incarnation
     assert proof.release_set_sha256 == await predecessor_release_sha256(capacity_session, disabled.member.configuration)
-    resized = await apply(capacity_session, transition(recreated_request, "capacity", revision=3), key=940003)
+    resized_request = transition(recreated_request, "capacity", revision=3)
+    resized = await apply(capacity_session, resized_request, key=940003)
     assert resized.member.reincarnation == proof
     assert (await apply(capacity_session, recreated_request, key=940002)).replayed
     assert await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch, through_revision=2) == old_snapshot
@@ -53,6 +60,11 @@ async def test_typed_recreation_generates_release_evidence_and_retains_old_insta
         (created.member.configuration.subject_incarnation, 1), (recreated.member.configuration.subject_incarnation, 1)}
     reporters = (await capacity_session.scalars(select(CapacityDemandReporter).where(CapacityDemandReporter.subject_id == created.member.configuration.subject_id))).all()
     assert {row.state for row in reporters} == {"current", "fenced"}
+    disabled_again = transition(resized_request, "destroy", revision=4)
+    await apply(capacity_session, disabled_again, key=940004)
+    second = await apply(capacity_session, recreate(disabled_again, revision=5), key=940005)
+    assert second.member.reincarnation.origin == proof.origin
+    assert second.member.reincarnation.predecessor.subject_incarnation == recreated.member.configuration.subject_incarnation
 
 
 @pytest.mark.parametrize("build", (False, True))
