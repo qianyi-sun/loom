@@ -122,7 +122,12 @@ resource "nebius_mk8s_v1_node_group" "regional" {
       "loom.nebius/platform"         = "integration"
       "loom.nebius/cluster-scope-id" = var.target.cluster_scope_id
     } }
-    taints             = concat([{ key = "loom.nebius/platform", value = "integration", effect = "NO_SCHEDULE" }], each.key == "execution" ? [{ key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" }] : [])
+    # Native addons must be schedulable before Cilium can initialize the cluster.
+    # Keep workload isolation on execution nodes, not the dedicated system node.
+    taints = each.key == "execution" ? [
+      { key = "loom.nebius/platform", value = "integration", effect = "NO_SCHEDULE" },
+      { key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" }
+    ] : []
     boot_disk          = { type = "NETWORK_SSD", size_gibibytes = 80 }
     network_interfaces = [{ subnet_id = var.target.subnet_id }]
     resources          = { platform = var.target.node_platform, preset = each.value.preset }

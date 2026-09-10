@@ -35,6 +35,32 @@ run "execution_only" {
     error_message = "Reuse private regional subnet and read-only pull identity."
   }
 }
+# Observed native Cilium Operator tolerations in eu-west1, 2026-09-10.
+# It cannot register CRDs if every node has Loom's custom NoSchedule taint.
+run "native_addon_scheduling" {
+  command = plan
+  assert {
+    condition = alltrue([
+      for taint in nebius_mk8s_v1_node_group.regional["system"].template.taints :
+      contains(["CriticalAddonsOnly", "node.cilium.io/agent-not-ready", "node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"], taint.key)
+    ])
+    error_message = "The native Cilium Operator must tolerate every regional system node taint so it can register CRDs."
+  }
+  assert {
+    condition = (
+      length(nebius_mk8s_v1_node_group.regional["system"].template.taints) == 0 &&
+      nebius_mk8s_v1_node_group.regional["system"].fixed_node_count == 1 &&
+      nebius_mk8s_v1_node_group.regional["system"].template.resources.preset == "4vcpu-16gb" &&
+      nebius_mk8s_v1_node_group.regional["system"].template.metadata.labels["loom.nebius/node-role"] == "system" &&
+      nebius_mk8s_v1_node_group.regional["execution"].template.metadata.labels["loom.nebius/node-role"] == "integration-execution" &&
+      toset([for taint in nebius_mk8s_v1_node_group.regional["execution"].template.taints : "${taint.key}=${taint.value}:${taint.effect}"]) == toset([
+        "loom.nebius/platform=integration:NO_SCHEDULE",
+        "loom.nebius/execution=true:NO_SCHEDULE"
+      ])
+    )
+    error_message = "Unblock addons on the existing single system node without increasing its shape or weakening execution-node taints and selector labels."
+  }
+}
 run "lower_limit" {
   command = plan
   variables { target = merge(var.target, { execution_max_nodes = 3 }) }

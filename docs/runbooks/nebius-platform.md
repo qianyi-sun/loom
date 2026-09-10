@@ -479,6 +479,27 @@ The optional Terraform `regional_execution_targets` map in the existing platform
 root composes `modules/regional-execution`. Each entry creates exactly one MK8s
 control plane with audit logging, one fixed system node and one min-zero CPU
 execution group (technical default maximum100, explicit lower values honored).
+The dedicated regional system node has no custom `NoSchedule` taint: native
+addons must schedule there before the cluster network can initialize. In the
+observed eu-west1 bootstrap, Cilium Operator did not tolerate
+`loom.nebius/platform=integration`; applying that taint to every node left both
+operator replicas Pending, Cilium CRDs absent, and agents unable to become ready.
+Execution nodes retain both Loom taints and their distinct node-role selector.
+This applies only to the independent regional module, not the primary shared
+cluster. The one-system-node configuration is intentionally not highly available:
+the observed operator's two replicas require different hosts, so only one can
+schedule on that node. Do not patch the managed addon or enlarge the system pool
+to hide this limit.
+
+For an already-created cluster, the pinned provider 0.6.46 documents a
+[taint-specific update exception](https://github.com/nebius/terraform-provider-nebius/blob/v0.6.46/docs/resources/mk8s_v1_node_group.md):
+changing `template.taints` affects future nodes and does not trigger a rollout or
+update existing Kubernetes Nodes. Apply the durable template correction, then
+review the existing system Node separately; an authorized removal of that same
+obsolete taint is a separate runtime repair. A successful Terraform update alone
+does not establish addon recovery. Keep the existing one-node, zero-surge strategy
+and confirm the Cilium CRDs, operator availability and node readiness afterward.
+
 Inputs identify an existing regional project/subnet. Existing-ID mode supplies a
 regional registry-pull identity and creates only these three infrastructure resources.
 `node_platform` is required per regional Terraform target, rather than inherited
