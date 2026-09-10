@@ -1202,6 +1202,9 @@ requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,
 owner/team, lifecycle operation, whole attempt/lease and platform. It rejects
 duplicates, conflicting records, missing/expired leases and unusable sources.
+The full SHA-256 identifies the demand bucket; a purpose-namespaced deterministic
+UUID identifies that same platform work in manager admission allowances. This
+uses the existing protected-attempt contract without creating a task trial.
 Build-specific capabilities keep these requests out of ordinary task shapes.
 This pure projector does not authenticate database records or publish demand:
 the durable caller must select unassigned platform requests under the current

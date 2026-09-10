@@ -14,7 +14,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from loom.personal_dev_candidate import CandidateRegistration, PersonalDevPlatform
 from loom_capacity_manager.contracts import MAX_DEMAND_BUCKETS_PER_REPORT, DemandBucketV1
@@ -104,10 +104,14 @@ def project_personal_build_demand(
             raise ValueError("personal build demand repeats a platform attempt")
         seen.add(key)
         work_id = "build-" + hashlib.sha256(binding + b"\n" + request.platform.encode("ascii")).hexdigest()
+        # Manager admission carries a UUID protected-attempt identity. Retain
+        # the full source-bound hash as bucket identity while deriving a stable,
+        # purpose-namespaced UUID for the same native work (not a task trial).
+        attempt_id = str(uuid5(NAMESPACE_URL, f"loom:personal-build-work:{work_id}"))
         pool, architecture = _PLATFORM_PLACEMENT[request.platform]
         buckets.append(DemandBucketV1(
             bucket_id=work_id, requested_slots=1, local_priority=0,
             oldest_submitted_at=submitted, eligible_pool_ids=(pool,),
-            required_capabilities=(architecture, "personal-build-worker"), attempt_ids=(work_id,),
+            required_capabilities=(architecture, "personal-build-worker"), attempt_ids=(attempt_id,),
         ))
     return tuple(sorted(buckets, key=lambda item: item.bucket_id))
