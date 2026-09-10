@@ -24,24 +24,30 @@ from tests.unit.test_capacity_build_membership import build_membership_input
 from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
 
 
-def typed_context(*, purpose="personal-build-worker", pool="oldlab"):
+def typed_context(*, purpose="personal-build-worker", pool="oldlab", resolved=None, execution=None):
     module = import_module("loom_capacity_executor.typed_launch_renderer")
     value = build_membership_input()
     member = next(item for item in value.membership.members if
         (item.purpose == "personal-build-worker") == (purpose == "personal-build-worker"))
     subject, ack = member.configuration, member.acknowledgement
+    if resolved is not None:
+        subject, ack = resolved.configuration, resolved.acknowledgement
     base = launch_context_fixture()
+    execution = execution or base.binding.execution.model_copy(update={
+        "trusted_fleet_release_sha256": value.preparation.trusted_fleet_release_sha256,
+        "execution_manifest_sha256": canonical_executable_digest(value.preparation),
+    })
     profile_ref = next(item for item in subject.profiles if item.pool_id == pool)
     shape = profile_ref.worker_shapes[0]
     nodes = ("trt-gb10-3",) if pool == "gb10" else ("oldlab-5",)
     profile = base.profile.model_copy(update={
         "pool_id": pool, "pool_generation": profile_ref.pool_generation,
-        "profile_id": profile_ref.profile_id, "profile_generation": profile_ref.profile_generation,
+        "profile_id": shape.shape_id, "profile_generation": profile_ref.profile_generation,
         "profile_digest": profile_ref.profile_digest, "shape_id": shape.shape_id,
         "resources": shape.total_resources, "concurrency_slots": shape.concurrency_slots,
         "cpus": shape.total_resources.cpu_millicores // 1000, "generic_tres": (),
-        "resource_domains": (OperatorResourceDomainV2(domain_id=shape.compatible_domain_ids[0], node_ids=nodes),),
-        "trusted_launcher_release_sha256": value.preparation.trusted_fleet_release_sha256,
+        "resource_domains": (OperatorResourceDomainV2(domain_id=next(domain for domain in profile_ref.eligible_resource_domains if domain in shape.compatible_domain_ids), node_ids=nodes),),
+        "trusted_launcher_release_sha256": execution.trusted_fleet_release_sha256,
         "image_digest": f"ghcr.io/qianyi-sun/loom-{purpose}@sha256:" + "e" * 64,
     })
     policy = PoolLaunchPolicyV3(pool_id=pool, pool_generation=profile.pool_generation,
@@ -49,10 +55,7 @@ def typed_context(*, purpose="personal-build-worker", pool="oldlab"):
     root = canonical_pool_launch_policy_digest(policy)
     profile = profile.model_copy(update={"controller_authority_sha256": root})
     binding = base.binding.model_copy(update={
-        "execution": base.binding.execution.model_copy(update={
-            "trusted_fleet_release_sha256": value.preparation.trusted_fleet_release_sha256,
-            "execution_manifest_sha256": canonical_executable_digest(value.preparation),
-        }),
+        "execution": execution,
         "subject_id": subject.subject_id, "subject_incarnation": subject.subject_incarnation,
         "account_id": subject.account_id, "tier_id": subject.tier_id,
         "candidate": ack.candidate, "candidate_generation": subject.candidate_generation,
@@ -70,7 +73,7 @@ def typed_context(*, purpose="personal-build-worker", pool="oldlab"):
             owner_id=member.owner_id, revision=member.revision, head_sha256="a" * 64,
             execution_manifest_sha256=binding.execution.execution_manifest_sha256))
     return module.TrustedLaunchContextV3(binding=binding,
-        subject=ResolvedAllocationLaunchSubject(configuration=subject, acknowledgement=ack, authority=authority),
+        subject=resolved or ResolvedAllocationLaunchSubject(configuration=subject, acknowledgement=ack, authority=authority),
         profiles=(profile,), policy=policy,
         controller_authority=base.controller_authority.model_copy(update={"pool_id": pool, "controller_authority_sha256": root}),
         ownership_key=base.ownership_key, submitted_at=base.submitted_at)
@@ -116,4 +119,21 @@ def test_typed_render_rejects_substitution_before_signing(tamper):
     else:
         context = replace(context, binding=context.binding.model_copy(update={"deployment_generation": context.binding.deployment_generation + 1}))
     with pytest.raises(ValueError):
+        module.render_typed_signed_launch(context)
+
+
+def test_typed_application_render_rejects_more_nodes_than_authenticated_shape():
+    context = typed_context(purpose="application-worker")
+    profile = context.profiles[0]
+    nodes = ("oldlab-5", "oldlab-6")
+    profile = profile.model_copy(update={"resource_domains": (
+        profile.resource_domains[0].model_copy(update={"node_ids": nodes}),)})
+    policy = context.policy.model_copy(update={"entries": (
+        PurposeLaunchPolicyV3(purpose="application-worker", profile_sha256=full_launch_profile_digest(profile)),)})
+    root = canonical_pool_launch_policy_digest(policy)
+    context = replace(context, binding=context.binding.model_copy(update={"node_ids": nodes}),
+        profiles=(profile.model_copy(update={"controller_authority_sha256": root}),), policy=policy,
+        controller_authority=context.controller_authority.model_copy(update={"controller_authority_sha256": root}))
+    module = import_module("loom_capacity_executor.typed_launch_renderer")
+    with pytest.raises(ValueError, match="profile differs"):
         module.render_typed_signed_launch(context)

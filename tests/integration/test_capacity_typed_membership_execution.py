@@ -117,6 +117,17 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                 assert resolved.authority.purpose == ("application-worker" if member.purpose == "personal-application" else "personal-build-worker")
                 assert resolved.authority.membership.owner_id == member.owner_id
                 assert resolved.authority.membership.revision == member.revision
+                if member.purpose == "personal-application":
+                    # Join real database provenance to a test operator policy
+                    # and intent. No bootstrap, scheduler submission or runtime
+                    # registration is claimed by this rendering check.
+                    from loom_capacity_executor.typed_launch_renderer import render_typed_signed_launch
+                    from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
+
+                    context = typed_context(purpose="application-worker", resolved=resolved, execution=sealed.execution)
+                    proof = render_typed_signed_launch(context).ownership_proof
+                    assert proof.metadata.subject_authority == resolved.authority
+                    assert proof.metadata.binding.candidate == member.acknowledgement.candidate
                 if member.revision != sealed.membership.revision:
                     assert resolved.authority.membership.head_sha256 != sealed.membership.head_sha256
                 if member.purpose == "personal-build-worker":
