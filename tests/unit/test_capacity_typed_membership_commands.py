@@ -142,6 +142,15 @@ def test_destroy_derivation_disables_capacity_without_changing_runtime_identity(
     assert member.acknowledgement == request.command.acknowledgement
 
 
+def test_destroy_build_derivation_enforces_the_sql_projection_limit():
+    module, value, request = typed_build_mutation()
+    projection = request.command.projection.model_copy(update={"operation_kind": "destroy",
+        "max_slots": value.preparation.personal_builds.max_slots_per_subject + 1})
+    request = request.model_copy(update={"command": request.command.model_copy(update={"projection": projection})})
+    with pytest.raises(ValueError, match="maximum"):
+        module.derive_build_member(request, value.preparation, value.fleet)
+
+
 def test_typed_result_binds_member_revision_and_full_build_derivation():
     module, value, request = typed_build_mutation()
     result = module.PersonalMembershipResultV2(revision=2, head_sha256="e" * 64, member=value.membership.members[-1], replayed=False)

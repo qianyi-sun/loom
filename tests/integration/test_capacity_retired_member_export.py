@@ -8,7 +8,12 @@ from sqlalchemy import func, select, text
 from loom_capacity_manager.models import CapacityConfigGeneration, CapacityConfigurationEpoch
 from loom_capacity_manager.store import ConfigurationConflictError, ExecutionConflictError
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
-from tests.capacity_build_membership_fixtures import application_request, build_request, typed_sql_execution
+from tests.capacity_build_membership_fixtures import (
+    application_request,
+    build_request,
+    managed_application_request,
+    typed_sql_execution,
+)
 from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_retired_application_import import retire
 from tests.integration.test_capacity_typed_managed_base_history import prepared
@@ -90,3 +95,46 @@ async def test_export_rejects_unretired_or_incomplete_or_changed_source(capacity
             {"subject": created.member.configuration.subject_id})
     with pytest.raises((ConfigurationConflictError, ExecutionConflictError)):
         await export(capacity_session, execution, snapshot)
+
+
+async def test_export_recreated_managed_application_keeps_original_pinned_root(capacity_session):
+    management, preparation, _fleet, execution = await prepared(capacity_session)
+    original = preparation.managed_application_origins[0].configuration
+    request = managed_application_request(preparation, execution)
+    await apply(capacity_session, request)
+    disabled = transition(request, "destroy", revision=1)
+    await apply(capacity_session, disabled, key=970001)
+    latest = await apply(capacity_session, recreate(disabled, revision=2), key=970002)
+    snapshot = await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)
+    await retire(capacity_session, management, preparation, execution)
+    result = await export(capacity_session, execution, snapshot)
+    origin = result.applications[0]
+    assert origin.inherited.original_origin.subject_incarnation == original.subject_incarnation
+    assert origin.inherited.original_origin.generation == original.configuration_generation
+    assert origin.inherited.anchor.member == latest.member
+    assert origin.inherited.original_origin == latest.member.reincarnation.origin
+
+
+@pytest.mark.parametrize("edit", ("dirty", "deleted", "new"))
+async def test_export_does_not_flush_or_discard_pending_session_edits(capacity_session, edit):
+    from uuid import UUID
+
+    management, preparation, _fleet, execution = await prepared(capacity_session)
+    snapshot = await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)
+    await retire(capacity_session, management, preparation, execution)
+    row = (await capacity_session.scalars(select(CapacityConfigGeneration))).first()
+    if edit == "dirty":
+        row.actor = "pending-local-actor"
+    elif edit == "deleted":
+        await capacity_session.delete(row)
+    else:
+        row = CapacityConfigGeneration(scope="subject", subject_id=UUID(int=970010),
+            subject_incarnation=UUID(int=970011), scope_generation=1, digest="e" * 64,
+            payload={}, state="proposed", actor="pending-local-actor", idempotency_key=UUID(int=970012))
+        capacity_session.add(row)
+    before = (set(capacity_session.new), set(capacity_session.dirty), set(capacity_session.deleted))
+    with pytest.raises(ConfigurationConflictError, match="pending edits"):
+        await export(capacity_session, execution, snapshot)
+    assert (set(capacity_session.new), set(capacity_session.dirty), set(capacity_session.deleted)) == before
+    if edit == "dirty":
+        assert row.actor == "pending-local-actor"

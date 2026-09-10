@@ -160,10 +160,8 @@ def test_build_origin_cannot_hide_oversized_installation_behind_smaller_current_
         parse(payload)
 
 
-def test_destroy_origin_preserves_unused_input_maximum_without_granting_capacity():
+def test_destroy_origin_rejects_input_maximum_forbidden_by_durable_history():
     payload = successor_payload(operation="destroy")
     payload["base_projection"] = dict(payload["base_projection"], max_slots=99)
-    value = parse(payload)
-    assert value.configuration.max_slots == 0
-    assert value.configuration.lifecycle_state == "disabled"
-    assert value.base_projection.max_slots == 99
+    with pytest.raises(ValueError):
+        parse(payload)
