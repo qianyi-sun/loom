@@ -398,22 +398,73 @@ async def test_competing_complete_uploads_pin_winner_and_retry_reresolves(journa
     assert await _publish(journal, retry, "second") == spec
 
 
-async def test_inventory_restart_preserves_receipts_and_invalidates_old_inflight_page(journal, tmp_path):
+async def test_inventory_restart_preserves_receipts_and_invalidates_old_inflight_page(
+    journal, tmp_path
+):
     from loom.task_bundle_source_storage import TaskBundleVersionBatch
 
     module, spec = _module(), _spec(tmp_path)
     ticket = await _upload(journal, spec)
     await _receipts(journal, ticket)
     async with journal.begin() as session:
-        intent, epoch, _ = await module.task_bundle_inventory_checkpoint(session, intent_id=ticket.intents[0].id)
+        intent, epoch, _ = await module.task_bundle_inventory_checkpoint(
+            session, intent_id=ticket.intents[0].id
+        )
     async with journal.begin() as session:
-        _, restart_epoch, cursor = await module.task_bundle_inventory_checkpoint(session, intent_id=intent.id, restart=True)
+        _, restart_epoch, cursor = await module.task_bundle_inventory_checkpoint(
+            session, intent_id=intent.id, restart=True
+        )
         assert restart_epoch == epoch + 1 and cursor is None
-        assert await session.scalar(text("SELECT count(*) FROM task_bundle_source_versions WHERE write_id=:id"), {"id": intent.id}) == 1
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM task_bundle_source_versions WHERE write_id=:id"),
+                {"id": intent.id},
+            )
+            == 1
+        )
     with pytest.raises(ValueError, match="epoch"):
         async with journal.begin() as session:
-            await module.checkpoint_task_bundle_inventory(session, intent_id=intent.id,
-                expected_epoch=epoch, batch=TaskBundleVersionBatch(versions=(), continuation=None), now=NOW)
+            await module.checkpoint_task_bundle_inventory(
+                session,
+                intent_id=intent.id,
+                expected_epoch=epoch,
+                batch=TaskBundleVersionBatch(versions=(), continuation=None),
+                now=NOW,
+            )
     async with journal.begin() as session:
-        await module.checkpoint_task_bundle_inventory(session, intent_id=intent.id,
-            expected_epoch=restart_epoch, batch=TaskBundleVersionBatch(versions=(), continuation=None), now=NOW)
+        await module.checkpoint_task_bundle_inventory(
+            session,
+            intent_id=intent.id,
+            expected_epoch=restart_epoch,
+            batch=TaskBundleVersionBatch(versions=(), continuation=None),
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE", "AUTOCOMMIT"])
+async def test_source_admission_rejects_fixed_or_nontransactional_snapshots(journal, tmp_path, isolation):
+    module, spec = _module(), _spec(tmp_path)
+    ticket = await _upload(journal, spec)
+    await _receipts(journal, ticket)
+    await _publish(journal, ticket)
+    async with journal() as snapshot:
+        await snapshot.connection(execution_options={"isolation_level": isolation})
+        assert await snapshot.scalar(text("SELECT state FROM task_bundle_source_incarnations WHERE id=:id"), {"id": ticket.incarnation_id}) == "available"
+        async with journal.begin() as session:
+            await module.release_task_bundle_reference(session, source_id=spec.id, reference_kind="catalog", owner_id="catalog")
+            assert await module.retire_task_bundle_source(session, incarnation_id=ticket.incarnation_id, now=NOW)
+        with pytest.raises(ValueError, match="READ COMMITTED"):
+            await module.attach_task_bundle_reference(snapshot, source_id=spec.id, reference_kind="trial", owner_id="stale-snapshot")
+        await snapshot.rollback()
+
+
+@pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE", "AUTOCOMMIT"])
+async def test_upload_refuses_unsafe_transaction_before_creating_any_authority(journal, tmp_path, isolation):
+    module, spec = _module(), _spec(tmp_path)
+    async with journal() as session:
+        await session.connection(execution_options={"isolation_level": isolation})
+        with pytest.raises(ValueError, match="READ COMMITTED"):
+            await module.begin_task_bundle_upload(session, spec=spec, upload_id=uuid4(), now=NOW, expires_at=NOW + timedelta(minutes=5))
+        await session.rollback()
+    async with journal() as session:
+        assert await session.scalar(text("SELECT count(*) FROM task_bundle_sources WHERE id=:id"), {"id": spec.id}) == 0
