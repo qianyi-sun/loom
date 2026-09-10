@@ -785,6 +785,9 @@ KMS/HSM; private keys do not enter the allocation or an authority HTTP request.
 Test signers use generated keys only. Key records distinguish active,
 verify-only and revoked. The future signed keyset and execution-start increment
 must consume these exact envelopes and serialize against this durable epoch.
+The [execution-trust contract](2026-09-10-task-image-execution-trust.md) now
+implements bounded signed-keyset and one-component verification primitives;
+authenticated distribution and complete online start composition remain closed.
 
 ### Canonical wire and signer boundary
 
