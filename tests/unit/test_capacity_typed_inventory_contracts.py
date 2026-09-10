@@ -10,6 +10,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorInventoryV2,
     ExecutionContextV2,
     canonical_executable_bytes,
+    canonical_executable_digest,
 )
 from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
 
@@ -137,3 +138,34 @@ async def test_legacy_inventory_store_rejects_typed_contract_before_database_acc
 
     with pytest.raises(ExecutionConflictError, match="inventory contract"):
         await CapacityExecutionStore().ingest_executor_inventory(None, typed_inventory())
+
+
+@pytest.mark.parametrize("tamper", ("none", "binding", "resources", "nodes", "state", "epoch"))
+def test_typed_terminal_inventory_requires_exact_owned_terminal_evidence(tamper):
+    from datetime import UTC, datetime
+    module = import_module("loom_capacity_manager.typed_inventory_contracts")
+    inventory = typed_inventory()
+    record = inventory.records[0].model_copy(update={"state": "terminal", "terminal_evidence_sha256": "b" * 64})
+    payload = dict(binding=record.ownership_proof.metadata.binding.model_dump(mode="json"),
+        inventory_execution=inventory.execution.model_dump(mode="json"), inventory_sequence=1,
+        inventory_digest=canonical_executable_digest(inventory), journal_sequence=0,
+        journal_digest="0" * 64, record=record.model_dump(mode="json"),
+        observed_at=datetime.now(UTC).isoformat(), schema_version=3)
+    if tamper == "binding":
+        payload["binding"]["deployment_generation"] += 1
+    elif tamper == "resources":
+        payload["record"]["resources"]["cpu_millicores"] += 1000
+    elif tamper == "nodes":
+        payload["record"]["node_ids"] = ["foreign-node"]
+    elif tamper == "state":
+        payload["record"]["state"] = "active"
+    elif tamper == "epoch":
+        payload["inventory_execution"]["execution_epoch"] += 1
+    encoded = json.dumps(payload).encode()
+    if tamper != "none":
+        with pytest.raises(ValueError):
+            module.parse_terminal_inventory_evidence(encoded)
+    else:
+        evidence = module.parse_terminal_inventory_evidence(encoded)
+        assert evidence.record == record
+        assert module.parse_terminal_inventory_evidence(canonical_executable_bytes(evidence)) == evidence
