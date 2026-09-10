@@ -2,6 +2,7 @@
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task, TaskImageMaterialization
 from loom.task_image_materialization import ensure_task_image_materializations
@@ -13,9 +14,15 @@ from tests.integration.test_task_bundle_source_journal import (
     _spec,
     _upload,
 )
-from tests.integration.test_task_bundle_source_journal import (
-    journal as journal,
-)
+
+
+@pytest.fixture
+async def journal(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 def _task(spec):
@@ -139,3 +146,44 @@ async def test_ensure_requires_exact_registered_snapshot(journal, tmp_path, chan
         with pytest.raises(ValueError, match=r"registered.*source"):
             await ensure_task_image_materializations(session, task_row=task)
         await session.rollback()
+
+
+@pytest.mark.parametrize("state", ["failed", "ready"])
+async def test_admin_retry_requires_available_registered_source_before_resetting_state(
+    journal, tmp_path, state
+):
+    from loom_control_plane.task_image_materializations import (
+        TaskImageRetryConflictError,
+        retry_task_image_materialization,
+    )
+
+    module, spec = _module(), _spec(tmp_path)
+    ticket = await _upload(journal, spec)
+    await _receipts(journal, ticket)
+    await _publish(journal, ticket)
+    async with journal.begin() as session:
+        rows = await ensure_task_image_materializations(session, task_row=_task(spec))
+        row = rows[0]
+        identity = row.id
+        row.state, row.attempt_count = state, 3
+        await module.release_task_bundle_reference(
+            session, source_id=spec.id, reference_kind="catalog", owner_id="catalog"
+        )
+        await module.release_task_bundle_reference(
+            session, source_id=spec.id, reference_kind="materialization", owner_id=str(row.id)
+        )
+        assert await module.retire_task_bundle_source(
+            session, incarnation_id=ticket.incarnation_id, now=NOW
+        )
+    async with journal() as session:
+        with pytest.raises(TaskImageRetryConflictError, match="source"):
+            await retry_task_image_materialization(session, materialization_id=identity)
+        await session.rollback()
+        row = await session.get(TaskImageMaterialization, identity)
+        assert row.state == state and row.attempt_count == 3
+    replacement = await _upload(journal, spec)
+    await _receipts(journal, replacement)
+    await _publish(journal, replacement)
+    async with journal.begin() as session:
+        row = await retry_task_image_materialization(session, materialization_id=identity)
+        assert row.state == "queued" and row.attempt_count == 0
