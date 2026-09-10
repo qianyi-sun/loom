@@ -89,7 +89,7 @@ def verify_publication_set(
         entry.__post_init__()
         unsigneds.append(decode_unsigned_input(canonical_publication_bytes(entry.unsigned)))
     names = tuple(item.component for item in unsigneds)
-    if names != tuple(sorted(required_task_image_components(task))):
+    if names != tuple(sorted(required_task_image_components(task), key=lambda name: (name != "task", name))):
         raise ValueError("publication set differs from frozen task components")
     first = unsigneds[0]
     arch = "arm64" if first.platform == "linux/arm64" else "x86_64"

@@ -248,7 +248,8 @@ Prebuilt-only sidecars are not extra builder components. Duplicate sidecar names
 including Dockerfile/prebuilt collisions, and non-Linux task snapshots are refused
 before the expected set is derived.
 
-The bounded inputs require unique lexical component ordering and common native
+The bounded inputs preserve the existing producer ordering (task first, followed
+by unique lexical sidecars) and common native
 task/materialization, attempt/lease/grant/session, frozen-plan, environment,
 purpose/campaign and build/containment provenance. Component graphs, repository
 names and observed bases may differ. Missing, extra, repeated or reordered

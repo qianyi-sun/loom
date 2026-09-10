@@ -21,11 +21,11 @@ def module():
     return importlib.import_module(name)
 
 
-def fixture(*, change=None, all_change=None, cpu_arch="arm64"):
+def fixture(*, change=None, all_change=None, cpu_arch="arm64", sidecar_name="db"):
     m = module()
     c, s, private, key, state, distribution, original, _ = setup_signing()
     task = _task_config(cpu_arch=cpu_arch, dockerfile="Dockerfile", sidecars=[
-        {"name": "db", "dockerfile": "db/Dockerfile"},
+        {"name": sidecar_name, "dockerfile": "db/Dockerfile"},
         {"name": "cache", "docker_image": "example/cache@sha256:" + "c" * 64},
     ])
     execution = Ed25519PrivateKey.generate()
@@ -41,7 +41,7 @@ def fixture(*, change=None, all_change=None, cpu_arch="arm64"):
         )],
     ), execution)
     expected, wires = [], []
-    for component in ("sidecar:db", "task"):
+    for component in ("task", f"sidecar:{sidecar_name}"):
         payload = original.model_dump(mode="json", by_alias=True, exclude_none=True)
         payload.update(component=component, task_id=task.task.id)
         if cpu_arch == "x86_64":
@@ -74,7 +74,7 @@ def fixture(*, change=None, all_change=None, cpu_arch="arm64"):
 def test_exact_complete_set_returns_verified_native_manifest_references_only(cpu_arch):
     data = fixture(cpu_arch=cpu_arch)
     result = module().verify_publication_set(**data)
-    assert tuple(item.statement.component for item in result.publications) == ("sidecar:db", "task")
+    assert tuple(item.statement.component for item in result.publications) == ("task", "sidecar:db")
     assert result.registry_images == tuple(
         (item.unsigned.component, f"registry.example/{item.unsigned.repository}@{item.unsigned.manifest.digest}")
         for item in data["expected"]
@@ -153,8 +153,8 @@ def test_distinct_component_graphs_preserve_native_manifest_not_index_reference(
         "layers": [], "observed_base_digests": ["sha256:" + "c" * 64],
     })
     result = module().verify_publication_set(**data)
-    assert result.registry_images[1][1].endswith("@sha256:" + "1" * 64)
-    assert result.publications[1].statement.root.digest == "sha256:" + "b" * 64
+    assert result.registry_images[0][1].endswith("@sha256:" + "1" * 64)
+    assert result.publications[0].statement.root.digest == "sha256:" + "b" * 64
 
 
 def test_valid_shadow_set_stays_shadow_and_grants_no_production_authority():
@@ -227,11 +227,14 @@ def test_matching_digest_pins_do_not_replace_cryptographic_verification(target):
 
 
 def test_existing_publication_producer_task_first_order_is_accepted():
-    data = fixture()
+    from tests.unit.test_task_image_publication_jobs import jobs, snapshot_payload
+    snapshot = jobs().decode_publication_snapshot(rfc8785.dumps(snapshot_payload(2)))
+    names = tuple(item.candidate.component for item in snapshot.components)
+    data = fixture(sidecar_name=names[1].removeprefix("sidecar:"))
     pairs = {entry.unsigned.component: (entry, wire) for entry, wire in zip(data["expected"], data["publication_wires"], strict=True)}
     # PublicationSnapshot and TaskImageBuildPlan both emit task first, then
     # lexical sidecars. The execution reader must accept that exact sequence.
-    data["expected"] = tuple(pairs[name][0] for name in ("task", "sidecar:db"))
-    data["publication_wires"] = tuple(pairs[name][1] for name in ("task", "sidecar:db"))
+    data["expected"] = tuple(pairs[name][0] for name in names)
+    data["publication_wires"] = tuple(pairs[name][1] for name in names)
     result = module().verify_publication_set(**data)
-    assert tuple(item.statement.component for item in result.publications) == ("task", "sidecar:db")
+    assert tuple(item.statement.component for item in result.publications) == names
