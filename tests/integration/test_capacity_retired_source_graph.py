@@ -123,7 +123,8 @@ async def test_graph_rejects_self_consistent_omission_in_an_intermediate_epoch(c
         await load(capacity_session, source)
 
 
-@pytest.mark.parametrize("bound", ("MAX_RETIRED_SOURCE_EPOCHS", "MAX_RETIRED_SOURCE_BYTES"))
+@pytest.mark.parametrize("bound", ("MAX_RETIRED_SOURCE_EPOCHS", "MAX_RETIRED_SOURCE_BYTES",
+    "MAX_RETIRED_SOURCE_EVENTS", "MAX_RETIRED_SOURCE_EVENT_BYTES"))
 async def test_graph_work_is_bounded_before_loading_unbounded_history(capacity_session, monkeypatch, bound):
     candidate, _initial = await successor(capacity_session)
     _candidate, source = await seed_empty_successor(capacity_session, candidate, epoch=43)
