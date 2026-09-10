@@ -76,6 +76,10 @@ from loom_capacity_manager.store import (
     _subject_scalars_match,
     _write_transaction,
 )
+from loom_capacity_manager.successor_origin_contracts import (
+    ManagedApplicationOriginV2,
+    ManagedBuildOriginV1,
+)
 from loom_capacity_manager.typed_membership_commands import (
     PersonalApplicationCommandV2,
     PersonalBuildCommandV2,
@@ -321,20 +325,24 @@ async def _validated_materialization(
     """Join immutable base references and the verified event overlay, not just JSON."""
     expected = await _load_base_configurations(session, epoch)
     preparation = ExecutionPreparationV4.model_validate_json(json.dumps(epoch.manifest_payload))
-    origins = {origin.configuration.subject_id: origin for origin in preparation.managed_application_origins}
+    origins: dict[UUID, ManagedApplicationOriginV1 | ManagedBuildOriginV1] = {
+        origin.configuration.subject_id: origin for origin in preparation.managed_application_origins}
+    origins.update({origin.configuration.subject_id: origin for origin in preparation.managed_build_origins})
     for identity in set(expected) & latest.keys():
         member = latest[identity].member
         base = origins.get(identity)
         if (
-            not isinstance(member, PersonalApplicationMemberV1) or base is None
+            base is None
+            or isinstance(member, PersonalBuildMemberV1) != isinstance(base, ManagedBuildOriginV1)
             or member.owner_id != base.base_projection.owner_id
             or member.configuration.display_name != base.configuration.display_name
             or member.configuration.configuration_generation <= base.configuration.configuration_generation
             or (member.reincarnation is None and member.configuration.subject_incarnation != base.configuration.subject_incarnation)
-            or (member.reincarnation is not None and member.reincarnation.origin != ConfigurationGenerationRefV1(
+            or (member.reincarnation is not None and member.reincarnation.origin != (
+                base.inherited.original_origin if isinstance(base, (ManagedApplicationOriginV2, ManagedBuildOriginV1)) else ConfigurationGenerationRefV1(
                 scope="subject", subject_id=base.configuration.subject_id,
                 subject_incarnation=base.configuration.subject_incarnation,
-                generation=base.configuration.configuration_generation, digest=canonical_digest(base.configuration)))
+                generation=base.configuration.configuration_generation, digest=canonical_digest(base.configuration))))
         ):
             raise ConfigurationConflictError("typed membership cannot replace the pinned managed base identity")
     expected.update({identity: result.member.configuration for identity, result in latest.items()})

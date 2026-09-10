@@ -777,7 +777,11 @@ Pure allocation also resolves inherited build bases using the pinned build templ
 and native profiles, including empty successor snapshots. Build and application
 overlays replace their own base reference once and retain a common owner ceiling;
 they cannot switch purpose. Recreation references the inherited original root.
-Durable successor materialization and mutation still require separate integration.
+The internal durable materialization consumer accepts same-purpose inherited
+application/build overlays and checks exact stored rows against the supplied
+authenticated tip, including original-root recreation. Its caller remains
+responsible for authenticating that tip; current successor mutation, import and
+admission are still unconnected.
 
 The internal build-generation stager accepts a first ordinary mutation against a
 pinned inherited build base. It verifies the actual pending candidate, deployment,
