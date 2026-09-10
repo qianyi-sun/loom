@@ -494,11 +494,20 @@ to hide this limit.
 For an already-created cluster, the pinned provider 0.6.46 documents a
 [taint-specific update exception](https://github.com/nebius/terraform-provider-nebius/blob/v0.6.46/docs/resources/mk8s_v1_node_group.md):
 changing `template.taints` affects future nodes and does not trigger a rollout or
-update existing Kubernetes Nodes. Apply the durable template correction, then
-review the existing system Node separately; an authorized removal of that same
-obsolete taint is a separate runtime repair. A successful Terraform update alone
-does not establish addon recovery. Keep the existing one-node, zero-surge strategy
-and confirm the Cilium CRDs, operator availability and node readiness afterward.
+update existing Kubernetes Nodes. For an affected existing regional cluster:
+
+1. Review the real Terraform plan: only the regional system node group's template
+   taint removal may change. Node count/preset, execution group, primary resources
+   and IAM must remain unchanged. Apply that saved plan through the normal operator path.
+2. Read the current unique regional system Node and confirm its native node-group
+   identity, UID and resourceVersion. In the authorized runtime repair, remove
+   only `loom.nebius/platform=integration:NoSchedule`, with UID/resourceVersion
+   preconditions so a replacement or concurrently changed Node is not modified.
+   Preserve every other taint; do not patch the managed Cilium addon.
+3. Verify Cilium CRDs, operator availability and Node readiness. A successful
+   Terraform update alone does not establish addon recovery. Retain the existing
+   one-node, zero-surge strategy; no node recreation or extra warmup is required
+   merely to remove this taint.
 
 Inputs identify an existing regional project/subnet. Existing-ID mode supplies a
 regional registry-pull identity and creates only these three infrastructure resources.
