@@ -8,18 +8,25 @@ import pytest
 from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
 from loom_capacity_manager.store import ConfigurationConflictError
 from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
-from tests.capacity_build_membership_fixtures import application_request, build_request, typed_sql_execution
-from tests.integration.test_capacity_mixed_membership_store import apply
+from tests.capacity_build_membership_fixtures import (
+    application_request,
+    build_request,
+    typed_sql_execution,
+)
+from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_retired_application_import import retire
 from tests.integration.test_capacity_retired_member_export import export
 from tests.integration.test_capacity_typed_managed_base_history import prepared
 
 
-async def successor(session, *, empty=False):
+async def successor(session, *, empty=False, resized=False):
     management, preparation, _fleet, execution = await (prepared if empty else typed_sql_execution)(session)
     if not empty:
         await apply(session, application_request(preparation, execution))
-        await apply(session, build_request(preparation, execution, owner=88011, revision=1), key=980001)
+        request = build_request(preparation, execution, owner=88011, revision=1)
+        await apply(session, request, key=980001)
+        if resized:
+            await apply(session, transition(request, "capacity", revision=2), key=980002)
     snapshot = await CapacityTypedMembershipStore().snapshot(session, execution.execution_epoch)
     await retire(session, management, preparation, execution)
     exported = await export(session, execution, snapshot)
@@ -63,9 +70,9 @@ async def test_self_consistent_successor_cannot_omit_any_source_members(capacity
         await verify(capacity_session, candidate)
 
 
-@pytest.mark.parametrize("boundary", ("root", "source-head", "future-epoch", "same-epoch", "authority", "configuration"))
+@pytest.mark.parametrize("boundary", ("root", "source-head", "future-epoch", "same-epoch", "authority", "configuration", "fleet", "release"))
 async def test_source_verification_rejects_forged_or_non_descending_history(capacity_session, boundary):
-    candidate, _exported = await successor(capacity_session)
+    candidate, _exported = await successor(capacity_session, resized=boundary == "root")
     epoch = 43
     if boundary in {"future-epoch", "same-epoch"}:
         epoch = 41 if boundary == "future-epoch" else 42
@@ -73,8 +80,15 @@ async def test_source_verification_rejects_forged_or_non_descending_history(capa
         candidate = candidate.model_copy(update={"authority_incarnation": UUID(int=980002)})
     elif boundary == "configuration":
         candidate = candidate.model_copy(update={"configuration_epoch": candidate.configuration_epoch - 1})
+    elif boundary == "fleet":
+        candidate = candidate.model_copy(update={"fleet_digest": "f" * 64})
+    elif boundary == "release":
+        candidate = candidate.model_copy(update={"trusted_fleet_release_sha256": "f" * 64,
+            "managed_build_origins": tuple(origin.model_copy(update={"trusted_fleet_release_sha256": "f" * 64})
+                for origin in candidate.managed_build_origins)})
     elif boundary == "source-head":
-        source = candidate.retired_source.model_copy(update={"head_sha256": "f" * 64})
+        source = candidate.retired_source.model_copy(update={"head_sha256": "f" * 64,
+            "revision": candidate.retired_source.revision + 1})
         candidate = candidate.model_copy(update={"retired_source": source,
             "managed_application_origins": tuple(origin.model_copy(update={"inherited": origin.inherited.model_copy(update={"source": source})}) for origin in candidate.managed_application_origins),
             "managed_build_origins": tuple(origin.model_copy(update={"inherited": origin.inherited.model_copy(update={"source": source})}) for origin in candidate.managed_build_origins)})
@@ -82,5 +96,9 @@ async def test_source_verification_rejects_forged_or_non_descending_history(capa
         origin = candidate.managed_build_origins[0]
         candidate = candidate.model_copy(update={"managed_build_origins": (origin.model_copy(update={"inherited":
             origin.inherited.model_copy(update={"original_origin": origin.inherited.original_origin.model_copy(update={"digest": "f" * 64})})}),)})
-    with pytest.raises(ConfigurationConflictError):
+    # These forged claims must remain structurally valid so the database-backed
+    # comparison, not only Pydantic consistency, detects the fabricated history.
+    candidate = ExecutionPreparationV4.model_validate_json(candidate.model_dump_json())
+    error = {"root": "complete retired source", "source-head": "final snapshot"}.get(boundary)
+    with pytest.raises(ConfigurationConflictError, match=error):
         await verify(capacity_session, candidate, epoch=epoch)

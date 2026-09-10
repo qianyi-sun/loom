@@ -735,6 +735,15 @@ purpose-aware successor consumers and complete typed import remain unconnected.
 The typed history reader explicitly rejects these source-bearing preparations
 until those checks are connected; import and execution interlocks remain closed.
 
+The internal `verify_successor_source` preflight authenticates an initial retired
+source edge and compares the proposed origins against the complete durable export.
+Removing an application, build service, or every managed member remains invalid
+even when the proposed policy and acknowledgements are internally consistent.
+Source epochs must strictly descend; configuration advances without substituting
+the fleet, namespace, development template or trusted build runtime. This preflight
+is historical evidence only, not a receipt or admission path, and source-bearing
+history remains rejected until iterative graph validation is connected.
+
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
 immutable base configuration, original create/update installation projection,
