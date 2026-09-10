@@ -64,7 +64,7 @@ async def test_runtime_checkpoint_rejects_known_telemetry_with_unknown_object_bi
         journal.append(event, sha256(b"x").hexdigest(),
             object_kind="executor", object_id="future-binding", payload=b"x")
         module = import_module("loom_capacity_executor.journal_retention")
-        with pytest.raises(JournalRegressionError, match="unsupported.*binding"):
+        with pytest.raises(JournalRegressionError, match=r"unsupported.*binding"):
             module.plan_runtime_checkpoint(runtime, await manager.executable_checkpoint())
     finally:
         journal.close()

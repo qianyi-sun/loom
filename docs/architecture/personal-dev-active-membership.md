@@ -1129,11 +1129,29 @@ and current protected release must agree. A later empty inventory is insufficien
 and current physical conflicts still refuse release. Available accounting evidence
 must match; conflicting evidence is never replaced with the historical fallback.
 
-This solves individual inventory record size, not steady-state journal retention.
-The journal is still bounded at 64 MiB and has no compaction. A checkpoint/retention
-implementation that preserves unresolved work and historical release evidence is
-required before enabling native operation. Recovery publication can spend reserved
-headroom, while new launch-fact retention must preserve it.
+The journal remains bounded at 64 MiB. Its checkpoint primitive writes a private,
+content-addressed snapshot of exact retained records and sparse evidence anchors,
+then binds that snapshot into the journal hash chain. Authenticated heartbeat
+readback must cover the checkpoint before atomic replacement removes the old
+prefix. Interrupted publication reopens one complete generation; repeated readback
+failures do not grow an already acknowledged heartbeat tail. Historical evidence
+anchors cannot authorize a manager checkpoint below the compaction floor.
+
+The runtime dependency selector preserves unreleased launch/bootstrap/physical
+binding and cancellation history, referenced launch facts, complete current
+inventory batches, first terminal inventories and inventories pinned by unused
+close. Lifecycle reclamation requires exact durable release confirmation and
+manager command high-water. Release tombstones remain while retained inventories
+still reference them. Unknown dependencies, pending RPCs, unfinished handoff
+cleanup and stale selections refuse compaction. Atomic old/new generations and
+recovery reserve count toward the same bound; unreferenced protocol files are
+reclaimed under the stable journal lock.
+
+Automatic runtime orchestration and capacity-pressure behavior remain under
+validation; these primitives alone are not steady-state GC or native readiness.
+Compaction must precede a freshly confirmed final inventory to preserve retirement
+ordering. Recovery publication can spend reserved headroom, while new launch-fact
+retention must preserve it.
 
 Terminal recovery has an explicit versioned read endpoint:
 `GET /v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence`
