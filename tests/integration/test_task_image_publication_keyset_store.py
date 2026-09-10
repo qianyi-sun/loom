@@ -194,10 +194,60 @@ async def test_bounded_full_keyset_never_silently_omits_historical_keys(database
             await m.prepare_keyset(session, trust_root=root)
 
 
+async def test_key_order_is_canonical_not_database_locale_order(database):
+    m, private, root, payload, _, key = await prepared(database)
+    async with database[1].begin() as session:
+        session.add_all(TaskImagePublicationKey(**vars(replace(key, key_id=name, public_key=Ed25519PrivateKey.generate().public_key().public_bytes_raw()))) for name in ("a-1", "a.1", "a_1", "a0"))
+    async with database[1].begin() as session:
+        plan = await m.prepare_keyset(session, trust_root=root)
+    assert tuple(member.key_id for member in plan.keys) == tuple(sorted(member.key_id for member in plan.keys))
+    payload.update(keys=[member.model_dump(mode="json", exclude_none=True) for member in plan.keys])
+    async with database[1].begin() as session:
+        retained = await m.finalize_keyset(session, preparation=plan, wire=_sign(payload, private), trust_root=root, clock=lambda: NOW)
+    async with database[1].begin() as session:
+        assert await m.read_keyset(session, trust_root=root, expected_state=retained.state, clock=lambda: NOW) == retained
+
+
 @pytest.mark.parametrize("isolation", ["AUTOCOMMIT", "REPEATABLE READ"])
 async def test_adapter_owns_checked_out_connection_isolation(database, isolation):
     m, _, root, _, _, key, _, result = await publish(database)
     adapter = m.DatabasePublicationDistribution(database[0].execution_options(isolation_level=isolation), trust_root=root, clock=lambda: NOW)
+    assert (await adapter.snapshot(state=result.state, key=key)).keyset_version == 1
+
+
+async def test_adapter_configures_independent_server_timeouts(database, monkeypatch):
+    m, _, root, _, _, key, _, result = await publish(database)
+    read = m.read_keyset
+
+    async def inspect_bounds(session, **kwargs):
+        assert await session.scalar(text("SHOW statement_timeout")) == "5s"
+        assert await session.scalar(text("SHOW idle_in_transaction_session_timeout")) == "5s"
+        return await read(session, **kwargs)
+
+    monkeypatch.setattr(m, "read_keyset", inspect_bounds)
+    adapter = m.DatabasePublicationDistribution(database[0], trust_root=root, clock=lambda: NOW, timeout_seconds=5)
+    assert (await adapter.snapshot(state=result.state, key=key)).keyset_version == 1
+
+
+async def test_adapter_cancellation_releases_owned_connection_and_does_not_change_state(database, monkeypatch):
+    m, _, root, _, _, key, _, result = await publish(database)
+    read = m.read_keyset
+    pid = asyncio.Future()
+
+    async def identify(session, **kwargs):
+        pid.set_result(await session.scalar(text("SELECT pg_backend_pid()")))
+        return await read(session, **kwargs)
+
+    monkeypatch.setattr(m, "read_keyset", identify)
+    adapter = m.DatabasePublicationDistribution(database[0], trust_root=root, clock=lambda: NOW)
+    async with database[1].begin() as blocker:
+        await blocker.execute(select(TaskImagePublicationState).with_for_update())
+        task = asyncio.create_task(adapter.snapshot(state=result.state, key=key))
+        await wait_locked(blocker, await asyncio.wait_for(pid, 3))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+    monkeypatch.setattr(m, "read_keyset", read)
     assert (await adapter.snapshot(state=result.state, key=key)).keyset_version == 1
 
 
