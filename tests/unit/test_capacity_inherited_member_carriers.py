@@ -11,7 +11,10 @@ from pydantic_core import PydanticSerializationError
 from loom_capacity_manager.build_membership_contracts import PersonalMembershipSnapshotV2
 from loom_capacity_manager.build_value_contracts import PersonalBuildMemberV1
 from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
-from loom_capacity_manager.typed_membership_commands import PersonalMembershipResultV2, parse_typed_membership_result
+from loom_capacity_manager.typed_membership_commands import (
+    PersonalMembershipResultV2,
+    parse_typed_membership_result,
+)
 from tests.unit.test_capacity_inherited_reincarnation import inherited_evidence_payload, parse
 from tests.unit.test_capacity_successor_member_origins import successor_payload
 
@@ -73,3 +76,18 @@ def test_new_carrier_requires_its_explicit_evidence_version(build, boundary):
         payload["reincarnation"]["schema_version"] = 1
     with pytest.raises(ValueError):
         type(member).model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("build", (False, True))
+def test_unconnected_inherited_recreation_cannot_enter_allocation(build):
+    from loom_capacity_manager.executable_contracts import canonical_executable_digest
+    from loom_capacity_manager.membership import resolved_subject_references
+    from tests.unit.test_capacity_successor_allocation import successor_allocation
+    value = successor_allocation()
+    member = new_member(build=build)
+    member = member.model_copy(update={"reincarnation": member.reincarnation.model_copy(update={
+        "execution_manifest_sha256": canonical_executable_digest(value.preparation)})})
+    result = PersonalMembershipResultV2(revision=1, head_sha256="f" * 64, member=member, replayed=False)
+    value = successor_allocation(result=result)
+    with pytest.raises(ValueError, match="cross-epoch recreation allocation is not yet connected"):
+        resolved_subject_references(value)
