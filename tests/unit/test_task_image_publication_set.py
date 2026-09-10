@@ -201,3 +201,23 @@ def test_frozen_task_cannot_collapse_distinct_sidecars_or_change_operating_syste
     data["task"] = type(data["task"]).model_validate(task)
     with pytest.raises(ValueError):
         module().verify_publication_set(**data)
+
+
+@pytest.mark.parametrize("target", ["publication", "keyset"])
+def test_matching_digest_pins_do_not_replace_cryptographic_verification(target):
+    import json
+    from dataclasses import replace
+    data = fixture()
+    if target == "publication":
+        envelope = json.loads(data["publication_wires"][0])
+        envelope["signature"] = _b64(b"\x00" * 64)
+        changed = rfc8785.dumps(envelope)
+        data["publication_wires"] = (changed, data["publication_wires"][1])
+        data["expected"] = (replace(data["expected"][0], envelope_sha256=hashlib.sha256(changed).hexdigest()), data["expected"][1])
+    else:
+        envelope = json.loads(data["keyset_wire"])
+        envelope["signature"] = _b64(b"\x00" * 64)
+        data["keyset_wire"] = rfc8785.dumps(envelope)
+        data["expected_snapshot_sha256"] = hashlib.sha256(data["keyset_wire"]).hexdigest()
+    with pytest.raises(ValueError):
+        module().verify_publication_set(**data)
