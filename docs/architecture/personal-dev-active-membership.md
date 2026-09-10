@@ -773,6 +773,12 @@ Imported disabled members still cannot be recreated as the first successor event
 that transition requires explicit cross-epoch predecessor evidence, not a rewritten
 epoch-local certificate. These prefix checks alone do not open durable consumers.
 
+Pure allocation also resolves inherited build bases using the pinned build template
+and native profiles, including empty successor snapshots. Build and application
+overlays replace their own base reference once and retain a common owner ceiling;
+they cannot switch purpose. Recreation references the inherited original root.
+Durable successor materialization and mutation still require separate integration.
+
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
 immutable base configuration, original create/update installation projection,

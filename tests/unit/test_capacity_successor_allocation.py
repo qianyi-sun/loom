@@ -1,6 +1,7 @@
 """Imported services stay in the common owner budget and native pool allocator."""
 
 import json
+from uuid import UUID
 
 import pytest
 
@@ -10,8 +11,13 @@ from loom_capacity_manager.build_membership_contracts import (
     ExecutionPreparationV4,
     PersonalMembershipSnapshotV2,
 )
-from loom_capacity_manager.contracts import ConfigurationGenerationRefV1, canonical_digest
+from loom_capacity_manager.contracts import (
+    ConfigurationGenerationRefV1,
+    canonical_digest,
+    canonical_digest_excluding,
+)
 from loom_capacity_manager.membership import resolved_subject_references
+from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
 from loom_capacity_manager.typed_membership_commands import parse_typed_membership_result
 from tests.unit.test_capacity_build_membership import build_membership_input
 from tests.unit.test_capacity_successor_preparation_origins import preparation_payload
@@ -78,5 +84,46 @@ def test_inherited_build_payload_cannot_change_purpose_profile():
     changed = build.model_copy(update={"profiles": value.fleet.development_subject_template.profiles})
     value = value.model_copy(update={"managed_base_subjects": tuple(changed if subject.subject_id == build.subject_id else subject
         for subject in value.managed_base_subjects)})
-    with pytest.raises(ValueError, match="origin|immutable"):
+    with pytest.raises(ValueError, match=r"origin|immutable"):
         resolved_subject_references(value)
+
+
+def test_inherited_build_and_application_share_one_owner_ceiling():
+    value = successor_allocation()
+    accounts = tuple(item.model_copy(update={"max_slots": 2}) for item in value.fleet.account_policies)
+    fleet = value.fleet.model_copy(update={"account_policies": accounts})
+    fleet = fleet.model_copy(update={"fleet_digest": canonical_digest_excluding(fleet, "fleet_digest")})
+    value = value.model_copy(update={"fleet": fleet,
+        "configuration": value.configuration.model_copy(update={"fleet": value.configuration.fleet.model_copy(update={"digest": canonical_digest(fleet)})}),
+        "effective_account_policies": tuple(item.model_copy(update={"max_slots": 2}) for item in value.effective_account_policies),
+        "preparation": value.preparation.model_copy(update={"fleet_digest": canonical_digest(fleet)})})
+    result = allocate_shadow(value)
+    build = value.preparation.managed_build_origins[0].configuration
+    owner_subjects = {subject.configuration.subject_id for subject in value.subjects if subject.configuration.account_id == build.account_id}
+    assert len(owner_subjects) == 2
+    assert sum(allocation.desired_slots for allocation in result.allocations if allocation.subject_id in owner_subjects) == 2
+
+
+@pytest.mark.parametrize("build", (False, True))
+def test_inherited_allocation_recreation_authenticates_original_not_imported_root(build):
+    preparation, _, first = successor_row(build=build, operation="destroy")
+    origin = preparation.managed_build_origins[0] if build else preparation.managed_application_origins[-1]
+    evidence = PersonalReincarnationEvidenceV1(namespace_id=first.namespace_id,
+        execution_manifest_sha256=first.execution_manifest_sha256, origin=origin.inherited.original_origin,
+        predecessor=parse_typed_membership_result(json.dumps(first.result_payload)).member.configuration,
+        predecessor_revision=first.revision, predecessor_head_sha256=first.head_sha256,
+        admission_revision=2, successor_incarnation=UUID(int=99600), release_set_sha256="f" * 64)
+    _, _, second = successor_row(build=build, operation="create", previous=first, reincarnation=evidence,
+        subject_incarnation=evidence.successor_incarnation, candidate_generation=1, deployment_generation=1,
+        demand_reporter_incarnation=UUID(int=99601), demand_reporter_token_sha256="9" * 64)
+    result = parse_typed_membership_result(json.dumps(second.result_payload))
+    value = successor_allocation(preparation=preparation, result=result)
+    refs = resolved_subject_references(value)
+    assert next(ref for ref in refs if ref.subject_id == result.member.configuration.subject_id).subject_incarnation == evidence.successor_incarnation
+    wrong = ConfigurationGenerationRefV1(scope="subject", subject_id=origin.configuration.subject_id,
+        subject_incarnation=origin.configuration.subject_incarnation, generation=origin.configuration.configuration_generation,
+        digest=canonical_digest(origin.configuration))
+    assert wrong != evidence.origin
+    member = result.member.model_copy(update={"reincarnation": evidence.model_copy(update={"origin": wrong})})
+    with pytest.raises(ValueError, match="origin"):
+        resolved_subject_references(value.model_copy(update={"membership": value.membership.model_copy(update={"members": (member,)})}))
