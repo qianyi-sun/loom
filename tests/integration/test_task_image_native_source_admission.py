@@ -10,10 +10,13 @@ import rfc8785
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from loom.db.schema import Task, TaskBundleSourceReference, TaskImageMaterialization
+from loom.db.schema import Task, TaskBundleSourceReference, TaskImageBuildProjection, TaskImageMaterialization
 from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1
-from loom.task_image_materialization import ensure_task_image_materializations
+from loom.task_image_materialization import (
+    ensure_task_image_materializations,
+    task_image_materialization_key,
+)
 from loom_task_image_authority import materializations as native
 from loom_task_image_authority.registry_credentials import (
     issue_session_registry_credential,
@@ -287,3 +290,78 @@ async def test_native_claim_refreshes_cached_materialization_epoch(journal, tmp_
         await stale.commit()
     async with journal() as session:
         assert (await session.get(TaskImageMaterialization, image_id)).lease_epoch == 4
+
+
+async def test_native_claim_refuses_an_unregistered_source_without_creating_attempt(journal, tmp_path):
+    directory = _bundle(tmp_path)
+    config = directory / "task.toml"
+    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "arm64"'))
+    spec = TaskBundleSourceSpecV1.from_registration(
+        prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
+        bucket="task-sources",
+    )
+    async with journal.begin() as session:
+        authorization, *_ = await _active_authorization(session)
+        image = TaskImageMaterialization(
+            task_id=spec.catalog_task_id, task_checksum=spec.manifest.task_checksum,
+            cpu_arch="arm64", task_config=spec.task_config, task_source=spec.source_uri,
+            task_source_provenance=spec.provenance, bundle_content_manifest_sha256=spec.manifest.digest,
+            materialization_key=task_image_materialization_key(
+                task_id=spec.catalog_task_id, task_checksum=spec.manifest.task_checksum,
+                cpu_arch="arm64", bundle_content_manifest_sha256=spec.manifest.digest,
+            ),
+        )
+        session.add(image)
+        await session.flush()
+        image_id = image.id
+    async with journal() as session:
+        with pytest.raises(native.TaskImageSessionMaterializationConflictError, match=r"source.*absent"):
+            await _claim(session, authorization)
+        await session.rollback()
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert image.state == "queued" and image.lease_epoch == 0
+        assert (await session.scalars(select(native.TaskImageMaterializationAttempt))).all() == []
+
+
+@pytest.mark.parametrize("operation", ["claim", "start", "heartbeat", "plan"])
+async def test_native_admission_rejects_pending_image_edits_without_discarding_them(journal, tmp_path, operation):
+    authorization, _spec, _ticket, image_id = await _setup(journal, tmp_path)
+    arguments = {}
+    if operation != "claim":
+        async with journal.begin() as session:
+            await _claim(session, authorization)
+            attempt = await _attempt(session)
+            arguments = dict(
+                authorization=authorization, materialization_id=image_id, attempt_id=attempt.id,
+                lease_epoch=attempt.lease_epoch, now=NOW + timedelta(seconds=11),
+            )
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        image.claimed_by = "unflushed-caller-edit"
+        with pytest.raises(native.TaskImageSessionMaterializationConflictError, match="unflushed"):
+            if operation == "claim":
+                await _claim(session, authorization)
+            elif operation == "plan":
+                await native.get_session_materialization_build_plan(session, **arguments)
+            else:
+                method = native.start_session_materialization if operation == "start" else native.heartbeat_session_materialization
+                await method(session, operation_id=uuid4(), **arguments)
+        assert image in session.dirty and image.claimed_by == "unflushed-caller-edit"
+        await session.rollback()
+
+
+async def test_native_claim_rechecks_cached_parent_revocation(journal, tmp_path):
+    authorization, _spec, _ticket, _image_id = await _setup(journal, tmp_path)
+    async with journal() as stale:
+        cached = await stale.scalar(select(TaskImageBuildProjection).where(
+            TaskImageBuildProjection.grant_id == authorization.grant_id,
+        ))
+        assert cached.state == "exchanged"
+        async with journal.begin() as current:
+            await current.execute(update(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == authorization.grant_id,
+            ).values(state="revoked", revoked_at=NOW + timedelta(seconds=10), revoke_reason="guard_attestation_lost"))
+        with pytest.raises(native.TaskImageSessionMaterializationAuthorizationError):
+            await _claim(stale, authorization)
+        await stale.rollback()
