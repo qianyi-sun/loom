@@ -1,7 +1,7 @@
 # Task-image execution trust
 
-Status: signed-keyset and one-component verification primitives implemented;
-distribution, complete execution grants and online start remain uncomposed.
+Status: signed-keyset verification and durable distribution adapter implemented;
+runtime distribution, complete execution grants and online start remain uncomposed.
 
 This increment implements the keyset wire described by the
 [Phase 2 production design](2026-09-02-task-image-builder-phase2-production.md).
@@ -25,7 +25,7 @@ ambiguous encodings are rejected.
 The keyset lifetime is at most fifteen minutes, also bounding the existing
 distribution snapshot freshness ceiling. The canonical keyset is at most 64 KiB;
 its complete signature envelope is at most 128 KiB. Refresh requires new signed
-authority and a monotonic version through the future durable distributor, not
+authority and a monotonic version through the durable distributor, not
 new local timestamps on old bytes.
 
 The signing preimage is `loom-task-image-publication-keyset-v1`, one NUL byte,
@@ -77,6 +77,55 @@ or sidecar runtime, it must obtain/consume the online one-use start authorizatio
 serialized with current publication revocation. A valid cached keyset or this
 verifier's return value cannot replace that operation.
 
+## Durable distribution journal
+
+Migration `0138` adds immutable signed-keyset and membership tables. The journal
+retains the original canonical signature envelope, inner and complete-envelope
+digests, environment, version/epoch, pinned-root fingerprint and original signed
+issue/expiry times. Restrictive membership references preserve historical public
+identities. SQL rejects journal/member updates, deletes and truncation; downgrade
+refuses retained artifacts. Upgrade/downgrade take state-first nonwaiting locks
+on all affected preexisting parents and never reset publication counters.
+
+`publication_keyset_store.prepare_keyset` snapshots the complete retained public
+key set under the existing publication singleton fence. Commit this short
+transaction before calling the dedicated signer; no signer I/O occurs under
+database locks. `finalize_keyset` authenticates the returned bytes against the
+configured execution root and frozen request, then reacquires current state and
+all keys, verifies the full snapshot and atomically journals the artifact and
+advances the version. Concurrent publishers can replay only the identical current
+artifact. Expired, stale or conflicting artifacts are never replaced in place.
+
+All store operations require actual READ COMMITTED transactions and reject pending
+caller writes before autoflush. Separate transaction probes reject AUTOCOMMIT;
+fresh locked reads reject cached ORM state. Migration `0135`'s key-mutation
+statement trigger already locks the singleton before key rows, including inserts
+that do not change that singleton. READ COMMITTED is necessary to observe such
+inserts after a wait. Queries fetch at most 129 keys to enforce a 128-key ceiling
+without silently omitting retained historical keys. Larger inventories require
+an explicit versioned selection/archival policy, not deletion or implicit eviction.
+
+`DatabasePublicationDistribution` owns a bounded transaction and configures
+isolation on its actual checked-out connection, even when its caller supplied an
+AUTOCOMMIT-derived engine. It verifies canonical bytes, signature, all metadata,
+membership and the entire current public key snapshot. Its `snapshot` method
+returns the original signed issue/expiry; `envelope` returns the exact retained
+wire. Time is rechecked after lock acquisition, persistence and transaction
+cleanup. Errors after persistence require the caller to roll back the entire
+transaction; a successful finalize result is not durable until commit succeeds.
+
+Full-keyset comparison is snapshot-admission validation. Unrelated key insertion
+or retirement closes new snapshot admission until a matching artifact is issued;
+it does not claim to revoke work already admitted through the existing selected-key,
+version, epoch and expiry checks. Key revocation continues to advance the existing
+publication epoch. No separate revocation clock is introduced.
+
+The adapter is **not runtime-composed**. Database authentication and the execution
+root remain operator-configured. Retention is not proof of fleet readiness: the
+authenticated claim path must deliver these exact envelopes to root-pinned capable
+workers, and the serialized online one-use start gate must exist before activation.
+No private signing key, signer service or worker capability is installed here.
+
 ## Evidence and remaining activation gates
 
 Tests use independently generated execution/publication keys and directly check
@@ -87,9 +136,15 @@ historical rotation, revocation, substituted keys and valid alternative executio
 bindings. These are cryptographic contract tests, not a production key ceremony,
 authenticated distribution service or live worker acceptance.
 
-The durable signed-keyset store/distributor, dedicated signing service policy,
-versioned complete grant, source binding, worker reader and serialized one-use
-start/revocation must still be implemented and integrated. Production remains
+Disposable PostgreSQL tests cover immutable audit and restrictive references,
+empty migration roundtrip and busy-parent refusal, full-snapshot changes during
+signing, exact replay, key-insert serialization, unsupported isolation, cached or
+pending state, unchanged expiry and rollback on expiration during persistence.
+These are local contract tests, not live distribution or native acceptance.
+
+The dedicated signing service policy, versioned complete grant, source binding,
+worker reader and serialized one-use start/revocation must still be implemented
+and integrated with this distributor. Production remains
 disabled pending those gates, genuine shadow isolation, both native containment
 and scheduling campaigns, Phase 1 continuity, incident acceptance, rollback and
 soak. No private signing keys, live state changes or runtime defaults are supplied
