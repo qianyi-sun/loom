@@ -9,7 +9,11 @@ from uuid import uuid4
 import pytest
 import yaml
 
-from loom.dev_instance_runtime import DevInstanceRuntimeError, KubectlClient
+from loom.dev_instance_runtime import (
+    DevInstanceRuntimeError,
+    KubectlClient,
+    WorkloadStatusConflictError,
+)
 from loom.personal_dev_capacity_runtime import KubectlPersonalDevCapacityInstaller
 from loom.personal_dev_incarnation_storage import personal_dev_storage_annotations
 from tests.integration.test_personal_dev_storage_namespace import (
@@ -140,7 +144,16 @@ async def test_real_candidate_new_attempt_reuses_job_and_updates_deployment(
     for selected in (config, retry):
         documents = tuple(document for document in dev_instance_manifest_documents(identity, selected)
                           if document["kind"] == "Job" or (document["kind"] == "Deployment" and "loom-web" in document["metadata"]["name"]))
-        await provisioner._apply_generation_workloads(identity, selected, documents)
+        # This low-level probe has no durable reconciler. Model its fresh
+        # reconciliation after an explicitly classified status-only conflict;
+        # all authority/spec conflicts still fail immediately.
+        for attempt in range(5):
+            try:
+                await provisioner._apply_generation_workloads(identity, selected, documents)
+                break
+            except WorkloadStatusConflictError:
+                if attempt == 4:
+                    raise
         for document in documents:
             resource = await kubectl.read_resource_json(namespace=identity.namespace, kind=document["kind"].lower(), name=document["metadata"]["name"])
             assert resource["metadata"]["labels"]["loom.dev/attempt"] == str(selected.lifecycle_binding.attempt_id)
