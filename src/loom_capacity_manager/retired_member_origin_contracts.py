@@ -20,6 +20,9 @@ from loom_capacity_manager.contracts import (
     PositiveQuantity,
     canonical_digest,
 )
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
+)
 from loom_capacity_manager.retired_source_reference import (
     RetiredMembershipSnapshotReferenceV1 as RetiredMembershipSnapshotReferenceV1,
 )
@@ -43,6 +46,8 @@ class PersonalMemberEventAnchorV1(_StrictOriginV1):
             raise ValueError("retired member differs from its own event revision")
         proof = self.member.reincarnation
         if proof is not None and proof.execution_manifest_sha256 != self.execution_manifest_sha256:
+            raise ValueError("retired member certificate belongs to another event epoch")
+        if isinstance(proof, PersonalInheritedReincarnationEvidenceV2) and proof.execution_epoch != self.execution_epoch:
             raise ValueError("retired member certificate belongs to another event epoch")
         return self
 

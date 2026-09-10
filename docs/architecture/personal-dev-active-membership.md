@@ -779,8 +779,12 @@ revision and head, the immediate retired source, the original root and the curre
 admission epoch/revision. It permits own revision N followed by successor revision
 1 only through strictly descending source epochs; it does not authenticate a source
 or release itself. Legacy V1 instance validation and serialization reject this
-newer evidence instead of dropping its fields. Member carriers, SQL and runtime
-consumers do not accept it yet, so imported-disabled first-create remains closed.
+newer evidence instead of dropping its fields. Versioned application/build member
+carriers preserve it in parsed values using explicit purpose and integer version
+tags; legacy member constructors and serialization reject those newer carriers.
+Command derivation, SQL and runtime consumers do not admit it yet, and pure
+allocation explicitly rejects unconnected cross-epoch recreation. Imported-disabled
+first-create therefore remains closed.
 
 Pure allocation also resolves inherited build bases using the pinned build template
 and native profiles, including empty successor snapshots. Build and application

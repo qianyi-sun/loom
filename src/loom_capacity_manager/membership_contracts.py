@@ -160,6 +160,8 @@ class PersonalReincarnationEvidenceV1(StrictV1Model):
 class PersonalApplicationMemberV1(StrictV1Model):
     """One revisioned personal application configuration and acknowledgement."""
 
+    model_config = ConfigDict(revalidate_instances="subclass-instances")
+
     revision: PositiveQuantity
     owner_id: UUID
     purpose: Literal["personal-application"] = "personal-application"

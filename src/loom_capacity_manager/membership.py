@@ -29,6 +29,9 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from loom_capacity_manager.fleet_state import validate_profile_narrowing
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
+)
 from loom_capacity_manager.membership_contracts import (
     DelegatedAllocationInputV2,
     PersonalApplicationMemberV1,
@@ -182,6 +185,11 @@ def resolved_subject_references(
             checked = DelegatedAllocationInputV3.model_validate_json(value.model_dump_json())
             membership = checked.membership
             build_template = checked.preparation.personal_builds
+            for inherited_origin in (*checked.preparation.managed_application_origins, *checked.preparation.managed_build_origins):
+                if isinstance(inherited_origin, (ManagedApplicationOriginV2, ManagedBuildOriginV1)) and isinstance(
+                    inherited_origin.inherited.anchor.member.reincarnation, PersonalInheritedReincarnationEvidenceV2,
+                ):
+                    raise _invalid("cross-epoch recreation allocation is not yet connected")
         else:
             membership = PersonalMembershipSnapshotV1.model_validate(
                 value.membership.model_dump(mode="python")
@@ -280,6 +288,8 @@ def resolved_subject_references(
 
     resolved = dict(base_references)
     for subject_id, member in members_by_subject.items():
+        if isinstance(member.reincarnation, PersonalInheritedReincarnationEvidenceV2):
+            raise _invalid("cross-epoch recreation allocation is not yet connected")
         owner_policy = _derived_owner_policy(member.owner_id, template_policy, accounts)
         if isinstance(member, PersonalBuildMemberV1):
             if build_template is None:

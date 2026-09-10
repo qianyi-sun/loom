@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from uuid import UUID, uuid5
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Discriminator, Field, Tag, field_validator, model_validator
 
 from loom_capacity_manager.contracts import (
     Digest,
@@ -23,6 +23,9 @@ from loom_capacity_manager.contracts import (
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     SubjectExecutionAcknowledgementV2,
+)
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
 )
 from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMemberV1,
@@ -101,6 +104,8 @@ Those remain required before executable readiness and pool-local admission.
 class PersonalBuildMemberV1(_StrictBuildV1):
     """One owner's distinct build service; not a personal-application subtype."""
 
+    model_config = ConfigDict(revalidate_instances="subclass-instances")
+
     revision: PositiveQuantity
     owner_id: UUID
     purpose: Literal["personal-build-worker"] = "personal-build-worker"
@@ -143,7 +148,45 @@ class PersonalBuildMemberV1(_StrictBuildV1):
         return self
 
 
-PersonalMemberV2 = Annotated[PersonalApplicationMemberV1 | PersonalBuildMemberV1, Field(discriminator="purpose")]
+class PersonalApplicationMemberV2(PersonalApplicationMemberV1):
+    """Typed application carrier for explicit inherited predecessor evidence."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    reincarnation: PersonalInheritedReincarnationEvidenceV2 = Field(...)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _exact_version(cls, value: object) -> object:
+        if type(value) is not int or value != 2:
+            raise ValueError("inherited application member schema must be integer 2")
+        return value
+
+
+class PersonalBuildMemberV2(PersonalBuildMemberV1):
+    """Typed build carrier for explicit inherited predecessor evidence."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    reincarnation: PersonalInheritedReincarnationEvidenceV2 = Field(...)
+
+
+def _member_tag(value: object) -> str | None:
+    if isinstance(value, dict):
+        version, purpose = value.get("schema_version", 1), value.get("purpose")
+    else:
+        version, purpose = getattr(value, "schema_version", None), getattr(value, "purpose", None)
+    if (type(version) is not int or version not in (1, 2)
+        or not isinstance(purpose, str) or purpose not in {"personal-application", "personal-build-worker"}):
+        return None
+    return f"{purpose}:{version}"
+
+
+PersonalMemberV2 = Annotated[
+    Annotated[PersonalApplicationMemberV1, Tag("personal-application:1")]
+    | Annotated[PersonalApplicationMemberV2, Tag("personal-application:2")]
+    | Annotated[PersonalBuildMemberV1, Tag("personal-build-worker:1")]
+    | Annotated[PersonalBuildMemberV2, Tag("personal-build-worker:2")],
+    Discriminator(_member_tag),
+]
 
 
 def _nonzero_identity(value: UUID) -> UUID:
