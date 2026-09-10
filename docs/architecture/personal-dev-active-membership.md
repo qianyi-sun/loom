@@ -994,7 +994,7 @@ that this owner remain the latest writer of the shared membership log. Signature
 verification proves authenticity, not current admission. The trusted producer
 must authenticate base/member selection and join the configuration, actual
 candidate acknowledgement and event before signing. These contracts do not yet
-enable typed rendering, journal/inventory adoption or build execution.
+enable journal/inventory adoption or build execution.
 
 The launch-subject producer now derives those references through
 the existing authenticated allocation/history reader. It returns the exact full
@@ -1006,6 +1006,17 @@ for accounting and cleanup. Typed builds retain `personal-build-worker` purpose
 and their own authenticated member event; pending build installations cannot
 pass current launch resolution. The producer does not sign, submit, or replace
 operation-specific intent, pool, executor and current-authority checks.
+
+The separate typed launch renderer consumes those authenticated full subject
+facts, joining their configuration and acknowledgement digests, candidate,
+deployment, account, profile, shape and node cardinality to the intent before
+signing. Purpose selects the exact approved native image under the complete
+pool policy root. The schema-3 proof commits the selected profile and member
+event; legacy rendering and proof verification do not accept this context.
+Both renderers share scheduler-field translation without sharing authorization
+rules. This renderer neither obtains manager authority nor enables submission:
+the caller still needs authenticated manager transport, current admission,
+purpose-aware journal/inventory handling and the held-submit/bind/release path.
 
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
