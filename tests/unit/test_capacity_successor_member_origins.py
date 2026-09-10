@@ -12,7 +12,10 @@ from tests.unit.test_capacity_typed_membership_events import _next_build_row, ev
 
 def successor_payload(*, build=True, operation="create"):
     value, _request, _result, first = event_row(build=build)
-    row = first if operation == "create" else _next_build_row(first, build=build, operation=operation)
+    changes = ({"deployment_generation": 2, "candidate_generation": 2,
+        "demand_reporter_incarnation": UUID(int=988), "demand_reporter_token_sha256": "e" * 64}
+        if operation == "update" else {})
+    row = first if operation == "create" else _next_build_row(first, build=build, operation=operation, **changes)
     member = row.result_payload["member"]
     inherited = origin_payload(build=build)
     inherited["source"].update(revision=row.revision, head_sha256=row.head_sha256)
@@ -21,7 +24,7 @@ def successor_payload(*, build=True, operation="create"):
         "schema_version": 1 if build else 2,
         "configuration": member["configuration"],
         "acknowledgement": member["acknowledgement"],
-        "installation_projection": first.request_payload["command"]["projection"],
+        "installation_projection": (row if operation == "update" else first).request_payload["command"]["projection"],
         "base_projection": row.request_payload["command"]["projection"],
         "inherited": inherited,
     }
@@ -39,13 +42,13 @@ def parse(payload, *, build=True):
 
 
 @pytest.mark.parametrize("build", (False, True))
-@pytest.mark.parametrize("operation", ("create", "capacity", "destroy"))
+@pytest.mark.parametrize("operation", ("create", "update", "capacity", "destroy"))
 def test_successor_retains_original_installation_and_last_member(build, operation):
     payload = successor_payload(build=build, operation=operation)
     value = parse(payload, build=build)
     assert value.model_dump(mode="json") == payload
     assert value.configuration == value.inherited.anchor.member.configuration
-    assert value.installation_projection.operation_kind == "create"
+    assert value.installation_projection.operation_kind == ("update" if operation == "update" else "create")
     assert value.inherited.original_origin.generation == 1
     assert value.base_projection.operation_kind == operation
     if build:
@@ -60,7 +63,8 @@ def test_successor_requires_exact_inherited_member(build, boundary):
     if boundary == "missing-history":
         del payload["inherited"]
     elif boundary == "acknowledgement":
-        payload["acknowledgement"] = dict(payload["acknowledgement"], acknowledgement_sha256="a" * 64)
+        assert payload["acknowledgement"]["acknowledgement_sha256"] != "9" * 64
+        payload["acknowledgement"] = dict(payload["acknowledgement"], acknowledgement_sha256="9" * 64)
     elif boundary == "old-member":
         payload["inherited"] = origin_payload(build=build)
     else:
@@ -117,3 +121,49 @@ def test_old_application_origin_bytes_remain_unchanged():
     import_module("loom_capacity_manager.successor_origin_contracts")
     assert canonical_bytes(before) == json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     assert "inherited" not in before.model_dump()
+
+
+@pytest.mark.parametrize("build", (False, True))
+def test_successor_after_recreation_keeps_old_certificate_without_rewriting(build):
+    from loom_capacity_manager.contracts import ConfigurationGenerationRefV1, SubjectConfigurationV1
+    from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
+    payload = successor_payload(build=build)
+    _value, _request, _result, first = event_row(build=build)
+    disabled = _next_build_row(first, operation="destroy", build=build)
+    proof = PersonalReincarnationEvidenceV1(namespace_id=first.namespace_id,
+        execution_manifest_sha256=first.execution_manifest_sha256,
+        origin=ConfigurationGenerationRefV1.model_validate_json(json.dumps(payload["inherited"]["original_origin"])),
+        predecessor=SubjectConfigurationV1.model_validate_json(json.dumps(disabled.result_payload["member"]["configuration"])),
+        predecessor_revision=disabled.revision, predecessor_head_sha256=disabled.head_sha256,
+        admission_revision=3, successor_incarnation=UUID(int=995), release_set_sha256="f" * 64)
+    recreated = _next_build_row(disabled, operation="create", subject_incarnation=UUID(int=995),
+        demand_reporter_incarnation=UUID(int=996), demand_reporter_token_sha256="e" * 64,
+        reincarnation=proof, build=build)
+    member = recreated.result_payload["member"]
+    projection = recreated.request_payload["command"]["projection"]
+    payload.update(configuration=member["configuration"], acknowledgement=member["acknowledgement"],
+        installation_projection=projection, base_projection=projection)
+    payload["inherited"]["anchor"].update(revision=3, head_sha256=recreated.head_sha256, member=member)
+    # The immediately retired epoch imported this member but had no local events.
+    payload["inherited"]["source"].update(execution_epoch=first.execution_epoch + 1,
+        execution_manifest_sha256="d" * 64, revision=0, head_sha256="0" * 64)
+    value = parse(payload, build=build)
+    assert value.inherited.anchor.member.reincarnation == proof
+    assert value.inherited.original_origin.subject_incarnation != value.configuration.subject_incarnation
+    assert "reincarnation" not in value.model_dump()
+
+
+def test_build_origin_cannot_hide_oversized_installation_behind_smaller_current_limit():
+    payload = successor_payload(operation="capacity")
+    payload["installation_projection"] = dict(payload["installation_projection"], max_slots=99)
+    with pytest.raises(ValueError):
+        parse(payload)
+
+
+def test_destroy_origin_preserves_unused_input_maximum_without_granting_capacity():
+    payload = successor_payload(operation="destroy")
+    payload["base_projection"] = dict(payload["base_projection"], max_slots=99)
+    value = parse(payload)
+    assert value.configuration.max_slots == 0
+    assert value.configuration.lifecycle_state == "disabled"
+    assert value.base_projection.max_slots == 99
