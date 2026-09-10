@@ -769,11 +769,15 @@ events. Later local recreation uses the original configuration root retained in
 provenance, not the latest imported base. Reporter, token and operation reservations
 cover both purposes. A first ordinary successor mutation has no local recreation
 certificate; any older certificate remains unchanged in inherited provenance.
-Imported disabled members still cannot be recreated as the first successor event:
-that transition requires explicit cross-epoch predecessor evidence, not a rewritten
-epoch-local certificate. These prefix checks alone do not open durable consumers.
+The pure command/prefix path also validates a first recreate of an imported disabled
+member using explicit cross-epoch evidence, not a rewritten epoch-local certificate.
+It matches the complete pinned source, own event, predecessor configuration,
+original root, owner/purpose and current execution epoch/manifest. Later local
+mutations retain that certificate; a subsequent locally witnessed recreation uses
+a new V1 certificate against its real local event. These structural checks alone
+do not open durable consumers or authenticate release witnesses.
 
-`PersonalInheritedReincarnationEvidenceV2` is a standalone value for the pending
+`PersonalInheritedReincarnationEvidenceV2` is a versioned value for the pending
 cross-epoch recreation path. It keeps the predecessor's real own epoch, manifest,
 revision and head, the immediate retired source, the original root and the current
 admission epoch/revision. It permits own revision N followed by successor revision
@@ -782,9 +786,11 @@ or release itself. Legacy V1 instance validation and serialization reject this
 newer evidence instead of dropping its fields. Versioned application/build member
 carriers preserve it in parsed values using explicit purpose and integer version
 tags; legacy member constructors and serialization reject those newer carriers.
-Command derivation, SQL and runtime consumers do not admit it yet, and pure
-allocation explicitly rejects unconnected cross-epoch recreation. Imported-disabled
-first-create therefore remains closed.
+Durable store issuance, SQL and runtime consumers do not admit it yet, and pure
+allocation explicitly rejects unconnected cross-epoch recreation in both local
+members and inherited bases. Operational imported-disabled first-create therefore
+remains closed. An original operator base without a real own-event anchor cannot
+use this evidence path.
 
 Pure allocation also resolves inherited build bases using the pinned build template
 and native profiles, including empty successor snapshots. Build and application

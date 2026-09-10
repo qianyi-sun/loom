@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
+from loom_capacity_manager.application_origin_contracts import ManagedApplicationOriginV1
 from loom_capacity_manager.build_membership_contracts import (
     ExecutionPreparationV4,
     PersonalBuildMemberV1,
@@ -22,11 +23,13 @@ from loom_capacity_manager.build_membership_contracts import (
     personal_build_subject_name,
 )
 from loom_capacity_manager.build_value_contracts import (
-    PersonalBuildProjectionV1 as PersonalBuildProjectionV1,
-)
-from loom_capacity_manager.build_value_contracts import (
+    PersonalApplicationMemberV2,
+    PersonalBuildMemberV2,
     _nonzero_identity,
     _StrictTypedV1,
+)
+from loom_capacity_manager.build_value_contracts import (
+    PersonalBuildProjectionV1 as PersonalBuildProjectionV1,
 )
 from loom_capacity_manager.contracts import (
     MAX_CONTRACT_BYTES,
@@ -48,6 +51,9 @@ from loom_capacity_manager.executable_contracts import (
     SubjectExecutionAcknowledgementV2,
     canonical_executable_digest,
 )
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
+)
 from loom_capacity_manager.membership import (
     _validate_build_configuration,
     _validate_build_template,
@@ -58,6 +64,10 @@ from loom_capacity_manager.membership_contracts import (
     PersonalReincarnationEvidenceV1,
 )
 from loom_capacity_manager.store import _derive_development_subject, _derive_owner_account
+from loom_capacity_manager.successor_origin_contracts import (
+    ManagedApplicationOriginV2,
+    ManagedBuildOriginV1,
+)
 
 
 class PersonalApplicationCommandV2(_StrictTypedV1):
@@ -211,11 +221,15 @@ validation here cannot prove predecessor cleanup or a historical release set.
         configuration_generation=projection.configuration_generation,
         demand_reporter_incarnation=projection.demand_reporter_incarnation, profiles=template.profiles,
     )
-    member = PersonalBuildMemberV1(
+    inherited = _inherited_recreation_context(request, preparation, reincarnation)
+    member = (PersonalBuildMemberV2(
+        revision=checked_add(request.expected_revision, 1), owner_id=projection.owner_id,
+        configuration=configuration, acknowledgement=request.command.acknowledgement, reincarnation=inherited,
+    ) if inherited is not None else PersonalBuildMemberV1(
         revision=checked_add(request.expected_revision, 1), owner_id=projection.owner_id,
         configuration=configuration, acknowledgement=request.command.acknowledgement, reincarnation=reincarnation,
-    )
-    member = PersonalBuildMemberV1.model_validate_json(member.model_dump_json())
+    ))
+    member = type(member).model_validate_json(member.model_dump_json())
     _validate_build_configuration(member, request.namespace_id, template, owner)
     if member.reincarnation is not None and (
         member.reincarnation.namespace_id != request.namespace_id
@@ -248,10 +262,43 @@ def derive_application_member(
         ))
     ):
         raise ValueError("application command acknowledgement or reincarnation differs from projection")
+    inherited = _inherited_recreation_context(request, preparation, reincarnation)
+    if inherited is not None:
+        return PersonalApplicationMemberV2(revision=checked_add(request.expected_revision, 1), owner_id=projection.owner_id,
+            configuration=configuration, acknowledgement=ack, reincarnation=inherited)
     return PersonalApplicationMemberV1(
         revision=checked_add(request.expected_revision, 1), owner_id=projection.owner_id,
         configuration=configuration, acknowledgement=ack, reincarnation=reincarnation,
     )
+
+
+def _inherited_recreation_context(
+    request: PersonalMembershipMutationV2, preparation: ExecutionPreparationV4,
+    evidence: PersonalReincarnationEvidenceV1 | None,
+) -> PersonalInheritedReincarnationEvidenceV2 | None:
+    """Join structural provenance; the store must authenticate graph and release."""
+    if not isinstance(evidence, PersonalInheritedReincarnationEvidenceV2):
+        return None
+    evidence = PersonalInheritedReincarnationEvidenceV2.model_validate_json(evidence.model_dump_json())
+    origins: tuple[ManagedApplicationOriginV1 | ManagedBuildOriginV1, ...] = (
+        *preparation.managed_application_origins, *preparation.managed_build_origins)
+    base = next((origin for origin in origins if origin.configuration.subject_id == evidence.predecessor.subject_id), None)
+    if (not isinstance(base, (ManagedApplicationOriginV2, ManagedBuildOriginV1))
+        or isinstance(request.command, PersonalBuildCommandV2) != isinstance(base, ManagedBuildOriginV1)
+        or base.base_projection.owner_id != request.command.projection.owner_id
+        or evidence.execution_epoch != request.execution.execution_epoch
+        or evidence.execution_manifest_sha256 != request.execution.execution_manifest_sha256
+        or evidence.namespace_id != request.namespace_id
+        or evidence.source != preparation.retired_source
+        or evidence.source != base.inherited.source
+        or evidence.origin != base.inherited.original_origin
+        or evidence.predecessor != base.configuration
+        or evidence.predecessor_execution_epoch != base.inherited.anchor.execution_epoch
+        or evidence.predecessor_execution_manifest_sha256 != base.inherited.anchor.execution_manifest_sha256
+        or evidence.predecessor_revision != base.inherited.anchor.revision
+        or evidence.predecessor_head_sha256 != base.inherited.anchor.head_sha256):
+        raise ValueError("inherited recreation differs from pinned predecessor or current execution")
+    return evidence
 
 
 def validate_typed_membership_result(

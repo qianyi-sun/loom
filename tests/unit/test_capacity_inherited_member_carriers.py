@@ -116,11 +116,8 @@ def test_historical_anchor_requires_new_evidence_current_epoch(build):
         PersonalMemberEventAnchorV1(**payload)
 
 
-@pytest.mark.parametrize("build", (False, True))
-def test_unconnected_evidence_in_inherited_base_cannot_enter_empty_allocation(build):
+def inherited_base_preparation(*, build):
     from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
-    from loom_capacity_manager.membership import resolved_subject_references
-    from tests.unit.test_capacity_successor_allocation import successor_allocation
     from tests.unit.test_capacity_successor_preparation_origins import preparation_payload
     payload = preparation_payload()
     member = new_member(build=build)
@@ -143,7 +140,14 @@ def test_unconnected_evidence_in_inherited_base_cannot_enter_empty_allocation(bu
         member=member.model_dump(mode="json"))
     payload["subject_acknowledgements"] = [origin["acknowledgement"] if ack["subject_id"] == origin["configuration"]["subject_id"] else ack
         for ack in payload["subject_acknowledgements"]]
-    preparation = ExecutionPreparationV4.model_validate_json(json.dumps(payload))
+    return ExecutionPreparationV4.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("build", (False, True))
+def test_unconnected_evidence_in_inherited_base_cannot_enter_empty_allocation(build):
+    from loom_capacity_manager.membership import resolved_subject_references
+    from tests.unit.test_capacity_successor_allocation import successor_allocation
+    preparation = inherited_base_preparation(build=build)
     value = successor_allocation(preparation=preparation)
     assert not value.membership.members
     with pytest.raises(ValueError, match="cross-epoch recreation allocation is not yet connected"):

@@ -5,7 +5,9 @@ from uuid import UUID
 
 import pytest
 
-from loom_capacity_manager.inherited_reincarnation_contracts import PersonalInheritedReincarnationEvidenceV2
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
+)
 from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
 from loom_capacity_manager.typed_membership_commands import parse_typed_membership_result
 from loom_capacity_manager.typed_membership_events import validate_typed_membership_event_prefix
@@ -62,3 +64,35 @@ def test_later_local_recreation_uses_real_local_event_and_v1_certificate(build):
 def test_inherited_certificate_current_epoch_is_bound_not_only_manifest(build):
     with pytest.raises(ValueError, match="inherited recreation"):
         inherited_create(build=build, evidence_changes={"execution_epoch": 44})
+
+
+@pytest.mark.parametrize("build", (False, True))
+@pytest.mark.parametrize("boundary", ("source", "own-head", "own-revision", "root", "predecessor"))
+def test_inherited_recreation_matches_exact_pinned_predecessor(build, boundary):
+    _, _, _, proof = inherited_create(build=build)
+    changes = {
+        "source": {"source": proof.source.model_copy(update={"head_sha256": "9" * 64})},
+        "own-head": {"predecessor_head_sha256": "9" * 64},
+        "own-revision": {"predecessor_revision": 1},
+        "root": {"origin": proof.origin.model_copy(update={"digest": "9" * 64})},
+        "predecessor": {"predecessor": proof.predecessor.model_copy(update={"configuration_generation": proof.predecessor.configuration_generation + 1})},
+    }[boundary]
+    changed = proof.model_copy(update=changes)
+    # Force structurally valid forgeries to reach the pinned-context comparison.
+    PersonalInheritedReincarnationEvidenceV2.model_validate_json(changed.model_dump_json())
+    with pytest.raises(ValueError, match="differs from pinned predecessor"):
+        inherited_create(build=build, evidence_changes=changes)
+
+
+@pytest.mark.parametrize("build", (False, True))
+@pytest.mark.parametrize("operation", ("capacity", "update", "destroy"))
+def test_importing_a_v2_member_keeps_old_certificate_only_in_provenance(build, operation):
+    from tests.unit.test_capacity_inherited_member_carriers import inherited_base_preparation
+    preparation = inherited_base_preparation(build=build)
+    origin = preparation.managed_build_origins[0] if build else preparation.managed_application_origins[-1]
+    old_proof = origin.inherited.anchor.member.reincarnation
+    preparation, fleet, row = successor_row(build=build, operation=operation, preparation_override=preparation, execution_epoch=44)
+    result, = validate_typed_membership_event_prefix((row,), preparation, fleet, execution_epoch=44)
+    assert result.member.schema_version == 1 and result.member.reincarnation is None
+    assert origin.inherited.anchor.member.reincarnation == old_proof
+    assert old_proof.execution_epoch == 43

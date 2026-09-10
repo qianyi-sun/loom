@@ -25,7 +25,13 @@ from loom_capacity_manager.contracts import (
     SubjectConfigurationV1,
     canonical_digest,
 )
-from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
+)
+from loom_capacity_manager.membership_contracts import (
+    PersonalApplicationMemberV1,
+    PersonalReincarnationEvidenceV1,
+)
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.models import CapacityPersonalMembershipEvent
 from loom_capacity_manager.successor_origin_contracts import (
@@ -127,11 +133,10 @@ def _build_transition(
     if recreating:
         evidence = member.reincarnation
         if (
-            prior is None or subject.subject_incarnation in used_incarnations or not fresh_reporter
+            subject.subject_incarnation in used_incarnations or not fresh_reporter
             or subject.candidate_generation != 1 or subject.deployment_generation != 1
             or evidence is None or evidence.origin != origin
-            or evidence.predecessor != old or evidence.predecessor_revision != prior[2].revision
-            or evidence.predecessor_head_sha256 != prior[2].head_sha256
+            or evidence.predecessor != old or not _matches_predecessor_event(evidence, prior)
             or evidence.admission_revision != member.revision
         ):
             raise ValueError("build membership predecessor event changed")
@@ -197,11 +202,10 @@ def _application_transition(
     if old.lifecycle_state == "disabled" and projection.operation_kind == "create":
         evidence = member.reincarnation
         if (
-            prior is None or evidence is None or evidence.origin != origin
+            evidence is None or evidence.origin != origin
             or subject.subject_incarnation in used_incarnations or not fresh_reporter
             or subject.candidate_generation != 1 or subject.deployment_generation != 1
-            or evidence.predecessor != old or evidence.predecessor_revision != prior[2].revision
-            or evidence.predecessor_head_sha256 != prior[2].head_sha256
+            or evidence.predecessor != old or not _matches_predecessor_event(evidence, prior)
             or evidence.admission_revision != member.revision
         ):
             raise ValueError("application membership predecessor event changed")
@@ -303,3 +307,15 @@ def _configuration_reference(configuration: SubjectConfigurationV1) -> Configura
     return ConfigurationGenerationRefV1(scope="subject", subject_id=configuration.subject_id,
         subject_incarnation=configuration.subject_incarnation, generation=configuration.configuration_generation,
         digest=canonical_digest(configuration))
+
+
+def _matches_predecessor_event(
+    evidence: PersonalReincarnationEvidenceV1,
+    prior: tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent] | None,
+) -> bool:
+    """Inherited anchors are already joined by command validation; never invent one."""
+    if prior is None:
+        return isinstance(evidence, PersonalInheritedReincarnationEvidenceV2)
+    return (not isinstance(evidence, PersonalInheritedReincarnationEvidenceV2)
+        and evidence.predecessor_revision == prior[2].revision
+        and evidence.predecessor_head_sha256 == prior[2].head_sha256)

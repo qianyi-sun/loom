@@ -25,7 +25,8 @@ from tests.unit.test_capacity_successor_preparation_origins import preparation_p
 from tests.unit.test_capacity_typed_membership_events import event_row
 
 
-def successor_row(*, build, operation="capacity", previous=None, reincarnation=None, source_operation="capacity", **changes):
+def successor_row(*, build, operation="capacity", previous=None, reincarnation=None, source_operation="capacity",
+    preparation_override=None, execution_epoch=43, **changes):
     payload = preparation_payload()
     for purpose, field in ((False, "managed_application_origins"), (True, "managed_build_origins")):
         inherited = successor_payload(build=purpose, operation=source_operation)
@@ -34,7 +35,7 @@ def successor_row(*, build, operation="capacity", previous=None, reincarnation=N
         payload["subject_acknowledgements"] = [inherited["acknowledgement"]
             if ack["subject_id"] == inherited["configuration"]["subject_id"] else ack
             for ack in payload["subject_acknowledgements"]]
-    preparation = ExecutionPreparationV4.model_validate_json(json.dumps(payload))
+    preparation = preparation_override or ExecutionPreparationV4.model_validate_json(json.dumps(payload))
     base = preparation.managed_build_origins[0] if build else preparation.managed_application_origins[-1]
     revision = 1 if previous is None else previous.revision + 1
     value, request, result, row = event_row(build=build, revision=revision,
@@ -59,20 +60,20 @@ def successor_row(*, build, operation="capacity", previous=None, reincarnation=N
         ack_fields["candidate"] = CandidateBindingV2(algorithm="source-sha256", identity=projection.candidate_sha256,
             publication_sha256=projection.candidate_publication_sha256)
     ack = ack.model_copy(update=ack_fields)
-    execution = request.execution.model_copy(update={"execution_epoch": 43,
+    execution = request.execution.model_copy(update={"execution_epoch": execution_epoch,
         "configuration_epoch": preparation.configuration_epoch,
         "execution_manifest_sha256": canonical_executable_digest(preparation)})
     request = request.model_copy(update={"execution": execution,
         "command": request.command.model_copy(update={"projection": projection, "acknowledgement": ack})})
     derive = derive_build_member if build else derive_application_member
     member = derive(request, preparation, value.fleet, reincarnation=reincarnation)
-    row.execution_epoch, row.execution_manifest_sha256 = 43, execution.execution_manifest_sha256
+    row.execution_epoch, row.execution_manifest_sha256 = execution_epoch, execution.execution_manifest_sha256
     row.subject_id, row.subject_incarnation = member.configuration.subject_id, projection.subject_incarnation
     row.owner_id, row.reporter_incarnation = projection.owner_id, projection.demand_reporter_incarnation
     row.operation_id = projection.operation_id
     row.configuration_generation, row.deployment_generation = projection.configuration_generation, projection.deployment_generation
     row.request_payload, row.request_digest = request.model_dump(mode="json"), canonical_digest(request)
-    row.head_sha256 = canonical_membership_event_head(actor=row.actor, execution_epoch=43,
+    row.head_sha256 = canonical_membership_event_head(actor=row.actor, execution_epoch=execution_epoch,
         idempotency_key=row.idempotency_key, operation_id=row.operation_id, previous_sha256=row.previous_sha256,
         request_digest=row.request_digest, request_payload=row.request_payload, member=member, revision=revision)
     row.result_payload = result.model_copy(update={"head_sha256": row.head_sha256, "member": member}).model_dump(mode="json")
