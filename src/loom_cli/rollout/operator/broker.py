@@ -992,35 +992,53 @@ def _start_staged(
             return 0
         mutation_guard = dependencies.mutation_guard
         assert mutation_guard is not None
+        # Guard startup already mutates shared lifecycle state. Bind the exact
+        # admitted request and assessment durably before handing it that authority,
+        # not only before the later backup launch. Failed publication must perform
+        # no guard operations; an interrupted acquisition must remain discoverable.
+        dependencies.store.create_preflight_request(request)
+        dependencies.store.publish_preflight_assessment(request.request_id, assessment)
+        dependencies.store.append_event(
+            _event(
+                request.request_id,
+                caller,
+                now=lambda: created_at,
+                event="requested",
+                status="pending",
+            )
+        )
         guard_acquired = False
         guard_transferred = False
         try:
-            guard_evidence = mutation_guard.acquire(request.request_id)
-            guard_acquired = True
-            observed_epoch = dependencies.read_mutation_epoch()
-            if (
-                type(observed_epoch) is not int
-                or guard_evidence.request_id != request.request_id
-                or guard_evidence.candidate_sha != candidate.resolved_sha
-                or guard_evidence.candidate_tree != request.candidate_tree
-                or guard_evidence.mutation_epoch != mutation_epoch
-                or observed_epoch != mutation_epoch
-            ):
-                raise LifecycleBusyError(
-                    "staging mutation epoch changed during guard acquisition",
-                    {"reason": "mutation_epoch_drift"},
+            guard_failure_reason = "guard_acquisition_failed"
+            try:
+                guard_evidence = mutation_guard.acquire(request.request_id)
+                guard_acquired = True
+                guard_failure_reason = "guard_readiness_mismatch"
+                observed_epoch = dependencies.read_mutation_epoch()
+                if (
+                    type(observed_epoch) is not int
+                    or guard_evidence.request_id != request.request_id
+                    or guard_evidence.candidate_sha != candidate.resolved_sha
+                    or guard_evidence.candidate_tree != request.candidate_tree
+                    or guard_evidence.mutation_epoch != mutation_epoch
+                    or observed_epoch != mutation_epoch
+                ):
+                    raise LifecycleBusyError(
+                        "staging mutation epoch changed during guard acquisition",
+                        {"reason": "mutation_epoch_drift"},
+                    )
+            except Exception:
+                # Request launch failed before backup. This is NOT evidence that
+                # an ambiguous guard start was cleaned up; its manager owns that
+                # reconciliation. Never persist raw process/transport diagnostics.
+                dependencies.store.append_event(
+                    _event(
+                        request.request_id, caller, now=dependencies.now,
+                        event="launch_failed", status="failed", reason=guard_failure_reason,
+                    )
                 )
-            dependencies.store.create_preflight_request(request)
-            dependencies.store.publish_preflight_assessment(request.request_id, assessment)
-            dependencies.store.append_event(
-                _event(
-                    request.request_id,
-                    caller,
-                    now=lambda: created_at,
-                    event="requested",
-                    status="pending",
-                )
-            )
+                raise
             job_id = validate_safe_identifier(
                 (
                     dependencies.new_backup_job_id()

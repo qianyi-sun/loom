@@ -49,6 +49,30 @@ func prebuildFixture(t *testing.T) (*prebuildLifecycle, *manualClock, chan struc
 		leaseExpiresAt: clock.Now().Add(time.Minute), timeout: 2 * time.Minute}, clock, renewed, guard, fd
 }
 
+func waitForPrebuildControlTimer(t *testing.T, clock *manualClock) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		clock.mu.Lock()
+		// The phase timer is registered before fetch starts. Wait for the
+		// separate control timer too: fetch entry alone does not prove that
+		// run has finished computing and registering its relative wait.
+		armed := len(clock.timers) >= 2
+		clock.mu.Unlock()
+		if armed {
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatal("prebuild control timer was not registered")
+		}
+	}
+}
+
 func TestPrebuildRenewsAndHeartbeatsDuringSnapshotIO(t *testing.T) {
 	p, clock, renewed, guard, fd := prebuildFixture(t)
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -83,6 +107,7 @@ func TestPrebuildRenewsAndHeartbeatsDuringSnapshotIO(t *testing.T) {
 		done <- err
 	}()
 	<-entered
+	waitForPrebuildControlTimer(t, clock)
 	clock.advance(20 * time.Second)
 	select {
 	case <-renewed:
@@ -156,9 +181,12 @@ func TestPrebuildRejectsHeartbeatLossAndClockRegression(t *testing.T) {
 				return nil, ctx.Err()
 			}
 			guard.failHeartbeat = kind == "heartbeat"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			done := make(chan error, 1)
-			go func() { _, err := p.run(context.Background()); done <- err }()
+			go func() { _, err := p.run(ctx); done <- err }()
 			<-entered
+			waitForPrebuildControlTimer(t, clock)
 			if kind == "clock" {
 				clock.advance(-time.Second)
 				clock.advance(0)

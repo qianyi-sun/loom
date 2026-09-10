@@ -71,8 +71,15 @@ individual rollout steps.
 ## Lifecycle mutation guard
 
 After Tier 0--2 preflight has bound the candidate and staging mutation epoch,
-a non-preview `start` acquires a request-bound mutation guard before publishing
-the backup job. The service-owned transient guard unit first suspends the
+a non-preview `start` durably publishes its immutable request, complete assessment,
+and requested event under the launch lock before acquiring the request-bound
+mutation guard. Publication failure starts no guard. Acquisition or readiness
+failure retains the request and records a sanitized `launch_failed` event with
+`guard_acquisition_failed` or `guard_readiness_mismatch`; this failed-launch status
+does not certify cleanup of an ambiguous guard start. The backup job is published
+only after guard readiness and epoch validation. This ordering supplies durable
+request identity, not permission to restart the database or skip verified backup.
+The service-owned transient guard unit first suspends the
 legacy `loom-staging-data-lifecycle` CronJob with a resource-version-checked
 patch and annotations carrying the request ID, candidate SHA, and candidate
 tree. It verifies the exact CronJob identity, lists nonterminal Jobs by the

@@ -121,11 +121,14 @@ async def test_held_request_has_signed_dispatch_audit_without_billable_call(
         monkeypatch.setenv(f"LOOM_GW_{provider}_API_KEY", "local-placeholder-provider-key")
     received: list[dict[str, object]] = []
     provider = FastAPI()
+    release_provider = asyncio.Event()
 
     @provider.post("/{rest:path}")
     async def hold(rest: str, request: Request) -> dict[str, object]:
         received.append({"headers": dict(request.headers), "body": await request.json()})
-        await asyncio.sleep(1.0)
+        # Keep the request in flight until the caller observes its deadline.
+        # A fixed sleep can finish first when CI dispatch/setup is slow.
+        await asyncio.wait_for(release_provider.wait(), timeout=15)
         return {"unused": True}
 
     async with _serve(provider) as provider_url:
@@ -149,25 +152,28 @@ async def test_held_request_has_signed_dispatch_audit_without_billable_call(
         try:
             async with _serve(create_app(settings)) as gateway_url:
                 agent_attempt_id, grant_id = uuid4(), uuid4()
-                token = mint_step_jwt(
-                    team_id=team_id,
-                    trial_id=trial_id,
-                    step_id="main",
-                    ttl_sec=360,
-                    signing_key=settings.step_jwt_signing_key.get_secret_value(),
-                    provider_connection_id=connection_id if bind_connection else None,
-                    attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(seconds=0.4),
-                    agent_attempt_id=agent_attempt_id,
-                    step_jwt_id=grant_id,
-                )
-                async with httpx.AsyncClient(base_url=gateway_url, timeout=5) as client:
-                    result = await client.post(
-                        path,
-                        json=payload,
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                        },
+                async with httpx.AsyncClient(base_url=gateway_url, timeout=10) as client:
+                    # Client/TLS setup is not the behavior under test. Mint only
+                    # after setup, with room for real HTTP/DB dispatch under load.
+                    token = mint_step_jwt(
+                        team_id=team_id,
+                        trial_id=trial_id,
+                        step_id="main",
+                        ttl_sec=360,
+                        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+                        provider_connection_id=connection_id if bind_connection else None,
+                        attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(seconds=5),
+                        agent_attempt_id=agent_attempt_id,
+                        step_jwt_id=grant_id,
                     )
+                    try:
+                        result = await client.post(
+                            path,
+                            json=payload,
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                    finally:
+                        release_provider.set()
                     assert result.status_code == 504, result.text
                     assert result.json()["detail"] == {
                         "code": "agent_timeout",
@@ -354,6 +360,7 @@ async def test_true_stream_deadline_keeps_transport_audit(
     monkeypatch.setenv("LOOM_GW_ANTHROPIC_API_KEY", "local-placeholder-provider-key")
     provider = FastAPI()
     received = []
+    release_provider = asyncio.Event()
 
     @provider.post("/{rest:path}")
     async def stream(rest: str) -> StreamingResponse:
@@ -361,7 +368,7 @@ async def test_true_stream_deadline_keeps_transport_audit(
 
         async def chunks():
             yield b"event: ping\ndata: {}\n\n"
-            await asyncio.sleep(2)
+            await asyncio.wait_for(release_provider.wait(), timeout=15)
             yield b"event: message_stop\ndata: {}\n\n"
 
         return StreamingResponse(
@@ -388,18 +395,18 @@ async def test_true_stream_deadline_keeps_transport_audit(
         engine.dispose()
         try:
             async with _serve(create_app(settings)) as gateway_url:
-                token = mint_step_jwt(
-                    team_id=team_id,
-                    trial_id=trial_id,
-                    step_id="main",
-                    ttl_sec=360,
-                    signing_key=settings.step_jwt_signing_key.get_secret_value(),
-                    provider_connection_id=connection_id if facade else None,
-                    attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(seconds=0.4),
-                    agent_attempt_id=uuid4(),
-                    step_jwt_id=uuid4(),
-                )
-                async with httpx.AsyncClient(base_url=gateway_url, timeout=5) as client:
+                async with httpx.AsyncClient(base_url=gateway_url, timeout=10) as client:
+                    token = mint_step_jwt(
+                        team_id=team_id,
+                        trial_id=trial_id,
+                        step_id="main",
+                        ttl_sec=360,
+                        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+                        provider_connection_id=connection_id if facade else None,
+                        attempt_deadline_wall_clock=datetime.now(UTC) + timedelta(seconds=5),
+                        agent_attempt_id=uuid4(),
+                        step_jwt_id=uuid4(),
+                    )
                     try:
                         result = await client.post(
                             "/anthropic/v1/messages" if facade else "/v1/messages",
@@ -416,6 +423,8 @@ async def test_true_stream_deadline_keeps_transport_audit(
                         else:
                             assert result.status_code == 504, result.text
                             assert result.json()["detail"]["code"] == "agent_timeout"
+                    finally:
+                        release_provider.set()
                 rows = await _terminal_receipts(postgres_url, trial_id)
                 assert len(received) == 1 and len(rows) == 1
                 assert rows[0]["provider_outcome"] == "deadline"

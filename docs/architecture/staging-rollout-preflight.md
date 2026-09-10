@@ -391,7 +391,12 @@ authority.
 
 The Tier 0–2 assessment remains outside the lifecycle mutation guard. For a
 non-preview launch, the broker binds the exact candidate and epoch first, then
-acquires the request-bound guard before publishing the detached backup job.
+durably publishes the immutable request, assessment and requested event under
+the launch lock before acquiring the request-bound guard. A publication failure
+performs no guard operations. Acquisition/readiness failures retain that request
+with a sanitized failed-launch event, without starting backup or rollout; an
+ambiguous guard start still requires the guard manager's cleanup reconciliation.
+Only validated guard readiness permits publishing the detached backup job.
 The guard's ready evidence must agree with the request ID, candidate SHA and
 tree, original mutation epoch, database backend PID, and entry-anchored
 absolute deadline at broker admission, backup-worker continuation, and detached

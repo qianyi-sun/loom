@@ -160,7 +160,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/prebuild_lifecycle_test.go",
-        "sha256": "5d4e36271dbcc6618d79c14d695f77edb1f4a1ae1d72e2d470d3492bc04b3cbb"
+        "sha256": "478ba80dc72859cd254c9da97407038e3fe06bc7226509eddca89f6a6ab37b93"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/prebuild_registered.go",

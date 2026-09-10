@@ -1966,8 +1966,23 @@ def _guarded_staged_start(
 
 def test_staged_start_acquires_guard_after_tier_0_2_and_hands_off_to_backup(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle, dependencies, store, guard = _guarded_staged_start(tmp_path)
+    acquire = guard.acquire
+
+    def require_durable_request(request_id):  # type: ignore[no-untyped-def]
+        # Open through a fresh store at the first potentially mutating operation.
+        recovered = RequestStore(store.root)
+        request = recovered.read_preflight_request(request_id)
+        assessment = recovered.read_preflight_assessment(request_id)
+        assert request.candidate.resolved_sha == SHA
+        assert request.mutation_epoch == 7
+        assert assessment.assessment_digest == request.preflight_assessment_sha256
+        assert recovered.read_events(request_id)[-1].event == "requested"
+        return acquire(request_id)
+
+    monkeypatch.setattr(guard, "acquire", require_durable_request)
 
     assert broker_main(["start"], dependencies=dependencies) == 0
 
@@ -1991,7 +2006,7 @@ def test_staged_dry_run_never_acquires_mutation_guard(tmp_path: Path) -> None:
     assert store.read_preflight_request("req-guarded001").status == "preview"
 
 
-def test_staged_start_releases_guard_on_post_readiness_epoch_drift_without_publication(
+def test_staged_start_records_failure_and_releases_guard_on_post_readiness_epoch_drift(
     tmp_path: Path,
 ) -> None:
     _bundle, dependencies, store, guard = _guarded_staged_start(tmp_path, epochs=(7, 8))
@@ -2000,8 +2015,12 @@ def test_staged_start_releases_guard_on_post_readiness_epoch_drift_without_publi
 
     assert guard.acquired == ["req-guarded001"]
     assert guard.released == ["req-guarded001"]
-    with pytest.raises(RequestStoreError, match="does not exist"):
-        store.read_preflight_request("req-guarded001")
+    assert store.read_preflight_request("req-guarded001").mutation_epoch == 7
+    assert store.read_events("req-guarded001")[-1].reason == "guard_readiness_mismatch"
+    assert broker_main(["status", "req-guarded001"], dependencies=dependencies) == 0
+    status = _last_json(dependencies.stdout)
+    assert status["status"] == "failed"
+    assert status["stage"] == "launch_failed"
 
 
 @pytest.mark.parametrize("failure", ["persistence", "launch"])
@@ -2027,8 +2046,55 @@ def test_staged_start_releases_guard_on_every_pre_handoff_failure(
 
     assert broker_main(["start"], dependencies=dependencies) == 1
 
-    assert guard.acquired == ["req-guarded001"]
-    assert guard.released == ["req-guarded001"]
+    expected = [] if failure == "persistence" else ["req-guarded001"]
+    assert guard.acquired == expected
+    assert guard.released == expected
+
+
+def test_staged_start_retains_request_when_guard_acquisition_fails(tmp_path, monkeypatch):
+    bundle, dependencies, store, guard = _guarded_staged_start(tmp_path)
+
+    def fail_acquire(request_id):
+        guard.acquired.append(request_id)
+        raise RuntimeError("private guard failure must not reach the event")
+
+    monkeypatch.setattr(guard, "acquire", fail_acquire)
+    assert broker_main(["start"], dependencies=dependencies) == 1
+    assert store.read_preflight_request("req-guarded001").mutation_epoch == 7
+    event = store.read_events("req-guarded001")[-1]
+    assert (event.event, event.status, event.reason) == ("launch_failed", "failed", "guard_acquisition_failed")
+    assert bundle.systemd.backup_starts == []
+    assert guard.released == []  # Acquisition owns ambiguous-start cleanup.
+    assert store.read_active() is None
+
+
+@pytest.mark.parametrize("failure", ["assessment", "requested-event"])
+def test_staged_start_never_acquires_guard_after_admission_publication_failure(tmp_path, monkeypatch, failure):
+    bundle, dependencies, store, guard = _guarded_staged_start(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise RequestStoreError("injected admission publication failure")
+
+    monkeypatch.setattr(store, "publish_preflight_assessment" if failure == "assessment" else "append_event", fail)
+    assert broker_main(["start"], dependencies=dependencies) == 1
+    assert guard.acquired == guard.released == []
+    assert bundle.systemd.backup_starts == []
+
+
+def test_staged_start_still_releases_guard_when_failure_event_cannot_be_saved(tmp_path, monkeypatch):
+    bundle, dependencies, store, guard = _guarded_staged_start(tmp_path, epochs=(7, 8))
+    append_event = store.append_event
+
+    def fail_terminal(event):
+        if event.event == "launch_failed":
+            raise RequestStoreError("injected failure event publication error")
+        append_event(event)
+
+    monkeypatch.setattr(store, "append_event", fail_terminal)
+    assert broker_main(["start"], dependencies=dependencies) == 1
+    assert guard.acquired == guard.released == ["req-guarded001"]
+    assert bundle.systemd.backup_starts == []
+    assert store.read_events("req-guarded001")[-1].event == "requested"
 
 
 def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:
