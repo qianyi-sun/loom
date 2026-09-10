@@ -77,3 +77,18 @@ def test_launch_facts_reject_corrupt_retained_chunk_without_overwriting(tmp_path
         with pytest.raises(JournalRegressionError):
             module.retain_launch_facts(journal, value)
         assert journal.head == head
+
+
+def test_launch_facts_capacity_rejection_preserves_head_and_cleanup_space(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.launch_facts_journal")
+    journal_module = import_module("loom_capacity_executor.journal")
+    monkeypatch.setattr(journal_module, "_MAX_JOURNAL_BYTES", 8 * 1024 * 1024)
+    with ExecutorJournal(tmp_path / "executor.journal") as journal:
+        head = journal.head
+        with pytest.raises(journal_module.JournalError, match="capacity"):
+            module.retain_launch_facts(journal, response())
+        assert journal.head == head
+        payload = b"cleanup evidence"
+        journal.append("intent-close-requested", sha256(payload).hexdigest(),
+            object_kind="intent", object_id="cleanup", payload=payload)
+        assert journal.head.sequence == 1
