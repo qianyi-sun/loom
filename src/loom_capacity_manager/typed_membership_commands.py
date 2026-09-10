@@ -193,6 +193,8 @@ validation here cannot prove predecessor cleanup or a historical release set.
         raise ValueError("build derivation requires a build command")
     projection = request.command.projection
     template = preparation.personal_builds
+    if projection.max_slots > template.max_slots_per_subject:
+        raise ValueError("build projection maximum exceeds the template")
     retiring = projection.operation_kind == "destroy"
     configuration = SubjectConfigurationV1(
         subject_id=personal_build_subject_id(request.namespace_id, projection.owner_id),

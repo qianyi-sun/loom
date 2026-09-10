@@ -708,6 +708,25 @@ configuration activation, not a separate import receipt. Replay is historical an
 is unavailable while execution is active. It does not activate V4 execution or
 open a public endpoint.
 
+Successor provenance now has separate structural contracts and an internal
+read-only `export_retired_member_origins` helper. Under a SERIALIZABLE authority
+lock, it authenticates retirement, the complete final snapshot, the actual last
+event for each subject, original configuration root, and retained installations.
+Its result distinguishes applications from pending build services and preserves
+recreated incarnations. It creates no configuration proposal or execution grant.
+Untouched operator-pinned applications retain their original origin without a
+synthetic membership event; pending session edits are rejected without flushing.
+
+`ManagedApplicationOriginV2` adds inherited provenance while preserving V1 bytes.
+`ManagedBuildOriginV1` also pins the trusted runtime release, build template,
+original installation and latest service projections; it cannot claim readiness.
+The inherited source's final global head is distinct from the subject's own event
+head. Old recreation certificates retain their original epoch and revision inside
+that provenance, never rewritten as a successor epoch's certificate. Structural
+contracts represent empty-epoch inheritance, but durable recursive source-graph
+validation, successor preparation consumers and complete typed import are still
+unconnected. These new origins do not remove the import or execution interlocks.
+
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
 immutable base configuration, original create/update installation projection,
