@@ -321,4 +321,4 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
     assert postgres_service["metadata"]["name"] == "loom-capacity-postgres"
     assert postgres_statefulset["metadata"]["name"] == "loom-capacity-postgres"
     assert len(migration_jobs) == 1
-    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0019-")
+    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0020-")
