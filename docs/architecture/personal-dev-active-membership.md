@@ -85,6 +85,15 @@ inherited source graphs remain interlocked. Rollback refuses retained typed
 intents and restores the prior functions and privilege boundaries. This is
 database lifecycle support, not proof of native submission or live acceptance.
 
+Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
+preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
+verification bind the exact historical configuration, acknowledgement and member
+event, including purpose and owner. The manager verifies the executor signature;
+SQL independently checks provenance plus the existing exact inventory, binding,
+digest and scalar joins. Later empty inventories and deployment supersession do
+not erase authenticated terminal proof. Downgrade refuses retained typed terminal
+evidence and leaves a persistent legacy-only table constraint for late writers.
+
 The log binds authority incarnation, writer/execution epoch, manifest digest,
 namespace, global membership revision, previous digest, actor, idempotency key,
 request digest, subject identity and complete resulting subject evidence.
@@ -1092,8 +1101,10 @@ requiring activation, rejects active membership events, and retains a zero
 capacity ceiling. Active reporter currentness still requires activated history;
 this readback does not enable preparation or activation. Manager readback and
 internal executor inventory publication preserve versioned terminal evidence.
-Manager database terminal/release guards remain downstream implementation
-boundaries, so schema-3 telemetry is not proof of working terminal cleanup.
+Manager database terminal/release guards authenticate the exact historical
+typed purpose and membership evidence. Real manager lifecycle tests cover
+terminal persistence and protected release, but schema-3 telemetry alone is
+not proof of working native terminal cleanup.
 Complete inventory journal records also retain their existing
 size limit; bounded large-inventory retention is required before live operation.
 

@@ -2658,12 +2658,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0020")
+            ).scalar_one() == ("capacity_0021")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0020"
+            assert environment_revision != "capacity_0021"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -2685,7 +2685,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 20
+    assert await assert_capacity_schema_at_head(capacity_engine) == 21
 
 
 def test_capacity_0015_terminal_inventory_evidence_is_append_only_and_reversible(

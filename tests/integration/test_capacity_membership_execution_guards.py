@@ -413,7 +413,7 @@ async def test_membership_guard_downgrade_refuses_retained_v3_allocations(
             await (await capacity_session.connection()).run_sync(downgrade)
     assert (
         await capacity_session.scalar(text("SELECT version_num FROM alembic_version"))
-        == "capacity_0020"
+        == "capacity_0021"
     )
 
 

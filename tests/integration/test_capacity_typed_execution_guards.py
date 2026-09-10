@@ -325,7 +325,7 @@ async def test_typed_execution_reader_downgrade_preserves_intents_and_restores_l
             async with capacity_session.begin_nested():
                 connection = await capacity_session.connection()
                 await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0019"))
-        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0020"
+        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0021"
     else:
         original = await capacity_session.scalar(text("SELECT pg_get_functiondef('public.capacity_0020_legacy_target_current(bigint,uuid,uuid)'::regprocedure)"))
         connection = await capacity_session.connection()
