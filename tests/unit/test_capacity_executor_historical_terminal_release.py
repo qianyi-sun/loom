@@ -18,8 +18,9 @@ from tests.unit.test_capacity_executor_typed_journal import facts, typed_executo
 
 
 @pytest.mark.parametrize("typed", (False, True))
+@pytest.mark.parametrize("compact", (False, True))
 @pytest.mark.parametrize("tamper", ("none", "sequence", "digest", "live", "binding", "duplicate-terminal"))
-async def test_delayed_release_requires_exact_historical_terminal_and_protected_fences(tmp_path, typed, tamper):
+async def test_delayed_release_requires_exact_historical_terminal_and_protected_fences(tmp_path, typed, compact, tamper):
     if typed:
         runtime, journal, context = typed_executor(tmp_path)
         subject = facts(context)
@@ -42,6 +43,15 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
         runtime.slurm.terminal_jobs = ()
         await runtime._publish_inventory(await runtime.client.executable_checkpoint())
         assert runtime.client.inventories[-1].records == ()
+        if compact:
+            from loom_capacity_executor.journal_retention import plan_runtime_checkpoint
+
+            plan = plan_runtime_checkpoint(runtime, await runtime.client.executable_checkpoint())
+            checkpoint = plan.prepare(journal)
+            journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+                central_digest=checkpoint.record_digest)
+            journal.close()
+            journal.__enter__()
         protected_digest = "1" * 64
         runtime.admission.observations[context.binding.intent_id] = ProtectedIntentObservationV2(
             binding=context.binding, bootstrap_registration_epoch=1,

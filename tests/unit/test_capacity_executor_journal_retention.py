@@ -32,13 +32,14 @@ async def test_idle_runtime_checkpoint_retains_only_latest_inventory_batch(tmp_p
         journal.close()
 
 
-async def test_runtime_checkpoint_rejects_unknown_dependencies_and_pending_work(tmp_path):
+@pytest.mark.parametrize("pending", (False, True))
+async def test_runtime_checkpoint_rejects_unknown_dependencies_and_pending_work(tmp_path, pending):
     runtime, journal, manager, _, _, _ = executor_fixture(tmp_path, work=None)
     try:
         module = import_module("loom_capacity_executor.journal_retention")
-        journal.append("future-operation-confirmed", sha256(b"x").hexdigest(),
+        journal.append("intent-close-requested" if pending else "future-operation-confirmed", sha256(b"x").hexdigest(),
             object_kind="executor", object_id="unknown", payload=b"x")
-        with pytest.raises(JournalRegressionError, match="unsupported"):
+        with pytest.raises(JournalRegressionError, match="unresolved" if pending else "unsupported"):
             module.plan_runtime_checkpoint(runtime, await manager.executable_checkpoint())
     finally:
         journal.close()
