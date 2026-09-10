@@ -96,7 +96,8 @@ async def test_typed_terminal_proof_survives_later_empty_inventory(capacity_sess
         reporter_incarnation=member.acknowledgement.reporter_incarnation, intent_id=binding.intent_id) == evidence
 
 
-async def test_typed_terminal_release_matches_python_and_sql_before_recreation(capacity_session):
+@pytest.mark.parametrize("cleanup_only", (False, True))
+async def test_typed_terminal_release_matches_python_and_sql_before_recreation(capacity_session, cleanup_only):
     from tests.integration.test_capacity_membership_release import assert_sql_release_matches
 
     store, preparation, member, binding, inventory = await terminal_inventory(capacity_session)
@@ -106,7 +107,7 @@ async def test_typed_terminal_release_matches_python_and_sql_before_recreation(c
         binding=binding, reporter_incarnation=member.acknowledgement.reporter_incarnation,
         bootstrap_registration_epoch=1, protected_registration_epoch=2, bootstrap_revoked=True,
         protected_release_sha256="b" * 64), actor="owner-agent", idempotency_key=UUID(int=123002))
-    release = await store.next_pool_work(capacity_session, executor_binding(binding.pool_id))
+    release = await store.next_pool_work(capacity_session, executor_binding(binding.pool_id), cleanup_only=cleanup_only)
     assert isinstance(release, ExecutablePartialReleaseV2)
     await store.release_shapes(capacity_session, release)
     await assert_sql_release_matches(capacity_session, member.configuration)

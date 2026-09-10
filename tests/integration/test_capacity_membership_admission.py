@@ -138,6 +138,30 @@ async def _personal_bootstrap(  # type: ignore[no-untyped-def]
     return fixture, active, request, store, executor, bootstrap
 
 
+async def test_cleanup_only_poll_preserves_proposals_without_admitting_new_work(capacity_session):
+    _fixture, active, _request = await _personal_plan(capacity_session, base_pending=True)
+    store = CapacityExecutionStore()
+    executor = executor_binding("gb10")
+    await _heartbeat(store, capacity_session, active, pool_id="gb10")
+    assert await store.next_pool_work(capacity_session, executor, cleanup_only=True) is None
+    assert (await capacity_session.scalars(select(CapacityExecutableIntent))).all() == []
+    proposal = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    for _ in range(2):
+        assert await store.next_pool_work(capacity_session, executor, cleanup_only=True) is None
+    assert await store.next_pool_work(capacity_session, executor) == proposal
+    await store.accept_reservation(capacity_session, ExecutableReservationAcceptanceV2(
+        execution=proposal.execution, tranche_id=proposal.tranche_id,
+        proposal_digest=store.contract_digest(proposal), pool_id=executor.pool_id,
+        pool_generation=executor.pool_generation, executor_id=executor.executor_id,
+        executor_incarnation=executor.executor_incarnation, command_sequence=1))
+    # Even an accepted intent must not cause the pressure poll to issue a new
+    # bootstrap/proposal/permit. Its reservation stays intact for a later retry.
+    assert await store.next_pool_work(capacity_session, executor, cleanup_only=True) is None
+    rows = (await capacity_session.scalars(select(CapacityExecutableIntent))).all()
+    assert rows and all(row.state == "accepted" for row in rows)
+
+
 def _bootstrap_ack(request, bootstrap):  # type: ignore[no-untyped-def]
     return ExecutableBootstrapAcknowledgementV2(
         binding=bootstrap.binding,
