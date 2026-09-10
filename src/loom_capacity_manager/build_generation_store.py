@@ -116,8 +116,8 @@ async def _require_build_installation_facts(
 
 
 async def _require_staged_facts(
-    session: AsyncSession, request: PersonalMembershipMutationV2,
-    member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4, *, reporter_state: Literal["current", "fenced"] = "current",
+    session: AsyncSession, member: PersonalBuildMemberV1, preparation: ExecutionPreparationV4, *,
+    token_sha256: str, reporter_state: Literal["current", "fenced"] = "current",
 ) -> None:
     await _require_build_installation_facts(session, member, preparation)
     subject = member.configuration
@@ -129,7 +129,7 @@ async def _require_staged_facts(
     _require_values(reporter, {
         "configuration_generation": subject.configuration_generation,
         "deployment_generation": subject.deployment_generation, "state": reporter_state,
-        "token_sha256": request.command.projection.demand_reporter_token_sha256,
+        "token_sha256": token_sha256,
     }, label="reporter")
 
 
@@ -142,7 +142,9 @@ async def stage_build_generation_evidence(
     """Stage facts in the caller's SERIALIZABLE membership transaction.
 
 The caller must already authenticate the current operation and any predecessor
-release. This component neither grants membership nor promotes pending runtime
+release, including the complete source graph for inherited bases. This component
+uses a pinned inherited installation directly, never a synthetic predecessor
+request. It neither grants membership nor promotes pending runtime
 installation to ready. It rolls back its writes on error and never commits an
 enclosing transaction. History/replay identity is owned by the membership store.
 """
@@ -158,12 +160,25 @@ enclosing transaction. History/replay identity is owned by the membership store.
     if (previous is None) != (previous_request is None):
         raise ValueError("build staging requires the original predecessor request and member")
     projection, subject = request.command.projection, member.configuration
+    base = next((origin for origin in preparation.managed_build_origins if origin.configuration.subject_id == subject.subject_id), None)
+    inherited_base = previous is None and base is not None
+    previous_token: str | None = None
     if previous is not None and previous_request is not None:
         previous_request = parse_typed_membership_mutation(canonical_bytes(previous_request))
         expected_previous = derive_build_member(previous_request, preparation, fleet, reincarnation=previous.reincarnation)
         if canonical_bytes(previous) != canonical_bytes(expected_previous):
             raise ValueError("build staging predecessor differs from its original command")
         previous = expected_previous
+        previous_token = previous_request.command.projection.demand_reporter_token_sha256
+    elif base is not None:
+        inherited_member = base.inherited.anchor.member
+        if not isinstance(inherited_member, PersonalBuildMemberV1):
+            raise ValueError("build staging inherited predecessor purpose changed")
+        previous = inherited_member
+        previous_token = base.base_projection.demand_reporter_token_sha256
+        if member.reincarnation is not None:
+            raise ValueError("first inherited build mutation cannot rewrite an old certificate")
+    if previous is not None:
         old = previous.configuration
         recreating = old.lifecycle_state == "disabled" and projection.operation_kind == "create"
         if (
@@ -174,7 +189,7 @@ enclosing transaction. History/replay identity is owned by the membership store.
         ):
             raise ValueError("build staging lifecycle identity changed")
         if recreating:
-            if member.reincarnation is None or member.reincarnation.predecessor != old:
+            if inherited_base or member.reincarnation is None or member.reincarnation.predecessor != old:
                 raise ValueError("build staging requires predecessor release evidence")
         elif projection.operation_kind == "update":
             if subject.deployment_generation <= old.deployment_generation or subject.candidate_generation < old.candidate_generation:
@@ -182,7 +197,7 @@ enclosing transaction. History/replay identity is owned by the membership store.
         elif (
             subject.deployment_generation != old.deployment_generation or subject.candidate_generation != old.candidate_generation
             or subject.demand_reporter_incarnation != old.demand_reporter_incarnation
-            or projection.demand_reporter_token_sha256 != previous_request.command.projection.demand_reporter_token_sha256
+            or projection.demand_reporter_token_sha256 != previous_token
             or member.acknowledgement.protected_admission_sha256 != previous.acknowledgement.protected_admission_sha256
         ):
             raise ValueError("non-deployment build staging must retain its service evidence")
@@ -191,8 +206,9 @@ enclosing transaction. History/replay identity is owned by the membership store.
 
     management = CapacityManagementStore()
     async with _write_transaction(session):
-        if previous is not None and previous_request is not None:
-            await _require_staged_facts(session, previous_request, previous, preparation)
+        if previous is not None:
+            assert previous_token is not None
+            await _require_staged_facts(session, previous, preparation, token_sha256=previous_token)
         if projection.operation_kind in {"create", "update"}:
             reporter_conflict = (await session.scalars(select(CapacityDemandReporter.id).where(or_(
                 CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,

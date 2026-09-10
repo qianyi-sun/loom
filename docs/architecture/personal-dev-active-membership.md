@@ -779,6 +779,14 @@ overlays replace their own base reference once and retain a common owner ceiling
 they cannot switch purpose. Recreation references the inherited original root.
 Durable successor materialization and mutation still require separate integration.
 
+The internal build-generation stager accepts a first ordinary mutation against a
+pinned inherited build base. It verifies the actual pending candidate, deployment,
+profiles and current reporter generation/token before writing, retains reporter
+high-water on capacity/destroy, and fences the old reporter on update. It does not
+fabricate a predecessor request or claim readiness from a trusted runtime release.
+The owning transaction must authenticate the complete source chain first; this
+internal staging support is not a successor admission endpoint.
+
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
 immutable base configuration, original create/update installation projection,

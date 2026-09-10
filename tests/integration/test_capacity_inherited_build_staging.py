@@ -6,16 +6,23 @@ import pytest
 from sqlalchemy import func, select
 
 from loom_capacity_manager.build_generation_store import stage_build_generation_evidence
-from loom_capacity_manager.models import CapacityCandidate, CapacityDemandReporter, CapacityDeploymentGeneration
-from loom_capacity_manager.typed_membership_commands import parse_typed_membership_mutation, parse_typed_membership_result
+from loom_capacity_manager.models import (
+    CapacityCandidate,
+    CapacityDemandReporter,
+    CapacityDeploymentGeneration,
+)
+from loom_capacity_manager.typed_membership_commands import (
+    parse_typed_membership_mutation,
+    parse_typed_membership_result,
+)
 from tests.unit.test_capacity_typed_membership_events import _next_build_row, event_row
 from tests.unit.test_capacity_typed_successor_history import successor_row
 
 
-async def seed_base(session):
+async def seed_base(session, *, operation="capacity"):
     value, request, result, first = event_row()
     await stage_build_generation_evidence(session, request, result.member, value.preparation, value.fleet)
-    resized = _next_build_row(first)
+    resized = _next_build_row(first, operation=operation)
     next_request = parse_typed_membership_mutation(json.dumps(resized.request_payload))
     next_result = parse_typed_membership_result(json.dumps(resized.result_payload))
     await stage_build_generation_evidence(session, next_request, next_result.member, value.preparation, value.fleet,
@@ -53,7 +60,8 @@ async def test_inherited_build_staging_requires_current_retained_facts(capacity_
         deployment = (await capacity_session.scalars(select(CapacityDeploymentGeneration))).one()
         deployment.readiness_state = "ready"
     elif tamper == "token":
-        reporter.token_sha256 = "f" * 64
+        assert reporter.token_sha256 != "a" * 64
+        reporter.token_sha256 = "a" * 64
     elif tamper == "generation":
         reporter.configuration_generation += 1
     else:
@@ -63,4 +71,29 @@ async def test_inherited_build_staging_requires_current_retained_facts(capacity_
     request = parse_typed_membership_mutation(json.dumps(row.request_payload))
     member = parse_typed_membership_result(json.dumps(row.result_payload)).member
     with pytest.raises(ValueError, match="retained build"):
+        await stage_build_generation_evidence(capacity_session, request, member, preparation, fleet)
+    assert await capacity_session.scalar(select(func.count()).select_from(CapacityDeploymentGeneration)) == 1
+
+
+@pytest.mark.parametrize("changes", (
+    {"demand_reporter_token_sha256": "9" * 64}, {"candidate_generation": 2},
+    {"deployment_generation": 2},
+))
+async def test_inherited_non_deployment_staging_cannot_replace_service(capacity_session, changes):
+    await seed_base(capacity_session)
+    preparation, fleet, row = successor_row(build=True, **changes)
+    request = parse_typed_membership_mutation(json.dumps(row.request_payload))
+    member = parse_typed_membership_result(json.dumps(row.result_payload)).member
+    with pytest.raises(ValueError, match="retain its service evidence"):
+        await stage_build_generation_evidence(capacity_session, request, member, preparation, fleet)
+
+
+async def test_inherited_disabled_first_create_stays_closed_in_staging(capacity_session):
+    from uuid import UUID
+    await seed_base(capacity_session, operation="destroy")
+    preparation, fleet, row = successor_row(build=True, source_operation="destroy", operation="create",
+        subject_incarnation=UUID(int=99920), demand_reporter_incarnation=UUID(int=99921), demand_reporter_token_sha256="9" * 64)
+    request = parse_typed_membership_mutation(json.dumps(row.request_payload))
+    member = parse_typed_membership_result(json.dumps(row.result_payload)).member
+    with pytest.raises(ValueError, match="predecessor release"):
         await stage_build_generation_evidence(capacity_session, request, member, preparation, fleet)
