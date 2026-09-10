@@ -892,7 +892,9 @@ describe("NewBatch", () => {
       subset_kind: "all",
       benchmark_ids: ["humaneval"],
     });
-    expect(call.body.trial_config).toEqual({});
+    expect(call.body.trial_config).toEqual({
+      retry: { max_attempts: 1, retry_on: [] },
+    });
     expect(call.body.combinations).toEqual([
       {
         agent_name: "direct-completion",
@@ -1128,7 +1130,7 @@ describe("NewBatch", () => {
     });
   });
 
-  it("emits NO retry block when only max_attempts is bumped (no reasons ticked)", async () => {
+  it("explicitly disables retries when only max_attempts is bumped (no reasons ticked)", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
@@ -1144,10 +1146,10 @@ describe("NewBatch", () => {
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
-    expect(tc.retry).toBeUndefined();
+    expect(tc.retry).toEqual({ max_attempts: 1, retry_on: [] });
   });
 
-  it("emits NO retry block when reasons are ticked but max_attempts is still 1", async () => {
+  it("explicitly disables retries when reasons are ticked but max_attempts is still 1", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
@@ -1163,7 +1165,7 @@ describe("NewBatch", () => {
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
-    expect(tc.retry).toBeUndefined();
+    expect(tc.retry).toEqual({ max_attempts: 1, retry_on: [] });
   });
 
   it("rejects when backoff max < backoff base", async () => {
