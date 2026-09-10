@@ -190,6 +190,51 @@ func TestPlanValidationMatchesBoundedWorkspaceAndSidecarContract(t *testing.T) {
 	}
 }
 
+func TestPhaseWorkingDirectoryBoundary(t *testing.T) {
+	for _, directory := range []string{"/app", "/workspace", "/workspace/task-dir"} {
+		item := phase{Role: "agent", Argv: []string{"/bin/pwd"}, WorkingDirectory: directory, TimeoutSeconds: 1}
+		if err := item.validate(); err != nil {
+			t.Fatalf("valid cwd %q rejected: %v", directory, err)
+		}
+	}
+	for _, directory := range []string{"/app/subdir", "/app-other", "/app/.", "/app/../app", "/workspace/../app", "/workspaceevil", "/etc"} {
+		item := phase{Role: "agent", Argv: []string{"/bin/pwd"}, WorkingDirectory: directory, TimeoutSeconds: 1}
+		if err := item.validate(); err == nil {
+			t.Fatalf("invalid cwd %q accepted by contract", directory)
+		}
+		if _, err := runPhase(context.Background(), item, 1, "/workspace", t.TempDir(), 1024, time.Second, nil); err == nil || !strings.Contains(err.Error(), "working directory") {
+			t.Fatalf("invalid cwd %q passed runtime boundary: %v", directory, err)
+		}
+	}
+	t.Run("workspace-child", func(t *testing.T) {
+		workspace, output := t.TempDir(), t.TempDir()
+		directory := filepath.Join(workspace, "task-dir")
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		item := phase{Role: "agent", Argv: []string{"/bin/sh", "-c", "exit 0"}, WorkingDirectory: directory, TimeoutSeconds: 1}
+		result, err := runPhase(context.Background(), item, 1, workspace, output, 1024, time.Second, nil)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("workspace child cwd rejected: %v", err)
+		}
+	})
+	t.Run("trusted-app", func(t *testing.T) {
+		if info, err := os.Stat("/app"); err != nil || !info.IsDir() {
+			t.Skip("run in Linux test container with /app to execute trusted cwd")
+		}
+		output := t.TempDir()
+		item := phase{Role: "agent", Argv: []string{"/bin/pwd"}, WorkingDirectory: "/app", TimeoutSeconds: 1}
+		result, err := runPhase(context.Background(), item, 1, t.TempDir(), output, 1024, time.Second, nil)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("trusted cwd rejected: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(output, "01-agent.stdout"))
+		if err != nil || strings.TrimSpace(string(body)) != "/app" {
+			t.Fatalf("controller did not run in /app: %q %v", body, err)
+		}
+	})
+}
+
 func TestPlanValidationRejectsImageAdmissionDriftButNotMetadataExpiry(t *testing.T) {
 	base := func() plan {
 		return testPlan("/workspace", phase{
@@ -255,6 +300,9 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 		Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: workspace, TimeoutSeconds: 1,
 	})
 	p.RuntimeBinarySHA256 = "sha256:" + hex.EncodeToString(digest[:])
+	p.AgentImageRef = &p.TaskImageRef
+	probe := probe{Kind: "exec", Argv: []string{"/loom/bin/loom-sandbox-runtime", "--check-socket", "/loom/sandboxes/task-sandbox/sandbox.sock"}, TimeoutSeconds: 2, PeriodSeconds: 2, FailureThreshold: 30}
+	p.Sidecars = []sidecar{{RoleName: "task-sandbox", PrivateSandbox: true, ImageRef: p.TaskImageRef, Argv: []string{"/loom/bin/loom-sandbox-runtime", "--socket", "/loom/sandboxes/task-sandbox/sandbox.sock"}, Resources: p.TaskResources, StartupProbe: probe, ReadinessProbe: probe}}
 	payload, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -262,15 +310,27 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 	destination := t.TempDir()
 	runtimePath := filepath.Join(destination, "runtime")
 	planPath := filepath.Join(destination, "plan.json")
+	sandboxPath := filepath.Join(destination, "sandbox")
+	sandboxSource := filepath.Join(destination, "sandbox-source")
+	if err := os.WriteFile(sandboxSource, []byte("bundled sandbox binary"), 0555); err != nil {
+		t.Fatal(err)
+	}
 	err = materialize([]string{
 		"--encoded-plan", base64.RawURLEncoding.EncodeToString(payload),
 		"--runtime-dest", runtimePath, "--plan-dest", planPath,
+		"--sandbox-source", sandboxSource, "--sandbox-dest", sandboxPath,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(runtimePath); err != nil || info.Mode().Perm() != 0o555 {
 		t.Fatalf("runtime mode mismatch: info=%v err=%v", info, err)
+	}
+	if info, err := os.Stat(sandboxPath); err != nil || info.Mode().Perm() != 0o555 {
+		t.Fatalf("sandbox mode mismatch: info=%v err=%v", info, err)
+	}
+	if data, err := os.ReadFile(sandboxPath); err != nil || string(data) != "bundled sandbox binary" {
+		t.Fatalf("sandbox materialization failed: %v", err)
 	}
 	if err := materialize([]string{
 		"--encoded-plan", base64.RawURLEncoding.EncodeToString(payload),

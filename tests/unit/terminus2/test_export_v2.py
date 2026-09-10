@@ -377,6 +377,31 @@ def test_resolve_native_artifacts_reads_indexed_bucket_not_settings() -> None:
     assert resolved["native/harbor_trajectory.json"] == native
 
 
+@pytest.mark.parametrize("kind,filename,archive", [
+    ("terminus_2.pane", "trajectory.json", "native/harbor_trajectory.json"),
+    ("recording.cast", "recording.cast", "native/recording.cast"),
+])
+def test_resolve_native_artifacts_reads_nebius_canonical_file_rows(kind, filename, archive) -> None:
+    trial = _trial()
+    native = b'{"native":"current-attempt"}'
+    digest = hashlib.sha256(native).hexdigest()
+    relative_path = f"artifacts/harbor/{filename}"
+    key = f"trials/{trial.team_id}/{trial.id}/attempts/2/bundles/current/files/{relative_path}"
+    trial.trajectory_index = {"attempt": 2, "artifacts": [{
+        "relative_path": relative_path, "key": key, "bucket": "nebius-artifacts",
+        "sha256": "sha256:" + digest, "size_bytes": len(native),
+    }]}
+    event = Terminus2ArtifactRefEvent(
+        **_base(trial_id=trial.id), artifact_kind=kind,
+        sandbox_path=f"/app/.loom/agent/{filename}", content_hash=digest,
+        size_bytes=len(native), share_policy="restricted",
+    )
+    result = resolve_native_artifacts(
+        trial, [event], client=_FakeS3({("nebius-artifacts", key): native}), artifacts_bucket="old",
+    )
+    assert result[archive] == native
+
+
 def test_build_per_trial_v2_bundle_happy_path() -> None:
     trial = _trial()
     native = b"{}"

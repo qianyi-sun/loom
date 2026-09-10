@@ -2448,10 +2448,12 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
 
 
 @pytest.mark.parametrize("use_combinations", [False, True])
+@pytest.mark.parametrize("agent_name", ["direct-completion", "terminus-2"])
 async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
     use_combinations: bool,
+    agent_name: str,
 ) -> None:
     app, raw, _team_id = camp_setup
     suffix = "combinations" if use_combinations else "single"
@@ -2459,6 +2461,16 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     target_id = f"nebius-automatic-backend-{suffix}"
     now = datetime.now(UTC)
     profile = _service_execution_runtime_profile()
+    if agent_name == "terminus-2":
+        controller_image = "registry.example/worker@sha256:" + "9" * 64
+        service_image = "registry.example/service@sha256:" + "8" * 64
+        profile = profile.model_copy(update={
+            "task_image_ref": service_image,
+            "agent_image_ref": controller_image,
+            "image_admission": signed_image_admission_bundle((
+                profile.task_image_ref, profile.runtime_image_ref, controller_image, service_image,
+            )),
+        })
     app.state.settings = app.state.settings.model_copy(
         update={
             "service_execution_runtime_profile_json": json.dumps(
@@ -2542,14 +2554,14 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             if use_combinations:
                 payload["combinations"] = [
                     {
-                        "agent_name": "direct-completion",
+                        "agent_name": agent_name,
                         "agent_model": model,
                         "n_per_task": 1,
                     }
                 ]
             else:
                 payload["trial_config"] = {
-                    "agent_name": "direct-completion",
+                    "agent_name": agent_name,
                     "agent_model": model,
                 }
             response = await ac.post(

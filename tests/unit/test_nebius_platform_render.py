@@ -54,6 +54,17 @@ def platform_inputs() -> tuple[dict, dict, dict]:
     return config, candidate, profile
 
 
+def test_worker_profile_binding_matches_published_candidate(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    image = "cr.eu-north1.nebius.cloud/test/worker@sha256:" + "d" * 64
+    candidate["images"]["worker"] = {"image_ref": image}
+    profile["agent_image_ref"] = image
+    build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    profile["agent_image_ref"] = image.replace("d" * 64, "e" * 64)
+    with pytest.raises(NebiusPlatformError, match="execution images"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
 def test_project_cannot_replace_tenant_quota_parent(platform_inputs: tuple) -> None:
     config, candidate, profile = platform_inputs
     config["quota_parent_id"] = config["project_id"]

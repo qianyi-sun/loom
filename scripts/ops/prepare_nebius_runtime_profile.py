@@ -187,10 +187,15 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         "service": args.service_release_record,
         "execution_runtime": args.execution_runtime_release_record,
     }
+    components = list(_COMPONENTS)
+    worker_record = getattr(args, "worker_release_record", None)
+    if worker_record is not None:
+        components.append(("worker", "worker", "loom-worker"))
+        release_inputs["worker"] = worker_record
     bindings: dict[str, dict[str, str]] = {}
     component_candidate_shas: dict[str, str] = {}
     scan_policies: list[dict[str, object]] = []
-    for key, component, image_name in _COMPONENTS:
+    for key, component, image_name in components:
         release_record, release_bytes = _read_json(
             release_inputs[key], label=f"{component} release record"
         )
@@ -269,7 +274,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     issued_at = _candidate_issued_at(args.candidate_sha)
     expires_at = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
     admissions: list[SignedImageAdmissionV1] = []
-    for key_name, _, _ in _COMPONENTS:
+    for key_name, _, _ in components:
         binding = bindings[key_name]
         statement = ImageAdmissionStatementV1(
             schema_version="loom.image-admission-statement.v1",
@@ -305,6 +310,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         execution_class_id="linux-amd64-cpu-pod-v1",
         task_image_ref=bindings["service"]["image_ref"],
         runtime_image_ref=bindings["execution_runtime"]["image_ref"],
+        agent_image_ref=bindings["worker"]["image_ref"] if "worker" in bindings else None,
         runtime_binary_sha256=runtime_binary_sha256,
         image_admission=bundle,
     )
@@ -324,7 +330,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     parsed_keyring = ImageAdmissionKeyring.from_json(_canonical_json(keyring).decode())
     verify_execution_image_admission(
         bundle,
-        required_image_refs=(profile.task_image_ref, profile.runtime_image_ref),
+        required_image_refs=tuple(binding["image_ref"] for binding in bindings.values()),
         keyring=parsed_keyring,
         now=issued_at,
     )
@@ -350,6 +356,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-summary", required=True, type=Path)
     parser.add_argument("--service-release-record", required=True, type=Path)
     parser.add_argument("--execution-runtime-release-record", required=True, type=Path)
+    parser.add_argument("--worker-release-record", type=Path)
     parser.add_argument("--signing-key", required=True, type=Path)
     parser.add_argument("--signing-key-id", required=True)
     parser.add_argument("--create-signing-key", action="store_true")

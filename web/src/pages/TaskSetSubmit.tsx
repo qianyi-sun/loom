@@ -11,6 +11,7 @@ export default function TaskSetSubmit(): JSX.Element {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const manifestRef = useRef<HTMLInputElement>(null);
+  const bundleRef = useRef<HTMLInputElement>(null);
   const verifierRef = useRef<HTMLInputElement>(null);
   const transformRef = useRef<HTMLInputElement>(null);
 
@@ -38,6 +39,9 @@ export default function TaskSetSubmit(): JSX.Element {
     const formData = new FormData();
     formData.append("manifest", manifestFile);
 
+    const bundleFile = bundleRef.current?.files?.[0];
+    if (bundleFile) formData.append("bundle", bundleFile);
+
     const verifierFile = verifierRef.current?.files?.[0];
     if (verifierFile) formData.append("verifier", verifierFile);
 
@@ -52,7 +56,7 @@ export default function TaskSetSubmit(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Submit Task Set</h1>
         <p className="text-sm text-slate-500">
-          Upload a manifest and optional verifier/transform scripts.
+          Upload a manifest with its task bundle or supporting scripts.
         </p>
       </header>
 
@@ -76,6 +80,23 @@ export default function TaskSetSubmit(): JSX.Element {
             </div>
 
             <div>
+              <label htmlFor="task-set-bundle" className="block text-sm font-medium text-slate-700">
+                Task bundle (optional)
+              </label>
+              <input
+                ref={bundleRef}
+                id="task-set-bundle"
+                type="file"
+                accept=".tar,.tar.gz,.tgz"
+                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Upload the .tar, .tar.gz or .tgz archive specified by your manifest.
+                If it includes task verifiers, no separate verifier file is needed.
+              </p>
+            </div>
+
+            <div>
               <label htmlFor="task-set-verifier" className="block text-sm font-medium text-slate-700">
                 Verifier (optional)
               </label>
@@ -87,7 +108,7 @@ export default function TaskSetSubmit(): JSX.Element {
                 className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Required for evaluation intent. Python script that scores agent output.
+                Python scoring script, if specified separately by your manifest.
               </p>
             </div>
 
@@ -150,7 +171,7 @@ intents:
   - evaluation                 # requires verifier
 
 source:
-  type: hf                     # hf | git | https | jsonl-inline
+  type: hf                     # hf | git | https | jsonl-inline | bundle-upload
   locator: namespace/dataset
   revision: 1.2.3             # optional
   subset: default             # optional
@@ -185,7 +206,8 @@ limits:
   timeout_per_task_s: 300`}
         </pre>
         <p className="mt-2 text-xs text-slate-500">
-          <code>evaluation</code> intent requires a verifier file.
+          <code>evaluation</code> intent requires a verifier, included in the task bundle
+          or supplied separately.
           A manifest without explicit intents defaults to <code>trajectory_generation</code>.
         </p>
       </DocsCallout>

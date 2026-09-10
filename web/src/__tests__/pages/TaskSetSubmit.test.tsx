@@ -65,6 +65,34 @@ describe("TaskSetSubmit", () => {
     expect((body as FormData).get("manifest")).toBeInstanceOf(File);
     expect((body as FormData).get("verifier")).toBeInstanceOf(File);
     expect((body as FormData).get("transform")).toBeInstanceOf(File);
+    expect((body as FormData).has("bundle")).toBe(false);
+  });
+
+  it("uploads an evaluation task bundle without separate scripts", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ task_set_id: "uploaded/bundle", status: "materializing" }, 202),
+    );
+    renderPage();
+    const manifest = new File(
+      ["source:\n  type: bundle-upload\n  locator: bundle.tar.gz\nintents: [evaluation]"],
+      "manifest.yaml", { type: "application/x-yaml" },
+    );
+    const bundle = new File(["task archive"], "bundle.tar.gz", { type: "application/gzip" });
+    await user.upload(screen.getByLabelText("Manifest (required)"), manifest);
+    await user.upload(screen.getByLabelText("Task bundle (optional)"), bundle);
+    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+
+    expect(await screen.findByText("Task set detail")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/v1/tasksets");
+    expect(request?.method).toBe("POST");
+    const body = request?.body as FormData;
+    expect(body.get("manifest")).toBe(manifest);
+    expect(body.get("bundle")).toBe(bundle);
+    expect(body.has("verifier")).toBe(false);
+    expect(body.has("transform")).toBe(false);
   });
 
   it("shows API details and the generic fallback", async () => {

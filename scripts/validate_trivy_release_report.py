@@ -61,6 +61,7 @@ _PERL_BASE_COMPONENTS = (
 )
 _EMPTY_COMPONENTS = (
     "execution-runtime",
+    "nebius-terminal-bench",
     "llm-gateway-sandbox",
     "personal-dev-builder",
     "service",
@@ -182,7 +183,11 @@ def _policy_statements() -> dict[str, str]:
 
 def _validate_release_component(component: str) -> None:
     manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    matches = tuple(item for item in manifest.release_components() if item.id == component)
+    owners = manifest.release_components()
+    if component == "nebius-terminal-bench":
+        # Fixed workload published only by Nebius, with a runtime-payload owner.
+        owners = tuple(item for item in manifest.components if item.kind == "runtime-payload-image")
+    matches = tuple(item for item in owners if item.id == component)
     if len(matches) != 1:
         raise TrivyReportError("release component authority is not unique")
 

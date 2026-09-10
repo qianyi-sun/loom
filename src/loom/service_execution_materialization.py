@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import stat
 from pathlib import Path, PurePosixPath
@@ -15,9 +16,11 @@ from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
+    ProbeV1,
     ProcessPhaseV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
+    SidecarContainerV1,
 )
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -95,6 +98,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     candidate_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     task_image_ref: str
+    agent_image_ref: str | None = None
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -106,9 +110,11 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
 
-    @field_validator("task_image_ref", "runtime_image_ref")
+    @field_validator("task_image_ref", "runtime_image_ref", "agent_image_ref")
     @classmethod
-    def immutable_images(cls, value: str) -> str:
+    def immutable_images(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
         if _DIGEST_REF.fullmatch(value) is None:
             raise ValueError("runtime profile images must be digest-pinned")
         return value
@@ -172,6 +178,7 @@ def automatic_service_execution_rejections(
 
     task = normalize_steps(task)
     env = task.environment
+    terminus = trial.agent_name == "terminus-2"
     reasons: list[str] = []
     if service_execution_input_binding(source_provenance) is None:
         reasons.append("immutable_task_input_unavailable")
@@ -189,7 +196,8 @@ def automatic_service_execution_rejections(
         reasons.append("resource_limits_required")
     elif env.cpus > 128 or env.memory_mb > 1_048_576 or env.storage_mb > 1_048_576:
         reasons.append("resource_limits_out_of_range")
-    if env.workdir != PurePosixPath("/workspace") or env.user != "agent":
+    if (env.workdir not in {PurePosixPath("/workspace"), PurePosixPath("/app")}
+        if terminus else env.workdir != PurePosixPath("/workspace")) or env.user != "agent":
         reasons.append("standard_workspace_identity_required")
     if env.baseline_network_policy.kind != "gateway-only":
         reasons.append("gateway_only_network_required")
@@ -212,7 +220,7 @@ def automatic_service_execution_rejections(
         reasons.append("custom_verifier_identity_unsupported")
     if len(task.steps) != 1 or task.multi_step is not None:
         reasons.append("single_step_required")
-    if trial.agent_name not in {"direct-completion", "litellm"}:
+    if trial.agent_name not in {"direct-completion", "litellm", "terminus-2"}:
         reasons.append("direct_completion_required")
     if trial.agent_model is None or trial.agent_model.source != "api":
         reasons.append("api_model_required")
@@ -231,6 +239,13 @@ def automatic_service_execution_rejections(
         reasons.append("exact_verifier_path_required")
     if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared"}:
         reasons.append("shared_verifier_required")
+    if terminus:
+        if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
+            reasons.append("private_verifier_directory_required")
+        if trial.workspace_staging_policy_name == "none":
+            reasons.append("private_workspace_isolation_required")
+        if trial.baseline_network_policy_override is not None:
+            reasons.append("network_override_unsupported")
     if task.steps:
         step = task.steps[0]
         if (
@@ -275,7 +290,11 @@ def compile_service_execution_plan(
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
-    if task.environment.docker_image != profile.task_image_ref:
+    terminus = trial.agent_name == "terminus-2"
+    profile_reasons = runtime_profile_rejections(task, trial, profile)
+    if "terminus_controller_unavailable" in profile_reasons:
+        raise ValueError("active runtime profile has no Terminus controller image")
+    if profile_reasons:
         raise ValueError("task image is not provided by the active runtime profile")
     binding = service_execution_input_binding(source_provenance)
     assert binding is not None
@@ -329,6 +348,12 @@ def compile_service_execution_plan(
             "verifier": task.verifier.model_dump(mode="json"),
         }
     )
+    if terminus:
+        return _compile_terminus_plan(
+            task=task, trial=trial, task_revision_sha256=task_revision_sha256,
+            profile=profile, binding=binding, command_identity=command_identity,
+            output_paths=output_paths,
+        )
     output_declarations = (
         *(
             RuntimeOutputDeclarationV1(
@@ -367,7 +392,7 @@ def compile_service_execution_plan(
         task_image_ref=profile.task_image_ref,
         runtime_image_ref=profile.runtime_image_ref,
         runtime_binary_sha256=profile.runtime_binary_sha256,
-        image_admission=profile.image_admission,
+        image_admission=_plan_admissions(profile, {profile.task_image_ref, profile.runtime_image_ref}),
         run_as_user=profile.run_as_user,
         run_as_group=profile.run_as_group,
         fs_group=profile.fs_group,
@@ -397,6 +422,110 @@ def compile_service_execution_plan(
         ),
         verifier_execution="in_attempt",
         verifier=verifier,
+        max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
+        max_artifact_bytes=profile.max_artifact_bytes,
+    )
+
+
+def runtime_profile_rejections(
+    task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
+) -> tuple[str, ...]:
+    """Submission and scheduling share the profile's image/agent compatibility."""
+    if trial.agent_name != "terminus-2":
+        return (() if task.environment.docker_image == profile.task_image_ref
+                else ("task_image_not_in_runtime_profile",))
+    if profile.agent_image_ref is None:
+        return ("terminus_controller_unavailable",)
+    admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
+    if task.environment.docker_image not in admitted or profile.agent_image_ref not in admitted:
+        return ("task_image_not_in_runtime_profile",)
+    return ()
+
+
+def _plan_admissions(
+    profile: ServiceExecutionRuntimeProfileV1, refs: set[str | None],
+) -> ExecutionImageAdmissionBundleV1:
+    return ExecutionImageAdmissionBundleV1(schema_version=profile.image_admission.schema_version,
+                                         admissions=tuple(
+        item for item in profile.image_admission.admissions if item.statement.image_ref in refs
+    ))
+
+
+def _compile_terminus_plan(
+    *, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
+    profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
+    command_identity: str, output_paths: list[str],
+) -> ExecutionRuntimePlanV1:
+    """Reuse Harbor in a trusted controller with private native task/verifier sandboxes."""
+    env = task.environment
+    assert env.docker_image and env.cpus and env.memory_mb and env.storage_mb
+    resources = ContainerResourcesV1(
+        cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb,
+        ephemeral_storage_mib=env.storage_mb,
+    )
+    binary = "/loom/bin/loom-sandbox-runtime"
+    agent_timeout = (trial.override_agent_timeout_sec or task.agent.timeout_sec) * trial.agent_timeout_multiplier
+    verifier_timeout = ((trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
+                        * trial.verifier_timeout_multiplier)
+    exec_limit = str(math.ceil(max(900, agent_timeout, verifier_timeout)))
+    sidecars = []
+    for role in ("task-sandbox", "verifier-sandbox"):
+        socket = f"/loom/sandboxes/{role}/sandbox.sock"
+        probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
+        sidecars.append(SidecarContainerV1(
+            role_name=role, image_ref=env.docker_image,
+            argv=(binary, "--socket", socket, "--exec-timeout-seconds", exec_limit), resources=resources,
+            startup_probe=probe, readiness_probe=probe, private_sandbox=True,
+        ))
+    phase_env = {
+        "LOOM_TASK_TRIAL_JSON": trial.model_dump_json(exclude_defaults=True),
+        "LOOM_TASK_ARTIFACTS_JSON": json.dumps(output_paths),
+    }
+    def phase(role: Literal["agent", "verifier"], mode: str, timeout: float) -> ProcessPhaseV1:
+        return ProcessPhaseV1(
+            role=role,
+            # Keep Python imports and dependency configuration discovery outside
+            # user-controlled task inputs, including dependencies that inspect cwd.
+            argv=("python", "-I", "-m", "loom.service_execution_sandbox_task", mode,
+                  "--workspace", "/workspace"),
+            working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
+        )
+    outputs = [RuntimeOutputDeclarationV1(
+        source_path=f".loom/collected/{path}", relative_path=f"artifacts/{path}",
+        kind="task_artifact", required=path in task.steps[0].required_artifacts,
+    ) for path in output_paths]
+    for source, target, kind, required in (
+        ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
+        ("agent/usage.json", "accounting/usage.json", "usage", True),
+        ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
+        ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
+        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
+        ("verifier/output.json", "verifier/output.json", "verifier", True),
+        ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
+    ):
+        outputs.append(RuntimeOutputDeclarationV1(
+            source_path=f".loom/{source}", relative_path=target, kind=kind, required=required,
+        ))
+    return ExecutionRuntimePlanV1(
+        candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
+        command_identity_sha256=command_identity, execution_class_id=profile.execution_class_id,
+        composition="init_payload", task_image_ref=env.docker_image,
+        agent_image_ref=profile.agent_image_ref, runtime_image_ref=profile.runtime_image_ref,
+        runtime_binary_sha256=profile.runtime_binary_sha256,
+        image_admission=_plan_admissions(
+            profile, {env.docker_image, profile.agent_image_ref, profile.runtime_image_ref},
+        ),
+        run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
+        task_resources=resources, workspace_mib=env.storage_mb,
+        runtime_volume_mib=profile.runtime_volume_mib,
+        termination_grace_seconds=profile.termination_grace_seconds,
+        task_input=RuntimeTaskInputV1(
+            manifest_sha256=binding.manifest_sha256, file_count=binding.file_count,
+            total_bytes=binding.total_bytes,
+        ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
+        main=phase("agent", "terminus-2", agent_timeout),
+        verifier_execution="in_attempt",
+        verifier=phase("verifier", "verify-sandbox", verifier_timeout),
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,
     )

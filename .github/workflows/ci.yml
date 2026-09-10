@@ -617,16 +617,16 @@ jobs:
           cache: false
       - name: gofmt
         run: |
-          out=$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-llm-gateway-sandbox)
+          out=$(gofmt -l ./cmd/loom-execution-runtime ./cmd/loom-llm-gateway-sandbox ./cmd/loom-sandbox-runtime)
           if [ -n "$out" ]; then
             echo "$out"
             echo "gofmt found issues; run gofmt on the selected runtime packages to fix"
             exit 1
           fi
       - name: go vet
-        run: go vet ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...
+        run: go vet ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/... ./cmd/loom-sandbox-runtime/...
       - name: go test
-        run: go test -race ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/...
+        run: go test -race ./cmd/loom-execution-runtime/... ./cmd/loom-llm-gateway-sandbox/... ./cmd/loom-sandbox-runtime/...
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at both

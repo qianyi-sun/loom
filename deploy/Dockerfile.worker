@@ -10,17 +10,20 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages ./packages
-# git is required only while pip resolves the pinned Harbor source. Purging it
-# in the same layer removes Git's unused Perl runtime from the final image.
+COPY deploy/patches/harbor-current-user-tool-probes.patch /tmp/harbor-current-user-tool-probes.patch
+# git resolves the pinned Harbor source; patch applies our current-user tool probes.
+# Purging them in the same layer removes Git's unused Perl runtime.
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends git patch && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
     pip install --no-cache-dir -e ./packages/loom-benchmarks && \
     pip install --no-cache-dir \
       "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}" && \
-    apt-get purge -y --auto-remove git && \
+    patch --batch --forward -p1 -d "$(python -c 'import harbor; print(next(iter(harbor.__path__)))')" < /tmp/harbor-current-user-tool-probes.patch && \
+    rm /tmp/harbor-current-user-tool-probes.patch && \
+    apt-get purge -y --auto-remove git patch && \
     rm -rf /var/lib/apt/lists/* && \
     pip check
 CMD ["python", "-m", "loom_worker"]

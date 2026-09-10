@@ -7,9 +7,11 @@ from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from sqlalchemy import select
 from starlette.responses import Response, StreamingResponse
 
-from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget
+from loom.db.schema import LlmCall, ServiceExecutionLease, ServiceExecutionTarget, Trial
+from loom.llm_call_ledger import serialize_llm_call
 from loom.pipeline.artifact_commit import ArtifactCommitError
 from loom_control_plane.service_execution_output import (
     ServiceExecutionBrokerError,
@@ -121,6 +123,44 @@ async def _authorize(
             )
             session.expunge(lease)
             return lease
+    except ServiceExecutionBrokerError as exc:
+        raise _broker_http(exc) from exc
+
+
+@router.get("/llm-calls")
+async def read_service_execution_llm_calls(
+    request: Request,
+    lease_id: LeaseIdHeader,
+    generation: GenerationHeader,
+    execution_role: RoleHeader,
+) -> dict[str, Any]:
+    """Read only this Pod's active attempt, excluding previous Trial retries."""
+    identity = _peer(lease_id, generation, execution_role)
+    if identity.execution_role != "attempt" or request.query_params:
+        raise HTTPException(status_code=403, detail="execution_ledger_scope_invalid")
+    try:
+        verified_pod = await _verified_pod(request, identity)
+        async with request.app.state.session_factory() as session:
+            lease = await authorize_service_execution_peer(
+                session, peer_ip=_peer_ip(request), verified_pod=verified_pod,
+                identity=identity, purpose="token", lock=True,
+            )
+            trial = await session.get(Trial, lease.trial_id)
+            if trial is None or trial.team_id != lease.team_id or trial.attempt_count != lease.attempt:
+                raise ServiceExecutionBrokerError("execution_generation_fenced")
+            binding = LlmCall.provider_extras["_loom_raw_provider_log"]["service_execution"]
+            rows = (await session.execute(select(LlmCall).where(
+                LlmCall.team_id == lease.team_id,
+                LlmCall.trial_id == lease.trial_id,
+                LlmCall.step_id == "agent",
+                binding["lease_id"].astext == str(lease.id),
+                binding["generation"].astext == str(lease.generation),
+            ).order_by(LlmCall.captured_at, LlmCall.id))).scalars().all()
+            return {
+                "trial_id": str(lease.trial_id), "team_id": str(lease.team_id),
+                "step_id": "agent",
+                "items": [serialize_llm_call(row, include_provider_log=False) for row in rows],
+            }
     except ServiceExecutionBrokerError as exc:
         raise _broker_http(exc) from exc
 

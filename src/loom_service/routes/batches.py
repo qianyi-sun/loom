@@ -57,6 +57,7 @@ from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
     load_service_execution_runtime_profile,
+    runtime_profile_rejections,
 )
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -486,8 +487,11 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                     )
                 if profile is None:
                     reasons = (*reasons, "runtime_profile_unavailable")
-                elif task_config.environment.docker_image != profile.task_image_ref:
-                    reasons = (*reasons, "task_image_not_in_runtime_profile")
+                elif parsed_trials:
+                    reasons = (*reasons, *(
+                        reason for parsed_trial in parsed_trials
+                        for reason in runtime_profile_rejections(task_config, parsed_trial, profile)
+                    ))
             if (
                 task_config is None
                 or (binding is not None and binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID)

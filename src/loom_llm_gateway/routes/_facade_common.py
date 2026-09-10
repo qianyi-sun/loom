@@ -562,6 +562,7 @@ def build_raw_provider_log(
     response_headers: dict[str, str],
     response_body: dict[str, Any],
     api_key: str,
+    auth_context: AuthContext | None = None,
 ) -> dict[str, Any]:
     """Build the redacted raw request/response record for export.
 
@@ -570,7 +571,7 @@ def build_raw_provider_log(
     headers, bearer values, and known secret text are scrubbed.
     """
 
-    return {
+    result = {
         "schema_version": "1",
         "dialect": dialect,
         "provider": provider,
@@ -588,6 +589,17 @@ def build_raw_provider_log(
             "body": _redact_raw_value(response_body, api_key),
         },
     }
+    # This attribution comes from the authenticated, currently fenced step JWT,
+    # never from client request fields. It distinguishes repeated Trial attempts
+    # whose upstream completions may be persisted at overlapping wall times.
+    if auth_context is not None and auth_context.service_execution_lease_id is not None:
+        if auth_context.service_execution_generation is None:
+            raise ValueError("service execution call lacks its generation")
+        result["service_execution"] = {
+            "lease_id": str(auth_context.service_execution_lease_id),
+            "generation": auth_context.service_execution_generation,
+        }
+    return result
 
 
 def http_failure_category(status_code: int) -> str:

@@ -54,7 +54,11 @@ COMPONENTS = {
     "gateway": "loom-llm-gateway",
     "execution_runtime": "loom-execution-runtime",
     "execution_actuator": "loom-execution-actuator",
+    "worker": "loom-worker",
+    "tb90_task": "loom-nebius-terminal-bench",
 }
+EXECUTION_COMPONENTS = ("service", "execution_runtime", "worker", "tb90_task")
+LEGACY_COMPONENTS = frozenset(COMPONENTS) - {"worker", "tb90_task"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 REGISTRY = re.compile(r"cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+\Z")
@@ -116,7 +120,7 @@ def _trusted_signer(path: Path, key_id: str, keyring_json: str) -> Ed25519Privat
     return key
 
 
-def validate_identity(document: dict[str, Any]) -> None:
+def validate_identity(document: dict[str, Any], *, require_current_images: bool = False) -> None:
     if (
         document.get("schema_version") != "loom.nebius-candidate.v1"
         or document.get("repository") != REPOSITORY
@@ -129,9 +133,13 @@ def validate_identity(document: dict[str, Any]) -> None:
     ):
         raise ValueError("candidate source identity is invalid")
     images = document.get("images")
-    if not isinstance(images, dict) or set(images) != set(COMPONENTS):
-        raise ValueError("candidate must contain exactly the six platform images")
-    for component, name in COMPONENTS.items():
+    allowed = {frozenset(COMPONENTS)}
+    if not require_current_images:
+        allowed.add(LEGACY_COMPONENTS)
+    if not isinstance(images, dict) or frozenset(images) not in allowed:
+        raise ValueError("candidate must contain the configured platform and execution images")
+    for component in images:
+        name = COMPONENTS[component]
         row = images[component]
         prefix = f"{document['registry_prefix']}/{name}@"
         if (
@@ -149,7 +157,7 @@ def create_candidate(
     signing_key_id: str,
     keyring_json: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    validate_identity(document)
+    validate_identity(document, require_current_images=True)
     key = _trusted_signer(signing_key, signing_key_id, keyring_json)
     result = {
         name: document[name]
@@ -169,7 +177,7 @@ def create_candidate(
     provenance = sha256(encoded(result))
     now = datetime.now(UTC)
     admissions = []
-    for component in ("service", "execution_runtime"):
+    for component in EXECUTION_COMPONENTS:
         row = document["images"][component]
         statement = ImageAdmissionStatementV1(
             schema_version="loom.image-admission-statement.v1",
@@ -197,6 +205,7 @@ def create_candidate(
         execution_class_id="linux-amd64-cpu-pod-v1",
         task_image_ref=document["images"]["service"]["image_ref"],
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
+        agent_image_ref=document["images"]["worker"]["image_ref"],
         runtime_binary_sha256=document["runtime_binary_sha256"],
         image_admission=ExecutionImageAdmissionBundleV1(
             schema_version="loom.execution-image-admission.v1",
@@ -340,6 +349,12 @@ def build(args: argparse.Namespace) -> None:
     _diagnostic_dir = args.output
     rows = release_image_matrix(load_manifest(ROOT / "config/component-ownership.toml"))
     ownership = {row["image_name"]: row for row in rows}
+    # This workload belongs only to Nebius publication, not legacy dev/main releases.
+    ownership[COMPONENTS["tb90_task"]] = {
+        "image": "nebius-terminal-bench",
+        "context": "deploy/catalog/nebius-terminal-bench/file-archive-manifest",
+        "dockerfile": "deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile",
+    }
     document: dict[str, Any] = {
         "schema_version": "loom.nebius-candidate.v1",
         "repository": REPOSITORY,
@@ -452,7 +467,7 @@ def build(args: argparse.Namespace) -> None:
             document["images"][component] = {
                 "image_ref": f"{args.registry_prefix}/{name}@{scanned_digest}",
             }
-            if component in {"service", "execution_runtime"}:
+            if component in EXECUTION_COMPONENTS:
                 document["images"][component].update(
                     {
                         "sbom_sha256": sha256(sbom.read_bytes()),

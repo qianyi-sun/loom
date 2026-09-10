@@ -195,8 +195,11 @@ func runPhase(
 	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
 	defer cancel()
 	directory := filepath.Clean(item.WorkingDirectory)
-	if directory != workspace && !isWithin(workspace, directory) {
-		return phaseEvidence{}, fmt.Errorf("phase working directory escapes workspace")
+	// /app is the fixed trusted controller directory. Do not normalize task
+	// paths into that exception or allow arbitrary sibling application paths.
+	if directory != item.WorkingDirectory ||
+		(directory != "/app" && directory != workspace && !isWithin(workspace, directory)) {
+		return phaseEvidence{}, fmt.Errorf("phase working directory escapes workspace or trusted /app")
 	}
 	prefix := fmt.Sprintf("%02d-%s", ordinal, item.Role)
 	stdoutPath := filepath.Join(outputRoot, prefix+".stdout")

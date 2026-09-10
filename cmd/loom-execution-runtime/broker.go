@@ -226,6 +226,10 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 	server := &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/internal/loom/llm-calls" {
+				b.serveCallLedger(writer, request)
+				return
+			}
 			if !allowedGatewayRequest(request.Method, request.URL.Path) {
 				http.Error(writer, "gateway route unavailable", http.StatusForbidden)
 				return
@@ -276,6 +280,32 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}, nil
+}
+
+// The local caller cannot select a trial, lease, token, or upstream URL. The
+// broker presents its current Pod identity, never a model-call step credential.
+func (b *workloadBroker) serveCallLedger(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet || request.URL.RawQuery != "" || b.identity.ExecutionRole != "attempt" {
+		http.Error(writer, "ledger route unavailable", http.StatusForbidden)
+		return
+	}
+	response, err := b.getInput(request.Context(), b.endpoint("/llm-calls"))
+	if err != nil {
+		// Avoid reflecting credential-bearing upstream bodies or transport URLs.
+		http.Error(writer, "workload ledger unavailable", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	const maximum = 16 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
+	if err != nil || len(body) > maximum || !json.Valid(body) {
+		http.Error(writer, "workload ledger invalid", http.StatusBadGateway)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(body)
 }
 
 func allowedGatewayRequest(method, path string) bool {

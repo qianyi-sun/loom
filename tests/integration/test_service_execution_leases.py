@@ -64,9 +64,11 @@ from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ExecutionRuntimeResultV1,
+    ProbeV1,
     ProcessPhaseV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
+    SidecarContainerV1,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
@@ -819,9 +821,9 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             )
             assert commands[0].payload_json["estimated_cost_microusd"] == 3_600_000
             assert cost_reservation.estimated_cost_microusd == 3_600_000
-            assert cost_reservation.requested_cpu_millis == 1_050
-            assert cost_reservation.requested_memory_mib == 1_088
-            assert cost_reservation.requested_ephemeral_storage_mib == 4_180
+            assert cost_reservation.requested_cpu_millis == 1_000
+            assert cost_reservation.requested_memory_mib == 1_024
+            assert cost_reservation.requested_ephemeral_storage_mib == 4_148
             assert history.snapshot_json["selected_pool_id"] == "nebius-cpu"
             projection = execution_lease_projection(persisted)
             assert projection["selected_pool_id"] == "nebius-cpu"
@@ -1015,7 +1017,7 @@ async def test_scheduler_capacity_wait_rolls_back_and_skips_oversized_head(
         async with sessions() as session:
             blocked_id, target = await _seed_ready_trial(session, now=now)
             await _configure_scheduler_trial(
-                session, trial_id=blocked_id, now=now, cpu_millis=64_000
+                session, trial_id=blocked_id, now=now, cpu_millis=65_000
             )
             blocked = await session.get(Trial, blocked_id)
             assert blocked is not None
@@ -1134,7 +1136,7 @@ async def test_scheduler_capacity_scan_is_bounded(postgres_url: str) -> None:
     try:
         async with sessions() as session:
             trial_id, _ = await _seed_ready_trial(session, now=now)
-            await _configure_scheduler_trial(session, trial_id=trial_id, now=now, cpu_millis=64_000)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now, cpu_millis=65_000)
             first = await session.get(Trial, trial_id)
             assert first is not None
             trial_ids = [trial_id, *(uuid4() for _ in range(32))]
@@ -1586,6 +1588,7 @@ async def test_provisioning_pending_limit_is_race_safe_before_claim(
         async with sessions() as session:
             first_trial_id, target = await _seed_ready_trial(session, now=now)
             first_trial = await session.get(Trial, first_trial_id)
+            assert first_trial is not None
             second_trial_id = uuid4()
             session.add(
                 Trial(
@@ -1599,10 +1602,11 @@ async def test_provisioning_pending_limit_is_race_safe_before_claim(
                 )
             )
             policy = await session.get(ExecutionCapacityPolicy, target.target_id)
+            assert policy is not None
             policy.max_pending_jobs = 1
             await session.commit()
 
-        async def claim(trial_id):
+        async def claim(trial_id: UUID) -> ServiceExecutionLease | str:
             try:
                 async with sessions() as session, session.begin():
                     return await _reserve(session, trial_id=trial_id, target=target, now=now)
@@ -4090,5 +4094,144 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
             assert closed.observed_state == "deleted"
             assert closed.output_commit_state == "unavailable"
             assert closed.output_unavailable_reason == "operator_cancelled"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("class_cpu_limit", [None, 5_000])
+async def test_private_terminus_sandboxes_reserve_full_pod_resources(
+    postgres_url: str,
+    class_cpu_limit: int | None,
+) -> None:
+    """Three 2 CPU / 4 GiB containers must reserve/admit 6 CPU / 12 GiB."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    plan = _runtime_contract(now=now)
+    resources = ContainerResourcesV1(
+        cpu_millis=2_000, memory_mib=4_096, ephemeral_storage_mib=2_048
+    )
+    agent_image = "registry.example/loom/worker@sha256:" + "d" * 64
+    sandboxes = []
+    for role in ("task-sandbox", "verifier-sandbox"):
+        socket = f"/loom/sandboxes/{role}/sandbox.sock"
+        probe = ProbeV1(
+            kind="exec", argv=("/loom/bin/loom-sandbox-runtime", "--check-socket", socket)
+        )
+        sandboxes.append(
+            SidecarContainerV1(
+                role_name=role,
+                private_sandbox=True,
+                image_ref=plan.task_image_ref,
+                argv=("/loom/bin/loom-sandbox-runtime", "--socket", socket),
+                resources=resources,
+                startup_probe=probe,
+                readiness_probe=probe,
+            )
+        )
+    plan = ExecutionRuntimePlanV1.model_validate(
+        {
+            **plan.canonical_payload(),
+            "agent_image_ref": agent_image,
+            "task_resources": resources,
+            "sidecars": sandboxes,
+            "image_admission": signed_image_admission_bundle(
+                (plan.task_image_ref, plan.runtime_image_ref, agent_image), now=now
+            ),
+        }
+    )
+    requirements = _requirements().model_copy(update={"cpu_millis": 2_000, "memory_mib": 4_096})
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            trial.config = {
+                "agent": {"name": "terminus-2"},
+                "model": {"provider": "zhipu", "name": "glm-5.2"},
+            }
+            execution_class = await session.get(ServiceExecutionClass, plan.execution_class_id)
+            assert execution_class is not None
+            execution_class.spec_json = {
+                **execution_class.spec_json,
+                # Internal task/verifier isolation does not consume submitted
+                # workload sidecar slots, but always consumes real resources.
+                "maximum_sidecars": 0,
+                "maximum_cpu_millis": class_cpu_limit,
+            }
+            await session.commit()
+
+        async with sessions() as session:
+            if class_cpu_limit is not None:
+                # The task's own 2 CPU declaration fits this class; its complete
+                # 6 CPU Pod does not. No lease or reservation may survive.
+                with pytest.raises(ServiceExecutionConflict, match="cpu_limit_exceeded"):
+                    async with session.begin_nested():
+                        await _reserve(
+                            session,
+                            trial_id=trial_id,
+                            target=target,
+                            now=now,
+                            requirements=requirements,
+                            runtime_contract=plan,
+                        )
+                await session.commit()
+                trial = await session.get(Trial, trial_id)
+                assert trial is not None and (trial.state, trial.attempt_count) == ("queued", 0)
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ServiceExecutionLease)
+                        .where(ServiceExecutionLease.trial_id == trial_id)
+                    )
+                    == 0
+                )
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ExecutionCostReservation)
+                        .where(ExecutionCostReservation.trial_id == trial_id)
+                    )
+                    == 0
+                )
+                return
+            lease = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now,
+                requirements=requirements,
+                runtime_contract=plan,
+            )
+            await session.commit()
+            lease_id = lease.id
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease_id)
+            assert persisted is not None
+            assert persisted.workload_requirements_json["sidecar_count"] == 0
+            assert persisted.workload_requirements_json["cpu_millis"] == 2_000
+            assert persisted.workload_requirements_json["memory_mib"] == 4_096
+            cost = (
+                await session.execute(
+                    select(ExecutionCostReservation).where(
+                        ExecutionCostReservation.lease_id == lease_id
+                    )
+                )
+            ).scalar_one()
+            capacity = (
+                await session.execute(
+                    select(ExecutionProvisioningAuthorization).where(
+                        ExecutionProvisioningAuthorization.lease_id == lease_id
+                    )
+                )
+            ).scalar_one()
+            for reserved in (cost, capacity):
+                assert reserved.requested_cpu_millis == 6_000
+                assert reserved.requested_memory_mib == 12_288
+            assert cost.requested_ephemeral_storage_mib == 8_244
+            assert capacity.requested_storage_mib == cost.requested_ephemeral_storage_mib
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and (trial.state, trial.attempt_count) == ("claimed", 1)
     finally:
         await engine.dispose()

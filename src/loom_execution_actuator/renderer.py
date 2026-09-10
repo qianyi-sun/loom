@@ -93,7 +93,7 @@ def _probe(value: ProbeV1) -> dict[str, Any]:
 
 
 def _sidecar(value: SidecarContainerV1) -> dict[str, Any]:
-    return {
+    result = {
         "name": value.role_name,
         "image": value.image_ref,
         "imagePullPolicy": "IfNotPresent",
@@ -110,6 +110,21 @@ def _sidecar(value: SidecarContainerV1) -> dict[str, Any]:
         "securityContext": _security_context(),
         "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
     }
+    if value.private_sandbox:
+        result["securityContext"] = _security_context(read_only_root=False)
+        result["volumeMounts"] = [
+            {
+                "name": f"{value.role_name}-socket",
+                "mountPath": f"/loom/sandboxes/{value.role_name}",
+            },
+            {
+                "name": "runtime",
+                "mountPath": "/loom/bin/loom-sandbox-runtime",
+                "subPath": "loom-sandbox-runtime",
+                "readOnly": True,
+            },
+        ]
+    return result
 
 
 def _runtime_plan(lease: ServiceExecutionLease) -> ExecutionRuntimePlanV1:
@@ -159,6 +174,7 @@ def render_execution_job(
             required_image_refs=(
                 plan.task_image_ref,
                 plan.runtime_image_ref,
+                *([plan.agent_image_ref] if plan.agent_image_ref is not None else []),
                 *(sidecar.image_ref for sidecar in plan.sidecars),
             ),
             now=current_time,
@@ -255,6 +271,7 @@ def render_execution_job(
                 "spec": {
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
+                    "shareProcessNamespace": False,
                     "enableServiceLinks": False,
                     "serviceAccountName": target.service_account_name,
                     "runtimeClassName": target.runtime_class_name,
@@ -284,7 +301,7 @@ def render_execution_job(
                     "containers": [
                         {
                             "name": "execution",
-                            "image": plan.task_image_ref,
+                            "image": plan.agent_image_ref or plan.task_image_ref,
                             "imagePullPolicy": "IfNotPresent",
                             "command": ["/loom/runtime/loom-execution-runtime"],
                             "args": [
@@ -325,6 +342,14 @@ def render_execution_job(
             },
         },
     }
+    pod = job["spec"]["template"]["spec"]
+    for sidecar in plan.sidecars:
+        if sidecar.private_sandbox:
+            name = f"{sidecar.role_name}-socket"
+            pod["volumes"].append({"name": name, "emptyDir": {"sizeLimit": "1Mi"}})
+            pod["containers"][0]["volumeMounts"].append(
+                {"name": name, "mountPath": f"/loom/sandboxes/{sidecar.role_name}"}
+            )
     if target.pod_identity_audience is not None:
         pod = job["spec"]["template"]["spec"]
         pod["volumes"].append(
