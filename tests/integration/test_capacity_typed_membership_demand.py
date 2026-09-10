@@ -3,12 +3,17 @@
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from loom_capacity_manager.membership_current import resolve_current_subject
 from loom_capacity_manager.models import (
+    CapacityCandidate,
+    CapacityDemandReporter,
     CapacityDemandSnapshot,
+    CapacityDeploymentGeneration,
     CapacityExecutionEpoch,
+    CapacitySubject,
+    CapacityWorkerProfile,
 )
 from loom_capacity_manager.store import ConfigurationConflictError, UnknownReporterError
 from tests.capacity_build_membership_fixtures import (
@@ -84,4 +89,43 @@ async def test_typed_current_subject_does_not_fall_back_for_unknown_identity(cap
     await apply(capacity_session, application_request(preparation, execution))
     epoch = await capacity_session.get(CapacityExecutionEpoch, execution.execution_epoch)
     with pytest.raises(ConfigurationConflictError, match="unavailable"):
+        await resolve_current_subject(capacity_session, epoch, subject_id=UUID(int=110999))
+
+
+@pytest.mark.parametrize("changed", ("subject-payload", "subject-scalar", "candidate", "reporter", "deployment", "profile"))
+async def test_typed_current_demand_rejects_corrupt_retained_evidence(capacity_session, changed):
+    management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    admitted = await apply(capacity_session, application_request(preparation, execution))
+    subject = admitted.member.configuration
+    changes = {
+        "subject-payload": (CapacitySubject, {"payload": {}}),
+        "subject-scalar": (CapacitySubject, {"max_slots": subject.max_slots + 1}),
+        "candidate": (CapacityCandidate, {"source_payload": {"publication_sha256": "f" * 64}}),
+        "reporter": (CapacityDemandReporter, {"token_sha256": "f" * 64}),
+        "deployment": (CapacityDeploymentGeneration, {"readiness_state": "pending"}),
+        "profile": (CapacityWorkerProfile, {"profile_digest": "f" * 64}),
+    }
+    model, fields = changes[changed]
+    await capacity_session.execute(update(model).where(model.subject_id == subject.subject_id).values(**fields))
+    with pytest.raises(ConfigurationConflictError):
+        await management.ingest_demand_snapshot(capacity_session, report(subject), actor="owner-agent")
+    assert await capacity_session.scalar(select(func.count()).select_from(CapacityDemandSnapshot)) == 0
+
+
+async def test_typed_current_demand_keeps_source_admission_closed(capacity_session):
+    from tests.integration.test_capacity_retired_source_graph import seed_active_successor
+    from tests.integration.test_capacity_successor_source_verification import successor
+
+    candidate, _exported = await successor(capacity_session)
+    _management, candidate, _execution = await seed_active_successor(capacity_session, candidate, epoch=43)
+    epoch = await capacity_session.get(CapacityExecutionEpoch, 43)
+    subject = candidate.managed_application_origins[0].configuration
+    with pytest.raises(ConfigurationConflictError, match="source graph authentication"):
+        await resolve_current_subject(capacity_session, epoch, subject_id=subject.subject_id)
+
+
+async def test_typed_current_demand_requires_activated_execution(capacity_session):
+    _management, _preparation, _fleet, execution = await typed_sql_execution(capacity_session, activate=False)
+    epoch = await capacity_session.get(CapacityExecutionEpoch, execution.execution_epoch)
+    with pytest.raises(ConfigurationConflictError, match="not active"):
         await resolve_current_subject(capacity_session, epoch, subject_id=UUID(int=110999))
