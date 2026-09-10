@@ -154,6 +154,28 @@ def test_existing_allocator_routes_only_to_build_capable_native_shapes(capabilit
     assert actual == expected
 
 
+def test_projected_work_roundtrips_the_manager_protected_attempt_contract():
+    from loom_capacity_manager.allocator import allocate_shadow
+    from loom_capacity_manager.executable_contracts import ExecutableAdmissionAllowanceV2
+    from tests.capacity_fixtures import allocator_input
+
+    subject = _allocator_build_subject()
+    result = allocate_shadow(allocator_input((subject,), gb10_slots=1, oldlab_slots=1))
+    identities = []
+    for allocation in result.allocations:
+        for allowance in allocation.placement_allowances:
+            # execution_store's admission proposal uses this exact UUID parsing
+            # boundary; the generic shadow allocator alone permits opaque strings.
+            protected_attempt_id = UUID(allowance.attempt_id)
+            assert str(protected_attempt_id) == allowance.attempt_id
+            projected = ExecutableAdmissionAllowanceV2(
+                allowance_id=UUID(int=100), protected_attempt_id=protected_attempt_id,
+                shape_instance_id=allowance.shape_instance_id, shape_slot_index=0,
+                submission_intent_id=UUID(int=101))
+            identities.append(projected.protected_attempt_id)
+    assert len(identities) == len(set(identities)) == 2
+
+
 def test_build_and_application_share_one_owner_ceiling():
     from loom_capacity_manager.allocator import allocate_shadow
     from loom_capacity_manager.contracts import canonical_digest, canonical_digest_excluding
