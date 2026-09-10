@@ -63,15 +63,18 @@ async def test_large_typed_final_inventory_confirms_retirement_in_database(capac
             """), {"executor": inventory.executor_incarnation})
 
 
-@pytest.mark.parametrize("retained", (False, True))
+@pytest.mark.parametrize("retained", ("none", "latest", "historical"))
 async def test_chunked_inventory_rollback_preserves_evidence_and_fences_late_writers(capacity_session, retained):
     from alembic import command
 
     from tests.integration.test_capacity_build_membership_sql import _config
 
     store, management, _common, inventory = await inventory_setup(capacity_session)
-    if retained:
+    if retained != "none":
         await store.ingest_typed_executor_inventory(capacity_session, inventory, management=management)
+        if retained == "historical":
+            await store.ingest_typed_executor_inventory(capacity_session,
+                inventory.model_copy(update={"inventory_sequence": 2, "records": ()}), management=management)
         with pytest.raises(RuntimeError, match="retained chunked inventory"):
             async with capacity_session.begin_nested():
                 connection = await capacity_session.connection()
