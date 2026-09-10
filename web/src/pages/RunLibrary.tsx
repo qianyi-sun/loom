@@ -16,7 +16,7 @@ import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
-import { batchStateVariant } from "../lib/statusVariant";
+import { batchResultPresentation, batchStateVariant } from "../lib/statusVariant";
 import { formatUsageCost } from "../lib/usageCost";
 
 const TERMINAL_STATES = new Set(["finished", "cancelled"]);
@@ -473,6 +473,8 @@ export default function RunLibrary(): JSX.Element {
                       matchedTaskCount: batch.expected_trial_count,
                     });
                     const terminal = TERMINAL_STATES.has(batch.state);
+                    const result = batch.result_status && terminal
+                      ? batchResultPresentation(batch.result_status, batch.trial_summary) : null;
                     return (
                       <tr key={batch.id} className="hover:bg-slate-50">
                         <td className="px-4 py-3">
@@ -493,10 +495,8 @@ export default function RunLibrary(): JSX.Element {
                           {primaryModel(batch)}
                         </td>
                         <td className="px-4 py-3">
-                          <StatusPill variant={batchStateVariant(batch.state)}>
-                            {batch.result_status && terminal
-                              ? batch.result_status
-                              : batch.state}
+                          <StatusPill variant={result?.variant ?? batchStateVariant(batch.state)}>
+                            {result?.label ?? batch.state}
                           </StatusPill>
                         </td>
                         <td className="px-4 py-3 text-slate-700">

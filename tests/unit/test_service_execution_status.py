@@ -16,6 +16,26 @@ from loom_service.service_execution_status import service_execution_lifecycle_st
         ({"trial_state": "succeeded"}, "succeeded"),
         ({"trial_state": "failed"}, "failed"),
         ({"trial_state": "cancelled"}, "cancelled"),
+        (
+            {"trial_state": "cancelled", "output_commit_state": "unavailable"},
+            "cancelled",
+        ),
+        (
+            {"trial_state": "cancelled", "materialization_state": "unavailable"},
+            "cancelled",
+        ),
+        (
+            {"trial_state": "cancelled", "materialization_state": "pending"},
+            "cancelled",
+        ),
+        (
+            {"trial_state": "failed", "output_commit_state": "unavailable"},
+            "output_unavailable",
+        ),
+        (
+            {"trial_state": "succeeded", "materialization_state": "unavailable"},
+            "output_unavailable",
+        ),
         ({"error_code": "unschedulable"}, "admission_blocked"),
         ({"materialization_state": "unavailable"}, "output_unavailable"),
     ],

@@ -27,28 +27,13 @@ import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
-import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { batchResultPresentation, batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 import { formatTokenUsage } from "../lib/tokenUsage";
 import {
   formatUsageCost,
   usageCostStatus,
   usageEstimateConfidence,
 } from "../lib/usageCost";
-
-function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
-  switch (s) {
-    case "succeeded":
-      return "success";
-    case "partial_failed":
-      return "warning";
-    case "all_failed":
-      return "failed";
-    case "cancelled":
-      return "cancelled";
-    default:
-      return "neutral";
-  }
-}
 
 const ACTIVE_STATES = new Set(["submitted", "running"]);
 
@@ -244,6 +229,7 @@ export default function BatchDetail(): JSX.Element {
     ),
   );
   const deliveryExport = createDeliveryExport.data ?? deliveryQuery.data;
+  const resultPresentation = c.result_status ? batchResultPresentation(c.result_status, c.trial_summary) : null;
   const deliveryStatus = deliveryExport?.status === "ready" ? "ready" : "not ready";
   const deliveryObjects = deliveryObjectText(deliveryExport);
 
@@ -275,9 +261,9 @@ export default function BatchDetail(): JSX.Element {
               <StatusPill variant={batchStateVariant(c.state)}>
                 {c.state}
               </StatusPill>
-              {c.result_status ? (
-                <StatusPill variant={resultStatusVariant(c.result_status)}>
-                  {c.result_status}
+              {resultPresentation ? (
+                <StatusPill variant={resultPresentation.variant}>
+                  {resultPresentation.label}
                 </StatusPill>
               ) : null}
               {c.backend ? (

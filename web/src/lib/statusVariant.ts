@@ -46,3 +46,31 @@ export function batchStateVariant(state: string): StatusVariant {
       return "neutral";
   }
 }
+
+/** Keep API result enums intact while distinguishing cancelled child trials. */
+export function batchResultPresentation(
+  result: string,
+  summary: Record<string, number>,
+): { label: string; variant: StatusVariant } {
+  const succeeded = summary.succeeded ?? 0;
+  const failed = summary.failed ?? 0;
+  const cancelled = summary.cancelled ?? 0;
+  const allTerminal = Object.entries(summary).every(
+    ([state, count]) => count === 0 || ["succeeded", "failed", "cancelled"].includes(state),
+  );
+  if (["all_failed", "partial_failed"].includes(result) && cancelled > 0 && allTerminal) {
+    if (failed > 0) {
+      return {
+        label: succeeded > 0 ? "Succeeded, failed and cancelled" : "Failed and cancelled",
+        variant: succeeded > 0 ? "warning" : "failed",
+      };
+    }
+    return {
+      label: succeeded > 0 ? "Succeeded and cancelled" : "All trials cancelled",
+      variant: "cancelled",
+    };
+  }
+  const variant: StatusVariant = result === "partial_failed" ? "warning"
+    : result === "all_failed" ? "failed" : trialStateVariant(result);
+  return { label: result, variant };
+}

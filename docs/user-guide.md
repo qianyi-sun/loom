@@ -459,6 +459,16 @@ the parent batch is **not** marked `cancelled`. Cancelled (like failed) counts
 as a terminal trial for **batch lifecycle** completion, so a hung last-in-flight
 trial can unblock the batch becoming `finished`.
 
+Cancelled trials keep the **cancelled** lifecycle even when cancellation happens
+before any runtime output is produced. Output availability is reported separately;
+an absent bundle in this case does not mean the cancellation failed. Genuine
+output failures on non-cancelled trials remain visible as `output_unavailable`.
+
+For API compatibility, batch `result_status` still groups unsuccessful child
+trials under `all_failed` or `partial_failed`, including cancellations. The batch
+display and debug evidence distinguish cancelled children from failed children
+using the trial summary, including batches where every child was cancelled.
+
 Delivery export is stricter: selection requires a **succeeded** trial per main
 coordinate. Cancelling a hang does not make that coordinate exportable. After
 the batch finishes, use `loom eval batch rerun-plan <batch-id>`, submit a
