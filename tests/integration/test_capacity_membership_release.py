@@ -44,8 +44,11 @@ from loom_capacity_manager.models import (
     CapacitySubject,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, sign_ownership
-from loom_capacity_manager.store import CapacityManagementStore, ConfigurationConflictError
-from loom_capacity_manager.store import _canonical_json_digest
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    ConfigurationConflictError,
+    _canonical_json_digest,
+)
 from tests.capacity_execution_fixtures import EXECUTOR_KEYS, executor_binding
 from tests.capacity_fixtures import demand_snapshot
 from tests.integration.test_capacity_grant_store import (

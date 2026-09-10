@@ -215,7 +215,7 @@ def managed_application_request(preparation, execution, *, operation="capacity",
         expected_revision=revision, command=PersonalApplicationCommandV2(projection=projection, acknowledgement=ack))
 
 
-async def staged_build_event(session, management, preparation, fleet, request, *, previous_head="0" * 64, previous=None, previous_request=None, idempotency_key=None):
+async def staged_build_event(session, management, preparation, fleet, request, *, previous_head="0" * 64, previous=None, previous_request=None, idempotency_key=None, reincarnation=None):
     from loom_capacity_manager.build_generation_store import stage_build_generation_evidence
     from loom_capacity_manager.membership_digest import canonical_membership_event_head
     from loom_capacity_manager.membership_store import CapacityMembershipStore
@@ -227,10 +227,10 @@ async def staged_build_event(session, management, preparation, fleet, request, *
         derive_build_member,
     )
     if isinstance(request.command, PersonalBuildCommandV2):
-        member = derive_build_member(request, preparation, fleet)
+        member = derive_build_member(request, preparation, fleet, reincarnation=reincarnation)
         await stage_build_generation_evidence(session, request, member, preparation, fleet, previous=previous, previous_request=previous_request)
     else:
-        member = derive_application_member(request, preparation, fleet)
+        member = derive_application_member(request, preparation, fleet, reincarnation=reincarnation)
         await CapacityMembershipStore(management)._persist_generation_evidence(session, request.command.projection, member.configuration, previous)
     rows = (await session.scalars(select(CapacitySubject).where(CapacitySubject.configuration_epoch == preparation.configuration_epoch))).all()
     await CapacityMembershipStore(management)._materialize_subject(session, preparation.configuration_epoch,

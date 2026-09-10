@@ -3,8 +3,10 @@
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
 
+from loom_capacity_manager.contracts import ObservedCommitmentV1
 from loom_capacity_manager.membership_release import predecessor_release_sha256
 from loom_capacity_manager.models import CapacityCandidate, CapacityDemandReporter
 from loom_capacity_manager.store import ConfigurationConflictError, WriterFence
@@ -13,8 +15,10 @@ from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
     managed_application_request,
+    staged_build_event,
     typed_sql_execution,
 )
+from tests.integration.test_capacity_build_membership_sql import _reseal
 from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_typed_managed_base_history import prepared
 
@@ -30,6 +34,20 @@ def recreate(request, *, revision):
         "reporter_incarnation": projection.demand_reporter_incarnation,
     })
     return result.model_copy(update={"command": result.command.model_copy(update={"projection": projection, "acknowledgement": acknowledgement})})
+
+
+async def retain_physical_charge(session, management, subject):
+    profile = subject.profiles[0]
+    shape = profile.worker_shapes[0]
+    observed = ObservedCommitmentV1(kind="physical", commitment_id="predecessor-still-running",
+        physical_identity="predecessor-still-running", subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation, pool_id=profile.pool_id,
+        pool_generation=profile.pool_generation, deployment_generation=subject.deployment_generation,
+        profile_id=shape.shape_id, profile_generation=profile.profile_generation,
+        profile_digest=profile.profile_digest, shape_id=shape.shape_id, resources=shape.total_resources, state="live")
+    await management._upsert_commitment(session, kind="physical", source_incarnation=UUID(int=99100),
+        sequence=1, observed=observed, now=await session.scalar(select(func.now())))
+    await session.flush()
 
 
 @pytest.mark.parametrize("kind", ("application", "build", "managed"))
@@ -75,3 +93,74 @@ async def test_typed_recreation_cannot_replace_an_active_predecessor(capacity_se
     with pytest.raises(ConfigurationConflictError):
         await apply(capacity_session, recreate(request, revision=1), key=940001)
     assert (await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)).revision == 1
+
+
+@pytest.mark.parametrize("build", (False, True))
+@pytest.mark.parametrize("tamper", (None, "release_set_sha256", "predecessor_revision", "predecessor_head_sha256", "origin", "missing", "charged"))
+async def test_sql_recreation_checks_certificate_independently_of_python(capacity_session, build, tamper):
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
+    request = (build_request if build else application_request)(preparation, execution)
+    await apply(capacity_session, request)
+    disabled_request = transition(request, "destroy", revision=1)
+    disabled = await apply(capacity_session, disabled_request, key=940001)
+    recreated_request = recreate(disabled_request, revision=2)
+    async with capacity_session.begin_nested() as trial:
+        receipt = await apply(capacity_session, recreated_request, key=940002)
+        proof = receipt.member.reincarnation
+        await trial.rollback()
+    row = await staged_build_event(capacity_session, management, preparation, fleet, recreated_request,
+        previous_head=disabled.head_sha256, previous=disabled.member, previous_request=disabled_request,
+        idempotency_key=UUID(int=940002), reincarnation=proof)
+    certificate = row.result_payload["member"]["reincarnation"]
+    if tamper == "charged":
+        await retain_physical_charge(capacity_session, management, disabled.member.configuration)
+    elif tamper == "missing":
+        row.result_payload["member"]["reincarnation"] = None
+    elif tamper == "origin":
+        certificate["origin"]["generation"] += 1
+    elif tamper == "predecessor_revision":
+        certificate[tamper] = 1
+    elif tamper is not None:
+        certificate[tamper] = "f" * 64
+    _reseal(row)
+    if tamper is None:
+        capacity_session.add(row)
+        await capacity_session.flush()
+        assert (await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)).revision == 3
+    else:
+        with pytest.raises(DBAPIError) as failure:
+            async with capacity_session.begin_nested():
+                capacity_session.add(row)
+                await capacity_session.flush()
+        assert failure.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.parametrize("build", (False, True))
+async def test_store_recreation_keeps_unreleased_predecessor_charged(capacity_session, build):
+    management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    request = (build_request if build else application_request)(preparation, execution)
+    await apply(capacity_session, request)
+    disabled_request = transition(request, "destroy", revision=1)
+    disabled = await apply(capacity_session, disabled_request, key=940001)
+    await retain_physical_charge(capacity_session, management, disabled.member.configuration)
+    with pytest.raises(ConfigurationConflictError, match="unreleased observed commitments"):
+        await apply(capacity_session, recreate(disabled_request, revision=2), key=940002)
+    value = await management.load_allocation_input(capacity_session,
+        WriterFence(authority_incarnation=execution.authority_incarnation, writer_epoch=execution.writer_epoch))
+    assert value.membership.revision == 2 and value.membership.members == (disabled.member,)
+    assert len(value.observed_commitments) == 1
+
+
+async def test_retired_import_cannot_flatten_recreation_lineage(capacity_session):
+    from tests.integration.test_capacity_retired_application_import import import_apps, retire
+
+    management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    request = application_request(preparation, execution)
+    await apply(capacity_session, request)
+    disabled_request = transition(request, "destroy", revision=1)
+    await apply(capacity_session, disabled_request, key=940001)
+    await apply(capacity_session, recreate(disabled_request, revision=2), key=940002)
+    snapshot = await CapacityTypedMembershipStore().snapshot(capacity_session, execution.execution_epoch)
+    await retire(capacity_session, management, preparation, execution)
+    with pytest.raises(ConfigurationConflictError, match="recreation lineage"):
+        await import_apps(capacity_session, management, execution, snapshot)
