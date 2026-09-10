@@ -574,7 +574,7 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         'export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-'
         '${project_candidate}-${project_job}"'
     ) in request.stdin
-    assert 'docker compose "${compose_args[@]}" up --build &' in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --build --exit-code-from worker &' in request.stdin
     assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin
     assert 'cd "$LOOM_REMOTE_WORKER_REPO_DIR"' in request.stdin
 
@@ -708,7 +708,7 @@ printf '%s|%s|%s|%s|%s\n' \
     docker_commands = [line.split("|", 4)[4] for line in runtime_lines]
     project = "loom-staging-aaaaaaaaaaaa-4242"
     assert docker_commands[0].startswith("compose --project-name ")
-    assert docker_commands[0].endswith("up --build")
+    assert docker_commands[0].endswith("up --build --exit-code-from worker")
     assert docker_commands[1].startswith("compose --project-name ")
     assert docker_commands[1].endswith("down --remove-orphans")
     assert docker_commands[2:] == [
@@ -1106,7 +1106,7 @@ def test_build_sbatch_request_cleans_up_compose_on_exit() -> None:
     assert "trap cleanup EXIT" in request.stdin
     assert "trap 'cleanup 130' INT" in request.stdin
     assert "trap 'cleanup 143' TERM" in request.stdin
-    assert 'docker compose "${compose_args[@]}" up --build &' in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --build --exit-code-from worker &' in request.stdin
     assert "compose_pid=$!" in request.stdin
     assert 'wait "$compose_pid"' in request.stdin
     assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin

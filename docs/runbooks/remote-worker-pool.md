@@ -301,3 +301,22 @@ Never put raw tokens in command history, reports, or documentation.
 
 Preserve sanitized worker, allocation, and trial identifiers for incident
 analysis. Store run-specific evidence outside the active documentation tree.
+
+## Protected worker authentication
+
+A protected Control Plane requires both the ordinary fleet bearer token and
+a worker credential issued through the trusted executor bootstrap handoff.
+The remote-worker Compose service forwards `LOOM_EXECUTOR_WORKER_CREDENTIAL`
+when supplied; unset remains absent. The worker sends it in
+`X-Loom-Executor-Worker-Credential` for registration and later worker requests.
+
+This credential is bound to an admitted worker/job and current allocation.
+Do not copy it between jobs or put it in a shared fleet environment file.
+Forwarding a value does not authorize a launch: the protected guard must already
+have accepted the corresponding executor registration.
+
+`401` with `protected worker session rejected` can occur with a valid fleet
+bearer. Check the executor's registration and credential delivery rather than
+rotating that bearer. If the protected executor is inactive or the manager's
+new-capacity ceiling is zero, finish the authorized execution prerequisites;
+adding a header or restarting a legacy worker cannot create that authority.

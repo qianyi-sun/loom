@@ -181,7 +181,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
-docker compose "\${compose_args[@]}" up --build &
+docker compose "\${compose_args[@]}" up --build --exit-code-from worker &
 compose_pid=\$!
 wait "\$compose_pid"
 SLURM
