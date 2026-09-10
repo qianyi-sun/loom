@@ -147,6 +147,14 @@ There is no default global consumer. Cancellation also covers an attempt that
 never created a Job: authoritative namespace reconciliation must finish its
 existing cleanup path without treating an active create as deleted.
 
+Legacy worker heartbeat and stale-claim requeues exclude Trials whose current
+attempt belongs to a service-execution lease, including revoked leases awaiting
+cleanup. The service scheduler never selects a cancel-requested queued Trial.
+Ordinary cancellation replay can settle historical queued cancellation records
+without creating work or changing a deleted lease; the original request time is
+preserved. If provider cleanup is still pending, its admission, provisioning and
+cost reservations remain held until the actuator confirms resource absence.
+
 Browser-session cancellation carries the session and CSRF credentials to the
 control plane, which independently validates the caller's submit scope and team.
 Bearer-token cancellation retains the same authority checks. Neither path may
