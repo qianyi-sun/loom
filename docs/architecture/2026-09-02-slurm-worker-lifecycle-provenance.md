@@ -144,3 +144,17 @@ Tests must prove:
 Live acceptance requires a fresh protected rollout request bound to the
 merged candidate. The failed epoch-239 request remains immutable evidence and
 must not be resumed after candidate/config drift.
+
+## Worker process exit status
+
+Both the elastic controller and the operator submission script run Compose
+with `--exit-code-from worker`. A worker startup failure therefore fails its
+Slurm job instead of recording a successful job with no registered worker.
+The job still tears down its Compose project and removes its owned trajectory
+and benchmark volumes. A cleanup failure cannot replace an existing worker
+failure with success; cleanup failure after a successful worker also fails
+the job. Signal handling retains the interrupted job status.
+
+Real Compose regression coverage exercises both generated scripts, worker
+success and failure, and owned-resource cleanup. This error propagation does
+not supply protected worker credentials or authorize capacity activation.

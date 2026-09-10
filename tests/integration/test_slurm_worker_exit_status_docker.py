@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,18 +16,19 @@ from tests.unit.test_elastic_slurm_worker_controller import _config
 pytestmark = pytest.mark.docker
 
 
-@pytest.mark.parametrize("worker_exit", [0, 17])
+@pytest.mark.parametrize("worker_exit", [0, 17, None], ids=["success", "failure", "cancel"])
 @pytest.mark.parametrize("launcher", ["controller", "operator-script"])
 def test_slurm_script_preserves_worker_exit_and_cleans_resources(
-    tmp_path: Path, worker_exit: int, launcher: str,
+    tmp_path: Path, worker_exit: int | None, launcher: str,
 ) -> None:
     repo = tmp_path / "repo"
     (repo / "deploy").mkdir(parents=True)
+    command = "sleep 300" if worker_exit is None else f"exit {worker_exit}"
     (repo / "deploy/docker-compose.remote-worker.yml").write_text(
         f"""services:
   worker:
     image: alpine:3.19
-    command: [sh, -c, 'exit {worker_exit}']
+    command: [sh, -c, '{command}']
     restart: 'no'
     network_mode: none
     cpus: 0.1
@@ -89,11 +91,39 @@ volumes:
         "-f", str(repo / "deploy/docker-compose.remote-worker.yml"),
     ]
     try:
-        result = subprocess.run(
-            ["bash"], input=script, env=environment,
-            capture_output=True, text=True, timeout=90,
-        )
-        assert result.returncode == worker_exit, result.stdout + result.stderr
+        with subprocess.Popen(
+            ["bash"], env=environment, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) as process:
+            try:
+                if worker_exit is None:
+                    assert process.stdin is not None
+                    process.stdin.write(script)
+                    process.stdin.close()
+                    process.stdin = None
+                    deadline = time.monotonic() + 30
+                    while True:
+                        running = subprocess.run(
+                            ["docker", "ps", "-q", "--filter", "status=running",
+                             "--filter", f"label=com.docker.compose.project={project}"],
+                            capture_output=True, text=True, check=True, timeout=15,
+                        )
+                        if running.stdout.strip():
+                            break
+                        assert process.poll() is None, "worker launcher exited before readiness"
+                        assert time.monotonic() < deadline, "worker container did not start"
+                        time.sleep(0.1)
+                    process.terminate()
+                    stdout, stderr = process.communicate(timeout=30)
+                else:
+                    stdout, stderr = process.communicate(input=script, timeout=90)
+                assert process.returncode == (143 if worker_exit is None else worker_exit), (
+                    stdout + stderr
+                )
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=15)
         for command in (
             ["docker", "ps", "-aq"],
             ["docker", "volume", "ls", "-q"],
