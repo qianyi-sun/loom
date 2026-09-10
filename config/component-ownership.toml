@@ -558,6 +558,7 @@ source_paths = [
   ".dockerignore",
   "README.md",
   "capacity_guard_migrations/**",
+  "capacity_build_guard_migrations/**",
   "deploy/Dockerfile.service",
   "migrations/**",
   "packages/**",

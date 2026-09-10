@@ -96,6 +96,23 @@ installation facts need no running worker and grant no readiness or capacity:
 management still must prove its allocation-contained admission adapter is actually
 installed before a cold build service can become ready.
 
+Build assignment evidence uses the independent `loom_capacity_build_guard`
+management schema, not the per-environment application trial guard. Revision
+`build_guard_0001` retains installations, canonical plans, immutable assignments
+and dispositions. A separate request-hold table permits only one current
+assignment per platform request while preserving assignment history. Logical
+cancellation does not release a hold or stop its global capacity charge.
+
+This initial revision installs no runtime mutation procedures. The agent has
+schema USAGE only; a distinct NOLOGIN owner controls evidence and a dedicated
+least-privileged migrator assumes that role. Migration requires an explicit
+database URL and role names, rejects foreign defaults and schema/object/column
+privilege drift on every run (including an at-head rerun), and refuses downgrade
+with retained evidence. It is packaged independently with the service image.
+Tables alone confer no admission acknowledgement, bootstrap capability or build
+readiness: protected prepare/publication/release and the native runtime adapter
+remain required before intake can open.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
