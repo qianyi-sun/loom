@@ -51,6 +51,27 @@ def test_inventory_capacity_refusal_leaves_no_partial_request(tmp_path, monkeypa
         assert journal.path.read_bytes() == b""
 
 
+def test_near_maximum_inventory_can_spend_recovery_reserve(tmp_path, monkeypatch):
+    from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES
+
+    module = import_module("loom_capacity_executor.inventory_journal")
+    value = typed_inventory()
+    record = value.records[0].model_copy(update={"physical_identity": "job-00000"})
+    empty = value.model_copy(update={"records": ()})
+    count = (MAX_CONTRACT_BYTES - len(canonical_executable_bytes(empty))) // (
+        len(canonical_executable_bytes(record)) + 1) - 1
+    value = value.model_copy(update={"records": tuple(record.model_copy(update={
+        "physical_identity": f"job-{index:05d}"}) for index in range(count))})
+    payload = canonical_executable_bytes(value)
+    assert MAX_CONTRACT_BYTES - 16_384 < len(payload) <= MAX_CONTRACT_BYTES
+    # New admission cannot use this budget, but terminal publication can.
+    monkeypatch.setattr("loom_capacity_executor.journal._MAX_JOURNAL_BYTES", 12 * 1024 * 1024)
+    with ExecutorJournal(tmp_path / "journal") as journal:
+        module.retain_inventory_request(journal, value)
+        module.complete_inventory_request(journal, value, rejected=False)
+        assert (journal.head.sequence, journal.head.digest) == inventory_confirmation_journal_head(value)
+
+
 @pytest.mark.parametrize("ambiguous", (False, True))
 async def test_runtime_large_inventory_terminal_readback_and_exact_replay(tmp_path, ambiguous):
     runtime, journal, context = typed_executor(tmp_path)
