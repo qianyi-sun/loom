@@ -92,3 +92,44 @@ def test_delegated_allocation_parser_requires_supported_exact_schema(tag: object
     payload["schema_version"] = tag
     with pytest.raises((ValidationError, ValueError)):
         module.parse_executable_epoch(json.dumps(payload))
+
+
+def test_typed_execution_seal_preserves_both_purposes_and_native_placement():
+    from tests.unit.test_capacity_build_membership import build_membership_input
+
+    module = import_module("loom_capacity_manager.membership_execution")
+    value = build_membership_input()
+    authority = execution_authority_fixture().model_copy(update={
+        "execution_manifest_sha256": canonical_executable_digest(value.preparation),
+    })
+    base = promote_shadow_epoch(allocate_shadow(value), authority, allocation_epoch=7)
+    sealed = module.bind_typed_executable_membership(base, value)
+    assert sealed.schema_version == 4
+    assert sealed.membership == value.membership
+    assert {member.purpose for member in sealed.membership.members} == {"personal-application", "personal-build-worker"}
+    assert sealed.configuration == base.configuration
+    assert sealed.execution == base.execution
+    assert sealed.allocations == base.allocations
+    assert sealed.input_digest == base.input_digest
+    assert module.parse_executable_epoch(sealed.model_dump_json()) == sealed
+    with pytest.raises(ValueError):
+        module.ExecutableEpochV3.model_validate_json(sealed.model_dump_json())
+
+
+@pytest.mark.parametrize("tamper", ("input", "manifest", "configuration"))
+def test_typed_execution_seal_rejects_substituted_promoted_input(tamper):
+    from tests.unit.test_capacity_build_membership import build_membership_input
+
+    module = import_module("loom_capacity_manager.membership_execution")
+    value = build_membership_input()
+    authority = execution_authority_fixture().model_copy(update={
+        "execution_manifest_sha256": canonical_executable_digest(value.preparation),
+    })
+    base = promote_shadow_epoch(allocate_shadow(value), authority, allocation_epoch=7)
+    changes = {
+        "input": {"input_digest": "f" * 64},
+        "manifest": {"execution": base.execution.model_copy(update={"execution_manifest_sha256": "f" * 64})},
+        "configuration": {"configuration": base.configuration.model_copy(update={"configuration_epoch": 2})},
+    }
+    with pytest.raises(ValueError):
+        module.bind_typed_executable_membership(base.model_copy(update=changes[tamper]), value)
