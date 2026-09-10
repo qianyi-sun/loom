@@ -116,6 +116,11 @@ async def test_runtime_checkpoint_maintenance_republishes_retirement_inventory(t
             assert journal.pending_checkpoint() is None
             assert len(tuple(tmp_path.glob("*.snapshot-*"))) == 1
         assert not manager.releases
+        # Retained snapshot bytes remain part of the capacity budget, but are
+        # not fresh journal growth that can justify another maintenance-only tick.
+        monkeypatch.setattr(module, "CHECKPOINT_TRIGGER_BYTES", journal.path.stat().st_size + 1)
+        assert journal._footprint() > module.CHECKPOINT_TRIGGER_BYTES
+        assert await module.maintain_runtime_journal(runtime) == "not-needed"
     finally:
         journal.close()
 
