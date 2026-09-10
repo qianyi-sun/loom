@@ -282,3 +282,156 @@ async def test_unversioned_publication_leaves_only_unreachable_recovery_intents(
             == 0
         )
     assert "Contents" not in minio_tls[3].list_objects_v2(Bucket=spec.bucket)
+
+
+async def test_versioned_local_producer_registers_authored_identity_and_reuses_images(
+    isolated_migration_postgres_url,
+    tmp_path,
+    minio_tls,
+):
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom.db.schema import Benchmark, Task, TaskImageMaterialization
+    from loom_cli.local_benchmark_publish import publish_local_benchmark
+    from tests.integration.test_local_benchmark_publish import _write_layout
+
+    root = tmp_path / "local-benchmark"
+    _write_layout(root)
+    task_dir = root / "tasks" / "alpha"
+    config = task_dir / "task.toml"
+    config.write_text(
+        config.read_text().replace(
+            'docker_image = "python:3.11-alpine"', 'cpu_arch = "any"\ndockerfile = "Dockerfile"'
+        )
+    )
+    (task_dir / "Dockerfile").write_text("FROM scratch\n")
+    bucket = "local-source-" + uuid4().hex
+    admin = minio_tls[3]
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    store = _store(minio_tls)
+    arguments = dict(
+        db_url=isolated_migration_postgres_url,
+        object_store=store,
+        bucket=bucket,
+        source_registration_mode="versioned-v1",
+    )
+    first = await publish_local_benchmark(root, **arguments)
+    assert first.inserted == 1 and first.uploaded_objects > 0
+    engine = create_async_engine(isolated_migration_postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            task = await session.get(Task, "team-evals/alpha")
+            benchmark = await session.get(Benchmark, "team-evals")
+            assert task.config["task"]["id"] == task.id
+            assert task.source_provenance["bundle_task_identity"]["bundle_task_id"] == "alpha"
+            assert task.source.startswith(benchmark.upstream_locator)
+            rows = tuple(
+                await session.scalars(
+                    select(TaskImageMaterialization).where(
+                        TaskImageMaterialization.task_id == task.id
+                    )
+                )
+            )
+            assert {row.cpu_arch for row in rows} == {"x86_64", "arm64"}
+            assert all(row.state == "queued" and row.task_source == task.source for row in rows)
+            identities = {row.id for row in rows}
+            registered_versions = await session.scalar(
+                text("SELECT count(*) FROM task_bundle_source_versions")
+            )
+            object_key = task.source.removeprefix(f"s3://{bucket}/") + "task.toml"
+        body = admin.get_object(Bucket=bucket, Key=object_key)["Body"]
+        try:
+            assert body.read() == config.read_bytes()
+        finally:
+            body.close()
+        repeated = await publish_local_benchmark(root, **arguments)
+        assert repeated.unchanged == 1 and repeated.uploaded_objects == 0
+        async with factory() as session:
+            assert set(await session.scalars(select(TaskImageMaterialization.id))) == identities
+            assert (
+                await session.scalar(text("SELECT count(*) FROM task_bundle_source_versions"))
+                == registered_versions
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("failure_boundary", ["upload", "catalog"])
+async def test_versioned_local_publication_failure_keeps_recovery_not_partial_catalog(
+    isolated_migration_postgres_url, tmp_path, minio_tls, monkeypatch, failure_boundary,
+):
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom.db.schema import Benchmark, Task, TaskImageMaterialization
+    from loom_cli import local_benchmark_source_publish as producer
+    from loom_cli.local_benchmark_publish import publish_local_benchmark
+    from tests.integration.test_local_benchmark_publish import _write_layout
+
+    root = tmp_path / "local-benchmark"
+    _write_layout(root)
+    bucket = "local-failure-" + uuid4().hex
+    task_dir = root / "tasks" / "alpha"
+    config = task_dir / "task.toml"
+    config.write_text(config.read_text().replace(
+        'docker_image = "python:3.11-alpine"', 'cpu_arch = "any"\ndockerfile = "Dockerfile"',
+    ))
+    (task_dir / "Dockerfile").write_text("FROM scratch\n")
+    admin = minio_tls[3]
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    store = _store(minio_tls)
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    put = store.put_object_with_metadata
+    observed = []
+
+    async def checked_put(**kwargs):
+        # The separate observer must see no catalog admission or locks while
+        # upload is in progress. A lost response still leaves exact versions.
+        async with sessions.begin() as session:
+            await session.execute(text("SET LOCAL lock_timeout='1s'"))
+            assert await session.scalar(select(Benchmark.id).with_for_update()) is None
+            assert await session.scalar(select(Task.id).with_for_update()) is None
+        receipt = await put(**kwargs)
+        observed.append(receipt)
+        if failure_boundary == "upload":
+            raise RuntimeError("lost upload response")
+        return receipt
+
+    publish = producer.publish_task_bundle_catalog
+
+    async def rejected_catalog(*args, **kwargs):
+        await publish(*args, **kwargs)
+        raise RuntimeError("catalog commit aborted")
+
+    monkeypatch.setattr(store, "put_object_with_metadata", checked_put)
+    if failure_boundary == "catalog":
+        monkeypatch.setattr(producer, "publish_task_bundle_catalog", rejected_catalog)
+    try:
+        with pytest.raises(RuntimeError, match=r"lost upload response|catalog commit aborted"):
+            await publish_local_benchmark(
+                root, db_url=isolated_migration_postgres_url, object_store=store,
+                bucket=bucket, source_registration_mode="versioned-v1",
+            )
+        assert observed
+        async with sessions() as session:
+            for model in (Benchmark, Task, TaskImageMaterialization):
+                assert await session.scalar(select(model.id)) is None
+            assert await session.scalar(text("SELECT count(*) FROM task_bundle_sources")) == 1
+            assert await session.scalar(
+                text("SELECT count(*) FROM task_bundle_source_references"),
+            ) == 0
+            assert await session.scalar(
+                text("SELECT state FROM task_bundle_source_incarnations"),
+            ) == "uploading"
+        for receipt in observed:
+            key = receipt.uri.removeprefix(f"s3://{bucket}/")
+            assert admin.head_object(
+                Bucket=bucket, Key=key, VersionId=receipt.version_id,
+            )["ContentLength"] >= 0
+    finally:
+        await engine.dispose()

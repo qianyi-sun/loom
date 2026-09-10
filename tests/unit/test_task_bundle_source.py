@@ -33,3 +33,19 @@ def test_source_reader_caches_only_immutable_inventory_not_authored_bytes(tmp_pa
     (task_dir / "task.toml").write_text("drifted")
     with pytest.raises(ValueError):
         spec.read_object(task_dir, spec.data_prefix + "task.toml")
+
+
+def test_source_namespace_keeps_benchmark_membership_scoped(tmp_path):
+    from loom.task_bundle_source import task_bundle_catalog_prefix
+
+    root = _bundle(tmp_path)
+    specs = [
+        TaskBundleSourceSpecV1.from_registration(
+            prepare_task_bundle_registration(root, task_id=task_id), bucket="task-sources"
+        )
+        for task_id in ("first/a", "first/b", "second/a")
+    ]
+    prefix = task_bundle_catalog_prefix("first")
+    assert all(spec.data_prefix.startswith(prefix) for spec in specs[:2])
+    assert not specs[2].data_prefix.startswith(prefix)
+    assert len({spec.source_uri for spec in specs}) == 3
