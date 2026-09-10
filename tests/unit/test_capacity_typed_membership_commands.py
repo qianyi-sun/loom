@@ -56,6 +56,18 @@ def test_build_command_derives_its_service_runtime_and_owner_configuration():
         PersonalApplicationMembershipMutationV1.model_validate_json(request.model_dump_json())
 
 
+def test_build_values_are_shared_leaf_contracts_with_unchanged_wire_hashes():
+    leaf = import_module("loom_capacity_manager.build_value_contracts")
+    preparation_module = import_module("loom_capacity_manager.build_membership_contracts")
+    module, value, request = typed_build_mutation()
+    assert leaf.PersonalBuildProjectionV1 is module.PersonalBuildProjectionV1
+    assert leaf.PersonalBuildMemberV1 is preparation_module.PersonalBuildMemberV1
+    assert leaf.PersonalBuildTemplateV1 is preparation_module.PersonalBuildTemplateV1
+    assert canonical_digest(request.command.projection) == "de1c8426c42d032bfcb49809b5bdbcf00e4463bb91bb38f93a52a7fa49ef5ddc"
+    assert canonical_digest(value.membership.members[-1]) == "133b6d5f5daa5619560c5901cc762915d2573bb9771479a40cd985141ffe2770"
+    assert canonical_digest(value.preparation.personal_builds) == "a6b2a8821fc2517d7c93fcb0cfffb76a147d71def5022d2a9c35be9a5354abb6"
+
+
 @pytest.mark.parametrize("field,value", (
     ("subject_id", str(UUID(int=990))), ("account_id", "independent-build-budget"), ("environment_name", "bob"),
     ("candidate_sha256", "a" * 64), ("candidate_publication_sha256", "b" * 64),
