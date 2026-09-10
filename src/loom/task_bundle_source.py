@@ -29,6 +29,17 @@ from loom.task_image_bundle_manifest import (
 from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 
 
+def task_bundle_catalog_prefix(catalog_id: str) -> str:
+    """Group a catalog's sources without making the group an access authority.
+
+    Benchmark IDs contain no slash; qualified task IDs begin with that ID.
+    Hashing both group and full task identity keeps arbitrary authored names out
+    of object keys. Exact registered objects, not this prefix, authorize access.
+    """
+    group = _task_id(catalog_id).split("/", 1)[0]
+    return f"loom-task-bundles/v1/{hashlib.sha256(group.encode()).hexdigest()}/"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskBundleObjectSpec:
     object_key: str
@@ -88,7 +99,7 @@ class TaskBundleSourceSpecV1(BaseModel):
     @property
     def data_prefix(self) -> str:
         task_key = hashlib.sha256(self.catalog_task_id.encode()).hexdigest()
-        return f"loom-task-bundles/v1/{task_key}/{self.manifest.digest}/"
+        return f"{task_bundle_catalog_prefix(self.catalog_task_id)}{task_key}/{self.manifest.digest}/"
 
     @property
     def source_uri(self) -> str:
@@ -100,8 +111,8 @@ class TaskBundleSourceSpecV1(BaseModel):
 
     @property
     def service_manifest_key(self) -> str:
-        task_key = hashlib.sha256(self.catalog_task_id.encode()).hexdigest()
-        return f"loom-task-bundle-inputs/v1/{task_key}/{self.manifest.digest}.json"
+        relative = self.data_prefix.removeprefix("loom-task-bundles/v1/").rstrip("/")
+        return f"loom-task-bundle-inputs/v1/{relative}.json"
 
     @property
     def service_manifest(self) -> ServiceExecutionInputManifestV1:

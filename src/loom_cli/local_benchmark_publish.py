@@ -18,8 +18,9 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from loom.config.benchmarks import LocalBenchmarkEntry
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.driver.task_image import (
@@ -73,9 +74,12 @@ async def publish_local_benchmark(
     source_subdir: str | None = None,
     imported_by: str | None = None,
     compat_flatten_environment: bool = False,
+    source_registration_mode: str = "legacy",
 ) -> LocalBenchmarkPublishStats:
     """Validate, upload, and register a user-owned local benchmark folder."""
 
+    if source_registration_mode not in {"legacy", "versioned-v1"}:
+        raise ValueError("unsupported task source registration mode")
     result = validate_local_benchmark(
         root,
         benchmark_id=benchmark_id,
@@ -84,6 +88,17 @@ async def publish_local_benchmark(
         license_spdx=license_spdx,
         source_subdir=source_subdir,
     )
+    if source_registration_mode == "versioned-v1":
+        from loom_cli.local_benchmark_source_publish import publish_versioned_local_benchmark
+
+        return await publish_versioned_local_benchmark(
+            result,
+            db_url=db_url,
+            object_store=object_store,
+            bucket=bucket,
+            imported_by=imported_by,
+            compat_flatten_environment=compat_flatten_environment,
+        )
     entry = result.entry
     await object_store.ensure_bucket(bucket)
 
@@ -94,34 +109,8 @@ async def publish_local_benchmark(
     source_prefix = f"s3://{bucket}/{entry.id}/"
     try:
         async with session_factory() as session:
-            await session.execute(
-                pg_insert(Benchmark)
-                .values(
-                    id=entry.id,
-                    display_name=entry.display_name,
-                    upstream_kind=S3_FOLDER_KIND,
-                    upstream_locator=source_prefix,
-                    upstream_revision="",
-                    license_spdx=entry.license_spdx,
-                    license_url="",
-                    series=entry.series,
-                    splits=[],
-                    imported_by=imported_by or PUBLISH_IMPORTED_BY,
-                )
-                .on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "display_name": entry.display_name,
-                        "upstream_kind": S3_FOLDER_KIND,
-                        "upstream_locator": source_prefix,
-                        "upstream_revision": "",
-                        "license_spdx": entry.license_spdx,
-                        "license_url": "",
-                        "series": entry.series,
-                        "splits": [],
-                        "imported_by": imported_by or PUBLISH_IMPORTED_BY,
-                    },
-                ),
+            await _upsert_benchmark(
+                session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
             )
 
             for task_toml in result.task_tomls:
@@ -244,6 +233,31 @@ async def publish_local_benchmark(
         compat_flattened_files=compat_flattened_files,
         bucket=bucket,
         source_prefix=source_prefix,
+    )
+
+
+async def _upsert_benchmark(
+    session: AsyncSession,
+    *,
+    entry: LocalBenchmarkEntry,
+    source_prefix: str,
+    imported_by: str | None,
+) -> None:
+    values = dict(
+        display_name=entry.display_name,
+        upstream_kind=S3_FOLDER_KIND,
+        upstream_locator=source_prefix,
+        upstream_revision="",
+        license_spdx=entry.license_spdx,
+        license_url="",
+        series=entry.series,
+        splits=[],
+        imported_by=imported_by or PUBLISH_IMPORTED_BY,
+    )
+    await session.execute(
+        pg_insert(Benchmark).values(id=entry.id, **values).on_conflict_do_update(
+            index_elements=["id"], set_=values,
+        ),
     )
 
 

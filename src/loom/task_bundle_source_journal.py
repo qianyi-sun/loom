@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import rfc8785
@@ -80,7 +81,19 @@ async def _require_transaction(session: AsyncSession) -> None:
         raise ValueError("source journal requires an explicit READ COMMITTED transaction")
 
 
+async def require_task_bundle_transaction(session: AsyncSession) -> None:
+    """Reject unsafe ownership before any caller state can be auto-flushed.
+
+    Text-only probes do not flush pending ORM objects. Separate assign/check
+    statements distinguish a retained transaction from per-statement AUTOCOMMIT.
+    Never silently change the caller's isolation or discard its pending edits.
+    """
+    await session.execute(text("SELECT pg_catalog.pg_current_xact_id()"))
+    await _require_transaction(session)
+
+
 async def _source(session: AsyncSession, source_id: str) -> TaskBundleSource:
+    await require_task_bundle_transaction(session)
     await session.flush()
     source = await session.scalar(
         select(TaskBundleSource)
@@ -99,6 +112,7 @@ async def _source(session: AsyncSession, source_id: str) -> TaskBundleSource:
 async def _incarnation(
     session: AsyncSession, incarnation_id: UUID
 ) -> tuple[TaskBundleSource, TaskBundleSourceIncarnation]:
+    await require_task_bundle_transaction(session)
     source_id = await session.scalar(
         select(TaskBundleSourceIncarnation.source_id).where(
             TaskBundleSourceIncarnation.id == incarnation_id
@@ -131,6 +145,7 @@ def _intent(row: TaskBundleSourceWrite) -> TaskBundleObjectIntentV1:
 async def _write(
     session: AsyncSession, intent_id: UUID
 ) -> tuple[TaskBundleSourceIncarnation, TaskBundleSourceWrite]:
+    await require_task_bundle_transaction(session)
     incarnation_id = await session.scalar(
         select(TaskBundleSourceWrite.incarnation_id).where(TaskBundleSourceWrite.id == intent_id)
     )
@@ -190,10 +205,7 @@ async def begin_task_bundle_upload(
         raise ValueError("source upload lifetime is invalid")
     # Parse again at the persistence boundary, preserving immutable config bytes.
     spec = TaskBundleSourceSpecV1.model_validate_json(spec.model_dump_json())
-    # Establish and check a real transaction before the first authority INSERT.
-    # Two statements intentionally distinguish AUTOCOMMIT from retained ownership.
-    await session.execute(text("SELECT pg_catalog.pg_current_xact_id()"))
-    await _require_transaction(session)
+    await require_task_bundle_transaction(session)
     await session.execute(
         pg_insert(TaskBundleSource)
         .values(
@@ -334,6 +346,43 @@ async def release_task_bundle_reference(
             TaskBundleSourceReference.owner_id == owner_id,
         )
     )
+
+
+async def admit_task_bundle_source(
+    session: AsyncSession,
+    *,
+    task_id: str,
+    task_checksum: str,
+    task_config: Mapping[str, Any],
+    task_source: str | None,
+    task_source_provenance: Mapping[str, Any],
+    reference_kind: ReferenceKind,
+    owner_id: str,
+) -> TaskBundleSourceSpecV1:
+    """Bind a caller's frozen task facts to available, retained source authority.
+
+    The caller holds its catalog/materialization/trial lock. A digest-shaped
+    provenance value alone is not registration, nor permission to revive input.
+    Additional upstream provenance is preserved but cannot replace source facts.
+    """
+    if not task_source:
+        raise ValueError("registered task bundle source is required")
+    source = await _source(session, hashlib.sha256(task_source.encode()).hexdigest())
+    spec = TaskBundleSourceSpecV1.model_validate_json(json.dumps(source.spec_json))
+    if (
+        source.id != spec.id
+        or source.source_uri != spec.source_uri
+        or task_source != spec.source_uri
+        or task_id != spec.catalog_task_id
+        or task_checksum.removeprefix("sha256:") != spec.manifest.task_checksum
+        or dict(task_config) != spec.task_config
+        or any(task_source_provenance.get(key) != value for key, value in spec.provenance.items())
+    ):
+        raise ValueError("registered task bundle source conflicts with the frozen snapshot")
+    await attach_task_bundle_reference(
+        session, source_id=spec.id, reference_kind=reference_kind, owner_id=owner_id
+    )
+    return spec
 
 
 async def publish_task_bundle_source(

@@ -1159,6 +1159,11 @@ captured manifest; data and auxiliary service-input manifest locations are stabl
 across generation replacement and upload retries, outside taskset generation
 roots. The immutable source specification binds normalized config and provenance.
 Physical upload IDs and object versions never enter materialization identity.
+Data prefixes group by the SHA-256 of the catalog ID's first component, then
+the full task-ID hash and manifest digest. Benchmark IDs cannot contain a slash,
+so this yields a benchmark-scoped upstream locator without conflating task
+identities. Auxiliary input manifests use the same grouping in their separate
+namespace. Group membership is organizational, never read/delete authority.
 
 The logical source row is the common publication/reference/retirement lock.
 Callers acquire their catalog/trial/materialization locks first, then logical
@@ -1166,8 +1171,10 @@ sources in sorted order. Source retirement never acquires those caller locks in
 reverse. All journal transitions use caller-owned database transactions with no
 storage I/O. Each requires an explicit READ COMMITTED transaction: an unchanged
 logical-source lock cannot refresh a fixed snapshot of separate incarnation and
-reference rows. A post-lock assigned-transaction-ID check also rejects AUTOCOMMIT;
-new upload preparation checks ownership before inserting any authority.
+reference rows. Separate transaction-ID assign/check statements reject AUTOCOMMIT
+before ORM queries can flush caller-owned writes. Catalog publication and strong
+image staging perform this preflight before their first flush or INSERT as well;
+rejection must not leave a Task or queued image committed independently.
 Publication needs a complete set of issued exact-version receipts
 and attaches its reference atomically; competing complete uploads pin the first
 available incarnation and retire only the losing upload. Retired incarnations
@@ -1206,9 +1213,41 @@ publication rollback, competing publications, reference/retirement lock contenti
 unversioned rejection, lost upload receipts, interrupted deletion, late writes,
 new identical publications, and shared-manifest ownership. Migration tests cover
 empty roundtrip, ORM parity and refusal to discard populated recovery authority.
-Producer integration, materialization/trial admission and release, both taskset
-GC paths, scheduled reconciliation, and V2 claim switching remain required.
-These journal APIs do not enable registration or native builder defaults.
+Image ensure/revival and administrative retry now validate their complete frozen
+snapshot against a registered available source and attach its materialization
+reference while holding the image lock before the source lock. Merely supplying
+a manifest-shaped digest cannot enqueue or revive a strong-source image. Exact
+republication can restore the same logical source and image identities; retirement
+of an old incarnation never does. These checks preserve the legacy path.
+
+Bulk catalog publication locks persisted Task rows in ID order, stages all image
+rows before taking any source lock, then locks the union of old/new sources in
+source-ID order. It publishes prepared uploads, validates exact snapshots, and
+pins the catalog and images in the caller's transaction. Replacing a catalog
+entry releases only its previous catalog reference, never historical image pins.
+The helper does no storage I/O and never commits. Callers must roll back their
+whole transaction on failure. Administrative retry refreshes locked ORM state
+before deciding eligibility, and refuses pending image edits rather than silently
+overwriting them; cached failed/ready rows cannot requeue a concurrently claimed
+or retiring materialization.
+
+The local benchmark publisher has an explicitly selected `versioned-v1` Python
+composition path. It stages compatibility copies without editing authored files,
+uses verified registration with the existing architecture fallback policy, and
+prepares all uploads before taking benchmark/catalog locks. The final transaction
+publishes benchmark, Task, source and native-image admission together. Repeated
+publication reuses available sources without PUTs. Preparation has a bounded
+24-hour deadline, not a renewable upload lease; expiry rejects final publication.
+Lost upload responses and aborted catalog transactions retain recovery records and
+exact object versions rather than attempting prefix cleanup. Tests exercise this
+real producer against PostgreSQL and TLS MinIO, including authored/catalog IDs,
+two-architecture enqueue, reuse, upload failure and publication rollback.
+
+The local CLI and Python default remain legacy. Adapter and taskset producer
+integration, builder/trial admission and reference release, both taskset GC paths,
+scheduled reconciliation, and V2 claim switching remain required. Taskset quota
+accounting must include retained historical source objects outside generation
+roots before that producer switches. These APIs do not activate native builders.
 
 ## Completion and subsequent activation
 

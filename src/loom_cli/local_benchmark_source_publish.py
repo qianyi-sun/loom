@@ -1,0 +1,133 @@
+"""Opt-in local producer for journaled, versioned task sources.
+
+Preparation owns short journal transactions; the final transaction alone owns
+benchmark, task, source and image admission. No storage call holds catalog locks.
+The CLI/default remains legacy until the other producers and retention converge.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from loom.db.schema import Task
+from loom.task_bundle_catalog import publish_task_bundle_catalog
+from loom.task_bundle_compat import (
+    CompatibilitySeverity,
+    collect_task_dir_compatibility_issues,
+    format_compatibility_issues,
+)
+from loom.task_bundle_registration import prepare_task_bundle_registration
+from loom.task_bundle_source import TaskBundleSourceSpecV1, task_bundle_catalog_prefix
+from loom.task_bundle_source_journal import TaskBundleUpload
+from loom.task_bundle_source_publisher import TaskBundleSourcePublisher
+from loom.trajectory.storage import ObjectStore
+from loom_benchmark_tool.db_url import normalize_db_url
+from loom_cli.local_benchmark_publish import (
+    LocalBenchmarkPublishStats,
+    _flatten_environment_subdir,
+    _upsert_benchmark,
+)
+from loom_cli.local_benchmark_validate import (
+    LocalBenchmarkValidationError,
+    LocalBenchmarkValidationResult,
+)
+
+
+async def publish_versioned_local_benchmark(
+    result: LocalBenchmarkValidationResult,
+    *,
+    db_url: str,
+    object_store: ObjectStore,
+    bucket: str,
+    imported_by: str | None,
+    compat_flatten_environment: bool,
+) -> LocalBenchmarkPublishStats:
+    entry = result.entry
+    source_prefix = f"s3://{bucket}/{task_bundle_catalog_prefix(entry.id)}"
+    engine = create_async_engine(normalize_db_url(db_url), isolation_level="READ COMMITTED")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    publisher = TaskBundleSourcePublisher(
+        sessions, object_store, upload_lifetime=timedelta(hours=24),
+    )
+    prepared: dict[str, tuple[TaskBundleSourceSpecV1, TaskBundleUpload]] = {}
+    inserted = updated = unchanged = uploaded_objects = compat_flattened_files = 0
+    try:
+        await object_store.ensure_bucket(bucket)
+        for task_toml in result.task_tomls:
+            relative = task_toml.parent.relative_to(result.task_root)
+            task_id = entry.id if relative == Path(".") else f"{entry.id}/{relative.as_posix()}"
+            with tempfile.TemporaryDirectory(prefix="loom-source-stage-") as stage_root:
+                staged = Path(stage_root) / "bundle"
+                shutil.copytree(task_toml.parent, staged, symlinks=False)
+                if compat_flatten_environment:
+                    compat_flattened_files += len(_flatten_environment_subdir(staged))
+                issues = [
+                    issue for issue in collect_task_dir_compatibility_issues(staged)
+                    if issue.severity == CompatibilitySeverity.ERROR
+                ]
+                if issues:
+                    raise LocalBenchmarkValidationError(
+                        f"task bundle compatibility preflight failed for {task_id}:\n"
+                        + format_compatibility_issues(issues),
+                    )
+                registration = prepare_task_bundle_registration(
+                    staged, task_id=task_id, promote_runtime_architecture=True,
+                )
+                spec = TaskBundleSourceSpecV1.from_registration(registration, bucket=bucket)
+                ticket = await publisher.prepare(spec, staged)
+                prepared[task_id] = (spec, ticket)
+                uploaded_objects += 0 if ticket.available else len(ticket.intents)
+
+        # Serialize a whole benchmark before any task/image/source lock. Upload
+        # failures above leave only recovery records, never a partial catalog.
+        async with sessions.begin() as session:
+            await _upsert_benchmark(
+                session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
+            )
+            tasks = []
+            for task_id, (spec, _) in sorted(prepared.items()):
+                existing = await session.scalar(
+                    select(Task).where(Task.id == task_id).with_for_update(),
+                )
+                values = dict(
+                    checksum=spec.manifest.task_checksum,
+                    config=spec.task_config,
+                    source=spec.source_uri,
+                    source_provenance=spec.provenance,
+                    license=entry.license_spdx,
+                    benchmark_id=entry.id,
+                )
+                if existing is None:
+                    inserted += 1
+                elif any(getattr(existing, key) != value for key, value in values.items()):
+                    updated += 1
+                else:
+                    unchanged += 1
+                task = (
+                    await session.execute(
+                        pg_insert(Task).values(id=task_id, **values).on_conflict_do_update(
+                            index_elements=["id"], set_=values,
+                        ).returning(Task).execution_options(populate_existing=True),
+                    )
+                ).scalar_one()
+                tasks.append(task)
+            await publish_task_bundle_catalog(
+                session, tasks=tasks,
+                uploads={task_id: ticket for task_id, (_, ticket) in prepared.items()},
+                now=datetime.now(UTC),
+            )
+    finally:
+        await engine.dispose()
+    return LocalBenchmarkPublishStats(
+        benchmark_id=entry.id, task_count=result.task_count, inserted=inserted,
+        updated=updated, unchanged=unchanged, uploaded_objects=uploaded_objects,
+        compat_flattened_files=compat_flattened_files, bucket=bucket,
+        source_prefix=source_prefix,
+    )
