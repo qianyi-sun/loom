@@ -150,6 +150,8 @@ existing cleanup path without treating an active create as deleted.
 Legacy worker heartbeat and stale-claim requeues exclude Trials whose current
 attempt belongs to a service-execution lease, including revoked leases awaiting
 cleanup. The service scheduler never selects a cancel-requested queued Trial.
+Retry-exhaustion sweeps leave cancellation-requested records to cancellation
+authority, while ordinary exhausted retries still become failed.
 Ordinary cancellation replay can settle historical queued cancellation records
 without creating work or changing a deleted lease; the original request time is
 preserved. If provider cleanup is still pending, its admission, provisioning and
