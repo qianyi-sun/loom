@@ -40,6 +40,26 @@ from loom_capacity_manager.grant_contracts import (
 )
 
 
+@pytest.mark.parametrize("unsafe_response", (False, True))
+async def test_cleanup_only_work_query_rejects_increase_from_older_manager(unsafe_response):
+    from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
+
+    binding = launch_context_fixture().binding
+
+    def handler(request):
+        assert request.url.params.get("cleanup_only") == "true"
+        return httpx.Response(200, json=binding.model_dump(mode="json") if unsafe_response else None)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ExecutableCapacityExecutorClient(_executable_registration(),
+            manager_origin="https://capacity.example.test", bearer_token="executor-secret", http_client=http)
+        if unsafe_response:
+            with pytest.raises(ExecutorTransportError, match="cleanup-only"):
+                await client.next_executable_work(0, cleanup_only=True)
+        else:
+            assert await client.next_executable_work(0, cleanup_only=True) is None
+
+
 def _binding() -> DryRunExecutorBinding:
     return DryRunExecutorBinding(
         authority_incarnation=UUID(int=10),
