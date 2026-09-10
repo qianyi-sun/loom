@@ -18,6 +18,7 @@ import docker
 import pytest
 from sqlalchemy import create_engine, insert, text
 from sqlalchemy.engine import make_url
+from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 from testcontainers.postgres import PostgresContainer
 
@@ -45,7 +46,10 @@ def archive(files):
 
 def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2]
-    with PostgresContainer("postgres:16") as source, MinioContainer() as storage:
+    with (
+        PostgresContainer("postgres:16") as source,
+        MinioContainer().waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as storage,
+    ):
         url = make_url(source.get_connection_url()).set(drivername="postgresql+psycopg")
         monkeypatch.setenv("LOOM_DB_URL", url.render_as_string(hide_password=False))
         subprocess.run(

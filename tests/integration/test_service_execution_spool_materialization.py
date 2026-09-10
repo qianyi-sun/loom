@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
 from loom.db.schema import Artifact, ServiceExecutionLease, Task, Trial, TrialEvent
@@ -46,8 +47,12 @@ from tests.integration.test_service_execution_leases import (
 def independent_minio_endpoints() -> Iterator[tuple[MinioContainer, MinioContainer]]:
     label = {"loom.test": "service-execution-spool-materialization"}
     with (
-        MinioContainer().with_kwargs(labels=label) as spool,
-        MinioContainer().with_kwargs(labels=label) as canonical,
+        MinioContainer()
+        .waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster"))
+        .with_kwargs(labels=label) as spool,
+        MinioContainer()
+        .waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster"))
+        .with_kwargs(labels=label) as canonical,
     ):
         assert spool.get_config()["endpoint"] != canonical.get_config()["endpoint"]
         spool.get_client().make_bucket("artifacts")
