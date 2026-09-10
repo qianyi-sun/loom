@@ -1015,8 +1015,19 @@ pool policy root. The schema-3 proof commits the selected profile and member
 event; legacy rendering and proof verification do not accept this context.
 Both renderers share scheduler-field translation without sharing authorization
 rules. This renderer neither obtains manager authority nor enables submission:
-the caller still needs authenticated manager transport, current admission,
-purpose-aware journal/inventory handling and the held-submit/bind/release path.
+the caller still needs current admission, purpose-aware journal/inventory
+handling and the held-submit/bind/release path.
+
+The executor-authenticated `GET /v3/executors/{pool_id}/intents/{intent_id}/launch-subject`
+returns canonical full configuration, acknowledgement and provenance for the
+exact persisted intent. The manager locks current authority, validates the
+executor lease and management policy, and requires an unexpired, unconsumed
+permit and a currently eligible subject. Reading facts neither consumes that
+permit nor advances command high-water. The client checks its registration and
+the exact returned intent. Serialization, parsing and streaming share an 8 MiB
+launch-facts limit; other receipt limits remain unchanged. Runtime submission
+still requires the purpose-preserving journal and inventory consumers; this
+read endpoint does not open typed activation or authorize scheduler submission.
 
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.

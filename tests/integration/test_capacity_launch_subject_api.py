@@ -5,12 +5,16 @@ from unittest.mock import AsyncMock
 from loom_capacity_manager.launch_subject_contracts import canonical_launch_subject_bytes
 from tests.integration.test_capacity_manager_api import (
     _v2_executor_headers,
+)
+from tests.integration.test_capacity_manager_api import (
     execution_preparation_api_context as execution_preparation_api_context,
 )
 from tests.unit.test_capacity_launch_subject_contract import response
 
 
-def test_launch_subject_route_requires_pool_actor_and_returns_canonical_facts(execution_preparation_api_context, monkeypatch):
+def test_launch_subject_route_requires_pool_actor_and_returns_canonical_facts(
+    execution_preparation_api_context, monkeypatch
+):
     client, app, *_ = execution_preparation_api_context
     value = response()
     resolve = AsyncMock(return_value=value)

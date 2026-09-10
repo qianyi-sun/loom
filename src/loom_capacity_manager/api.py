@@ -105,6 +105,7 @@ from loom_capacity_manager.grant_store import (
     StaleCommandError,
     StaleExecutorError,
 )
+from loom_capacity_manager.launch_subject_contracts import canonical_launch_subject_bytes
 from loom_capacity_manager.membership_auth import authenticate_personal_subject_agent
 from loom_capacity_manager.membership_contracts import (
     ExecutionPreparationV3,
@@ -1589,6 +1590,22 @@ def create_app(
                 raise HTTPException(status_code=409, detail="execution context not available")
             public_payload = result.model_dump(include=set(ExecutionContextV2.model_fields))
             return jsonable_encoder(ExecutionContextV2.model_validate(public_payload))
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v3/executors/{pool_id}/intents/{intent_id}/launch-subject")
+    async def executable_launch_subject(
+        pool_id: str, intent_id: UUID, request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Response:
+        executor = executor_binding(actor, pool_id=pool_id)
+        session_factory, executions = execution_runtime(request)
+        _sessions, management, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.launch_subject(session, executor,
+                    intent_id=intent_id, management=management)
+            return Response(content=canonical_launch_subject_bytes(result), media_type="application/json")
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

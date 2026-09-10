@@ -11,9 +11,12 @@ from tests.unit.test_capacity_executor_typed_launch_renderer import typed_contex
 def response():
     module = import_module("loom_capacity_manager.launch_subject_contracts")
     context = typed_context()
-    return module.ExecutableLaunchSubjectV3(binding=context.binding,
-        configuration=context.subject.configuration, acknowledgement=context.subject.acknowledgement,
-        authority=context.subject.authority)
+    return module.ExecutableLaunchSubjectV3(
+        binding=context.binding,
+        configuration=context.subject.configuration,
+        acknowledgement=context.subject.acknowledgement,
+        authority=context.subject.authority,
+    )
 
 
 def test_launch_subject_round_trip_preserves_full_facts():
@@ -24,7 +27,10 @@ def test_launch_subject_round_trip_preserves_full_facts():
     assert value.authority.purpose == "personal-build-worker"
 
 
-@pytest.mark.parametrize("field", ("candidate", "account", "configuration", "acknowledgement", "profile", "nodes", "schema"))
+@pytest.mark.parametrize(
+    "field",
+    ("candidate", "account", "configuration", "acknowledgement", "profile", "nodes", "schema"),
+)
 def test_launch_subject_rejects_mismatched_or_noncanonical_facts(field):
     module = import_module("loom_capacity_manager.launch_subject_contracts")
     value = response().model_dump(mode="json")

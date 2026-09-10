@@ -52,6 +52,11 @@ from loom_capacity_manager.grant_contracts import (
     DryRunReservationAcceptanceV1,
     canonical_grant_digest,
 )
+from loom_capacity_manager.launch_subject_contracts import (
+    MAX_LAUNCH_SUBJECT_BYTES,
+    ExecutableLaunchSubjectV3,
+    parse_launch_subject,
+)
 
 _MAX_CREDENTIAL_BYTES = MAX_BEARER_TOKEN_BYTES
 _MAX_RECEIPT_BYTES = 64 * 1024
@@ -306,6 +311,7 @@ async def _stream_response_bounded(
     headers: dict[str, str],
     content: bytes | None = None,
     body_label: str,
+    max_bytes: int = _MAX_RECEIPT_BYTES,
 ) -> tuple[int, bytes]:
     try:
         async with http_client.stream(
@@ -320,7 +326,7 @@ async def _stream_response_bounded(
             observed = 0
             async for chunk in response.aiter_bytes():
                 observed += len(chunk)
-                if observed > _MAX_RECEIPT_BYTES:
+                if observed > max_bytes:
                     raise ExecutorTransportError(
                         f"capacity manager {body_label} exceeds its byte bound"
                     )
@@ -767,6 +773,25 @@ class ExecutableCapacityExecutorClient:
         ):
             raise ExecutorTransportError("capacity manager heartbeat receipt changed")
         return receipt
+
+    async def launch_subject(self, binding: ExecutableIntentBindingV2) -> ExecutableLaunchSubjectV3:
+        """Fetch exact current manager facts; this does not consume a permit."""
+        self._assert_contract_binding(binding)
+        status_code, content = await _stream_response_bounded(self._http, "GET",
+            f"{self._manager_origin}/v3/executors/{self.registration.pool_id}/intents/{binding.intent_id}/launch-subject",
+            headers={"Authorization": f"Bearer {self._bearer_token}"}, body_label="launch subject",
+            max_bytes=MAX_LAUNCH_SUBJECT_BYTES)
+        if 400 <= status_code < 500:
+            raise ExecutorRejectedError(f"capacity manager rejected launch subject with status {status_code}")
+        if status_code != 200:
+            raise ExecutorTransportError(f"capacity manager launch subject failed with status {status_code}")
+        try:
+            value = parse_launch_subject(content)
+        except ValueError as exc:
+            raise ExecutorTransportError("capacity manager launch subject is invalid") from exc
+        if value.binding != binding:
+            raise ExecutorTransportError("capacity manager launch subject intent changed")
+        return value
 
     async def next_executable_work(
         self,

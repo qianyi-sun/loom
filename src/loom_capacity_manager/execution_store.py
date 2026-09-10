@@ -64,6 +64,10 @@ from loom_capacity_manager.executable_contracts import (
     canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
+from loom_capacity_manager.launch_subject_contracts import (
+    ExecutableLaunchSubjectV3,
+    canonical_launch_subject_bytes,
+)
 from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
 from loom_capacity_manager.membership_execution import parse_executable_epoch
 from loom_capacity_manager.membership_execution_store import (
@@ -71,6 +75,7 @@ from loom_capacity_manager.membership_execution_store import (
     resolve_allocation_reporter,
     resolve_allocation_subject,
 )
+from loom_capacity_manager.membership_launch_authority import resolve_allocation_launch_subject
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAllocation,
@@ -958,6 +963,47 @@ class CapacityExecutionStore:
             ):
                 raise ExecutionConflictError("stored terminal inventory evidence binding changed")
             return evidence
+
+    async def launch_subject(
+        self, session: AsyncSession, executor: PreparedExecutorBindingV2, *,
+        intent_id: UUID, management: CapacityManagementStore,
+    ) -> ExecutableLaunchSubjectV3:
+        """Read current facts only for the exact live permitted executor.
+
+        This neither consumes the permit nor changes command high-water. The
+        executor must still consume the exact permit before scheduler submission.
+        """
+        async with _write_transaction(session):
+            authority = await self._lock_authority(session)
+            epoch = await self._lock_current_epoch(session, authority)
+            row = await self._locked_intent(session, intent_id)
+            binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
+            if (
+                binding.intent_id != intent_id or binding.pool_id != executor.pool_id
+                or binding.pool_generation != executor.pool_generation
+                or binding.executor_id != executor.executor_id or binding.executor_incarnation != executor.executor_incarnation
+            ):
+                raise ExecutionConflictError("launch subject executor binding changed")
+            context = await self._locked_execution_context(session, binding.execution, executor)
+            await management.execution_authority(session)
+            now = await _database_now(session)
+            if row.state != "permitted" or row.permit_payload is None or row.permit_expires_at is None or row.permit_expires_at <= now:
+                raise ExecutionConflictError("launch subject requires an unexpired permit")
+            permit = ExecutableLaunchPermitV2.model_validate_json(json.dumps(row.permit_payload))
+            if (
+                permit.binding != binding or permit.permit_id != row.permit_id
+                or permit.permit_epoch != row.permit_epoch or permit.expires_at != row.permit_expires_at
+                or canonical_executable_digest(permit) != row.permit_digest
+            ):
+                raise ExecutionConflictError("launch subject permit evidence changed")
+            await self._assert_increase_eligible(session, context, current=row)
+            allocation = await self._allocation_for_binding(session, binding)
+            resolved = await resolve_allocation_launch_subject(session, epoch, allocation,
+                subject_id=binding.subject_id, require_current=True)
+            result = ExecutableLaunchSubjectV3(binding=binding, configuration=resolved.configuration,
+                acknowledgement=resolved.acknowledgement, authority=resolved.authority)
+            canonical_launch_subject_bytes(result)
+            return result
 
     async def next_pool_work(
         self,
