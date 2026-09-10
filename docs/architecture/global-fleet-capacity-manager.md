@@ -171,6 +171,15 @@ matching activation artifact and manager execution context. The control-plane
 CLI still exposes no apply, start, or ceiling-changing command; activation,
 drain, and retirement are least-scope protected HTTP transitions.
 
+The installed prerequisite builder prepares the initial #906 cutover with a
+one-slot global execution ceiling. It retains the immutable physical pool
+ceilings and configured finite launch-rate envelope; physical capacity is not
+permission to activate every slot. The manager requires preparation to match
+the owner policy and activation to match that exact prepared ceiling. Later
+expansion therefore requires a separately reviewed execution epoch, not a
+larger activation request against the initial preparation. Preparation remains
+non-launching at an effective ceiling of zero until all activation gates pass.
+
 ## Controller-local Slurm inventory and active execution
 
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can

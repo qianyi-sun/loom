@@ -1365,20 +1365,10 @@ def _preparation_request(
     *,
     artifact: ProtectedExecutionPrerequisiteArtifact,
 ) -> ExecutionPreparationV2:
-    policy = artifact.execution_policy
-    request = ExecutionPreparationV2(
+    request = artifact.preparation_request(
         authority_incarnation=status.authority_incarnation,
         expected_writer_epoch=status.writer_epoch,
         configuration_epoch=status.configuration_epoch,
-        fleet_generation=artifact.desired_fleet_generation,
-        fleet_digest=artifact.desired_fleet_sha256,
-        trusted_fleet_release_sha256=policy.trusted_fleet_release_sha256,
-        requested_ceiling=policy.executable_new_capacity_ceiling,
-        requested_rate_per_minute=policy.executable_new_capacity_rate_per_minute,
-        executors=policy.executors,
-        subject_acknowledgements=policy.subject_acknowledgements,
-        legacy_writer_fences=policy.legacy_writer_fences,
-        rollback_evidence_sha256=policy.rollback_evidence_sha256,
     )
     if status.execution_state == "prepared" and (
         status.execution_manifest_sha256 != canonical_executable_digest(request)

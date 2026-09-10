@@ -49,6 +49,9 @@ _TARGET_NODES = {
     "oldlab": frozenset(f"trt-eai-oldlab-{index}" for index in range(3, 6)),
 }
 _TARGET_POOL_SLOTS = {"gb10": 140, "oldlab": 18}
+# #906's first cutover is one slot. Physical pool limits are not permission to
+# activate the full fleet; expansion needs a separately reviewed execution epoch.
+_INITIAL_EXECUTION_CAPACITY_CEILING = 1
 
 
 def _valid_registry(value: object) -> bool:
@@ -342,7 +345,7 @@ class ProtectedExecutionPrerequisiteRuntimeSource:
             trusted_fleet_release_sha256=(
                 authority.executor_profile_seed.trusted_fleet_release_sha256
             ),
-            executable_new_capacity_ceiling=sum(pool.max_slots for pool in desired.fleet.pools),
+            executable_new_capacity_ceiling=_INITIAL_EXECUTION_CAPACITY_CEILING,
             executable_new_capacity_rate_per_minute=requested_rate,
             executors=tuple(
                 PreparedExecutorBindingV2(

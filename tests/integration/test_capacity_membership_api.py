@@ -31,7 +31,9 @@ from tests.integration.test_capacity_membership import DELEGATE, NAMESPACE_ID, _
 MEMBERSHIP_TOKEN = "test-personal-membership-manager"
 OTHER_TOKEN = "test-other-membership-manager"
 READ_TOKEN = "test-read-operator"
-PREPARE_TOKEN = "test-prepare-operator"
+# Also consumed by the protected-client integration, whose credential loader
+# requires at least 32 printable bytes. This is disposable test authority only.
+PREPARE_TOKEN = "test-prepare-operator-credential-32-bytes"
 
 
 @pytest.fixture
