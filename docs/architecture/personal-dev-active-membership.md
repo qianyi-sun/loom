@@ -74,6 +74,17 @@ inventory and installs a persistent legacy-only fence before removing its
 version trigger. This does not yet complete typed terminal-evidence insertion,
 predecessor release or executable SQL admission.
 
+Migration `capacity_0020` dispatches allocation-pinned SQL readers explicitly
+between legacy V2/V3 and typed V4 histories. Typed application reservations,
+bootstrap and protected admission use the same authenticated member history as
+Python. Currentness checks the original installation (including managed bases),
+exact candidate attestation/profile set and reporter binding. Capacity-only
+supersession can close old admission without requiring a new allocation epoch.
+Build services remain ineligible until authenticated build readiness is connected;
+inherited source graphs remain interlocked. Rollback refuses retained typed
+intents and restores the prior functions and privilege boundaries. This is
+database lifecycle support, not proof of native submission or live acceptance.
+
 The log binds authority incarnation, writer/execution epoch, manifest digest,
 namespace, global membership revision, previous digest, actor, idempotency key,
 request digest, subject identity and complete resulting subject evidence.

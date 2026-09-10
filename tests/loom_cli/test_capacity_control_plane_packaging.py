@@ -44,6 +44,7 @@ _MIGRATION_RESOURCES = {
     "capacity_migrations/versions/capacity_0017_personal_membership_execution.py",
     "capacity_migrations/versions/capacity_0018_personal_build_membership.py",
     "capacity_migrations/versions/capacity_0019_typed_inventory_retirement.py",
+    "capacity_migrations/versions/capacity_0020_typed_execution_readers.py",
 }
 _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/__init__.py",
