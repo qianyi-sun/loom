@@ -365,7 +365,8 @@ func (p phase) validate() error {
 		return fmt.Errorf("invalid phase role")
 	}
 	if len(p.Argv) == 0 || len(p.Argv) > 128 || p.TimeoutSeconds <= 0 ||
-		p.TimeoutSeconds > 86_400 || !workspacePath.MatchString(p.WorkingDirectory) {
+		p.TimeoutSeconds > 86_400 || filepath.Clean(p.WorkingDirectory) != p.WorkingDirectory ||
+		(p.WorkingDirectory != "/app" && !workspacePath.MatchString(p.WorkingDirectory)) {
 		return fmt.Errorf("invalid %s phase", p.Role)
 	}
 	argvBytes := 0

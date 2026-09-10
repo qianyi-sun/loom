@@ -484,8 +484,11 @@ def _compile_terminus_plan(
     def phase(role: Literal["agent", "verifier"], mode: str, timeout: float) -> ProcessPhaseV1:
         return ProcessPhaseV1(
             role=role,
-            argv=("python", "-m", "loom.service_execution_sandbox_task", mode),
-            working_directory="/workspace", timeout_seconds=round(timeout), environment=phase_env,
+            # Keep Python imports and dependency configuration discovery outside
+            # user-controlled task inputs, including dependencies that inspect cwd.
+            argv=("python", "-I", "-m", "loom.service_execution_sandbox_task", mode,
+                  "--workspace", "/workspace"),
+            working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
         )
     outputs = [RuntimeOutputDeclarationV1(
         source_path=f".loom/collected/{path}", relative_path=f"artifacts/{path}",

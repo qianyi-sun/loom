@@ -73,6 +73,10 @@ Use the existing pinned Harbor Terminus-2 runtime and trajectory capture. The
 controller talks to task and verifier over two different Unix sockets on
 separate private volumes; the task cannot connect to the verifier socket. These
 containers do not share a PID namespace. Keep
+the controller in its image-owned `/app` directory, with Python isolated mode
+and an explicit `--workspace /workspace` input path. This prevents task modules,
+startup hooks and `.env` files from affecting trusted imports or configuration.
+Keep
 tests and verifier files out of the task image and agent workspace; the trusted
 executor transfers them only to a distinct verifier container after the agent
 finishes. That container uses the same image and receives the completed public

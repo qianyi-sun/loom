@@ -6,6 +6,7 @@ agent task and fresh verifier receive their inputs over different Unix sockets.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -163,13 +164,19 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
 
 
 def main() -> None:
-    workspace = Path.cwd()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("phase", choices=("terminus-2", "verify-sandbox"))
+    parser.add_argument("--workspace", required=True, type=Path)
+    args = parser.parse_args()
+    workspace = args.workspace
+    if not workspace.is_absolute():
+        raise ServiceExecutionTaskError("isolated execution requires an absolute workspace")
+    # The interpreter runs from the trusted image directory. Some dependencies
+    # add cwd to their import path or load .env; never chdir into task inputs.
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
-    if len(sys.argv) != 2 or sys.argv[1] not in {"terminus-2", "verify-sandbox"}:
-        raise ServiceExecutionTaskError("unknown isolated execution phase")
-    phase = run_agent if sys.argv[1] == "terminus-2" else run_verifier
+    phase = run_agent if args.phase == "terminus-2" else run_verifier
     asyncio.run(phase(workspace, task, trial))
 
 

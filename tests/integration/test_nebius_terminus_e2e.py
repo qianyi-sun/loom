@@ -37,6 +37,20 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir(mode=0o777)
     evidence.chmod(0o777)
+    source = repository / "deploy/catalog/nebius-terminal-bench/file-archive-manifest"
+    workspace = evidence / "workspace"
+    shutil.copytree(source / "original", workspace)
+    shutil.copyfile(source / "verifier/run.sh", workspace / "verifier/run.sh")
+    workspace.chmod(0o777)
+    (workspace / "task.toml").chmod(0o666)
+    poison = (
+        "from pathlib import Path\n"
+        "Path('/evidence/shadow-import-executed').write_text('untrusted import')\n"
+        "raise RuntimeError('user bundle was imported into trusted controller')\n"
+    )
+    for name in ("loom.py", "sitecustomize.py"):
+        (workspace / name).write_text(poison)
+    (workspace / ".env").write_text("LOOM_SHADOW_ENV_IMPORTED=1\n")
 
     def docker(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["docker", *args], text=True, capture_output=True, check=True, timeout=180)
@@ -55,12 +69,12 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path) -> None:
         result = docker(
             "run", "--rm", "--network", "none", "--user", "65532:65532",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "-v", f"{repository}:/checkout:ro", "-v", f"{evidence}:/evidence",
+            "-v", f"{repository}:/checkout:ro", "-v", f"{repository / 'src'}:/app/src:ro",
+            "-v", f"{evidence}:/evidence",
             "-v", volumes[0] + ":/loom/sandboxes/task-sandbox",
             "-v", volumes[1] + ":/loom/sandboxes/verifier-sandbox",
-            "-e", "PYTHONPATH=/checkout/src:/checkout", "-e", "PYTHONDONTWRITEBYTECODE=1",
-            "-e", "HOME=/tmp/loom-home", "--workdir", "/evidence", "--entrypoint", "python",
-            controller_image, "/checkout/tests/integration/test_nebius_terminus_e2e.py", "--inside",
+            "-e", "HOME=/tmp/loom-home", "--workdir", "/app", "--entrypoint", "python",
+            controller_image, "-I", "-B", "/checkout/tests/integration/test_nebius_terminus_e2e.py", "--inside",
         )
         (evidence / "controller.stdout").write_text(result.stdout)
         (evidence / "controller.stderr").write_text(result.stderr)
@@ -70,6 +84,8 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path) -> None:
         assert report["gateway_calls"] == report["typed_calls"]
         assert report["private_inputs_hidden"] is True
         assert report["external_model_calls"] == 0
+        assert report["untrusted_imports_blocked"] is True
+        assert not (evidence / "shadow-import-executed").exists()
     except subprocess.CalledProcessError as exc:
         pytest.fail(f"local controller failed: {exc.stdout}\n{exc.stderr}")
     finally:
@@ -129,21 +145,24 @@ async def _verify_harbor_tool_identity() -> None:
 
 
 async def _inside() -> None:
-    from loom.models.task import TaskConfig
+    import tomli_w
+
+    import loom
     from loom.models.trial import TrialConfig
-    from loom.service_execution_sandbox_task import run_agent, run_verifier
 
     Path.home().mkdir(parents=True, exist_ok=True)
     await _verify_harbor_tool_identity()
     source = Path("/checkout/deploy/catalog/nebius-terminal-bench/file-archive-manifest")
     workspace = Path("/evidence/workspace")
-    shutil.copytree(source / "original", workspace)
-    shutil.copyfile(source / "verifier/run.sh", workspace / "verifier/run.sh")
+    assert sys.flags.isolated and str(loom.__file__).startswith("/app/src/loom/")
+    assert str(workspace) not in sys.path and "" not in sys.path
+    assert not Path("/evidence/shadow-import-executed").exists()
+    assert "LOOM_SHADOW_ENV_IMPORTED" not in os.environ
     raw = tomllib.loads((workspace / "task.toml").read_text())
     raw["environment"].update({"cpu_arch": "x86_64", "baseline_network_policy": {"kind": "gateway-only"}})
     raw["verifier"].pop("user", None)
     raw["verifier"]["args"]["script_path"] = "verifier/run.sh"
-    task = TaskConfig.model_validate(raw)
+    (workspace / "task.toml").write_text(tomli_w.dumps(raw))
     trial = TrialConfig(agent_name="terminus-2", agent_model={"provider": "openai", "name": "glm-5.2"},
                         override_agent_timeout_sec=90, request_params={"temperature": 0.2})
     trial_id, team_id = uuid4(), uuid4()
@@ -198,8 +217,17 @@ async def _inside() -> None:
     os.environ["LOOM_GATEWAY_URL"] = f"http://127.0.0.1:{server.server_port}"
     os.environ["LOOM_TASK_ARTIFACTS_JSON"] = '["archive_manifest.json","build_manifest.py","private-inputs-hidden"]'
     try:
-        await run_agent(workspace, task, trial)
-        await run_verifier(workspace, task, trial)
+        for phase in ("terminus-2", "verify-sandbox"):
+            completed = subprocess.run(
+                [sys.executable, "-I", "-B", "-m", "loom.service_execution_sandbox_task",
+                 phase, "--workspace", str(workspace)],
+                cwd="/app", env={**os.environ, "LOOM_TASK_TRIAL_JSON": trial.model_dump_json()},
+                capture_output=True, text=True, timeout=120,
+            )
+            sys.stdout.write(completed.stdout)
+            sys.stderr.write(completed.stderr)
+            completed.check_returncode()
+        assert not Path("/evidence/shadow-import-executed").exists()
     finally:
         server.shutdown()
         server.server_close()
@@ -211,7 +239,7 @@ async def _inside() -> None:
               "native_turns": sum(step["source"] == "agent" for step in native["steps"]),
               "gateway_calls": len(ledger), "typed_calls": sum(event["kind"] == "llm_call" for event in events),
               "private_inputs_hidden": (workspace / ".loom/collected/private-inputs-hidden").exists(),
-              "external_model_calls": 0}
+              "external_model_calls": 0, "untrusted_imports_blocked": True}
     Path("/evidence/report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
 

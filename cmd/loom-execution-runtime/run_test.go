@@ -190,6 +190,51 @@ func TestPlanValidationMatchesBoundedWorkspaceAndSidecarContract(t *testing.T) {
 	}
 }
 
+func TestPhaseWorkingDirectoryBoundary(t *testing.T) {
+	for _, directory := range []string{"/app", "/workspace", "/workspace/task-dir"} {
+		item := phase{Role: "agent", Argv: []string{"/bin/pwd"}, WorkingDirectory: directory, TimeoutSeconds: 1}
+		if err := item.validate(); err != nil {
+			t.Fatalf("valid cwd %q rejected: %v", directory, err)
+		}
+	}
+	for _, directory := range []string{"/app/subdir", "/app-other", "/app/.", "/app/../app", "/workspace/../app", "/workspaceevil", "/etc"} {
+		item := phase{Role: "agent", Argv: []string{"/bin/pwd"}, WorkingDirectory: directory, TimeoutSeconds: 1}
+		if err := item.validate(); err == nil {
+			t.Fatalf("invalid cwd %q accepted by contract", directory)
+		}
+		if _, err := runPhase(context.Background(), item, 1, "/workspace", t.TempDir(), 1024, time.Second, nil); err == nil || !strings.Contains(err.Error(), "working directory") {
+			t.Fatalf("invalid cwd %q passed runtime boundary: %v", directory, err)
+		}
+	}
+	t.Run("workspace-child", func(t *testing.T) {
+		workspace, output := t.TempDir(), t.TempDir()
+		directory := filepath.Join(workspace, "task-dir")
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		item := phase{Role: "agent", Argv: []string{"/bin/sh", "-c", "exit 0"}, WorkingDirectory: directory, TimeoutSeconds: 1}
+		result, err := runPhase(context.Background(), item, 1, workspace, output, 1024, time.Second, nil)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("workspace child cwd rejected: %v", err)
+		}
+	})
+	t.Run("trusted-app", func(t *testing.T) {
+		if info, err := os.Stat("/app"); err != nil || !info.IsDir() {
+			t.Skip("run in Linux test container with /app to execute trusted cwd")
+		}
+		output := t.TempDir()
+		item := phase{Role: "agent", Argv: []string{"/bin/pwd"}, WorkingDirectory: "/app", TimeoutSeconds: 1}
+		result, err := runPhase(context.Background(), item, 1, t.TempDir(), output, 1024, time.Second, nil)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("trusted cwd rejected: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(output, "01-agent.stdout"))
+		if err != nil || strings.TrimSpace(string(body)) != "/app" {
+			t.Fatalf("controller did not run in /app: %q %v", body, err)
+		}
+	})
+}
+
 func TestPlanValidationRejectsImageAdmissionDriftButNotMetadataExpiry(t *testing.T) {
 	base := func() plan {
 		return testPlan("/workspace", phase{

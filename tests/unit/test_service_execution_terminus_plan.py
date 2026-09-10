@@ -57,8 +57,11 @@ def test_terminus_plan_preserves_task_environment_and_has_fresh_private_verifier
     assert plan.task_image_ref == task.environment.docker_image
     assert [s.role_name for s in plan.sidecars] == ["task-sandbox", "verifier-sandbox"]
     assert all(s.private_sandbox and s.image_ref == _TASK_IMAGE for s in plan.sidecars)
-    assert plan.main.argv[-1] == "terminus-2"
-    assert plan.verifier.argv[-1] == "verify-sandbox"
+    assert plan.main.argv[4] == "terminus-2"
+    assert plan.verifier.argv[4] == "verify-sandbox"
+    assert plan.main.argv[-2:] == plan.verifier.argv[-2:] == ("--workspace", "/workspace")
+    assert plan.main.working_directory == plan.verifier.working_directory == "/app"
+    assert plan.main.argv[:3] == plan.verifier.argv[:3] == ("python", "-I", "-m")
     assert json.loads(plan.main.environment["LOOM_TASK_TRIAL_JSON"])["agent_name"] == "terminus-2"
     paths = {item.relative_path for item in plan.output_declarations}
     assert not next(item for item in plan.output_declarations

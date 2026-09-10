@@ -57,9 +57,16 @@ class ContainerResourcesV1(_Strict):
 class ProcessPhaseV1(_Strict):
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
-    working_directory: str = Field(pattern=r"^/workspace(?:/[-A-Za-z0-9._]+)*$")
+    working_directory: str = Field(pattern=r"^(?:/app|/workspace(?:/[-A-Za-z0-9._]+)*)$")
     timeout_seconds: int = Field(gt=0, le=86_400)
     environment: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("working_directory")
+    @classmethod
+    def _working_directory_is_canonical(cls, value: str) -> str:
+        if any(part in {".", ".."} for part in value.split("/")):
+            raise ValueError("process working directory must be canonical")
+        return value
 
     @field_validator("argv")
     @classmethod
