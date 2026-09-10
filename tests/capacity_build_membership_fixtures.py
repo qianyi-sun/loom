@@ -65,7 +65,7 @@ def application_origin_payload(configuration, acknowledgement, *, configuration_
         base_projection=projection, acknowledgement=acknowledgement)
 
 
-async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None, activate=True):
+async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None, activate=True, retired_source=None):
     fleet = fleet_with_development_template()
     fixture = await setup_execution(session, execution_policy=execution_policy(), fleet=fleet)
     origins = ()
@@ -104,6 +104,7 @@ async def typed_sql_execution(session, *, max_subjects=8, managed_projection=Non
     )
     preparation = ExecutionPreparationV4.model_validate(fixture.request.model_dump(mode="python") | {
         "schema_version": 4, "personal_builds": template,
+        "retired_source": retired_source,
         "managed_application_origins": origins,
         "personal_membership": PersonalMembershipPolicyV1(namespace_id=UUID(int=88001),
             management_principal_id="build-management", development_template_sha256=canonical_digest(fleet.development_subject_template), max_subjects=max_subjects,

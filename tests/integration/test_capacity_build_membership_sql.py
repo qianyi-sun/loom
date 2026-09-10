@@ -12,6 +12,29 @@ from sqlalchemy.exc import DBAPIError
 from loom_capacity_manager.build_membership_contracts import personal_build_subject_id
 
 
+async def test_sql_cannot_admit_membership_without_successor_source_graph_authentication(capacity_session):
+    from loom_capacity_manager.retired_member_origin_contracts import (
+        RetiredMembershipSnapshotReferenceV1,
+    )
+    from tests.capacity_build_membership_fixtures import (
+        build_request,
+        staged_build_event,
+        typed_sql_execution,
+    )
+
+    source = RetiredMembershipSnapshotReferenceV1(namespace_id=UUID(int=88001), execution_epoch=41,
+        execution_manifest_sha256="e" * 64, revision=0, head_sha256="0" * 64)
+    management, preparation, fleet, execution = await typed_sql_execution(capacity_session, retired_source=source)
+    request = build_request(preparation, execution)
+    row = await staged_build_event(capacity_session, management, preparation, fleet, request)
+    with pytest.raises(DBAPIError) as error:
+        async with capacity_session.begin_nested():
+            capacity_session.add(row)
+            await capacity_session.flush()
+    assert error.value.orig.sqlstate == "23514"
+    assert "source graph" in str(error.value.orig)
+
+
 def _config(connection):
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "capacity_migrations/alembic.ini"))
