@@ -932,6 +932,16 @@ A prepared epoch is not activation evidence. No reader selects authority
 by the largest stored epoch, and historical installation reads do not recursively
 require an obsolete reporter to remain current. A readable historical snapshot
 cannot substitute for these current checks.
+An equivocal current-tip reporter remains valid retained accounting evidence,
+but cannot publish demand or authorize new work. Its safety state does not block
+other owners. Recovery rotates to a new reporter and fences the old one; no
+capacity-only update can reactivate an equivocal reporter.
+The current-subject/demand consumer resolves fresh typed application members from
+that authenticated history and exact materialization, including independent owner
+accounts and generation supersession. It retains the legacy deployment-readiness
+check: pending build services cannot publish executable demand. Source-bearing
+epochs and V4 execution preparation/promotion remain closed. Disposable SQL-only
+execution fixtures exercise this demand boundary, not operational activation.
 Allocation input loading explicitly returns the typed input with base applications
 and owner build services, reusing the existing demand, pool, reservation, physical
 commitment and fairness readers. Disabled build services and old physical jobs

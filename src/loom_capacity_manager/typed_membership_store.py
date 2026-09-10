@@ -269,8 +269,13 @@ async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _T
             _require_values(row, {
                 "configuration_generation": subject.configuration_generation,
                 "deployment_generation": subject.deployment_generation, "token_sha256": token,
-                "state": "current" if tips[subject.subject_id].demand_reporter_incarnation == reporter_id else "fenced",
             }, label="typed reporter")
+            # Equivocation fences one reporter's demand, not other owners'
+            # history or retained accounting. Target admission still requires
+            # current state; superseded reporters must remain fenced.
+            states = {"current", "equivocal"} if tips[subject.subject_id].demand_reporter_incarnation == reporter_id else {"fenced"}
+            if row is None or row.state not in states:
+                raise ValueError("typed reporter state changed")
     except ValueError as exc:
         raise ConfigurationConflictError("typed current reporter evidence changed") from exc
     return history

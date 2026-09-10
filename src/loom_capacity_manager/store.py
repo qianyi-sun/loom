@@ -2262,7 +2262,7 @@ class CapacityManagementStore:
             update(CapacityDemandReporter)
             .where(
                 CapacityDemandReporter.subject_id == subject.subject_id,
-                CapacityDemandReporter.state == "current",
+                CapacityDemandReporter.state.in_(("current", "equivocal")),
                 CapacityDemandReporter.reporter_incarnation != subject.demand_reporter_incarnation,
             )
             .values(state="fenced")

@@ -160,6 +160,13 @@ async def resolve_current_subject(
 
     if epoch.state != "active":
         raise ConfigurationConflictError("current subject execution is not active")
+    if epoch.manifest_payload.get("schema_version") == 4:
+        try:
+            return await _resolve_current_typed_subject(
+                session, epoch, subject_id=subject_id, allow_disabled=allow_disabled,
+            )
+        except ValueError as exc:
+            raise ConfigurationConflictError("current typed subject evidence is invalid") from exc
     management = CapacityManagementStore()
     try:
         preparation = management._execution_preparation_from_row(epoch)
@@ -246,6 +253,53 @@ async def resolve_current_subject(
         await CapacityMembershipStore(management)._require_retained_evidence(
             session, projection, subject
         )
+    return subject, acknowledgement
+
+
+async def _resolve_current_typed_subject(
+    session: AsyncSession,
+    epoch: CapacityExecutionEpoch,
+    *,
+    subject_id: UUID,
+    allow_disabled: bool,
+) -> tuple[SubjectConfigurationV1, SubjectExecutionAcknowledgementV2]:
+    """Use authenticated typed history without widening legacy execution parsing.
+
+    Pending build installations cannot pass the existing deployment readiness
+    check. Source-bearing preparations remain rejected by the history reader.
+    Callers retain the authority-first transaction and operation-specific fence.
+    """
+    from loom_capacity_manager.typed_membership_store import (
+        _load_base_configurations,
+        _load_typed_history,
+        _validated_materialization,
+    )
+
+    history = await _load_typed_history(session, epoch.execution_epoch)
+    if history.epoch.state != "active":
+        raise ConfigurationConflictError("current subject execution is not active")
+    await _validated_materialization(session, history.epoch, history.fleet, history.latest)
+    result = history.latest.get(subject_id)
+    if result is not None:
+        subject, acknowledgement = result.member.configuration, result.member.acknowledgement
+    else:
+        bases = await _load_base_configurations(session, history.epoch)
+        base_subject = bases.get(subject_id)
+        if base_subject is None:
+            raise ConfigurationConflictError("current subject is unavailable")
+        base_acknowledgement = next((ack for ack in history.preparation.subject_acknowledgements
+            if _acknowledgement_matches(ack, base_subject)), None)
+        if base_acknowledgement is None:
+            raise ConfigurationConflictError("current subject acknowledgement is unavailable")
+        subject, acknowledgement = base_subject, base_acknowledgement
+    if subject.lifecycle_state != "active" and not (
+        allow_disabled and subject.lifecycle_state == "disabled"
+    ):
+        raise ConfigurationConflictError("current subject is not active")
+    await _require_current_evidence(
+        session, CapacityManagementStore(), subject, acknowledgement,
+        require_deployment=result is not None,
+    )
     return subject, acknowledgement
 
 

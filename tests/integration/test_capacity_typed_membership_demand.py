@@ -15,7 +15,11 @@ from loom_capacity_manager.models import (
     CapacitySubject,
     CapacityWorkerProfile,
 )
-from loom_capacity_manager.store import ConfigurationConflictError, ReportEquivocationError, UnknownReporterError
+from loom_capacity_manager.store import (
+    ConfigurationConflictError,
+    ReportEquivocationError,
+    UnknownReporterError,
+)
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
