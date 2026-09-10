@@ -55,3 +55,16 @@ async def test_runtime_checkpoint_plan_cannot_outlive_its_selected_head(tmp_path
             plan.prepare(journal)
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize("event", ("heartbeat-confirmed", "inventory-publish-confirmed", "inventory-chunk-retained"))
+async def test_runtime_checkpoint_rejects_known_telemetry_with_unknown_object_binding(tmp_path, event):
+    runtime, journal, manager, _, _, _ = executor_fixture(tmp_path, work=None)
+    try:
+        journal.append(event, sha256(b"x").hexdigest(),
+            object_kind="executor", object_id="future-binding", payload=b"x")
+        module = import_module("loom_capacity_executor.journal_retention")
+        with pytest.raises(JournalRegressionError, match="unsupported.*binding"):
+            module.plan_runtime_checkpoint(runtime, await manager.executable_checkpoint())
+    finally:
+        journal.close()
