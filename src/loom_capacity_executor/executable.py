@@ -2186,8 +2186,9 @@ class ExecutablePoolExecutor:
                     )
                 terminal = await self._terminal_for(terminal_identity)
                 if (
-                    terminal is None
-                    or self._slurm_evidence_digest(terminal) != item.terminal_evidence_sha256
+                    (terminal is not None
+                     and self._slurm_evidence_digest(terminal) != item.terminal_evidence_sha256)
+                    or (terminal is None and not await self._historical_terminal_for_release(item))
                 ):
                     return ExecutorTickResult(
                         "quarantined",
@@ -2200,6 +2201,46 @@ class ExecutablePoolExecutor:
             operation=lambda: self.client.release_executable_shapes(release),
         )
         return ExecutorTickResult("released")
+
+    async def _historical_terminal_for_release(self, item: ExecutableReleasedShapeV2) -> bool:
+        """Use manager-pinned durable terminal proof when accounting has expired.
+
+        Protected release is independently checked by the caller. Neither a later
+        empty inventory nor accounting absence alone authorizes capacity release.
+        """
+        envelope = self._load_launch(item.binding.intent_id)
+        if envelope is None or envelope.rendered.ownership_proof.metadata.binding != item.binding:
+            return False
+        matches = []
+        for retained in self.journal.records("inventory", str(self.registration.executor_incarnation)):
+            if retained.event_kind != "inventory-publish-confirmed":
+                continue
+            inventory = load_journal_inventory(self.journal, retained)
+            self._assert_inventory_binding(inventory)
+            if inventory.inventory_sequence != item.inventory_sequence:
+                continue
+            records = tuple(record for record in inventory.records
+                if record.physical_identity == item.terminal_identity
+                or (record.ownership_proof is not None
+                    and record.ownership_proof.metadata.binding.intent_id == item.binding.intent_id))
+            if len(records) != 1:
+                return False
+            record = records[0]
+            if (record.state != "terminal" or record.physical_kind != item.terminal_kind
+                or record.physical_identity != item.terminal_identity
+                or record.terminal_evidence_sha256 != item.terminal_evidence_sha256
+                or record.authority_scope != "dedicated-loom-association"
+                or record.ownership_proof != envelope.rendered.ownership_proof
+                or record.resources != item.binding.resources
+                or record.node_ids != item.binding.node_ids):
+                return False
+            matches.append(canonical_executable_bytes(inventory))
+        if not matches or len(set(matches)) != 1:
+            return False
+        # A current physical conflict must not be hidden by older terminal proof.
+        return not any(job.job_id == item.terminal_identity
+            or job.ownership_token == envelope.rendered.request.ownership_token
+            for job in await self.slurm.inventory())
 
     async def _unused_terminal_detail(self, item: ExecutableReleasedShapeV2) -> str | None:
         inventory = self._confirmed_inventory_for_release(item)

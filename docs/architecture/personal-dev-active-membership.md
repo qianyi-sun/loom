@@ -1122,6 +1122,13 @@ The persistent rollback fence uses JSONB's conservatively larger serialized size
 so older migrations can remove their canonical serializer without breaking it;
 near-threshold small inventories may therefore also require refusing rollback.
 
+Delayed physical release can use the exact confirmed historical terminal inventory
+after Slurm accounting expires. The manager-pinned inventory sequence, terminal
+identity/digest, complete binding/resources, authenticated original launch proof,
+and current protected release must agree. A later empty inventory is insufficient,
+and current physical conflicts still refuse release. Available accounting evidence
+must match; conflicting evidence is never replaced with the historical fallback.
+
 This solves individual inventory record size, not steady-state journal retention.
 The journal is still bounded at 64 MiB and has no compaction. A checkpoint/retention
 implementation that preserves unresolved work and historical release evidence is
