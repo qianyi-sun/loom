@@ -1,10 +1,10 @@
 """Unpublished image owners need bounded retirement independent of registry GC."""
 
 import importlib
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import (
@@ -242,11 +242,12 @@ async def test_new_publication_during_gc_fences_old_cleanup_acknowledgement(jour
     async with journal.begin() as session:
         image = await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
         gc_epoch = image.lease_epoch
-    async with journal.begin() as session:
-        await record_task_image_publication(
-            session, materialization_id=image_id, builder_id="builder", attempt_count=1,
-            lease_epoch=epoch, component="task", registry_image="registry/image@sha256:" + "b" * 64,
-        )
+    for digest in ("b", "c"):
+        async with journal.begin() as session:
+            await record_task_image_publication(
+                session, materialization_id=image_id, builder_id="builder", attempt_count=1,
+                lease_epoch=epoch, component="task", registry_image="registry/image@sha256:" + digest * 64,
+            )
     async with journal() as session:
         with pytest.raises(TaskImageLeaseConflictError):
             await complete_task_image_registry_gc(
@@ -257,5 +258,79 @@ async def test_new_publication_during_gc_fences_old_cleanup_acknowledgement(jour
         image = await claim_task_image_registry_gc(session, gc_id="gc2", grace_hours=0)
         assert image is not None and image.id == image_id and image.lease_epoch > gc_epoch
         assert {entry["registry_image"] for entry in image.registry_image_history} == {
-            "registry/image@sha256:" + "a" * 64, "registry/image@sha256:" + "b" * 64,
+            "registry/image@sha256:" + digest * 64 for digest in ("a", "b", "c")
         }
+
+
+async def test_durable_evidence_without_current_maps_excludes_unpublished_retirement(journal, tmp_path):
+    _, image_id = await _image(journal, tmp_path)
+    async with journal.begin() as session:
+        image = await claim_task_image_materialization(session, builder_id="builder", cpu_arch="x86_64")
+        await fail_task_image_materialization(
+            session, materialization_id=image_id, builder_id="builder", lease_epoch=image.lease_epoch,
+            retryable=False, failure_reason="timeout", failure_message="partial push",
+            registry_images={"task": "registry/image@sha256:" + "a" * 64},
+        )
+    async with journal.begin() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        image.registry_images = {}
+        image.registry_image_history = []
+    assert await _observe(journal, image_id) == "ineligible"
+
+
+async def test_busy_catalog_fence_does_not_start_retirement_grace(journal, tmp_path):
+    spec, image_id = await _image(journal, tmp_path)
+    async with journal.begin() as writer:
+        await writer.execute(text("LOCK TABLE public.tasks IN ROW EXCLUSIVE MODE"))
+        with pytest.raises(DBAPIError, match="lock"):
+            await _observe(journal, image_id)
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert image.unreferenced_at is None and image.state == "queued"
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is not None
+
+
+async def test_duplicate_publication_does_not_invalidate_exact_gc_inventory(journal, tmp_path):
+    _, image_id = await _image(journal, tmp_path)
+    published = "registry/image@sha256:" + "a" * 64
+    async with journal.begin() as session:
+        image = await claim_task_image_materialization(session, builder_id="builder", cpu_arch="x86_64")
+        epoch = image.lease_epoch
+        await fail_task_image_materialization(
+            session, materialization_id=image_id, builder_id="builder", lease_epoch=epoch,
+            retryable=False, failure_reason="timeout", failure_message="partial push",
+            registry_images={"task": published},
+        )
+    async with journal.begin() as session:
+        image = await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
+        gc_epoch, deadline = image.lease_epoch, image.lease_expires_at
+    async with journal.begin() as session:
+        image = await record_task_image_publication(
+            session, materialization_id=image_id, builder_id="builder", attempt_count=1,
+            lease_epoch=epoch, component="task", registry_image=published,
+        )
+        assert (image.lease_epoch, image.lease_expires_at) == (gc_epoch, deadline)
+        assert len(image.registry_image_history) == 1
+    async with journal.begin() as session:
+        image = await complete_task_image_registry_gc(
+            session, materialization_id=image_id, gc_id="gc", lease_epoch=gc_epoch,
+        )
+        assert image.state == "retired"
+
+
+async def test_contradictory_expired_owner_requires_reconciliation_before_retirement(journal, tmp_path):
+    spec, image_id = await _image(journal, tmp_path)
+    async with journal.begin() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        image.claimed_by = "unreconciled-owner"
+        image.lease_expires_at = datetime.now(UTC) - timedelta(hours=1)
+        image.unreferenced_at = NOW
+    assert await _observe(journal, image_id) == "ineligible"
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert image.state == "queued" and image.claimed_by == "unreconciled-owner"
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is not None
