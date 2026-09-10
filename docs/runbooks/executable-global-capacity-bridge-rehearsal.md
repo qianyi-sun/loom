@@ -266,6 +266,13 @@ directories, installs a root-owned immutable offline venv and units, and leaves
 every service inactive and every timer disabled. It does not install a
 credential, controller config, policy, runtime artifact, or capacity authority.
 
+The release image also installs its hash-locked offline dependencies and Loom
+wheel into the image interpreter. The installer imports protected CLI contracts
+before it creates the host virtual environment; having a wheelhouse alone is
+insufficient. Both architecture builds execute the installer help and reject an
+invalid discovery request as the unprivileged image user, without host mounts or
+scheduler access. A missing import must fail the image build, before installation.
+
 ```bash
 executor_source_sha=1111111111111111111111111111111111111111
 executor_image="ghcr.io/qianyi-sun/loom-capacity-executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
