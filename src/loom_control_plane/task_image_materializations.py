@@ -20,6 +20,7 @@ from loom.db.schema import (
 )
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    admit_task_image_source,
     current_task_image_reference,
     required_task_image_components,
     validate_task_image_registry_images,
@@ -498,18 +499,32 @@ async def retry_task_image_materialization(
     materialization_id: UUID,
 ) -> TaskImageMaterialization:
     """Requeue an exhausted or suspect ready image under an admin decision."""
+    if any(
+        isinstance(row, TaskImageMaterialization)
+        for row in (*session.new, *session.dirty, *session.deleted)
+    ):
+        raise TaskImageRetryConflictError("task image retry has pending materialization writes")
     now = datetime.now(UTC)
-    row = await session.scalar(
-        select(TaskImageMaterialization)
-        .where(TaskImageMaterialization.id == materialization_id)
-        .with_for_update()
-    )
+    # Inspect the locked source kind before selecting its admission contract.
+    # An unsafe strong-source caller must not flush unrelated pending Task rows
+    # merely to discover that its transaction cannot retain the required locks.
+    with session.no_autoflush:
+        row = await session.scalar(
+            select(TaskImageMaterialization)
+            .where(TaskImageMaterialization.id == materialization_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
     if row is None:
         raise TaskImageRetryConflictError("task image materialization does not exist")
     if row.state not in {"failed", "ready"}:
         raise TaskImageRetryConflictError(
             f"task image materialization in state {row.state!r} cannot be retried"
         )
+    try:
+        await admit_task_image_source(session, row=row)
+    except ValueError as error:
+        raise TaskImageRetryConflictError(str(error)) from error
     row.state = "queued"
     row.attempt_count = 0
     row.next_attempt_at = None

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -221,6 +221,23 @@ async def ensure_task_image_materializations(
     *,
     task_row: Task,
 ) -> tuple[TaskImageMaterialization, ...]:
+    rows = await _lock_task_image_materializations(session, task_row=task_row)
+    await _reference_task_image_materializations(session, rows=rows)
+    return rows
+
+
+def _assert_no_pending_task_image_writes(session: AsyncSession) -> None:
+    if any(
+        isinstance(row, TaskImageMaterialization)
+        for row in (*session.new, *session.dirty, *session.deleted)
+    ):
+        raise RuntimeError("task image ensure has pending materialization writes")
+
+
+async def _lock_task_image_materializations(
+    session: AsyncSession, *, task_row: Task
+) -> tuple[TaskImageMaterialization, ...]:
+    """Internal staging for caller-atomic publication; not source admission."""
     task = TaskConfig.model_validate(task_row.config)
     architectures = required_task_image_architectures(task)
     if not architectures:
@@ -228,16 +245,16 @@ async def ensure_task_image_materializations(
 
     # Locked refresh below must never overwrite pending caller-owned state,
     # including when the caller has deliberately suppressed ORM autoflush.
-    if any(
-        isinstance(row, TaskImageMaterialization)
-        for row in (*session.new, *session.dirty, *session.deleted)
-    ):
-        raise RuntimeError("task image ensure has pending materialization writes")
+    _assert_no_pending_task_image_writes(session)
 
     task_checksum = canonical_task_checksum(task_row.checksum)
     manifest_digest = task_bundle_content_manifest_digest(task_row.source_provenance)
     if manifest_digest and task.task.id != task_row.id:
         raise ValueError("frozen task snapshot identity differs from the materialization")
+    if manifest_digest:
+        from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+        await require_task_bundle_transaction(session)
     keys = {
         cpu_arch: task_image_materialization_key(
             task_id=task_row.id,
@@ -291,6 +308,17 @@ async def ensure_task_image_materializations(
         for row in rows
     ):
         raise ValueError("frozen content-manifest snapshot conflicts with existing materialization")
+    return tuple(by_arch[cpu_arch] for cpu_arch in architectures)
+
+
+async def _reference_task_image_materializations(
+    session: AsyncSession, *, rows: Sequence[TaskImageMaterialization]
+) -> None:
+    """Finish staged image rows only after source admission in the same transaction."""
+    if not rows:
+        return
+    for row in rows:
+        await admit_task_image_source(session, row=row)
     now = datetime.now(UTC)
     for row in rows:
         row.last_referenced_at = now
@@ -310,7 +338,31 @@ async def ensure_task_image_materializations(
             row.ready_at = None
             row.finished_at = None
     await session.flush()
-    return tuple(by_arch[cpu_arch] for cpu_arch in architectures)
+
+
+async def admit_task_image_source(
+    session: AsyncSession, *, row: TaskImageMaterialization
+) -> None:
+    """Pin a registered strong source while holding its materialization lock."""
+    digest = task_bundle_content_manifest_digest(row.task_source_provenance)
+    if not digest:
+        return
+    if row.bundle_content_manifest_sha256 != digest:
+        raise ValueError("registered source manifest differs from materialization identity")
+    # Bundle parsing depends on native-plan identity helpers in this module.
+    # Resolve the journal at the call boundary, not during that import cycle.
+    from loom.task_bundle_source_journal import admit_task_bundle_source
+
+    await admit_task_bundle_source(
+        session,
+        task_id=row.task_id,
+        task_checksum=row.task_checksum,
+        task_config=row.task_config,
+        task_source=row.task_source,
+        task_source_provenance=row.task_source_provenance,
+        reference_kind="materialization",
+        owner_id=str(row.id),
+    )
 
 
 async def get_trial_task_image_execution_grant(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import stat
 import tempfile
 import threading
@@ -294,6 +295,22 @@ def _object_write_version_id(response: object) -> str | None:
     return version_id
 
 
+def _object_user_metadata(metadata: Mapping[str, str] | None) -> tuple[tuple[str, str], ...] | None:
+    """Copy bounded canonical S3 user metadata before yielding to storage I/O."""
+    if metadata is None:
+        return None
+    if not isinstance(metadata, Mapping) or len(metadata) > 32:
+        raise ValueError("object metadata is invalid")
+    items = tuple(metadata.items())
+    if any(
+        type(key) is not str or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", key) is None
+        or type(value) is not str or any(not 32 <= ord(char) <= 126 for char in value)
+        for key, value in items
+    ) or sum(len(key) + len(value) for key, value in items) > 2048:
+        raise ValueError("object metadata is invalid")
+    return items
+
+
 class ObjectStore(Protocol):
     """Trajectory + artifact storage. Multipart for streaming writes; put_object
     for one-shot uploads; presign_put for client-driven uploads (workers ship
@@ -342,6 +359,8 @@ class ObjectStore(Protocol):
         bucket: str,
         key: str,
         body: bytes,
+        metadata: Mapping[str, str] | None = None,
+        require_versioning: bool = False,
     ) -> ObjectWriteResult: ...
 
     async def get_object(self, *, bucket: str, key: str) -> bytes: ...
@@ -493,7 +512,11 @@ class FakeObjectStore:
         bucket: str,
         key: str,
         body: bytes,
+        metadata: Mapping[str, str] | None = None,
+        require_versioning: bool = False,
     ) -> ObjectWriteResult:
+        if require_versioning or metadata is not None:
+            raise ValueError("fake object store does not support versioning or user metadata")
         uri = await self.put_object(bucket=bucket, key=key, body=body)
         return ObjectWriteResult(uri=uri, version_id=None)
 
@@ -863,9 +886,29 @@ class MinioObjectStore:
         bucket: str,
         key: str,
         body: bytes,
+        metadata: Mapping[str, str] | None = None,
+        require_versioning: bool = False,
     ) -> ObjectWriteResult:
+        """Optionally bind a durable intent to every immutable version written.
+
+        Requiring versioning checks Enabled before each application retry, then
+        rejects missing/null receipts. It does not cancel already accepted writes
+        on timeout or revoke external versioning authority. SDK-internal retries
+        carry the same metadata but do not repeat that preflight. Callers must
+        journal intents before I/O and reconcile late/unknown versions after errors.
+        """
+        frozen_metadata = _object_user_metadata(metadata)
+
         def _do(client: Any) -> object:
-            return client.put_object(Bucket=bucket, Key=key, Body=body)
+            if require_versioning and client.get_bucket_versioning(Bucket=bucket).get("Status") != "Enabled":
+                raise ValueError("object write requires Enabled bucket versioning")
+            kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key, "Body": body}
+            if frozen_metadata is not None:
+                kwargs["Metadata"] = dict(frozen_metadata)
+            response = client.put_object(**kwargs)
+            if require_versioning and _object_write_version_id(response) in {None, "null"}:
+                raise ValueError("object write did not return an immutable object version")
+            return response
 
         response = await self._run_client_call("put_object", _do)
         return ObjectWriteResult(

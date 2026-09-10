@@ -120,7 +120,10 @@ async def test_finalize_preserves_post_upload_object_version(tmp_path: Path) -> 
             bucket: str,
             key: str,
             body: bytes,
+            metadata=None,
+            require_versioning: bool = False,
         ) -> object:
+            assert metadata is None and not require_versioning
             uri = await super().put_object(bucket=bucket, key=key, body=body)
             return SimpleNamespace(uri=uri, version_id="atif-version-123")
 

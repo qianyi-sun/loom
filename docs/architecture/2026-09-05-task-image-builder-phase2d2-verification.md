@@ -1114,6 +1114,141 @@ taskset generation cleanup currently follows Task sources rather than image
 prerequisites. These unresolved source-lifecycle boundaries are not cleared by
 the registration tests or by a queued materialization alone.
 
+### Strong-source preparation and recoverable writes
+
+`prepare_task_bundle_registration` captures the content manifest, reads the exact
+verified `task.toml` bytes, and records the relationship between authored and
+catalog IDs without rewriting authored files. It preserves explicit architecture
+choices; optional runtime fallback promotion reads the captured Dockerfile.
+Parsed configuration and Dockerfile text each have a 1 MiB ceiling before the
+verified full-byte read. The persisted `task_config_document` is a copied canonical
+JSON view: set-valued network policies are sorted, while ordered steps/commands
+remain ordered. Re-serializing its model view is not the persistence contract.
+Cross-process hash-seed tests protect the normalized config fingerprint.
+
+The source-storage primitives reuse `ObjectWriteResult` and add optional bounded
+user metadata and required versioning to the existing object-store write API.
+Legacy calls keep their existing requests and unversioned behavior. Strong writes
+require an Enabled preflight and a non-null immutable version receipt. Metadata
+is copied before asynchronous I/O; application and SDK retries carry the same
+intent identity. A preflight cannot prevent an external versioning-policy change
+or prove that an earlier timed-out request has stopped.
+
+Each intended write therefore needs a **committed durable intent before storage
+I/O**. Recovery lists only that intent's expected key prefix, reads exact versions
+at the exact expected key, and verifies intent metadata, size and SHA-256. Equal
+bytes from another intent do not establish ownership. `scan_batch` returns a
+bounded verified batch and an intent-bound continuation for atomic journal
+checkpointing. It preserves opaque MinIO continuation values without treating
+them as object-key authority. An empty batch or observed end does not authorize
+forgetting a tombstone: late versions require periodic fresh reconciliation.
+Consumers must finish pagination before deleting its continuation-marker versions.
+
+Disposable TLS MinIO tests cover disabled/suspended versioning, a delayed first
+PUT arriving after its retry was deleted and an identical new publication was
+created, exact-version cleanup preserving that new publication, and resumable
+inventory across foreign versions and delete markers. These are storage-boundary
+tests, not activation acceptance.
+
+### Durable source publication and recovery
+
+Migration `0137` adds an initially empty logical-source, upload-incarnation,
+write-intent, exact-version and reference journal. It neither discovers historical
+objects nor upgrades legacy authority. Logical identity uses the catalog ID and
+captured manifest; data and auxiliary service-input manifest locations are stable
+across generation replacement and upload retries, outside taskset generation
+roots. The immutable source specification binds normalized config and provenance.
+Physical upload IDs and object versions never enter materialization identity.
+Data prefixes group by the SHA-256 of the catalog ID's first component, then
+the full task-ID hash and manifest digest. Benchmark IDs cannot contain a slash,
+so this yields a benchmark-scoped upstream locator without conflating task
+identities. Auxiliary input manifests use the same grouping in their separate
+namespace. Group membership is organizational, never read/delete authority.
+
+The logical source row is the common publication/reference/retirement lock.
+Callers acquire their catalog/trial/materialization locks first, then logical
+sources in sorted order. Source retirement never acquires those caller locks in
+reverse. All journal transitions use caller-owned database transactions with no
+storage I/O. Each requires an explicit READ COMMITTED transaction: an unchanged
+logical-source lock cannot refresh a fixed snapshot of separate incarnation and
+reference rows. Separate transaction-ID assign/check statements reject AUTOCOMMIT
+before ORM queries can flush caller-owned writes. Catalog publication and strong
+image staging perform this preflight before their first flush or INSERT as well;
+rejection must not leave a Task or queued image committed independently.
+Publication needs a complete set of issued exact-version receipts
+and attaches its reference atomically; competing complete uploads pin the first
+available incarnation and retire only the losing upload. Retired incarnations
+never revive. An available preparation ticket is not a reference: if retirement
+wins before publication, the caller must roll back and prepare again, resolving
+the current incarnation. Retries of an uploading incarnation preserve its
+original deadline rather than extending its lifetime.
+
+`TaskBundleSourcePublisher` commits intent issuance before verified file reads
+and retrying PUTs, then commits each exact receipt. It returns a prepared ticket,
+not a catalog publication. It caches immutable transport manifests and authored
+key lookup, but rereads and verifies authored file descriptors on each upload.
+Exceptions leave recoverable intent records, never prefix-delete compensation.
+
+Recovery commits an inventory fence before first-page I/O, checkpoints receipts
+and continuation atomically with an epoch comparison, and retains every observed
+version. An explicit restart drops only the cursor and advances the epoch, making
+older in-flight pages stale. Deletion claims wait for that incarnation's active
+inventory passes; scans wait for its outstanding deletion claims. Shared keys
+can also contain other sources' versions and markers: this is not a bucket-wide
+snapshot or deletion fence. A pinned MinIO diagnostic resumed after deleting a
+marker; production reconciliation must still support restart and periodic fresh
+scans. An observed end is never proof that a timed-out writer has terminated.
+
+`TaskBundleSourceRecovery` commits exact deletion claims before storage I/O and
+records completion only after exact-version absence. A lost response can be
+retried without deleting a newer publication at the same key. Global content
+manifests have separately owned exact versions per upload; no source owns or
+deletes their shared key. SQL identity/retirement guards reject mutation and
+DELETE/TRUNCATE of recovery records; downgrade uses NOWAIT and refuses any
+populated source journal. Compact tombstones are retained until a future explicit
+writer-termination/compaction protocol can prove them unnecessary.
+
+Real PostgreSQL and TLS MinIO composition tests cover committed intent-before-PUT,
+publication rollback, competing publications, reference/retirement lock contention,
+unversioned rejection, lost upload receipts, interrupted deletion, late writes,
+new identical publications, and shared-manifest ownership. Migration tests cover
+empty roundtrip, ORM parity and refusal to discard populated recovery authority.
+Image ensure/revival and administrative retry now validate their complete frozen
+snapshot against a registered available source and attach its materialization
+reference while holding the image lock before the source lock. Merely supplying
+a manifest-shaped digest cannot enqueue or revive a strong-source image. Exact
+republication can restore the same logical source and image identities; retirement
+of an old incarnation never does. These checks preserve the legacy path.
+
+Bulk catalog publication locks persisted Task rows in ID order, stages all image
+rows before taking any source lock, then locks the union of old/new sources in
+source-ID order. It publishes prepared uploads, validates exact snapshots, and
+pins the catalog and images in the caller's transaction. Replacing a catalog
+entry releases only its previous catalog reference, never historical image pins.
+The helper does no storage I/O and never commits. Callers must roll back their
+whole transaction on failure. Administrative retry refreshes locked ORM state
+before deciding eligibility, and refuses pending image edits rather than silently
+overwriting them; cached failed/ready rows cannot requeue a concurrently claimed
+or retiring materialization.
+
+The local benchmark publisher has an explicitly selected `versioned-v1` Python
+composition path. It stages compatibility copies without editing authored files,
+uses verified registration with the existing architecture fallback policy, and
+prepares all uploads before taking benchmark/catalog locks. The final transaction
+publishes benchmark, Task, source and native-image admission together. Repeated
+publication reuses available sources without PUTs. Preparation has a bounded
+24-hour deadline, not a renewable upload lease; expiry rejects final publication.
+Lost upload responses and aborted catalog transactions retain recovery records and
+exact object versions rather than attempting prefix cleanup. Tests exercise this
+real producer against PostgreSQL and TLS MinIO, including authored/catalog IDs,
+two-architecture enqueue, reuse, upload failure and publication rollback.
+
+The local CLI and Python default remain legacy. Adapter and taskset producer
+integration, builder/trial admission and reference release, both taskset GC paths,
+scheduled reconciliation, and V2 claim switching remain required. Taskset quota
+accounting must include retained historical source objects outside generation
+roots before that producer switches. These APIs do not activate native builders.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency

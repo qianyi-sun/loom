@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import time
 from types import SimpleNamespace
 
@@ -6,6 +8,117 @@ import pytest
 from botocore.exceptions import ClientError
 
 from loom.trajectory.storage import MinioObjectStore, _remove_expect_header
+
+
+class _IntentWriteClient:
+    def __init__(self, *, status="Enabled", version="version-1"):
+        self.status = status
+        self.version = version
+        self.calls = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+
+    def get_bucket_versioning(self, **kwargs):
+        self.calls.append(("versioning", kwargs))
+        self.entered.set()
+        assert self.release.wait(10)
+        return {"Status": self.status} if self.status is not None else {}
+
+    def put_object(self, **kwargs):
+        self.calls.append(("put", kwargs))
+        return {"VersionId": self.version} if self.version is not None else {}
+
+
+@pytest.mark.parametrize("status", [None, "", "Suspended", "invalid"])
+async def test_strong_put_refuses_non_enabled_versioning_before_any_write(status):
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    client = _IntentWriteClient(status=status)
+    store._client = client
+    with pytest.raises(ValueError, match="versioning"):
+        await store.put_object_with_metadata(
+            bucket="sources", key="task/file", body=b"abc",
+            metadata={"loom-source-write-id": "intent-1"}, require_versioning=True,
+        )
+    assert [name for name, _ in client.calls] == ["versioning"]
+
+
+@pytest.mark.parametrize("version", [None, "null"])
+async def test_strong_put_refuses_unversioned_receipt_without_legacy_regression(version):
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    client = _IntentWriteClient(version=version)
+    store._client = client
+    with pytest.raises(ValueError, match="immutable object version"):
+        await store.put_object_with_metadata(
+            bucket="sources", key="task/file", body=b"abc", require_versioning=True,
+        )
+    result = await store.put_object_with_metadata(bucket="sources", key="legacy/file", body=b"abc")
+    assert result.version_id == version
+    assert "Metadata" not in client.calls[-1][1]
+
+
+async def test_strong_put_snapshots_metadata_before_async_preflight():
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    client = _IntentWriteClient()
+    client.release.clear()
+    store._client = client
+    metadata = {"loom-source-write-id": "intent-1"}
+    task = asyncio.create_task(store.put_object_with_metadata(
+        bucket="sources", key="task/file", body=b"abc", metadata=metadata, require_versioning=True,
+    ))
+    try:
+        assert await asyncio.to_thread(client.entered.wait, 5)
+        metadata["loom-source-write-id"] = "changed"
+    finally:
+        client.release.set()
+        result = await task
+    assert result.version_id == "version-1"
+    assert client.calls[-1][1]["Metadata"] == {"loom-source-write-id": "intent-1"}
+
+
+@pytest.mark.parametrize("metadata", [{"Bad-Key": "v"}, {"key": "bad\nvalue"}, {"key": "x" * 2049}])
+async def test_put_rejects_invalid_intent_metadata_before_io(metadata):
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    client = _IntentWriteClient()
+    store._client = client
+    with pytest.raises(ValueError, match="metadata"):
+        await store.put_object_with_metadata(bucket="sources", key="task/file", body=b"abc", metadata=metadata)
+    assert client.calls == []
+
+
+async def test_strong_write_rechecks_versioning_on_retry_with_the_same_intent_metadata():
+    from botocore.exceptions import ConnectionClosedError
+
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    first, second = _IntentWriteClient(), _IntentWriteClient(status="Suspended")
+    attempts = []
+
+    def fail_write(**kwargs):
+        attempts.append(kwargs)
+        raise ConnectionClosedError(endpoint_url="http://disposable-invalid")
+
+    first.put_object = fail_write
+    store._client = first
+    store._build_client = lambda: second
+    with pytest.raises(ValueError, match="versioning"):
+        await store.put_object_with_metadata(bucket="sources", key="task/file", body=b"abc",
+            metadata={"loom-source-write-id": "intent-1"}, require_versioning=True)
+    assert attempts[0]["Metadata"] == {"loom-source-write-id": "intent-1"}
+    assert [name for name, _ in second.calls] == ["versioning"]
+
+
+@pytest.mark.parametrize("backend", ["fake", "local"])
+async def test_nonversioned_backends_refuse_strong_write_without_creating_objects(backend, tmp_path):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_cli.local_object_store import LocalDiskObjectStore
+
+    store = FakeObjectStore() if backend == "fake" else LocalDiskObjectStore(root=tmp_path)
+    with pytest.raises(ValueError, match="versioning"):
+        await store.put_object_with_metadata(bucket="sources", key="task/file", body=b"abc", require_versioning=True)
+    if backend == "fake":
+        assert store.objects == {}
+    else:
+        assert list(tmp_path.iterdir()) == []
 
 
 def test_minio_object_store_uses_import_safe_s3_client_defaults() -> None:

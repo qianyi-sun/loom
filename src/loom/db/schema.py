@@ -2144,6 +2144,84 @@ class Task(Base):
     )
 
 
+class TaskBundleSource(Base):
+    """Immutable logical identity and shared source admission/retirement lock."""
+
+    __tablename__ = "task_bundle_sources"
+    __table_args__ = (CheckConstraint("id ~ '^[0-9a-f]{64}$'", name="task_bundle_sources_id_check"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_uri: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    spec_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class TaskBundleSourceIncarnation(Base):
+    __tablename__ = "task_bundle_source_incarnations"
+    __table_args__ = (
+        CheckConstraint("state IN ('uploading','available','deleting','retired')", name="task_bundle_incarnation_state_check"),
+        CheckConstraint("expires_at > created_at", name="task_bundle_incarnation_deadline_check"),
+        Index("task_bundle_incarnation_source_idx", "source_id", "state"),
+        Index("task_bundle_incarnation_available_uidx", "source_id", unique=True, postgresql_where=text("state = 'available'")),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(64), ForeignKey("task_bundle_sources.id"), nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class TaskBundleSourceWrite(Base):
+    __tablename__ = "task_bundle_source_writes"
+    __table_args__ = (
+        UniqueConstraint("incarnation_id", "object_key", name="task_bundle_write_object_uidx"),
+        UniqueConstraint("id", "bucket", "object_key", name="task_bundle_write_storage_uidx"),
+        CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$' AND size_bytes >= 0", name="task_bundle_write_content_check"),
+        CheckConstraint("inventory_epoch >= 0", name="task_bundle_write_epoch_check"),
+        Index("task_bundle_write_reconcile_idx", "last_observed_end_at", "id"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    incarnation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("task_bundle_source_incarnations.id"), nullable=False)
+    bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    issued_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    inventory_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    inventory_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    inventory_cursor: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    last_observed_end_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class TaskBundleSourceVersion(Base):
+    __tablename__ = "task_bundle_source_versions"
+    __table_args__ = (
+        ForeignKeyConstraint(["write_id", "bucket", "object_key"], ["task_bundle_source_writes.id", "task_bundle_source_writes.bucket", "task_bundle_source_writes.object_key"], name="task_bundle_version_write_fkey"),
+        UniqueConstraint("bucket", "object_key", "version_id", name="task_bundle_version_identity_uidx"),
+        CheckConstraint("version_id <> 'null' AND version_id <> '' AND version_id = btrim(version_id)", name="task_bundle_version_immutable_check"),
+        CheckConstraint("state IN ('available','deleting','deleted')", name="task_bundle_version_state_check"),
+        CheckConstraint("(state = 'deleted') = (deleted_at IS NOT NULL)", name="task_bundle_version_deleted_check"),
+        Index("task_bundle_version_write_idx", "write_id", "state"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    write_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    version_id: Mapped[str] = mapped_column(String(1024), nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class TaskBundleSourceReference(Base):
+    __tablename__ = "task_bundle_source_references"
+    __table_args__ = (CheckConstraint("kind IN ('catalog','materialization','trial')", name="task_bundle_reference_kind_check"),)
+    source_id: Mapped[str] = mapped_column(String(64), ForeignKey("task_bundle_sources.id"), primary_key=True)
+    kind: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
 class TaskImageMaterialization(Base):
     """Per-architecture prerequisite, optionally qualified by a strong manifest."""
 

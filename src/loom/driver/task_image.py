@@ -717,15 +717,18 @@ def _is_arm64_docker_image(image: Any) -> bool:
 
 
 def _dockerfile_uses_base_image(dockerfile: Path, image: str) -> bool:
-    normalized_image = _normalize_docker_image_name(image)
     try:
-        lines = dockerfile.read_text(encoding="utf-8").splitlines()
+        content = dockerfile.read_text(encoding="utf-8")
     except OSError as exc:
         raise TaskImageBuildError(
             f"failed to read Dockerfile {dockerfile}: {exc}",
         ) from exc
+    return _dockerfile_text_uses_base_image(content, image)
 
-    for raw_line in lines:
+
+def _dockerfile_text_uses_base_image(content: str, image: str) -> bool:
+    normalized_image = _normalize_docker_image_name(image)
+    for raw_line in content.splitlines():
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -742,6 +745,13 @@ def _dockerfile_uses_base_image(dockerfile: Path, image: str) -> bool:
             return False
         return _normalize_docker_image_name(from_args[0]) == normalized_image
     return False
+
+
+def dockerfile_text_uses_runtime_arm64_fallback_base(content: str) -> bool:
+    """Apply the same base probe to already verified, owned Dockerfile bytes."""
+    return any(
+        _dockerfile_text_uses_base_image(content, base) for base in RUNTIME_ARM64_FALLBACK_BASES
+    )
 
 
 def dockerfile_uses_runtime_arm64_fallback_base(dockerfile: Path) -> bool:
