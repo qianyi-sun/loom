@@ -219,7 +219,7 @@ adopt the exact active accepted subject into its managed base; a noncommitted
 first create instead has no adopted subject. The manager still makes the final
 atomic admission and identity decision.
 
-Migration `0136` retains the predecessor and independently accepted source with
+Migration `0139` retains the predecessor and independently accepted source with
 restricting foreign keys. The predecessor envelope and referenced accepted
 operation/attempt evidence remain immutable. In one lease-fenced transaction,
 the predecessor becomes `superseded` at `membership_successor_created`, a fresh
@@ -291,7 +291,7 @@ derives database/roles/buckets and object-store identities from the name plus
 full subject incarnation, retaining stable namespaces and routes. Short purpose
 suffixes keep every PostgreSQL and bucket name within 63 bytes. Bindings pin
 owner user/team and subject identities; resource paths are never caller overrides.
-Migration `0137` reserves the canonical binding and digest on each environment
+Migration `0140` reserves the canonical binding and digest on each environment
 and lifecycle operation before external work. Historical NULL bindings retain
 the exact legacy mapping; there is no physical rename or historical backfill.
 Retries and same-incarnation operations retain their binding. Recreation inherits

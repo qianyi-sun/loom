@@ -1,15 +1,15 @@
 """Retain unique, immutable, lease-fenced personal membership successor lineage.
 
-Revision ID: 0136
-Revises: 0135
+Revision ID: 0139
+Revises: 0138
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0136"
-down_revision = "0135"
+revision = "0139"
+down_revision = "0138"
 branch_labels = None
 depends_on = None
 
@@ -347,7 +347,7 @@ def downgrade() -> None:
             IF EXISTS (SELECT 1 FROM dev_lifecycle_operations
                        WHERE membership_predecessor_operation_id IS NOT NULL OR state = 'superseded')
                OR EXISTS (SELECT 1 FROM dev_lifecycle_operation_attempts WHERE state = 'superseded') THEN
-                RAISE EXCEPTION 'cannot downgrade 0136 with membership successor history';
+                RAISE EXCEPTION 'cannot downgrade 0139 with membership successor history';
             END IF;
         END $$
     """)

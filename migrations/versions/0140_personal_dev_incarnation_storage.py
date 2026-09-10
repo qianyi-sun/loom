@@ -1,15 +1,15 @@
 """Pin personal storage layouts to immutable owner/incarnation lifecycle history.
 
-Revision ID: 0137
-Revises: 0136
+Revision ID: 0140
+Revises: 0139
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0137"
-down_revision = "0136"
+revision = "0140"
+down_revision = "0139"
 branch_labels = None
 depends_on = None
 
@@ -180,7 +180,7 @@ def downgrade() -> None:
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM dev_instances WHERE storage_binding IS NOT NULL)
                OR EXISTS (SELECT 1 FROM dev_lifecycle_operations WHERE storage_binding IS NOT NULL) THEN
-                RAISE EXCEPTION 'cannot downgrade 0137 with incarnation storage history';
+                RAISE EXCEPTION 'cannot downgrade 0140 with incarnation storage history';
             END IF;
         END $$
     """)
