@@ -7,7 +7,9 @@ from alembic import command
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.unit.test_personal_dev_build_admission import admission_input
 
 
@@ -71,7 +73,7 @@ async def test_installation_rejects_same_deployment_rebinding(owner_sessions, tm
     async with sessions.begin() as session:
         await session.execute(text(f"SET LOCAL ROLE {owner}"))
         store = store_type(session, expected_owner_role=owner)
-        with pytest.raises(ValueError, match="binding|replay"):
+        with pytest.raises(ValueError, match=r"binding|replay"):
             await store.retain(member=member, runtime=runtime)
         assert await store.read(first.id) == first
 
@@ -89,7 +91,9 @@ async def test_installation_requires_owner_transaction(owner_sessions, tmp_path)
             await store_type(session, expected_owner_role=owner).retain(member=values["member"], runtime=values["runtime"])
 
 
-async def test_installation_readback_rejects_noncanonical_owner_evidence(owner_sessions, tmp_path):
+@pytest.mark.parametrize("boundary", ["wire", "scalar", "runtime-digest", "unknown-field"])
+async def test_installation_readback_rejects_noncanonical_owner_evidence(owner_sessions, tmp_path, boundary):
+    import json
     from hashlib import sha256
 
     store_type = import_module("loom_capacity_build_guard.installation_store").BuildGuardInstallationStore
@@ -102,9 +106,46 @@ async def test_installation_readback_rejects_noncanonical_owner_evidence(owner_s
         # Owner corruption is not runtime authority; even valid JSON with a
         # recomputed hash must not be accepted if its canonical wire changed.
         await session.execute(text("ALTER TABLE loom_capacity_build_guard.installations DISABLE TRIGGER immutable"))
-        wire = b" " + first.wire_payload
-        await session.execute(text("UPDATE loom_capacity_build_guard.installations SET wire_payload=:wire, payload_sha256=:digest"),
-            {"wire": wire, "digest": sha256(wire).hexdigest()})
+        payload = json.loads(first.wire_payload)
+        if boundary == "runtime-digest":
+            payload["runtime_installation_sha256"] = "f" * 64
+        elif boundary == "unknown-field":
+            payload["runtime"]["unexpected"] = "not-authority"
+        wire = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        if boundary == "wire":
+            wire = b" " + wire
+        await session.execute(text("UPDATE loom_capacity_build_guard.installations SET payload=CAST(:payload AS jsonb), wire_payload=:wire, payload_sha256=:digest"),
+            {"payload": wire.decode("ascii"), "wire": wire, "digest": sha256(wire).hexdigest()})
+        if boundary == "scalar":
+            await session.execute(text("UPDATE loom_capacity_build_guard.installations SET deployment_generation=2"))
         await session.execute(text("ALTER TABLE loom_capacity_build_guard.installations ENABLE TRIGGER immutable"))
-        with pytest.raises(ValueError, match="canonical"):
+        with pytest.raises(ValueError, match=r"canonical|digest"):
             await store.read(first.id)
+
+
+async def test_runtime_agent_cannot_retain_installation(build_guard_database, tmp_path):
+    store_type = import_module("loom_capacity_build_guard.installation_store").BuildGuardInstallationStore
+    config, _engine, owner, _agent, agent_url = build_guard_database
+    command.upgrade(config, "head")
+    database = create_async_engine(agent_url.set(drivername="postgresql+psycopg"), isolation_level="SERIALIZABLE")
+    values = admission_input(tmp_path)
+    try:
+        async with async_sessionmaker(database).begin() as session:
+            with pytest.raises(ValueError, match="owner"):
+                await store_type(session, expected_owner_role=owner).retain(member=values["member"], runtime=values["runtime"])
+    finally:
+        await database.dispose()
+
+
+async def test_installation_insert_rolls_back_with_caller(owner_sessions, tmp_path):
+    store_type = import_module("loom_capacity_build_guard.installation_store").BuildGuardInstallationStore
+    sessions, owner = owner_sessions
+    values = admission_input(tmp_path)
+    async with sessions() as session:
+        await session.begin()
+        await session.execute(text(f"SET LOCAL ROLE {owner}"))
+        retained = await store_type(session, expected_owner_role=owner).retain(member=values["member"], runtime=values["runtime"])
+        await session.rollback()
+    async with sessions.begin() as session:
+        await session.execute(text(f"SET LOCAL ROLE {owner}"))
+        assert await store_type(session, expected_owner_role=owner).read(retained.id) is None
