@@ -763,6 +763,16 @@ preparations until purpose-aware mutation, allocation and admission consumers ar
 connected. Read-only graph verification does not activate a successor or complete
 the development runtime acceptance criteria.
 
+The pure typed prefix validator supports first capacity, update and destroy events
+for inherited applications and build services without synthesizing local create
+events. Later local recreation uses the original configuration root retained in
+provenance, not the latest imported base. Reporter, token and operation reservations
+cover both purposes. A first ordinary successor mutation has no local recreation
+certificate; any older certificate remains unchanged in inherited provenance.
+Imported disabled members still cannot be recreated as the first successor event:
+that transition requires explicit cross-epoch predecessor evidence, not a rewritten
+epoch-local certificate. These prefix checks alone do not open durable consumers.
+
 V4 preparation and operator policy now pin `managed_application_origins` with
 exact coverage of the managed base identities. Each origin contains the complete
 immutable base configuration, original create/update installation projection,

@@ -28,6 +28,10 @@ from loom_capacity_manager.contracts import (
 from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.models import CapacityPersonalMembershipEvent
+from loom_capacity_manager.successor_origin_contracts import (
+    ManagedApplicationOriginV2,
+    ManagedBuildOriginV1,
+)
 from loom_capacity_manager.typed_membership_commands import (
     PersonalApplicationCommandV2,
     PersonalBuildCommandV2,
@@ -90,12 +94,13 @@ def validate_typed_membership_event(
 def _build_transition(
     request: PersonalMembershipMutationV2, member: PersonalBuildMemberV1,
     prior: tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent] | None,
-    origin: SubjectConfigurationV1, used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
+    origin: ConfigurationGenerationRefV1, used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
+    base: ManagedBuildOriginV1 | None = None,
 ) -> None:
     assert isinstance(request.command, PersonalBuildCommandV2)
     projection, subject = request.command.projection, member.configuration
     fresh_reporter = subject.demand_reporter_incarnation not in reporters and projection.demand_reporter_token_sha256 not in tokens
-    if prior is None:
+    if prior is None and base is None:
         if (
             projection.operation_kind != "create" or subject.subject_incarnation in used_incarnations
             or subject.candidate_generation != 1 or subject.deployment_generation != 1
@@ -103,27 +108,30 @@ def _build_transition(
         ):
             raise ValueError("initial build membership requires a fresh service identity")
         return
-    old_request, old_result, old_row = prior
-    old_member, old = old_result.member, old_result.member.configuration
+    if prior is None:
+        assert base is not None
+        old, old_projection, old_ack = base.configuration, base.base_projection, base.acknowledgement
+        old_owner = base.base_projection.owner_id
+    else:
+        old_request, old_result, _old_row = prior
+        if not isinstance(old_result.member, PersonalBuildMemberV1) or not isinstance(old_request.command, PersonalBuildCommandV2):
+            raise ValueError("build membership historical purpose changed")
+        old, old_projection, old_ack = old_result.member.configuration, old_request.command.projection, old_result.member.acknowledgement
+        old_owner = old_result.member.owner_id
     if (
-        not isinstance(old_member, PersonalBuildMemberV1)
-        or member.owner_id != old_member.owner_id or subject.display_name != old.display_name
+        member.owner_id != old_owner or subject.display_name != old.display_name
         or subject.configuration_generation <= old.configuration_generation
     ):
         raise ValueError("build membership historical identity changed")
     recreating = old.lifecycle_state == "disabled" and projection.operation_kind == "create"
     if recreating:
         evidence = member.reincarnation
-        origin_reference = ConfigurationGenerationRefV1(
-            scope="subject", subject_id=origin.subject_id, subject_incarnation=origin.subject_incarnation,
-            generation=origin.configuration_generation, digest=canonical_digest(origin),
-        )
         if (
-            subject.subject_incarnation in used_incarnations or not fresh_reporter
+            prior is None or subject.subject_incarnation in used_incarnations or not fresh_reporter
             or subject.candidate_generation != 1 or subject.deployment_generation != 1
-            or evidence is None or evidence.origin != origin_reference
-            or evidence.predecessor != old or evidence.predecessor_revision != old_row.revision
-            or evidence.predecessor_head_sha256 != old_row.head_sha256
+            or evidence is None or evidence.origin != origin
+            or evidence.predecessor != old or evidence.predecessor_revision != prior[2].revision
+            or evidence.predecessor_head_sha256 != prior[2].head_sha256
             or evidence.admission_revision != member.revision
         ):
             raise ValueError("build membership predecessor event changed")
@@ -131,7 +139,7 @@ def _build_transition(
     if (
         old.lifecycle_state == "disabled" or projection.operation_kind == "create"
         or subject.subject_incarnation != old.subject_incarnation
-        or member.reincarnation != old_member.reincarnation
+        or member.reincarnation != (None if prior is None else prior[1].member.reincarnation)
     ):
         raise ValueError("build membership requires a released fresh reincarnation")
     if projection.operation_kind == "update":
@@ -144,8 +152,8 @@ def _build_transition(
         subject.deployment_generation != old.deployment_generation
         or subject.candidate_generation != old.candidate_generation
         or subject.demand_reporter_incarnation != old.demand_reporter_incarnation
-        or projection.demand_reporter_token_sha256 != old_request.command.projection.demand_reporter_token_sha256
-        or member.acknowledgement != old_member.acknowledgement.model_copy(update={
+        or projection.demand_reporter_token_sha256 != old_projection.demand_reporter_token_sha256
+        or member.acknowledgement != old_ack.model_copy(update={
             "configuration_generation": subject.configuration_generation,
             "acknowledgement_sha256": member.acknowledgement.acknowledgement_sha256,
         })
@@ -156,7 +164,7 @@ def _build_transition(
 def _application_transition(
     request: PersonalMembershipMutationV2, member: PersonalApplicationMemberV1,
     prior: tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent] | None,
-    origin: SubjectConfigurationV1, used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
+    origin: ConfigurationGenerationRefV1, used_incarnations: set[UUID], reporters: set[UUID], tokens: set[str],
     base: ManagedApplicationOriginV1 | None = None,
 ) -> None:
     """Authenticate lifecycle from a real prior event or pinned managed origin."""
@@ -188,11 +196,8 @@ def _application_transition(
         raise ValueError("application membership historical identity or lifecycle changed")
     if old.lifecycle_state == "disabled" and projection.operation_kind == "create":
         evidence = member.reincarnation
-        reference = ConfigurationGenerationRefV1(scope="subject", subject_id=origin.subject_id,
-            subject_incarnation=origin.subject_incarnation, generation=origin.configuration_generation,
-            digest=canonical_digest(origin))
         if (
-            prior is None or evidence is None or evidence.origin != reference
+            prior is None or evidence is None or evidence.origin != origin
             or subject.subject_incarnation in used_incarnations or not fresh_reporter
             or subject.candidate_generation != 1 or subject.deployment_generation != 1
             or evidence.predecessor != old or evidence.predecessor_revision != prior[2].revision
@@ -244,17 +249,21 @@ unique indexes also enforce their uniqueness across other execution epochs.
         raise ValueError("typed membership execution epoch must be positive")
     preparation = ExecutionPreparationV4.model_validate_json(preparation.model_dump_json())
     bases = {origin.configuration.subject_id: origin for origin in preparation.managed_application_origins}
+    build_bases = {origin.configuration.subject_id: origin for origin in preparation.managed_build_origins}
+    all_bases: tuple[ManagedApplicationOriginV1 | ManagedBuildOriginV1, ...] = (*bases.values(), *build_bases.values())
     previous = "0" * 64
-    operations = {projection.operation_id for origin in bases.values()
+    operations = {projection.operation_id for origin in all_bases
         for projection in (origin.installation_projection, origin.base_projection)}
     keys: set[UUID] = set()
     prior_members: dict[UUID, tuple[PersonalMembershipMutationV2, PersonalMembershipResultV2, CapacityPersonalMembershipEvent]] = {}
-    names = {origin.configuration.display_name: origin.configuration.subject_id for origin in bases.values()}
-    origins: dict[UUID, SubjectConfigurationV1] = {identity: base.configuration for identity, base in bases.items()}
+    names = {origin.configuration.display_name: origin.configuration.subject_id for origin in all_bases}
+    origins = {base.configuration.subject_id: (base.inherited.original_origin
+        if isinstance(base, (ManagedApplicationOriginV2, ManagedBuildOriginV1)) else _configuration_reference(base.configuration))
+        for base in all_bases}
     used_incarnations = {item.subject_incarnation for item in preparation.subject_acknowledgements}
     base_ids = set(preparation.personal_membership.managed_base_subject_ids) | {item.subject_id for item in preparation.subject_acknowledgements}
     reporters = {item.reporter_incarnation for item in preparation.subject_acknowledgements}
-    tokens = {origin.base_projection.demand_reporter_token_sha256 for origin in bases.values()}
+    tokens = {origin.base_projection.demand_reporter_token_sha256 for origin in all_bases}
     results: list[PersonalMembershipResultV2] = []
     for revision, row in enumerate(rows, start=1):
         request, result = validate_typed_membership_event(row, preparation, fleet)
@@ -270,11 +279,11 @@ unique indexes also enforce their uniqueness across other execution epochs.
         prior = prior_members.get(subject.subject_id)
         if prior is not None and member.purpose != prior[1].member.purpose:
             raise ValueError("typed membership subject purpose changed")
-        origin = origins.setdefault(subject.subject_id, subject)
+        origin = origins.setdefault(subject.subject_id, _configuration_reference(subject))
         if isinstance(member, PersonalBuildMemberV1):
-            if subject.subject_id in base_ids:
+            if subject.subject_id in base_ids and subject.subject_id not in build_bases:
                 raise ValueError("build membership cannot replace an immutable base subject")
-            _build_transition(request, member, prior, origin, used_incarnations, reporters, tokens)
+            _build_transition(request, member, prior, origin, used_incarnations, reporters, tokens, build_bases.get(subject.subject_id))
         else:
             if subject.subject_id in base_ids and subject.subject_id not in bases:
                 raise ValueError("application base adoption requires authenticated original provenance")
@@ -288,3 +297,9 @@ unique indexes also enforce their uniqueness across other execution epochs.
         keys.add(row.idempotency_key)
         results.append(result)
     return tuple(results)
+
+
+def _configuration_reference(configuration: SubjectConfigurationV1) -> ConfigurationGenerationRefV1:
+    return ConfigurationGenerationRefV1(scope="subject", subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation, generation=configuration.configuration_generation,
+        digest=canonical_digest(configuration))
