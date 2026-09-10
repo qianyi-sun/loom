@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom.db.schema import (
@@ -20,6 +20,7 @@ from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
 )
 from loom_control_plane.task_image_materializations import (
+    TaskImageLeaseConflictError,
     claim_task_image_materialization,
     start_task_image_materialization,
 )
@@ -129,3 +130,32 @@ async def test_build_and_execution_admission_require_available_pinned_source(
             assert await session.get(TaskBundleSourceReference, (
                 spec.id, "materialization", str(image_id),
             )) is not None
+
+
+async def test_start_rechecks_current_owner_instead_of_cached_claim(journal, tmp_path):
+    spec = _spec(tmp_path)
+    ticket = await _upload(journal, spec)
+    await _receipts(journal, ticket)
+    await _publish(journal, ticket)
+    async with journal.begin() as session:
+        image = (await ensure_task_image_materializations(session, task_row=_task(spec)))[0]
+        image.state = "claimed"
+        image.claimed_by = "original"
+        image.lease_epoch = 1
+        image.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        image_id = image.id
+    async with journal() as stale:
+        cached = await stale.get(TaskImageMaterialization, image_id)
+        assert cached.claimed_by == "original"
+        async with journal.begin() as current:
+            await current.execute(update(TaskImageMaterialization).where(
+                TaskImageMaterialization.id == image_id,
+            ).values(claimed_by="replacement", lease_epoch=2))
+        with pytest.raises(TaskImageLeaseConflictError, match="stale"):
+            await start_task_image_materialization(
+                stale, materialization_id=image_id, builder_id="original", lease_epoch=1,
+            )
+        await stale.rollback()
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert (image.state, image.claimed_by, image.lease_epoch) == ("claimed", "replacement", 2)
