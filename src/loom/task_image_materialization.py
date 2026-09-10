@@ -6,7 +6,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -27,6 +27,9 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.models.task import TaskConfig
+
+if TYPE_CHECKING:
+    from loom.task_bundle_source import TaskBundleSourceSpecV1
 
 NativeCPUArch = Literal["x86_64", "arm64"]
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
@@ -342,18 +345,23 @@ async def _reference_task_image_materializations(
 
 async def admit_task_image_source(
     session: AsyncSession, *, row: TaskImageMaterialization
-) -> None:
+) -> TaskBundleSourceSpecV1 | None:
     """Pin a registered strong source while holding its materialization lock."""
     digest = task_bundle_content_manifest_digest(row.task_source_provenance)
-    if not digest:
-        return
     if row.bundle_content_manifest_sha256 != digest:
         raise ValueError("registered source manifest differs from materialization identity")
+    if not digest:
+        return None
+    if row.materialization_key != task_image_materialization_key(
+        task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
+        bundle_content_manifest_sha256=digest,
+    ):
+        raise ValueError("registered source differs from materialization key")
     # Bundle parsing depends on native-plan identity helpers in this module.
     # Resolve the journal at the call boundary, not during that import cycle.
     from loom.task_bundle_source_journal import admit_task_bundle_source
 
-    await admit_task_bundle_source(
+    return await admit_task_bundle_source(
         session,
         task_id=row.task_id,
         task_checksum=row.task_checksum,

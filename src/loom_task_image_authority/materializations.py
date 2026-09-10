@@ -9,7 +9,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
 
 import rfc8785
@@ -30,10 +30,10 @@ from loom.db.schema import (
 from loom.security.secret_store import SecretStore
 from loom.task_image_build_plan import (
     TaskImageBuildPlan,
-    TaskImageBuildPlanV1,
     derive_task_image_build_plan,
     parse_task_image_build_plan,
 )
+from loom.task_image_materialization import admit_task_image_source
 from loom_task_image_authority.bundle_capability import (
     AsyncTaskImageBundleCapabilityProvider,
     TaskImageBundleCapability,
@@ -43,6 +43,9 @@ from loom_task_image_authority.bundle_capability import (
     parse_task_image_bundle_capability,
 )
 from loom_task_image_authority.retention import attempt_is_retired
+
+if TYPE_CHECKING:
+    from loom.task_bundle_source import TaskBundleSourceSpecV1
 
 DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS = 300.0
 MAX_SESSION_MATERIALIZATION_LEASE_SECONDS = 15 * 60.0
@@ -221,9 +224,12 @@ async def lock_current_task_image_build_session_authority(
     *,
     authorization: TaskImageBuildSessionAuthorization,
     now: datetime,
+    source_admission: bool = False,
 ) -> TaskImageBuildSessionGeneration:
     """Recheck and lock grant → projection → current generation in canonical order."""
 
+    if source_admission:
+        await _require_source_transaction(session)
     _reject_pending_materialization_authority(session)
     if (
         authorization.authority_version != 2
@@ -311,6 +317,36 @@ async def lock_current_task_image_build_session_authority(
     return generation
 
 
+async def _require_source_transaction(session: AsyncSession) -> None:
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    try:
+        await require_task_bundle_transaction(session)
+    except ValueError as error:
+        raise TaskImageSessionMaterializationConflictError(str(error)) from None
+
+
+async def _admit_source(
+    session: AsyncSession, row: TaskImageMaterialization,
+) -> TaskBundleSourceSpecV1 | None:
+    # Call only after the caller/image/attempt locks. Cleanup deliberately does
+    # not enter here: loss of input must never prevent closing an allocation.
+    if row.state == "retired":
+        raise TaskImageSessionMaterializationConflictError("task-image source owner is retired")
+    try:
+        return await admit_task_image_source(session, row=row)
+    except ValueError as error:
+        raise TaskImageSessionMaterializationConflictError(f"task-image source unavailable: {error}") from None
+
+
+async def _admitted_plan(
+    session: AsyncSession, row: TaskImageMaterialization,
+    authorization: TaskImageBuildSessionAuthorization,
+) -> TaskImageBuildPlan:
+    source = await _admit_source(session, row)
+    return derive_task_image_build_plan(row, authorization, admitted_source=source)
+
+
 async def _claim_replay(
     session: AsyncSession,
     *,
@@ -373,6 +409,7 @@ async def _claim_replay(
         )
     if await attempt_is_retired(session, attempt_id=attempt.id):
         raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
+    await _admit_source(session, row)
     return row, _stored_claim_plan(
         attempt,
         authorization=authorization,
@@ -397,6 +434,7 @@ async def claim_session_materialization(
         session,
         authorization=authorization,
         now=now,
+        source_admission=True,
     )
     replay = await _claim_replay(
         session,
@@ -453,13 +491,14 @@ async def claim_session_materialization(
         )
         .order_by(TaskImageMaterialization.created_at, TaskImageMaterialization.id)
         .limit(1)
+        .execution_options(populate_existing=True)
         .with_for_update(skip_locked=True)
     )
     if row is None:
         return None
 
     # Derivation must reject malformed frozen state before any lease field changes.
-    plan = derive_task_image_build_plan(row, authorization)
+    plan = await _admitted_plan(session, row, authorization)
     plan_json, plan_sha256 = _plan_snapshot(plan)
     next_attempt_number = (
         int(
@@ -549,6 +588,8 @@ async def _operation_replay(
         session, attempt_id=attempt_id
     ):
         raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
+    if operation_type in ("start", "heartbeat"):
+        await _admit_source(session, row)
     return row
 
 
@@ -565,6 +606,8 @@ async def lock_session_materialization_lease(
 ) -> tuple[TaskImageMaterialization, TaskImageMaterializationAttempt]:
     # Only trusted release/failure transitions opt out: they return no bundle,
     # build plan, registry credential, candidate or publication authority.
+    if not cleanup_only:
+        await _require_source_transaction(session)
     _reject_pending_materialization_authority(session)
     row = await session.scalar(
         select(TaskImageMaterialization)
@@ -601,6 +644,8 @@ async def lock_session_materialization_lease(
         )
     if not cleanup_only and await attempt_is_retired(session, attempt_id=attempt.id):
         raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
+    if not cleanup_only:
+        await _admit_source(session, row)
     return row, attempt
 
 
@@ -705,6 +750,7 @@ async def _prepare_operation(
         session,
         authorization=authorization,
         now=now,
+        source_admission=operation_type in ("start", "heartbeat", "bundle"),
     )
     replay = await _operation_replay(
         session,
@@ -824,7 +870,7 @@ async def get_session_materialization_build_plan(
     attempt_id: UUID,
     lease_epoch: int,
     now: datetime,
-) -> TaskImageBuildPlanV1:
+) -> TaskImageBuildPlan:
     """Re-derive a plan only for the exact current live lease, without mutation."""
 
     now = _utc(now)
@@ -836,6 +882,7 @@ async def get_session_materialization_build_plan(
         session,
         authorization=authorization,
         now=now,
+        source_admission=True,
     )
     row, _attempt = await lock_session_materialization_lease(
         session,
@@ -846,7 +893,7 @@ async def get_session_materialization_build_plan(
         allowed_states=("claimed", "running"),
         now=now,
     )
-    return derive_task_image_build_plan(row, authorization)
+    return await _admitted_plan(session, row, authorization)
 
 
 @dataclass(frozen=True, slots=True)
@@ -894,6 +941,7 @@ async def _lock_bundle_state(
         session,
         authorization=authorization,
         now=now,
+        source_admission=True,
     )
     event = await session.scalar(
         select(TaskImageMaterializationOperationEvent)
@@ -927,7 +975,7 @@ async def _lock_bundle_state(
         authorization.session_expires_at, row.lease_expires_at,
     )
     checked_at = _bundle_time(clock, previous=now, valid_until=valid_until)
-    plan = derive_task_image_build_plan(row, authorization)
+    plan = await _admitted_plan(session, row, authorization)
     claimed = _stored_attempt_claim_plan(attempt, authorization=authorization, materialization_id=materialization_id)
     # Original claim identity is validated against the attempt above. A renewed
     # session changes live capability identity, not the frozen build inputs.
