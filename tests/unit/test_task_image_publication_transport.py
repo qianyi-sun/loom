@@ -122,7 +122,9 @@ async def test_real_mtls_client_sends_only_canonical_input_to_fixed_operation(tm
     b"Content-Length: 2, 2",
     b"Content-Length: 2\r\nContent-Length: 3",
     b"Transfer-Encoding: chunked\r\nContent-Length: 2",
-], ids=["identical", "list", "conflicting", "chunked-and-length"])
+    b"Content-Length: 2\r\nX-Test: ok\nContent-Length: 2",
+    b"Content-Length: 2\r\nX-Test: ok\n folded",
+], ids=["identical", "list", "conflicting", "chunked-and-length", "hidden-bare-lf-length", "hidden-bare-lf-fold"])
 async def test_raw_response_framing_cannot_be_normalized_into_acceptance(tmp_path, framing):
     t = transport()
     c, _, _, _, _, _, unsigned, _ = setup_signing()
