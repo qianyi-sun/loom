@@ -89,7 +89,7 @@ eligible domains. Neither a matching image alone nor a partial policy is enough.
             or profile.trusted_launcher_release_sha256 != preparation.trusted_fleet_release_sha256
             or profile.resources != shape.total_resources
             or profile.concurrency_slots != shape.concurrency_slots
-            or not domains <= set(reference.eligible_resource_domains) & set(shape.compatible_domain_ids)
+            or domains != set(reference.eligible_resource_domains) & set(shape.compatible_domain_ids)
         ):
             raise ValueError("build installation native image, resources or authority differs")
         result.append(PersonalBuildPoolInstallation(pool_id=policy.pool_id, platform=platform,
