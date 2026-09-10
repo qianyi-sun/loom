@@ -1102,17 +1102,46 @@ partial action map is not rollout authority.
 The next component consumes the exact Tier 1 `rendered.yaml` publication and
 never invokes the renderer or image builder. It first requires the journaled
 epoch component to classify as exact for this request and plan, then runs a
-bounded server-side `kubectl diff`. Exit zero is exact; exit one is ready to
-converge under the claimed epoch; every command error is fail-closed. Apply uses
+bounded server-side `kubectl diff`. Exit one is ready to converge under the
+claimed epoch; every command error is fail-closed. Exit zero establishes only
+that the manifest is applied, not that its replacement pods are serving. Apply uses
 server-side apply with the fixed `loom-staging-rollout` field manager, strict
-validation, and no `--force-conflicts`, then must reclassify to an empty diff.
+validation, and no `--force-conflicts`, then must reclassify to an empty diff
+and current-generation application readiness.
 Diff output is discarded so a Secret difference cannot enter logs or evidence.
 The component binds the fresh protected-baseline digest, candidate/tree,
 rendered-manifest digest, namespace, and starting epoch in its immutable intent.
 
+For an empty diff, the same classifier reads every Deployment named in the
+hash-verified manifest, requiring the control plane, service, gateway and web
+core set at positive replica counts. Within one bounded readiness deadline,
+each Deployment must retain the submitted pod-template fields, have a positive
+generation observed by its controller, and have total, updated, ready and
+available replica counts equal to the attested desired count. Unavailable or
+terminating replicas prevent success. Optional zero-replica Deployments must
+also be observed and empty. Server-added defaults are allowed; resource
+quantities compare by exact value only at Kubernetes quantity fields, so CPU
+`1` and `1000m` agree without weakening other scalar identities. Progress-deadline
+failure, API errors, identity drift and timeout fail closed. The classifier
+rechecks epoch ownership and the manifest after waiting, and checks the epoch
+again after that final diff. Unready applications never become `ready` apply
+permission: resuming an already-applied candidate waits again without reapply.
+
+The stronger component implementation digest rejects old journal intent or
+terminal identities; old empty-diff evidence cannot be silently relabeled as
+serving-generation proof. Evidence remains stable across harmless status or
+resource-version changes, but terminal replay still re-observes readiness.
+This gate precedes normal downstream GB10/supervisor candidate activation in
+both migration orders. Initial compensation reconciliation remains earlier
+because it restores the already-authoritative generation; this check is not a
+replacement for restart fencing. Deployment status proves controller-reported
+convergence, not individual Pod/EndpointSlice identity or real-model task
+success. Those runtime acceptance checks remain separate requirements.
+
 `final.convergence` then reuses those same migration, epoch and manifest
 classifiers in read-only mode. It requires the target schema, the exact
-request-owned single epoch advance and an empty server-side manifest diff. It
+request-owned single epoch advance, an empty server-side manifest diff and the
+same current-generation application readiness. It
 does not call any component apply method, rerender a manifest or rebuild an
 image; drift is returned as bounded per-component blocker evidence.
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
 import pytest
+import yaml
 
 from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
 from loom_cli.rollout.operator.protected_apply_journal import ComponentState
@@ -19,6 +21,7 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import (
     _migration,
     _production_defaults,
 )
+from tests.support.protected_application_deployments import CORE_NAMES, application_manifest
 
 
 def _rebind_schema3_authority(plan, *, schema_revision: str):
@@ -80,6 +83,16 @@ def _published_plan(tmp_path: Path):
     base = _plan(tmp_path)
     state = tmp_path / "state"
     images = _images()
+    manifests = _manifests(images)
+    rendered = manifests.rendered_yaml + "---\n" + yaml.safe_dump_all(
+        [application_manifest(name) for name in CORE_NAMES]
+    )
+    manifests = replace(
+        manifests,
+        rendered_yaml=rendered,
+        rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
+        resource_count=1 + len(CORE_NAMES),
+    )
     migration = _migration(
         images,
         candidate_tree="b" * 40,
@@ -91,7 +104,7 @@ def _published_plan(tmp_path: Path):
         candidate_tree="b" * 40,
         mutation_epoch=7,
         images=images,
-        manifests=_manifests(images),
+        manifests=manifests,
         migration=migration,
         production_defaults=_production_defaults(candidate_tree="b" * 40),
         migration_plan_sha256="4" * 64,

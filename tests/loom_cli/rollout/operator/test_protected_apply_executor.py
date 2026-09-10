@@ -48,6 +48,7 @@ from tests.loom_cli.rollout.operator.test_protected_external_supervisor_componen
 from tests.loom_cli.rollout.operator.test_protected_migration_component import (
     _rebind_schema3_authority,
 )
+from tests.support.protected_application_deployments import application_manifest, ready_application
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +70,7 @@ class Runner:
         self.calls: list[str] = []
         self.environment = {"KUBECONFIG": "/exact"}
         self.manifest_status = 1
+        self.application_readiness_failure = False
         self.transition_objects: dict[str, dict[str, object]] = {}
         self.supervisor_database_value = "cG9zdGdyZXNxbDovL2Rlcml2ZWQtc291cmNlCg=="
 
@@ -82,6 +84,26 @@ class Runner:
             "validatingadmissionpolicybindings": "validatingadmissionpolicybinding",
         }
         requested_resource = argv[argv.index("get") + 1] if "get" in argv else None
+        if requested_resource == "deployment":
+            self.calls.append("application-readiness")
+            name = argv[argv.index("get") + 2]
+            live = ready_application(application_manifest(name))
+            if self.application_readiness_failure and name == "loom-control-plane":
+                live["status"].update(
+                    {
+                        "replicas": 3,
+                        "updatedReplicas": 1,
+                        "unavailableReplicas": 1,
+                        "conditions": [
+                            {
+                                "type": "Progressing",
+                                "status": "False",
+                                "reason": "ProgressDeadlineExceeded",
+                            }
+                        ],
+                    }
+                )
+            return json.dumps(live).encode()
         if requested_resource == "secret/loom-secrets":
             assert "--output=jsonpath={.data.cp-db-url}" in argv
             return self.supervisor_database_value.encode()
@@ -615,6 +637,51 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[14].name == "14-external-supervisor-transition-cleanup"
     assert roots[15].name == "15-external-supervisor-credential-gb10"
     assert roots[16].name == "16-external-supervisors-gb10"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_application_readiness_blocks_downstream_activation_in_both_orders(
+    tmp_path: Path, legacy: bool
+) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan = _plan(tmp_path)
+    if legacy:
+        plan = replace(
+            _rebind_schema3_authority(plan, schema_revision="0065"), starting_mutation_epoch=0
+        )
+    runner = Runner(revision="0065" if legacy else "0069", epoch=None if legacy else 7)
+    runner.plan_digest = plan.plan_digest
+    runner.application_readiness_failure = True
+    supervisors = ExternalSupervisors()
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
+    executor = MigrationEpochProtectedApplyExecutor(
+        state_root=state,
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
+        candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls),
+        external_supervisor_transport=supervisors,
+        external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
+        production_defaults_request=_defaults_request,
+    )
+    with pytest.raises(RuntimeError, match="readiness progress deadline"):
+        executor("final.protected-apply", CheckOperation.APPLY, plan)
+    assert runner.calls.count("manifest-apply") == 1
+    assert "application-readiness" in runner.calls
+    assert "supervisor-apply" not in supervisors.calls
+    # Compensation must still reconcile the prior authoritative generation
+    # before any new candidate mutation, even if new serving readiness fails.
+    assert "supervisor-reconcile" in supervisors.calls
+    assert all("credential-publish" not in transport.calls for transport in credentials.values())
+    runner.application_readiness_failure = False
+    executor("final.protected-apply", CheckOperation.APPLY, plan)
+    assert runner.calls.count("manifest-apply") == 1
+    assert supervisors.calls.count("supervisor-apply") == 1
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
