@@ -215,6 +215,10 @@ func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 }
 
 func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, error) {
+	// Model calls follow the caller's phase lifetime and the Gateway's deadline.
+	// Keep the transport's connect/TLS bounds and the finite broker-operation client.
+	gatewayClient := *b.client
+	gatewayClient.Timeout = 0
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, err
@@ -242,7 +246,7 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 			upstream.Header = request.Header.Clone()
 			upstream.Header.Set("Authorization", "Bearer "+token)
 			upstream.Header.Del("Connection")
-			response, requestErr := b.client.Do(upstream)
+			response, requestErr := gatewayClient.Do(upstream)
 			if requestErr != nil {
 				http.Error(writer, "gateway unavailable", http.StatusBadGateway)
 				return

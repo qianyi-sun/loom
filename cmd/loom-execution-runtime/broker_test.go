@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,106 @@ import (
 	"testing"
 	"time"
 )
+
+func TestModelProxyWaitsBeyondBrokerOperationTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		time.Sleep(80 * time.Millisecond)
+		if r.URL.Path == "/v1/responses" {
+			http.Error(w, "upstream deadline reached", http.StatusGatewayTimeout)
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer server.Close()
+	root, _ := url.Parse(server.URL + "/internal/service-execution")
+	client := server.Client()
+	client.Timeout = 20 * time.Millisecond
+	broker := &workloadBroker{root: root, client: client, token: "step-token", expires: time.Now().Add(time.Hour)}
+	proxyURL, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	for path, want := range map[string]int{"/v1/chat/completions": http.StatusOK, "/v1/responses": http.StatusGatewayTimeout} {
+		response, err := http.Post(proxyURL+path, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != want {
+			t.Errorf("%s: got %d %s, want %d", path, response.StatusCode, body, want)
+		}
+	}
+	// Token/input/output operations keep the original finite client budget.
+	err = broker.doJSON(context.Background(), http.MethodGet, broker.endpoint("/slow"), nil, nil, nil)
+	var timeout interface{ Timeout() bool }
+	if !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("non-model operation lost its timeout: %v", err)
+	}
+}
+
+func TestModelProxyPhaseProcessCancellationReachesUpstream(t *testing.T) {
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+	root, _ := url.Parse(server.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: server.Client(), token: "step-token", expires: time.Now().Add(time.Hour)}
+	proxyURL, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-started:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	workspace := t.TempDir()
+	evidence, err := runPhase(ctx, phase{
+		Role: "agent", Argv: []string{os.Args[0], "-test.run=^TestModelProxyPhaseHelper$"},
+		WorkingDirectory: workspace, TimeoutSeconds: 3,
+		Environment: map[string]string{"LOOM_TEST_PROXY_URL": proxyURL},
+	}, 1, workspace, t.TempDir(), 4096, 50*time.Millisecond, nil)
+	if !errors.Is(err, context.Canceled) || evidence.ExitCode == 0 {
+		t.Fatalf("phase process did not stop: evidence=%+v err=%v", evidence, err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream model request survived the phase process")
+	}
+}
+
+func TestModelProxyPhaseHelper(t *testing.T) {
+	endpoint := os.Getenv("LOOM_TEST_PROXY_URL")
+	if endpoint == "" {
+		return
+	}
+	response, err := http.Post(endpoint+"/v1/chat/completions", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		os.Exit(2)
+	}
+	_ = response.Body.Close()
+	os.Exit(0)
+}
 
 func TestWorkloadBrokerRefreshProxyAndDurableOutputCommit(t *testing.T) {
 	leaseID := "0194d739-8bec-7b7b-88f5-62f7cbd42cb3"
