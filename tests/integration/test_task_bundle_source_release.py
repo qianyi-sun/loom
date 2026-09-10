@@ -1,8 +1,9 @@
 """Image cleanup releases only the input pins whose owners actually retire."""
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from loom.db.schema import TaskBundleSourceReference
+from loom.db.schema import Task, TaskBundleSourceReference, TaskImageMaterialization
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.task_image_materializations import (
     claim_task_image_registry_gc,
@@ -61,3 +62,75 @@ async def test_completed_image_gc_releases_only_retired_image_source_pin(
         assert await _module().retire_task_bundle_source(
             session, incarnation_id=ticket.incarnation_id, now=NOW,
         ) is (not raced_reference)
+
+
+@pytest.mark.parametrize("boundary", ["claim", "complete"])
+@pytest.mark.parametrize("isolation", ["AUTOCOMMIT", "REPEATABLE READ", "SERIALIZABLE"])
+async def test_image_gc_rejects_unsafe_transactions_before_pending_writes(
+    journal, tmp_path, boundary, isolation,
+):
+    spec = _spec(tmp_path)
+    ticket = await _upload(journal, spec)
+    await _receipts(journal, ticket)
+    await _publish(journal, ticket)
+    async with journal.begin() as session:
+        image = (await ensure_task_image_materializations(session, task_row=_task(spec)))[0]
+        image.state = "ready"
+        image.registry_images = {"task": "registry.example/task@sha256:" + "a" * 64}
+        image_id = image.id
+    epoch = None
+    if boundary == "complete":
+        async with journal.begin() as session:
+            image = await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
+            epoch = image.lease_epoch
+    sessions = async_sessionmaker(
+        journal.kw["bind"].execution_options(isolation_level=isolation), expire_on_commit=False,
+    )
+    pending = Task(id="pending-" + str(image_id), checksum="f" * 64, config={})
+    async with sessions() as session:
+        session.add(pending)
+        with pytest.raises(ValueError, match="explicit READ COMMITTED"):
+            if boundary == "claim":
+                await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
+            else:
+                await complete_task_image_registry_gc(
+                    session, materialization_id=image_id, gc_id="gc", lease_epoch=epoch,
+                )
+        assert pending in session.new
+        await session.rollback()
+    async with journal() as session:
+        assert await session.get(Task, pending.id) is None
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert image.state == ("ready" if boundary == "claim" else "retiring")
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is not None
+
+
+async def test_image_retirement_rollback_restores_image_and_source_pin(journal, tmp_path):
+    spec = _spec(tmp_path)
+    ticket = await _upload(journal, spec)
+    await _receipts(journal, ticket)
+    await _publish(journal, ticket)
+    async with journal.begin() as session:
+        image = (await ensure_task_image_materializations(session, task_row=_task(spec)))[0]
+        image.state = "ready"
+        image.registry_images = {"task": "registry.example/task@sha256:" + "a" * 64}
+        image_id = image.id
+    async with journal.begin() as session:
+        image = await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
+        epoch = image.lease_epoch
+    async with journal() as session:
+        await complete_task_image_registry_gc(
+            session, materialization_id=image_id, gc_id="gc", lease_epoch=epoch,
+        )
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is None
+        await session.rollback()
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert image.state == "retiring" and image.registry_images
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is not None
