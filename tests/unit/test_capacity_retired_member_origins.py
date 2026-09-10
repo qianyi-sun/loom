@@ -6,8 +6,13 @@ from uuid import UUID
 
 import pytest
 
-from loom_capacity_manager.contracts import ConfigurationGenerationRefV1, canonical_digest
-from tests.unit.test_capacity_typed_membership_events import event_row
+from loom_capacity_manager.contracts import (
+    ConfigurationGenerationRefV1,
+    SubjectConfigurationV1,
+    canonical_digest,
+)
+from loom_capacity_manager.membership_contracts import PersonalReincarnationEvidenceV1
+from tests.unit.test_capacity_typed_membership_events import _next_build_row, event_row
 
 
 def origin_payload(*, build=True):
@@ -52,6 +57,31 @@ def test_untouched_member_can_keep_real_anchor_through_an_empty_retired_epoch(bu
     value = parse(payload)
     assert value.source.revision == 0 and value.anchor.revision == 1
     assert value.anchor.execution_epoch < value.source.execution_epoch
+
+
+@pytest.mark.parametrize("build", (False, True))
+def test_inherited_recreation_keeps_the_original_certificate_epoch_and_revision(build):
+    payload = origin_payload(build=build)
+    _value, _request, first_result, first = event_row(build=build)
+    disabled = _next_build_row(first, operation="destroy", build=build)
+    predecessor = SubjectConfigurationV1.model_validate_json(json.dumps(disabled.result_payload["member"]["configuration"]))
+    proof = PersonalReincarnationEvidenceV1(namespace_id=first.namespace_id,
+        execution_manifest_sha256=first.execution_manifest_sha256,
+        origin=ConfigurationGenerationRefV1.model_validate_json(json.dumps(payload["original_origin"])),
+        predecessor=predecessor, predecessor_revision=disabled.revision, predecessor_head_sha256=disabled.head_sha256,
+        admission_revision=3, successor_incarnation=UUID(int=995), release_set_sha256="f" * 64)
+    recreated = _next_build_row(disabled, operation="create", subject_incarnation=UUID(int=995),
+        demand_reporter_incarnation=UUID(int=996), demand_reporter_token_sha256="a" * 64, reincarnation=proof, build=build)
+    payload["anchor"].update(revision=3, head_sha256=recreated.head_sha256, member=recreated.result_payload["member"])
+    payload["source"].update(execution_epoch=first.execution_epoch + 1, execution_manifest_sha256="d" * 64,
+        revision=0, head_sha256="0" * 64)
+    inherited = parse(payload)
+    assert inherited.anchor.member.reincarnation == proof
+    assert inherited.anchor.member.reincarnation.admission_revision == 3
+    assert inherited.original_origin.subject_incarnation == first_result.member.configuration.subject_incarnation
+    payload["anchor"]["member"]["reincarnation"]["execution_manifest_sha256"] = "d" * 64
+    with pytest.raises(ValueError, match="another event epoch"):
+        parse(payload)
 
 
 @pytest.mark.parametrize("boundary", (
