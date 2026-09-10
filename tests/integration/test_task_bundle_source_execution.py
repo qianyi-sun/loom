@@ -5,8 +5,10 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom.db.schema import (
+    Task,
     TaskBundleSourceReference,
     TaskImageMaterialization,
     Team,
@@ -35,8 +37,9 @@ from tests.integration.test_task_bundle_source_journal import (
 
 @pytest.mark.parametrize("operation", ["claim", "start", "execution-grant"])
 @pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("isolation", ["READ COMMITTED", "AUTOCOMMIT", "REPEATABLE READ", "SERIALIZABLE"])
 async def test_build_and_execution_admission_require_available_pinned_source(
-    journal, tmp_path, operation, retired,
+    journal, tmp_path, operation, retired, isolation,
 ):
     spec = _spec(tmp_path)
     ticket = await _upload(journal, spec)
@@ -98,8 +101,20 @@ async def test_build_and_execution_admission_require_available_pinned_source(
             session, trial_id=trial_id, cpu_arches=["x86_64"],
         )
 
-    async with journal() as session:
-        if retired:
+    unsafe = isolation != "READ COMMITTED"
+    sessions = async_sessionmaker(
+        journal.kw["bind"].execution_options(isolation_level=isolation), expire_on_commit=False,
+    )
+    pending_id = "pending-task-" + uuid4().hex
+    async with sessions() as session:
+        if unsafe:
+            pending = Task(id=pending_id, checksum="f" * 64, config={})
+            session.add(pending)
+            with pytest.raises((ValueError, RuntimeError), match="explicit READ COMMITTED"):
+                await admit(session)
+            assert pending in session.new, "admission flushed caller state before rejection"
+            await session.rollback()
+        elif retired:
             with pytest.raises((ValueError, RuntimeError), match="available"):
                 await admit(session)
             await session.rollback()
@@ -107,7 +122,8 @@ async def test_build_and_execution_admission_require_available_pinned_source(
             assert await admit(session) is not None
             await session.commit()
     async with journal() as session:
-        if retired:
+        assert await session.get(Task, pending_id) is None
+        if retired or unsafe:
             assert (await session.get(TaskImageMaterialization, image_id)).state == expected_state
         else:
             assert await session.get(TaskBundleSourceReference, (
