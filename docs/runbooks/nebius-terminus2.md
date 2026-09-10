@@ -37,7 +37,9 @@ existing TaskSet upload contract uses TAR archives; ZIP is not accepted.
 The output directory must be absent or empty to preserve existing operator work.
 
 Import the directory through the ordinary TaskSet path after the target runtime
-supports Terminus-2. Select `terminus-2` + `glm-5.2` when submitting a Trial;
+supports Terminus-2. In **Task Sets → Submit Task Set**, select `manifest.yaml`
+and `bundle.tar.gz`; the archive already includes its verifier, so leave the
+separate verifier and transform fields empty. Select `terminus-2` + `glm-5.2` when submitting a Trial;
 model/provider configuration and credentials stay in the Gateway. Catalog/model
 availability must be verified on the target environment. The task configuration
 starts with 2 vCPU, 4 GiB memory and 8 GiB storage for the task container. The
