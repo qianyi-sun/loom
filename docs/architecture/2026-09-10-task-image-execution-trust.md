@@ -111,7 +111,10 @@ AUTOCOMMIT-derived engine. It verifies canonical bytes, signature, all metadata,
 membership and the entire current public key snapshot. Its `snapshot` method
 returns the original signed issue/expiry; `envelope` returns the exact retained
 wire. Time is rechecked after lock acquisition, persistence and transaction
-cleanup. Errors after persistence require the caller to roll back the entire
+cleanup. An outer deadline includes checkout and cleanup; transaction-local
+statement and idle timeouts independently bound server locks during an event-loop
+stall. Cancellation closes the owned transaction. Errors after persistence
+require the caller to roll back the entire
 transaction; a successful finalize result is not durable until commit succeeds.
 
 Full-keyset comparison is snapshot-admission validation. Unrelated key insertion

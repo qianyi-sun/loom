@@ -97,7 +97,7 @@ async def _locked(
     # Migration 0135's statement-level key mutation trigger takes state first.
     # READ COMMITTED plus that held lock fences new-key phantoms and lifecycles.
     rows = (await session.scalars(select(TaskImagePublicationKey)
-        .order_by(TaskImagePublicationKey.key_id).limit(129)
+        .order_by(TaskImagePublicationKey.key_id.collate("C")).limit(129)
         .execution_options(populate_existing=True).with_for_update())).all()
     if not 1 <= len(rows) <= 128:
         raise ValueError("full publication keyset requires 1 to 128 retained keys")
@@ -165,7 +165,7 @@ async def _retained(
         raise ValueError("authenticated publication keyset is absent")
     members = tuple((await session.scalars(select(TaskImagePublicationKeysetMember.key_id)
         .where(TaskImagePublicationKeysetMember.keyset_version == state.keyset_version)
-        .order_by(TaskImagePublicationKeysetMember.key_id).limit(129))).all())
+        .order_by(TaskImagePublicationKeysetMember.key_id.collate("C")).limit(129))).all())
     verified = verify_publication_keyset(row.canonical_envelope, trust_root=trust_root, expected_state=state, now=clock())
     result = _result(row.canonical_envelope, verified)
     if (
@@ -262,6 +262,13 @@ class DatabasePublicationDistribution:
                 # derived-engine isolation options, including AUTOCOMMIT.
                 await connection.execution_options(isolation_level="READ COMMITTED")
                 async with AsyncSession(connection, expire_on_commit=False) as session, session.begin():
+                    # Bound the server independently of event-loop liveness.
+                    # The outer monotonic deadline still includes checkout,
+                    # every query, commit and cleanup (not one budget per query).
+                    await session.execute(text(
+                        "SELECT pg_catalog.set_config('statement_timeout', :bound, true), "
+                        "pg_catalog.set_config('idle_in_transaction_session_timeout', :bound, true)"
+                    ), {"bound": f"{math.ceil(self._timeout * 1000)}ms"})
                     result = await read_keyset(session, trust_root=self._root, expected_state=state, clock=self._clock)
             # Transaction commit and pool cleanup also consume the deadline.
             verify_publication_keyset(result.wire, trust_root=self._root, expected_state=state, now=self._clock())
