@@ -21,10 +21,10 @@ def module():
     return importlib.import_module(name)
 
 
-def fixture(*, change=None, all_change=None):
+def fixture(*, change=None, all_change=None, cpu_arch="arm64"):
     m = module()
     c, s, private, key, state, distribution, original, _ = setup_signing()
-    task = _task_config(cpu_arch="arm64", dockerfile="Dockerfile", sidecars=[
+    task = _task_config(cpu_arch=cpu_arch, dockerfile="Dockerfile", sidecars=[
         {"name": "db", "dockerfile": "db/Dockerfile"},
         {"name": "cache", "docker_image": "example/cache@sha256:" + "c" * 64},
     ])
@@ -44,6 +44,8 @@ def fixture(*, change=None, all_change=None):
     for component in ("sidecar:db", "task"):
         payload = original.model_dump(mode="json", by_alias=True, exclude_none=True)
         payload.update(component=component, task_id=task.task.id)
+        if cpu_arch == "x86_64":
+            payload.update(platform="linux/amd64", slurm_cluster_id="oldlab", pool_id="oldlab-builder")
         if all_change is not None:
             payload.update(all_change)
         if component == "task" and change is not None:
@@ -68,8 +70,9 @@ def fixture(*, change=None, all_change=None):
                 trust_root=root, expected_state=state, expected_snapshot_sha256=hashlib.sha256(keyset).hexdigest(), now=NOW)
 
 
-def test_exact_complete_set_returns_verified_native_manifest_references_only():
-    data = fixture()
+@pytest.mark.parametrize("cpu_arch", ["arm64", "x86_64"])
+def test_exact_complete_set_returns_verified_native_manifest_references_only(cpu_arch):
+    data = fixture(cpu_arch=cpu_arch)
     result = module().verify_publication_set(**data)
     assert tuple(item.statement.component for item in result.publications) == ("sidecar:db", "task")
     assert result.registry_images == tuple(
