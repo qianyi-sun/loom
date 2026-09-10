@@ -342,9 +342,21 @@ async def _admit_source(
 async def _admitted_plan(
     session: AsyncSession, row: TaskImageMaterialization,
     authorization: TaskImageBuildSessionAuthorization,
+    *, attempt: TaskImageMaterializationAttempt | None = None,
 ) -> TaskImageBuildPlan:
     source = await _admit_source(session, row)
-    return derive_task_image_build_plan(row, authorization, admitted_source=source)
+    plan = derive_task_image_build_plan(row, authorization, admitted_source=source)
+    if attempt is not None:
+        claimed = _stored_attempt_claim_plan(
+            attempt, authorization=authorization, materialization_id=row.id,
+        )
+        # A valid canonical hash authenticates receipt bytes, not their binding
+        # to the admitted inputs. Session renewal may change only these live
+        # fields; callers returning a replay still return the original receipt.
+        live_fields = {"authorization_expires_at", "session_id", "session_generation", "builder_id"}
+        if plan.model_dump(exclude=live_fields) != claimed.model_dump(exclude=live_fields):
+            raise TaskImageSessionMaterializationConflictError("task-image frozen claim plan changed")
+    return plan
 
 
 async def _claim_replay(
@@ -409,7 +421,7 @@ async def _claim_replay(
         )
     if await attempt_is_retired(session, attempt_id=attempt.id):
         raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
-    await _admit_source(session, row)
+    await _admitted_plan(session, row, authorization, attempt=attempt)
     return row, _stored_claim_plan(
         attempt,
         authorization=authorization,
@@ -589,7 +601,20 @@ async def _operation_replay(
     ):
         raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     if operation_type in ("start", "heartbeat"):
-        await _admit_source(session, row)
+        attempt = await session.scalar(
+            select(TaskImageMaterializationAttempt)
+            .where(
+                TaskImageMaterializationAttempt.id == attempt_id,
+                TaskImageMaterializationAttempt.materialization_id == materialization_id,
+                TaskImageMaterializationAttempt.lease_epoch == lease_epoch,
+                TaskImageMaterializationAttempt.grant_id == authorization.grant_id,
+            )
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if attempt is None:
+            raise TaskImageSessionMaterializationConflictError("task-image replay attempt is unavailable")
+        await _admitted_plan(session, row, authorization, attempt=attempt)
     return row
 
 
@@ -645,7 +670,7 @@ async def lock_session_materialization_lease(
     if not cleanup_only and await attempt_is_retired(session, attempt_id=attempt.id):
         raise TaskImageSessionMaterializationConflictError("task-image attempt is permanently retired")
     if not cleanup_only:
-        await _admit_source(session, row)
+        await _admitted_plan(session, row, authorization, attempt=attempt)
     return row, attempt
 
 
@@ -871,7 +896,7 @@ async def get_session_materialization_build_plan(
     lease_epoch: int,
     now: datetime,
 ) -> TaskImageBuildPlan:
-    """Re-derive a plan only for the exact current live lease, without mutation."""
+    """Derive the exact live plan while retaining its registered source pin."""
 
     now = _utc(now)
     _nonzero_id(materialization_id, label="materialization_id")
