@@ -25,7 +25,7 @@ def test_checkpoint_reopen_retains_evidence_and_enforces_manager_floor(tmp_path)
         with pytest.raises(JournalRegressionError, match="acknowledg"):
             journal.commit_checkpoint(central_sequence=retained.sequence,
                 central_digest=retained.record_digest)
-        append(journal, "heartbeat-confirmed", "lease")
+        append(journal, "heartbeat-confirmed", "lease", kind="heartbeat")
         final = journal.head
         journal.commit_checkpoint(central_sequence=checkpoint.sequence,
             central_digest=checkpoint.record_digest)
@@ -104,3 +104,71 @@ def test_checkpoint_snapshot_corruption_fails_closed(tmp_path):
     with pytest.raises(JournalCorruptionError, match="snapshot"):
         with ExecutorJournal(path):
             pass
+
+
+def test_completed_runtime_work_after_prepare_cannot_invalidate_snapshot_dependencies(tmp_path):
+    with ExecutorJournal(tmp_path / "journal") as journal:
+        checkpoint = journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        append(journal, "slurm-submit-confirmed", "new-launch", kind="job")
+        with pytest.raises(JournalRegressionError, match="unexpected runtime work"):
+            journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+                central_digest=checkpoint.record_digest)
+
+
+def test_repeated_checkpoints_are_self_contained_and_reclaim_old_snapshot(tmp_path):
+    path = tmp_path / "journal"
+    with ExecutorJournal(path) as journal:
+        retained = append(journal, "job-retained", "live", kind="job")
+        for _ in range(3):
+            checkpoint = journal.prepare_checkpoint(retained_sequences=(retained.sequence,),
+                retained_anchors=(), reserved_bytes=0)
+            journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+                central_digest=checkpoint.record_digest)
+            assert len(tuple(tmp_path.glob("*.snapshot-*"))) == 1
+            assert journal.latest("job", "live") == retained
+    with ExecutorJournal(path) as journal:
+        assert journal.latest("job", "live") == retained
+        journal.assert_covers(checkpoint.sequence, checkpoint.record_digest)
+
+
+@pytest.mark.parametrize("after_replace", (False, True))
+def test_crash_at_atomic_publication_reopens_one_complete_generation(tmp_path, monkeypatch, after_replace):
+    import os
+
+    path = tmp_path / "journal"
+    with ExecutorJournal(path) as journal:
+        retained = append(journal, "job-retained", "live", kind="job")
+        checkpoint = journal.prepare_checkpoint(retained_sequences=(retained.sequence,),
+            retained_anchors=(), reserved_bytes=0)
+        real_replace = os.replace
+
+        def crash(source, target):
+            if after_replace:
+                real_replace(source, target)
+            raise OSError("power loss")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", crash)
+            with pytest.raises(OSError, match="power loss"):
+                journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+                    central_digest=checkpoint.record_digest)
+    with ExecutorJournal(path) as journal:
+        assert journal.latest("job", "live") == retained
+        journal.assert_covers(checkpoint.sequence, checkpoint.record_digest)
+        assert (journal.pending_checkpoint() is None) == after_replace
+        assert not tuple(tmp_path.glob("*.checkpoint-tmp-*"))
+
+
+def test_orphan_snapshot_before_anchor_is_reclaimed_on_restart(tmp_path, monkeypatch):
+    path = tmp_path / "journal"
+    with ExecutorJournal(path) as journal:
+        def crash(*args, **kwargs):
+            raise OSError("crash before anchor")
+
+        monkeypatch.setattr(journal, "append", crash)
+        with pytest.raises(OSError):
+            journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        assert len(tuple(tmp_path.glob("*.snapshot-*"))) == 1
+    with ExecutorJournal(path) as journal:
+        assert journal.head.sequence == 0
+        assert not tuple(tmp_path.glob("*.snapshot-*"))
