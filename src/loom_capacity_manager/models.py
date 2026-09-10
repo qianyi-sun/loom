@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Column,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -1894,7 +1895,12 @@ class CapacityExecutableExecutorState(Base):
     """Mutable lease and journal checkpoint for immutable v2 executor evidence."""
 
     __tablename__ = "capacity_executable_executor_states"
+    # This monotonic audit marker is owned exclusively by its database trigger;
+    # ordinary inventory/heartbeat writes must neither hydrate nor overwrite it.
+    # DeclarativeBase defines this class configuration without a ClassVar type.
+    __mapper_args__ = {"exclude_properties": ("chunked_inventory_seen",)}  # noqa: RUF012
     __table_args__ = (
+        Column("chunked_inventory_seen", Boolean, nullable=False, server_default=text("false")),
         CheckConstraint(
             "execution_epoch > 0 AND pool_generation > 0 "
             "AND pool_id IN ('gb10','oldlab') AND heartbeat_high_water >= 0 "
@@ -1940,7 +1946,11 @@ class CapacityExecutableExecutorState(Base):
             "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
             "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
             "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
-            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
+            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - "
+            "(2 + CASE WHEN (inventory_payload -> 'schema_version' = '3'::jsonb AND "
+            "octet_length(public.capacity_executable_canonical_jsonb_text(inventory_payload)) > 32768) "
+            "THEN (octet_length(public.capacity_executable_canonical_jsonb_text(inventory_payload)) "
+            "+ 32767) / 32768 ELSE 0 END)) "
             "AND inventory_confirmation_journal_digest = journal_digest)) "
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "

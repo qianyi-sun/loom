@@ -37,6 +37,11 @@ from loom_capacity_executor.client import (
     ProposedExecutableBootstrapReceiptV2,
     ReleasedExecutableShapesReceiptV2,
 )
+from loom_capacity_executor.inventory_journal import (
+    complete_inventory_request,
+    load_journal_inventory,
+    retain_inventory_request,
+)
 from loom_capacity_executor.journal import (
     ExecutorJournal,
     JournalRecord,
@@ -107,7 +112,6 @@ from loom_capacity_manager.typed_inventory_contracts import (
     ExecutableInventoryRecordV3,
     ExecutorInventory,
     InventoryRecord,
-    parse_executor_inventory,
 )
 from loom_capacity_manager.typed_ownership_contracts import (
     SignedExecutableOwnershipProofV3,
@@ -1046,20 +1050,7 @@ class ExecutablePoolExecutor:
         if len(records) != 1:
             raise JournalRegressionError("multiple inventory requests remain unresolved")
         record = records[0]
-        payload = record.durable_payload()
-        if payload is None:
-            raise JournalRegressionError("inventory request is absent from journal")
-        try:
-            inventory = parse_executor_inventory(payload)
-        except ValueError as exc:
-            raise JournalRegressionError("inventory request is invalid") from exc
-        if (
-            record.object_kind != "inventory"
-            or record.object_id != str(inventory.executor_incarnation)
-            or record.payload_digest != canonical_executable_digest(inventory)
-            or payload != canonical_executable_bytes(inventory)
-        ):
-            raise JournalRegressionError("inventory request binding changed")
+        inventory = load_journal_inventory(self.journal, record)
         self._assert_inventory_binding(inventory)
         if checkpoint.inventory_sequence not in {
             inventory.inventory_sequence - 1,
@@ -1914,10 +1905,7 @@ class ExecutablePoolExecutor:
         retained = self.journal.latest("inventory", str(self.registration.executor_incarnation))
         if retained is None or retained.event_kind != "inventory-publish-confirmed":
             return None
-        payload = retained.durable_payload()
-        if payload is None:
-            raise JournalRegressionError("confirmed inventory is absent from journal")
-        inventory = parse_executor_inventory(payload)
+        inventory = load_journal_inventory(self.journal, retained)
         self._assert_inventory_binding(inventory)
         matches = tuple(
             record
@@ -2278,11 +2266,8 @@ class ExecutablePoolExecutor:
         ):
             if record.event_kind != "inventory-publish-confirmed":
                 continue
-            payload = record.durable_payload()
-            if payload is None:
-                continue
             try:
-                inventory = parse_executor_inventory(payload)
+                inventory = load_journal_inventory(self.journal, record)
                 self._assert_inventory_binding(inventory)
             except (ValueError, JournalRegressionError):
                 continue
@@ -2290,8 +2275,7 @@ class ExecutablePoolExecutor:
                 continue
             sequence_records += 1
             if (
-                record.payload_digest == item.terminal_evidence_sha256
-                and canonical_executable_digest(inventory) == item.terminal_evidence_sha256
+                canonical_executable_digest(inventory) == item.terminal_evidence_sha256
             ):
                 matches.append(inventory)
                 match_payloads.add(canonical_executable_bytes(inventory))
@@ -2558,7 +2542,6 @@ class ExecutablePoolExecutor:
         replayed = await self._replay_inventory_request(checkpoint)
         if replayed is not None:
             return replayed
-        inventory_object_id = str(self.registration.executor_incarnation)
         observed = await self.slurm.inventory() if jobs is None else jobs
         proofs: dict[str, SignedExecutableOwnershipProofV2 | SignedExecutableOwnershipProofV3] = {}
         terminal_proofs: dict[
@@ -2677,14 +2660,7 @@ class ExecutablePoolExecutor:
                 records=live_records + terminal_records,
             )
         )
-        inventory_payload = canonical_executable_bytes(inventory)
-        self.journal.append(
-            "inventory-publish-requested",
-            canonical_executable_digest(inventory),
-            object_kind="inventory",
-            object_id=inventory_object_id,
-            payload=inventory_payload,
-        )
+        retain_inventory_request(self.journal, inventory)
         return await self._send_inventory(inventory)
 
     def _assert_inventory_binding(self, inventory: ExecutorInventory) -> None:
@@ -2714,27 +2690,17 @@ class ExecutablePoolExecutor:
         self,
         inventory: ExecutorInventory,
     ) -> ExecutorTickResult:
-        payload = canonical_executable_bytes(inventory)
-        digest = canonical_executable_digest(inventory)
-        object_id = str(self.registration.executor_incarnation)
+        requested = self.journal.latest("inventory", str(inventory.executor_incarnation))
+        if (requested is None or requested.event_kind != "inventory-publish-requested"
+            or requested.sequence != self.journal.head.sequence
+            or load_journal_inventory(self.journal, requested) != inventory):
+            raise JournalRegressionError("inventory publication differs from pending request")
         try:
             await self.client.ingest_executable_inventory(inventory)
         except ExecutorRejectedError:
-            self.journal.append(
-                "inventory-publish-rejected",
-                digest,
-                object_kind="inventory",
-                object_id=object_id,
-                payload=payload,
-            )
+            complete_inventory_request(self.journal, inventory, rejected=True)
             raise
-        self.journal.append(
-            "inventory-publish-confirmed",
-            digest,
-            object_kind="inventory",
-            object_id=object_id,
-            payload=payload,
-        )
+        complete_inventory_request(self.journal, inventory, rejected=False)
         return ExecutorTickResult("inventory-published")
 
 

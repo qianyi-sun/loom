@@ -42,6 +42,7 @@ from loom_capacity_manager.typed_ownership_contracts import (
 )
 
 MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES = MAX_CONTRACT_BYTES
+INVENTORY_JOURNAL_CHUNK_BYTES = 32 * 1024
 
 
 class _StrictInventoryV3(StrictV2Model):
@@ -243,25 +244,19 @@ def inventory_confirmation_journal_head(inventory: ExecutorInventory) -> tuple[i
 def typed_inventory_confirmation_journal_head(
     inventory: ExecutableExecutorInventoryV3,
 ) -> tuple[int, str]:
-    """Commit the actual V3 bytes in the unchanged V2 journal-record protocol."""
-    if type(inventory) is not ExecutableExecutorInventoryV3:
-        raise ValueError("typed inventory confirmation requires its exact contract")
-    payload = canonical_executable_bytes(inventory)
-    checked = parse_executor_inventory(payload)
-    if canonical_executable_bytes(checked) != payload:
-        raise ValueError("typed inventory confirmation is not canonical")
-    digest = hashlib.sha256(payload).hexdigest()
+    """Derive the exact bounded durable batch from its pre-publication anchor."""
+    frames = typed_inventory_journal_frames(inventory)
     sequence, previous = inventory.journal_sequence, inventory.journal_digest
-    for event in ("inventory-publish-requested", "inventory-publish-confirmed"):
+    for event, kind, object_id, payload in frames:
         sequence += 1
         record = {
             "schema_version": 2,
             "sequence": sequence,
             "previous_digest": previous,
             "event_kind": event,
-            "object_kind": "inventory",
-            "object_id": str(inventory.executor_incarnation),
-            "payload_digest": digest,
+            "object_kind": kind,
+            "object_id": object_id,
+            "payload_digest": hashlib.sha256(payload).hexdigest(),
             "payload_base64": base64.b64encode(payload).decode("ascii"),
         }
         previous = hashlib.sha256(
@@ -270,3 +265,32 @@ def typed_inventory_confirmation_journal_head(
             )
         ).hexdigest()
     return sequence, previous
+
+
+def typed_inventory_journal_frames(
+    inventory: ExecutableExecutorInventoryV3,
+) -> tuple[tuple[str, str, str, bytes], ...]:
+    """Canonical chunk/request/confirmation frames; small inventories stay inline.
+
+    Chunk identities bind the entire canonical inventory, which already contains
+    the pre-batch journal head. No mutable external payload store is involved.
+    """
+    if type(inventory) is not ExecutableExecutorInventoryV3:
+        raise ValueError("typed inventory confirmation requires its exact contract")
+    payload = canonical_executable_bytes(inventory)
+    checked = parse_executor_inventory(payload)
+    if canonical_executable_bytes(checked) != payload:
+        raise ValueError("typed inventory confirmation is not canonical")
+    frames: list[tuple[str, str, str, bytes]] = []
+    if len(payload) > INVENTORY_JOURNAL_CHUNK_BYTES:
+        digest = hashlib.sha256(payload).hexdigest()
+        chunks = tuple(payload[offset:offset + INVENTORY_JOURNAL_CHUNK_BYTES]
+            for offset in range(0, len(payload), INVENTORY_JOURNAL_CHUNK_BYTES))
+        frames.extend(("inventory-chunk-retained", "executor", f"inventory:{digest}:{index}", chunk)
+            for index, chunk in enumerate(chunks))
+        payload = json.dumps({"inventory_journal_reference": {
+            "sha256": digest, "byte_count": len(payload), "chunk_count": len(chunks),
+        }}, sort_keys=True, separators=(",", ":")).encode("ascii")
+    for event in ("inventory-publish-requested", "inventory-publish-confirmed"):
+        frames.append((event, "inventory", str(inventory.executor_incarnation), payload))
+    return tuple(frames)

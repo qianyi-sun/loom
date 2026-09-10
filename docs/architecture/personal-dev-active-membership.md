@@ -1072,7 +1072,8 @@ operator profile set against its registered controller root. Its typed journal
 envelopes retain the exact subject facts in digest-addressed 32 KiB chunks within
 the existing locked, hash-chained, fsync'd journal. The full missing-chunk write
 is capacity-checked before the first append, preserving a recovery allowance of
-at least 8 MiB and increasing it with retained job count. Exhausted capacity
+16 MiB for a maximum framed inventory, plus a per-retained-job cleanup allowance.
+Exhausted capacity
 rejects the new retention without consuming its permit or filling that allowance;
 this is backpressure, not journal garbage collection or unlimited retention.
 Existing per-record and journal size limits remain unchanged.
@@ -1105,8 +1106,27 @@ Manager database terminal/release guards authenticate the exact historical
 typed purpose and membership evidence. Real manager lifecycle tests cover
 terminal persistence and protected release, but schema-3 telemetry alone is
 not proof of working native terminal cleanup.
-Complete inventory journal records also retain their existing
-size limit; bounded large-inventory retention is required before live operation.
+Typed inventories above 32 KiB are retained as deterministic 32 KiB chunks,
+followed by small requested/confirmed digest references. Smaller typed inventories
+and legacy V2 inventories keep their original inline confirmation hashes. The
+manager derives the exact chunk/request/confirmation chain from the inventory's
+pre-batch journal anchor. The whole batch, including its response, is capacity
+checked before the first write or RPC. An interrupted chunk-only batch has not
+published anything; a durable request must replay the original inventory without
+resampling. Terminal and delayed release readers resolve the same retained bytes.
+Migration `capacity_0022` extends exact retirement sequence checks to this framing;
+rollback refuses retained large typed inventory and fences late writers.
+Its SQL-owned monotonic history marker survives later small inventories, so a
+replacement cannot hide older chunked journal dependencies from rollback checks.
+The persistent rollback fence uses JSONB's conservatively larger serialized size,
+so older migrations can remove their canonical serializer without breaking it;
+near-threshold small inventories may therefore also require refusing rollback.
+
+This solves individual inventory record size, not steady-state journal retention.
+The journal is still bounded at 64 MiB and has no compaction. A checkpoint/retention
+implementation that preserves unresolved work and historical release evidence is
+required before enabling native operation. Recovery publication can spend reserved
+headroom, while new launch-fact retention must preserve it.
 
 Terminal recovery has an explicit versioned read endpoint:
 `GET /v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence`

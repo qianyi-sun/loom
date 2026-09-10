@@ -23,7 +23,10 @@ from loom_capacity_manager.launch_subject_contracts import (
 )
 
 LAUNCH_FACTS_CHUNK_BYTES = 32 * 1024
-_MIN_RECOVERY_RESERVE_BYTES = 8 * 1024 * 1024
+# A maximum 8 MiB inventory needs about 11 MiB after base64 and record framing.
+# Leave a bounded extra allowance for its confirmation and heartbeat, in addition
+# to (not instead of) per-job cleanup work.
+_MIN_RECOVERY_RESERVE_BYTES = 16 * 1024 * 1024
 # Conservative allowance for a next recovery pass per retained job, including
 # the prospective new launch. Terminal history remains counted until compaction.
 _PER_JOB_RECOVERY_RESERVE_BYTES = 16 * 64 * 1024
@@ -85,10 +88,8 @@ def retain_launch_facts(
     if missing:
         journal.assert_payload_capacity(
             tuple(len(chunk) for _, _, chunk in missing),
-            reserved_bytes=max(
-                _MIN_RECOVERY_RESERVE_BYTES,
-                (len(journal.latest_records("job")) + 1) * _PER_JOB_RECOVERY_RESERVE_BYTES,
-            ),
+            reserved_bytes=_MIN_RECOVERY_RESERVE_BYTES
+                + (len(journal.latest_records("job")) + 1) * _PER_JOB_RECOVERY_RESERVE_BYTES,
         )
     for object_id, chunk_digest, chunk in missing:
         journal.append(
