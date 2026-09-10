@@ -578,6 +578,9 @@ async def claim_task_image_registry_gc(
         for row in (*session.new, *session.dirty, *session.deleted)
     ):
         raise ValueError("task image GC has pending materialization writes")
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=grace_hours)
     legacy_owned = TaskImageMaterialization.ready_publication_operation_id.is_(None)
