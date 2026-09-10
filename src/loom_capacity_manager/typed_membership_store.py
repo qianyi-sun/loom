@@ -257,6 +257,7 @@ async def _load_typed_history(session: AsyncSession, execution_epoch: int) -> _T
     if authority is None or not isinstance(CapacityManagementStore._execution_context(authority, history.epoch), ExecutionAuthorityV2):
         raise ExecutionConflictError("typed reporter evidence requires current activated authority")
     tips = {origin.configuration.subject_id: origin.configuration for origin in history.preparation.managed_application_origins}
+    tips.update({origin.configuration.subject_id: origin.configuration for origin in history.preparation.managed_build_origins})
     tips.update({identity: result.member.configuration for identity, result in history.latest.items()})
     try:
         for reporter_id, (subject, token) in history.reporter_bindings.items():

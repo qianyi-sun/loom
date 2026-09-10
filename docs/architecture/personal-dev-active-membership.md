@@ -925,8 +925,10 @@ rejects an old snapshot. The mutation transaction reuses this same history reade
 Historical snapshots authenticate installation and event evidence, not mutable
 reporter currentness. Current allocation, mutation/replay and materialization
 checks additionally resolve the explicitly current activated authority and verify
-every retained reporter against its last current-epoch event or pinned base
-binding. A prepared epoch is not activation evidence. No reader selects authority
+every retained reporter against its last current-epoch event or pinned application
+or build base binding. Inherited build bases participate even before the first
+local event; source-bearing runtime admission remains separately closed.
+A prepared epoch is not activation evidence. No reader selects authority
 by the largest stored epoch, and historical installation reads do not recursively
 require an obsolete reporter to remain current. A readable historical snapshot
 cannot substitute for these current checks.
