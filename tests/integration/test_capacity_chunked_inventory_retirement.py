@@ -2,7 +2,9 @@
 
 from uuid import UUID
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import ExecutableExecutorHeartbeatV2
@@ -17,7 +19,7 @@ from tests.integration.test_capacity_manager_execution_epoch import _drain_reque
 from tests.integration.test_capacity_typed_membership_execution import typed_management
 
 
-async def test_large_typed_final_inventory_confirms_retirement_in_database(capacity_session):
+async def inventory_setup(capacity_session):
     management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
     binding = preparation.executors[0]
     store = CapacityExecutionStore()
@@ -34,14 +36,52 @@ async def test_large_typed_final_inventory_confirms_retirement_in_database(capac
                 physical_kind="slurm-job", authority_scope="foreign", state="active",
                 resources=ResourceVectorV1(slots=1), controller_evidence_sha256="a" * 64)
             for index in range(300)))
+    return store, typed_management(preparation), common, inventory
+
+
+@pytest.mark.parametrize("large", (False, True))
+async def test_large_typed_final_inventory_confirms_retirement_in_database(capacity_session, large):
+    store, management, common, inventory = await inventory_setup(capacity_session)
+    if not large:
+        inventory = inventory.model_copy(update={"records": ()})
     await store.ingest_typed_executor_inventory(capacity_session, inventory,
-        management=typed_management(preparation))
+        management=management)
     sequence, digest = inventory_confirmation_journal_head(inventory)
-    assert sequence > 2
+    assert (sequence > 2) == large
     await store.heartbeat_executor(capacity_session, ExecutableExecutorHeartbeatV2(
         **common, heartbeat_sequence=2, journal_sequence=sequence, journal_digest=digest,
         journal_checkpoint_sequence=0, journal_checkpoint_digest="0" * 64))
     assert await capacity_session.scalar(text("""
         SELECT retirement_safe FROM capacity_executable_executor_states
         WHERE executor_incarnation=:executor
-    """), {"executor": binding.executor_incarnation}) is True
+    """), {"executor": inventory.executor_incarnation}) is True
+    with pytest.raises(IntegrityError, match="capacity_executable_executor_retirement_check"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(text("""
+                UPDATE capacity_executable_executor_states SET journal_high_water=journal_high_water+1
+                WHERE executor_incarnation=:executor
+            """), {"executor": inventory.executor_incarnation})
+
+
+@pytest.mark.parametrize("retained", (False, True))
+async def test_chunked_inventory_rollback_preserves_evidence_and_fences_late_writers(capacity_session, retained):
+    from alembic import command
+
+    from tests.integration.test_capacity_build_membership_sql import _config
+
+    store, management, _common, inventory = await inventory_setup(capacity_session)
+    if retained:
+        await store.ingest_typed_executor_inventory(capacity_session, inventory, management=management)
+        with pytest.raises(RuntimeError, match="retained chunked inventory"):
+            async with capacity_session.begin_nested():
+                connection = await capacity_session.connection()
+                await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0021"))
+        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0022"
+    else:
+        connection = await capacity_session.connection()
+        await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0021"))
+        with pytest.raises(IntegrityError, match="capacity_executor_inline_inventory_check"):
+            async with capacity_session.begin_nested():
+                await store.ingest_typed_executor_inventory(capacity_session, inventory, management=management)
+        await connection.run_sync(lambda sync: command.upgrade(_config(sync), "capacity_0022"))
+        await store.ingest_typed_executor_inventory(capacity_session, inventory, management=management)

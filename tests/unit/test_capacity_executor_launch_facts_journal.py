@@ -91,10 +91,11 @@ def test_launch_facts_reject_corrupt_retained_chunk_without_overwriting(tmp_path
         assert journal.head == head
 
 
-def test_launch_facts_capacity_rejection_preserves_head_and_cleanup_space(tmp_path, monkeypatch):
+@pytest.mark.parametrize("journal_mebibytes", (8, 12))
+def test_launch_facts_capacity_rejection_preserves_head_and_cleanup_space(tmp_path, monkeypatch, journal_mebibytes):
     module = import_module("loom_capacity_executor.launch_facts_journal")
     journal_module = import_module("loom_capacity_executor.journal")
-    monkeypatch.setattr(journal_module, "_MAX_JOURNAL_BYTES", 8 * 1024 * 1024)
+    monkeypatch.setattr(journal_module, "_MAX_JOURNAL_BYTES", journal_mebibytes * 1024 * 1024)
     with ExecutorJournal(tmp_path / "executor.journal") as journal:
         head = journal.head
         with pytest.raises(journal_module.JournalError, match="capacity"):
