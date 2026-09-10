@@ -21,6 +21,13 @@ from loom_capacity_manager.build_membership_contracts import (
     personal_build_subject_id,
     personal_build_subject_name,
 )
+from loom_capacity_manager.build_value_contracts import (
+    PersonalBuildProjectionV1 as PersonalBuildProjectionV1,
+)
+from loom_capacity_manager.build_value_contracts import (
+    _nonzero_identity,
+    _StrictTypedV1,
+)
 from loom_capacity_manager.contracts import (
     MAX_CONTRACT_BYTES,
     AccountPolicyV1,
@@ -51,47 +58,6 @@ from loom_capacity_manager.membership_contracts import (
     PersonalReincarnationEvidenceV1,
 )
 from loom_capacity_manager.store import _derive_development_subject, _derive_owner_account
-
-
-def _nonzero_identity(value: UUID) -> UUID:
-    if value.int == 0:
-        raise ValueError("typed membership identity must be nonzero")
-    return value
-
-
-class _StrictTypedV1(StrictV1Model):
-    @field_validator("schema_version", mode="before")
-    @classmethod
-    def _exact_version(cls, value: object) -> object:
-        if type(value) is not int or value != cls.model_fields["schema_version"].default:
-            raise ValueError("typed membership schema requires its exact integer version")
-        return value
-
-
-class PersonalBuildProjectionV1(_StrictTypedV1):
-    owner_id: UUID
-    subject_incarnation: UUID
-    operation_kind: Literal["create", "update", "capacity", "destroy"]
-    operation_id: UUID
-    operation_epoch: PositiveQuantity
-    configuration_generation: PositiveQuantity
-    candidate_generation: PositiveQuantity
-    deployment_generation: PositiveQuantity
-    demand_reporter_incarnation: UUID
-    demand_reporter_token_sha256: Digest
-    max_slots: Quantity
-
-    _identities_nonzero = field_validator(
-        "owner_id", "subject_incarnation", "operation_id", "demand_reporter_incarnation",
-    )(_nonzero_identity)
-
-    @model_validator(mode="after")
-    def _service_generation(self) -> PersonalBuildProjectionV1:
-        if self.configuration_generation != self.operation_epoch:
-            raise ValueError("build configuration generation must match service operation epoch")
-        if self.demand_reporter_token_sha256 == "0" * 64:
-            raise ValueError("build reporter token digest must be nonzero")
-        return self
 
 
 class PersonalApplicationCommandV2(_StrictTypedV1):

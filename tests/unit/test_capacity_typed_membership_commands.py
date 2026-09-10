@@ -1,6 +1,8 @@
 """Typed control-owned commands cannot borrow feature-source/application authority."""
 
 import json
+import subprocess
+import sys
 from importlib import import_module
 from uuid import UUID
 
@@ -66,6 +68,12 @@ def test_build_values_are_shared_leaf_contracts_with_unchanged_wire_hashes():
     assert canonical_digest(request.command.projection) == "de1c8426c42d032bfcb49809b5bdbcf00e4463bb91bb38f93a52a7fa49ef5ddc"
     assert canonical_digest(value.membership.members[-1]) == "133b6d5f5daa5619560c5901cc762915d2573bb9771479a40cd985141ffe2770"
     assert canonical_digest(value.preparation.personal_builds) == "a6b2a8821fc2517d7c93fcb0cfffb76a147d71def5022d2a9c35be9a5354abb6"
+    subprocess.run([sys.executable, "-c", "\n".join((
+        "import sys",
+        "import loom_capacity_manager.build_value_contracts",
+        "for name in ('build_membership_contracts', 'application_origin_contracts', 'typed_membership_commands', 'membership', 'store'):",
+        "    assert 'loom_capacity_manager.' + name not in sys.modules, name",
+    ))], check=True, capture_output=True, text=True)
 
 
 @pytest.mark.parametrize("field,value", (
