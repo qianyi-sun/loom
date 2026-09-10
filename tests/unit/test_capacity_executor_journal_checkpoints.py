@@ -251,3 +251,55 @@ def test_checkpoint_snapshot_rejects_unsafe_files(tmp_path, mutation):
     with pytest.raises(JournalCorruptionError):
         with ExecutorJournal(path):
             pass
+
+
+@pytest.mark.parametrize("ambiguous", (False, True))
+async def test_checkpoint_handshake_resumes_exact_heartbeat_after_transport_failure(tmp_path, ambiguous):
+    from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
+    from tests.unit.test_capacity_executor_heartbeat import RecordingHeartbeatClient, _registration
+
+    class Client(RecordingHeartbeatClient):
+        fail = True
+
+        async def heartbeat_executable_executor(self, heartbeat):
+            if self.fail:
+                self.fail = False
+                if ambiguous:
+                    await super().heartbeat_executable_executor(heartbeat)
+                raise ConnectionError("response lost")
+            return await super().heartbeat_executable_executor(heartbeat)
+
+    client = Client()
+    path = tmp_path / "journal"
+    with ExecutorJournal(path) as journal:
+        checkpoint = journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        with pytest.raises(ConnectionError):
+            await ExecutableHeartbeatLoop(_registration(), journal, client).finish_checkpoint()
+        assert journal.pending_checkpoint() == checkpoint
+        pending = journal.latest("heartbeat", str(_registration().executor_incarnation))
+        original_payload = pending.durable_payload()
+    with ExecutorJournal(path) as journal:
+        assert await ExecutableHeartbeatLoop(_registration(), journal, client).finish_checkpoint()
+        assert journal.pending_checkpoint() is None
+        from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+
+        assert canonical_executable_bytes(client.heartbeats[-1]) == original_payload
+        assert not await ExecutableHeartbeatLoop(_registration(), journal, client).finish_checkpoint()
+
+
+async def test_checkpoint_handshake_requires_durable_readback_not_just_heartbeat_receipt(tmp_path):
+    from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
+    from tests.unit.test_capacity_executor_heartbeat import RecordingHeartbeatClient, _registration
+
+    class Client(RecordingHeartbeatClient):
+        async def heartbeat_executable_executor(self, heartbeat):
+            result = await super().heartbeat_executable_executor(heartbeat)
+            self.journal_sequence = 0
+            self.journal_digest = "0" * 64
+            return result
+
+    with ExecutorJournal(tmp_path / "journal") as journal:
+        checkpoint = journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        with pytest.raises(JournalRegressionError, match="acknowledged"):
+            await ExecutableHeartbeatLoop(_registration(), journal, Client()).finish_checkpoint()
+        assert journal.pending_checkpoint() == checkpoint
