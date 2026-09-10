@@ -24,6 +24,7 @@ from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
@@ -241,7 +242,8 @@ def _unsafe_traversal_bundle_tar_bytes() -> bytes:
 
 @pytest.fixture(scope="module")
 def materialization_minio() -> MinioContainer:
-    with MinioContainer() as m:
+    # The pinned MinIO image reports liveness before its object layer is writable.
+    with MinioContainer().waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

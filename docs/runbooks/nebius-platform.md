@@ -419,6 +419,21 @@ read-only cleanup verification. The monitor exposes only the logical target
 identifier; private cluster, node group and API bindings remain filtered.
 Omitting `--target-id` preserves the existing environment-derived behavior.
 
+For a later bounded run on a quota-following or regional deployment, set the
+policy file's `accepted_concurrency` to the authorized run ceiling (for example,
+1), retain `target_concurrency` at least that large, and copy `admission_policies`
+from a fresh administrative `GET /admin/execution-admission/status` readback.
+Missing or disabled global/pool limits are valid; any enabled global/pool limit
+must cover the run ceiling. These fields describe different controls: the local
+run budget limits selected stages, while the recorded administrative rows describe
+the deployment. Do not re-enable historical limits to satisfy this CLI. The
+ordinary-user runner does not change policies or assert that the supplied
+administrative snapshot is still current. With multiple regional targets, always
+pass `--target-id`; the CLI selects that target within the same environment/pool
+and rejects missing or duplicate identities. Without an explicit ID, it still
+requires exactly one matching target. Target selection checks evidence; placement
+continues through the scheduler and does not follow a client-selected routing override.
+
 A single `--stage 4` creates four CPU Trials total. Do not use larger/default
 staged concurrency profiles for this first bootstrap. Acceptance requires real
 node-backed overlap, canonical successes, authenticated complete bundles and
@@ -494,6 +509,28 @@ this is **12 creates** for a new target, with no change to existing resources.
 The node groups wait for memberships and attach the new regional node-pull
 account, avoiding an unverified cross-project identity attachment. Node-pull has
 no registered key; actuator and Gateway receive no cloud group membership.
+
+Use **RSA4096** for each authorized key; RSA2048 is rejected by the native
+registration API. Follow the [authorized-key instructions](https://docs.nebius.com/iam/service-accounts/authorized-keys)
+in a protected directory, once per runtime identity:
+
+```sh
+umask 077
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out actuator.private.pem
+openssl pkey -in actuator.private.pem -pubout -out actuator.public.pem
+```
+
+Choose `service_cidr` from free address space in the destination subnet's existing
+private pool; the example CIDR is not an allocation. Read the actual subnet and
+its associated network/pool, plus current allocations, before selecting a range.
+Do not overlap an existing allocation or consume space required by control-plane
+and node addresses. The native [network requirements](https://docs.nebius.com/kubernetes/networking/requirements)
+and [CIDR troubleshooting instructions](https://docs.nebius.com/kubernetes/troubleshooting/cidr-allocation-error)
+explain those allocations; inspect the target subnet with:
+
+```sh
+nebius vpc subnet get --id "$REGIONAL_SUBNET_ID" --format json
+```
 
 Read back both existing groups' permissions before plan review: the observer
 group must provide the collector's required read-only tenant/project coverage,
