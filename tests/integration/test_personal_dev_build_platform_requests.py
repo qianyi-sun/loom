@@ -65,7 +65,7 @@ async def test_cancelled_or_expired_platforms_do_not_emit_new_demand(sessions, t
     async with sessions.begin() as session:
         await module.stage_platform_requests(session, registration, member=member, runtime=runtime,
             platforms=("linux/arm64", "linux/amd64"), now=_NOW)
-        assert await module.cancel_platform_requests(session, registration, member=member,
+        assert await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
             platforms=("linux/arm64",), now=_NOW + timedelta(seconds=1)) == 1
         remaining = await module.pending_platform_demand(session, member=member, runtime=runtime, now=_NOW + timedelta(seconds=2))
         assert len(remaining) == 1 and remaining[0].eligible_pool_ids == ("oldlab",)
@@ -139,9 +139,9 @@ async def test_disabled_service_can_cancel_but_not_requeue(sessions, tmp_path):
             platforms=("linux/arm64",), now=_NOW)
         disabled = member.model_copy(update={"configuration": member.configuration.model_copy(update={
             "lifecycle_state": "disabled", "max_slots": 0})})
-        assert await module.cancel_platform_requests(session, registration, member=disabled,
+        assert await module.cancel_platform_requests(session, registration, member=disabled, runtime=runtime,
             platforms=("linux/arm64",), now=_NOW + timedelta(seconds=1)) == 1
-        assert await module.cancel_platform_requests(session, registration, member=disabled,
+        assert await module.cancel_platform_requests(session, registration, member=disabled, runtime=runtime,
             platforms=("linux/arm64",), now=_NOW + timedelta(seconds=2)) == 0
         with pytest.raises(ValueError, match="disabled"):
             await module.stage_platform_requests(session, registration, member=disabled, runtime=runtime,
@@ -154,12 +154,83 @@ async def test_cancellation_before_staging_permanently_closes_that_platform_leas
     registration = await _seed_running_attempt(sessions, now=_NOW)
     member, runtime = build_service(tmp_path, registration)
     async with sessions.begin() as session:
-        await module.cancel_platform_requests(session, registration, member=member,
+        await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
             platforms=("linux/arm64",), now=_NOW)
     async with sessions.begin() as session:
         with pytest.raises(ValueError, match="cancelled"):
             await module.stage_platform_requests(session, registration, member=member, runtime=runtime,
                 platforms=("linux/arm64",), now=_NOW + timedelta(seconds=1))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cancel_and_stage_leave_no_runnable_request(sessions, tmp_path):
+    module = import_module("loom.personal_dev_build_platform_requests")
+    registration = await _seed_running_attempt(sessions, now=_NOW)
+    member, runtime = build_service(tmp_path, registration)
+
+    async def stage():
+        async with sessions.begin() as session:
+            try:
+                await module.stage_platform_requests(session, registration, member=member, runtime=runtime,
+                    platforms=("linux/arm64",), now=_NOW)
+            except ValueError as exc:
+                assert "cancelled" in str(exc)
+
+    async def cancel():
+        async with sessions.begin() as session:
+            assert await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
+                platforms=("linux/arm64",), now=_NOW) == 1
+
+    await asyncio.gather(stage(), cancel())
+    async with sessions() as session:
+        assert await module.pending_platform_demand(session, member=member, runtime=runtime, now=_NOW) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ("future_epoch", "claimant"))
+async def test_cancellation_rejects_unissued_lease_identity(sessions, tmp_path, boundary):
+    module = import_module("loom.personal_dev_build_platform_requests")
+    from loom.db.schema import PersonalDevBuildPlatformRequest
+
+    registration = await _seed_running_attempt(sessions, now=_NOW)
+    member, runtime = build_service(tmp_path, registration)
+    attempt = registration.build_attempt
+    forged = replace(registration, build_attempt=replace(attempt,
+        **({"lease_epoch": attempt.lease_epoch + 1} if boundary == "future_epoch"
+           else {"claimed_by": "other-builder"})))
+    async with sessions.begin() as session:
+        with pytest.raises(ValueError, match="lease identity changed"):
+            await module.cancel_platform_requests(session, forged, member=member, runtime=runtime,
+                platforms=("linux/arm64",), now=_NOW)
+        assert list((await session.scalars(select(PersonalDevBuildPlatformRequest))).all()) == []
+        rows = await module.stage_platform_requests(session, registration, member=member, runtime=runtime,
+            platforms=("linux/arm64",), now=_NOW)
+        assert rows[0].cancelled_at is None
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_tombstone_does_not_cancel_next_lease(sessions, tmp_path):
+    module = import_module("loom.personal_dev_build_platform_requests")
+    from loom.db.schema import PersonalDevCandidateBuildAttempt
+
+    registration = await _seed_running_attempt(sessions, now=_NOW)
+    member, runtime = build_service(tmp_path, registration)
+    expired = registration.build_attempt.lease_expires_at
+    async with sessions.begin() as session:
+        assert await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
+            platforms=("linux/arm64",), now=expired) == 1
+        await session.execute(update(PersonalDevCandidateBuildAttempt).where(
+            PersonalDevCandidateBuildAttempt.id == registration.build_attempt.id).values(
+                lease_epoch=2, lease_expires_at=expired + timedelta(seconds=60)))
+        renewed = replace(registration, build_attempt=replace(registration.build_attempt,
+            lease_epoch=2, lease_expires_at=expired + timedelta(seconds=60)))
+        rows = await module.stage_platform_requests(session, renewed, member=member, runtime=runtime,
+            platforms=("linux/arm64",), now=expired)
+        assert rows[0].cancelled_at is None
+        # Delayed cleanup of an issued historical lease must remain possible.
+        assert await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
+            platforms=("linux/amd64",), now=expired) == 1
+        assert len(await module.pending_platform_demand(session, member=member, runtime=runtime, now=expired)) == 1
 
 
 @pytest.mark.asyncio
@@ -191,7 +262,7 @@ async def test_0141_rollback_refuses_any_retained_request(sessions, tmp_path, is
         await module.stage_platform_requests(session, registration, member=member, runtime=runtime,
             platforms=("linux/arm64",), now=_NOW)
         if cancelled:
-            await module.cancel_platform_requests(session, registration, member=member,
+            await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
                 platforms=("linux/arm64",), now=_NOW + timedelta(seconds=1))
     with pytest.raises(DBAPIError, match="cannot downgrade 0141"):
         await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0140")
