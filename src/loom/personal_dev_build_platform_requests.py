@@ -52,13 +52,18 @@ def _member(member: PersonalBuildMemberV1, *, allow_disabled: bool = False) -> P
 def _installation(member: PersonalBuildMemberV1, runtime: PersonalBuildRuntimeInstallation) -> str:
     if runtime.candidate != member.acknowledgement.candidate or runtime.profiles != member.configuration.profiles:
         raise ValueError("platform request runtime differs from build service")
+    return runtime_installation_digest(runtime, member.acknowledgement.protected_admission_sha256)
+
+
+def runtime_installation_digest(runtime: PersonalBuildRuntimeInstallation, protected_admission_sha256: str) -> str:
+    """Hash stable service facts identically for demand and protected readback."""
     return _digest({"candidate": runtime.candidate.model_dump(mode="json"),
         "execution_manifest_sha256": runtime.execution_manifest_sha256,
         "trusted_fleet_release_sha256": runtime.trusted_fleet_release_sha256,
         "template_sha256": runtime.template_sha256, "release_evidence_sha256": runtime.release_evidence_sha256,
         "profiles": [item.model_dump(mode="json") for item in runtime.profiles],
         "pools": [asdict(item) for item in runtime.pools],
-        "protected_admission_sha256": member.acknowledgement.protected_admission_sha256})
+        "protected_admission_sha256": protected_admission_sha256})
 
 
 def _platforms(platforms: tuple[PersonalDevPlatform, ...]) -> tuple[PersonalDevPlatform, ...]:

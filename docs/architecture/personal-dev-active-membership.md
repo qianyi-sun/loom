@@ -113,6 +113,14 @@ Tables alone confer no admission acknowledgement, bootstrap capability or build
 readiness: protected prepare/publication/release and the native runtime adapter
 remain required before intake can open.
 
+The owner-only installation store retains authenticated installer inputs in a
+SERIALIZABLE outer transaction. A deployment's identity remains stable across
+capacity-only membership updates, while owner, reporter, candidate-generation or
+approved-runtime rebinding is rejected. Readback checks exact canonical bytes,
+scalar identity pins and the runtime digest shared with platform requests.
+Retention does not activate an installation; the runtime agent cannot call this
+owner interface, and caller rollback also rolls back the retained record.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
