@@ -72,6 +72,9 @@ async def test_runtime_closes_listener_and_database_after_cancelled_service(tmp_
     "sqlite:///tmp/file", "postgresql+psycopg://signer:password@db.example/loom",
     "postgresql+psycopg://signer:password@db.example/loom?sslmode=require",
     "postgresql+psycopg://signer:password@db.example/loom?sslmode=verify-full",
+    "postgresql+psycopg://signer:password@127.0.0.1/loom?host=db.example&sslmode=disable",
+    "postgresql+psycopg://signer:password@127.0.0.1/loom?hostaddr=192.0.2.1&sslmode=disable",
+    "postgresql+psycopg://signer:password@127.0.0.1/loom?service=remote",
 ])
 async def test_remote_database_requires_verified_tls_before_connection(tmp_path, monkeypatch, url):
     m = module()
@@ -80,3 +83,51 @@ async def test_remote_database_requires_verified_tls_before_connection(tmp_path,
     with pytest.raises(ValueError):
         async with m.running_signer(configured(tmp_path)):
             pytest.fail("unsafe database opened")
+
+
+@pytest.mark.parametrize("name", ["PGHOSTADDR", "PGSERVICE", "PGSSLMODE"])
+async def test_ambient_libpq_destination_or_tls_overrides_refused(tmp_path, monkeypatch, name):
+    m = module()
+    monkeypatch.setenv(name, "untrusted-override")
+    monkeypatch.setattr(m, "read_owner_only_secret", lambda path: "postgresql+psycopg://signer:password@127.0.0.1/loom")
+    monkeypatch.setattr(m, "create_async_engine", lambda *args, **kwargs: pytest.fail("ambient override reached database connection"))
+    with pytest.raises(ValueError):
+        async with m.running_signer(configured(tmp_path)):
+            pytest.fail("ambient override admitted")
+
+
+async def test_interrupted_context_cleanup_keeps_database_until_server_joins(tmp_path, monkeypatch):
+    m = module()
+    closing, release, disposed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    class Engine:
+        async def dispose(self):
+            disposed.set()
+    class Server:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def start(self, **kwargs):
+            pass
+        async def aclose(self):
+            closing.set()
+            await release.wait()
+    monkeypatch.setattr(m, "read_owner_only_secret", lambda path: "postgresql+psycopg://signer:password@127.0.0.1/loom")
+    monkeypatch.setattr(m, "read_owner_only_bytes", lambda *args, **kwargs: b"validated-tls-key")
+    monkeypatch.setattr(m, "create_async_engine", lambda *args, **kwargs: Engine())
+    async def verified(engine):
+        pass
+    monkeypatch.setattr(m, "verify_signer_database_role", verified)
+    monkeypatch.setattr(m, "load_signing_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, "SignerPolicy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, "SignerServer", Server)
+    async def caller():
+        async with m.running_signer(configured(tmp_path)):
+            pass
+    task = asyncio.create_task(caller())
+    try:
+        await asyncio.wait_for(closing.wait(), 1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert not disposed.is_set(), "database disposed while signer work still owns it"
+    finally:
+        release.set()
+        await asyncio.wait_for(disposed.wait(), 1)

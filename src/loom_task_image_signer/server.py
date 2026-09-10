@@ -161,6 +161,12 @@ class SignerServer:
             self._close_task = asyncio.create_task(self._close())
         await asyncio.shield(self._close_task)
 
+    async def wait(self) -> None:
+        """Observe unexpected listener termination without transferring ownership."""
+        if self._accept_task is None:
+            raise ValueError("signer listener has not started")
+        await asyncio.shield(self._accept_task)
+
     async def _close(self) -> None:
         if self._accept_task is not None:
             self._accept_task.cancel()

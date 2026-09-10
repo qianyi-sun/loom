@@ -277,3 +277,15 @@ async def test_cancelled_close_retains_shutdown_owner_until_joined(tmp_path):
             assert not server.active_connections
         finally:
             writer.transport.abort()
+
+
+async def test_listener_failure_is_observable_to_service_supervisor(tmp_path, monkeypatch):
+    module()
+    loop = asyncio.get_running_loop()
+    async def fail(listener):
+        raise OSError("listener failure")
+    monkeypatch.setattr(loop, "sock_accept", fail)
+    async with service(tmp_path) as (server, _, _):
+        with pytest.raises(OSError):
+            await asyncio.wait_for(server.wait(), 1)
+        assert not server.active_connections

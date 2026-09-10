@@ -1,7 +1,7 @@
 # Task-image execution trust
 
 Status: signed-keyset verification, durable distribution adapter and dedicated
-signer policy/client implemented; host signing service provisioning, runtime
+signer service/client implemented; host signing service provisioning, runtime
 distribution, complete execution grants and online start remain uncomposed.
 
 This increment implements the keyset wire described by the
@@ -193,9 +193,48 @@ mode, size and before/after metadata are checked; the derived public key must
 match the configured pin. There is no missing-file generation fallback, exported
 private-key API or detached signing thread. Key bytes live only in the dedicated
 signer process; service-account isolation and protected key installation remain
-operator prerequisites. The module does not provision them. There is still no
-enabled service, completed startup privilege validation, identity ceremony or
-worker delivery evidence.
+operator prerequisites. The module does not provision them.
+
+### Explicit startup and privilege admission
+
+The inert `loom-task-image-signer --config /absolute/owner-only/settings.json`
+entrypoint requires schema `loom.task-image-signer/v1`. Configuration supplies
+the bind address/port, owner-only database URL file, TLS certificate/private key
+and client CA files, distinct execution/publication public pins and seed paths,
+the execution root's environment/validity interval, stable publication selections,
+and exact peer certificate digests mapped to `keyset`/`publication` operations.
+No credential, root, permission, bind listener or selection is discovered from
+worker state. Limits default to sixteen admitted connections, two operations,
+16 KiB headers, three-second handshake/read budgets and a ten-second total
+connection deadline. Policy I/O has a five-second ceiling and new keysets a
+five-minute lifetime, bounded by the configured root and fifteen-minute maximum.
+
+Startup first authenticates with the dedicated database role and verifies its
+effective privileges. Administrative/inherited roles, database or schema CREATE,
+unrelated relation/sequence access, function ownership, callable non-trigger
+SECURITY DEFINER routines, parameter permission to change
+`session_replication_role`, extra column writes and missing required read/lock
+privileges are rejected. The exact enabled trigger set, trigger properties and
+function bodies are pinned to migrations `0135`/`0138`. Row-security filtering
+and disabled, substituted or extra authority triggers close admission. Ordinary
+trigger-returning routines cannot be called directly and are verified through
+their attached authority triggers. These checks perform no grants or schema
+changes. A trusted administrator changing privileges after startup remains
+outside this service-account boundary.
+
+Only then are signing keys loaded and the TLS listener opened. Database URLs
+accept only explicit `postgresql+psycopg` credentials/destination and the closed
+`sslmode`/`sslrootcert` option set. A nonnumeric-loopback destination requires
+`verify-full` with an absolute CA path. All ambient `PG*` settings are rejected,
+preventing libpq host/service/TLS overrides. Authority transactions explicitly
+put `pg_temp` last in their search path. A listener failure reaches the service
+supervisor; SIGINT/SIGTERM close/join connection and policy work before disposing
+the database pool. Interrupted context cleanup retains that ordering.
+
+Disposable tests exercise this complete startup-to-signature path with an actual
+restricted login, owner-only key files and mTLS. This is not a production key
+ceremony or native activation. There is still no installed service account, live
+listener, worker delivery, complete execution grant or one-use start evidence.
 
 ## Evidence and remaining activation gates
 

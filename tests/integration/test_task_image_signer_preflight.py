@@ -52,6 +52,7 @@ async def test_database_owner_or_superuser_is_not_a_signer_identity(database):
     "missing-read", "missing-lock", "counter-write", "key-write", "delete", "truncate",
     "foreign-table-read", "foreign-column-write", "schema-create", "role-membership",
     "disabled-trigger", "replaced-function", "extra-trigger", "row-security",
+    "replication-parameter", "database-create", "sequence-usage", "callable-definer",
 ])
 async def test_effective_privilege_or_schema_drift_keeps_listener_closed(database, change):
     m = module()
@@ -72,7 +73,15 @@ async def test_effective_privilege_or_schema_drift_keeps_listener_closed(databas
                 "replaced-function": "CREATE OR REPLACE FUNCTION task_image_publication_preserve_key() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$BEGIN RETURN NEW; END$$",
                 "extra-trigger": "CREATE TRIGGER extra_signer_trigger BEFORE UPDATE ON task_image_publication_keys FOR EACH ROW EXECUTE FUNCTION task_image_publication_preserve_key()",
                 "row-security": "ALTER TABLE task_image_publication_keys ENABLE ROW LEVEL SECURITY",
+                "replication-parameter": f"GRANT SET ON PARAMETER session_replication_role TO {role}",
+                "database-create": f"GRANT CREATE ON DATABASE {connection.engine.url.database} TO {role}",
+                "sequence-usage": f"GRANT USAGE ON SEQUENCE signer_unrelated_sequence TO {role}",
+                "callable-definer": f"GRANT EXECUTE ON FUNCTION signer_mutate_authority() TO {role}",
             }
+            if change == "sequence-usage":
+                await connection.execute(text("CREATE SEQUENCE signer_unrelated_sequence"))
+            if change == "callable-definer":
+                await connection.execute(text("CREATE FUNCTION signer_mutate_authority() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'UPDATE public.task_image_publication_state SET keyset_version=keyset_version+1'"))
             await connection.execute(text(statements[change]))
         with pytest.raises(ValueError):
             await m.verify_signer_database_role(engine)

@@ -155,6 +155,9 @@ class SignerPolicy:
         async with self._engine.connect() as connection:
             await connection.execution_options(isolation_level="READ COMMITTED")
             async with AsyncSession(connection, expire_on_commit=False) as session, session.begin():
+                # Explicit pg_temp last prevents inherited search_path or
+                # connection-local temporary tables shadowing public authority.
+                await session.execute(text("SET LOCAL search_path=pg_catalog,public,pg_temp"))
                 await session.execute(text(
                     "SELECT pg_catalog.set_config('statement_timeout', :bound, true), "
                     "pg_catalog.set_config('idle_in_transaction_session_timeout', :bound, true)"

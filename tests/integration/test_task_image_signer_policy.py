@@ -332,3 +332,60 @@ async def test_real_tls_policy_database_bootstrap_commit_and_publication_chain(d
                 await finalize_keyset(session, preparation=plan, wire=wire, trust_root=root, clock=lambda: NOW)
             reply = await client.sign_publication(c.canonical_publication_bytes(unsigned), maximum_reply_bytes=131072)
         assert verify_historical_publication(reply, key=key).statement.unsigned_input() == unsigned
+
+
+async def test_provisioned_runtime_admits_real_role_loads_keys_and_bootstraps(database, tmp_path, unused_tcp_port):
+    import base64
+    import hashlib
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    from loom_task_image_authority.publication_transport import HTTPSKeysetSigner
+    from loom_task_image_signer.config import decode_signer_settings
+    from loom_task_image_signer.runtime import running_signer
+    from tests.integration.test_task_image_signer_preflight import role_engine
+    from tests.unit.test_task_image_publication_transport import _identity, _new_ca
+
+    result = await setup(database)
+    _, request, plan, root, key, unsigned, _, publication_provider, execution_provider = result
+    ca_key, ca = _new_ca()
+    ca_file = tmp_path / "client-ca.pem"
+    ca_file.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    certificate, private_key = _identity(tmp_path, "localhost", ca_key, ca, server=True)
+    private_key.chmod(0o600)
+    client_cert, client_key = _identity(tmp_path, "publisher", ca_key, ca, server=False)
+    peer = x509.load_pem_x509_certificate(client_cert.read_bytes()).public_bytes(serialization.Encoding.DER)
+    seed_directory = tmp_path / "seeds"
+    seed_directory.mkdir(mode=0o700)
+    publication_seed, execution_seed = seed_directory / "publication", seed_directory / "execution"
+    for path, provider in ((publication_seed, publication_provider), (execution_seed, execution_provider)):
+        path.write_bytes(provider.private.private_bytes_raw())
+        path.chmod(0o600)
+    now = datetime.now(UTC).replace(microsecond=0)
+    root = replace(root, activated_at=now - timedelta(days=1), expires_at=now + timedelta(days=1))
+    async with role_engine(database) as (engine, _):
+        database_file = tmp_path / "db-url"
+        assert engine.url.host in {"localhost", "127.0.0.1"}, "this startup test requires loopback disposable PostgreSQL"
+        database_file.write_text(engine.url.set(host="127.0.0.1").render_as_string(hide_password=False))
+        database_file.chmod(0o600)
+        values = dict(
+            schema="loom.task-image-signer/v1", host="127.0.0.1", port=unused_tcp_port,
+            database_url_file=str(database_file), ca_file=str(ca_file),
+            certificate_file=str(certificate), private_key_file=str(private_key),
+            execution=dict(key_id=root.key_id, environment=root.environment,
+                public_key=base64.urlsafe_b64encode(root.public_key).rstrip(b"=").decode(),
+                activated_at=root.activated_at.strftime("%Y-%m-%dT%H:%M:%SZ"), expires_at=root.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"), seed_file=str(execution_seed)),
+            publication=dict(key_id=key.key_id, public_key=base64.urlsafe_b64encode(key.public_key).rstrip(b"=").decode(), seed_file=str(publication_seed)),
+            selections=[asdict(module().PublicationSelection.from_unsigned(unsigned))],
+            peer_operations={hashlib.sha256(peer).hexdigest(): ["keyset"]},
+        )
+        settings = decode_signer_settings(json.dumps(values).encode())
+        async with running_signer(settings) as server:
+            async with HTTPSKeysetSigner(origin=f"https://localhost:{server.port}", ca_file=ca_file, client_cert_file=client_cert, client_key_file=client_key) as client:
+                wire = await client.sign_keyset(request, maximum_reply_bytes=131072)
+            checked = verify_publication_keyset(wire, trust_root=root, expected_state=plan.proposed_state, now=datetime.now(UTC).replace(microsecond=0))
+            assert checked.keyset.keys == plan.keys
+        assert not server.active_connections
