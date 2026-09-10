@@ -1232,6 +1232,17 @@ build admission, capability issuance and readiness remain interlocked until
 their integrated lifecycle exists. Retention reclamation must eventually require
 authoritative cleanup; cancelled rows are not proof of physical release.
 
+The build admission join consumes the manager's existing proposal without
+allocating again. It requires exactly one request per cold one-slot shape and
+matches the current execution fence, prepared executor incarnation, permitted
+nodes, native profile/protocol, runtime publication and owner service. Cancelled,
+expired, zero-capacity and source-rebound work cannot pass. Its output retains
+manager allowance/intent/slot identities and the tighter of the proposal and
+whole-attempt lease deadlines. This pure join is not a committed assignment or
+an acknowledgement: the protected store must lock and persist it, then recheck
+authority before publication. Capability issuance additionally requires actual
+launch/bootstrap authority. Application trial lifecycles are not synthesized.
+
 Submit a Slurm job held, durably bind it, then release under the exact current
 fence. Reconcile ambiguous submissions before retrying. The allocation grant
 binds owner, service subject, intent/slot, source candidate, attempt/lease,

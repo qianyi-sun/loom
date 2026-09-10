@@ -53,6 +53,8 @@ def _installation(member: PersonalBuildMemberV1, runtime: PersonalBuildRuntimeIn
     if runtime.candidate != member.acknowledgement.candidate or runtime.profiles != member.configuration.profiles:
         raise ValueError("platform request runtime differs from build service")
     return _digest({"candidate": runtime.candidate.model_dump(mode="json"),
+        "execution_manifest_sha256": runtime.execution_manifest_sha256,
+        "trusted_fleet_release_sha256": runtime.trusted_fleet_release_sha256,
         "template_sha256": runtime.template_sha256, "release_evidence_sha256": runtime.release_evidence_sha256,
         "profiles": [item.model_dump(mode="json") for item in runtime.profiles],
         "pools": [asdict(item) for item in runtime.pools],

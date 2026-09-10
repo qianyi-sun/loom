@@ -20,13 +20,20 @@ from loom_capacity_executor.launch_policy_set import (
 from loom_capacity_executor.launch_renderer import OperatorLaunchProfileV2
 from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
 from loom_capacity_manager.contracts import ProfileReferenceV1, canonical_digest
-from loom_capacity_manager.executable_contracts import CandidateBindingV2
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    canonical_executable_digest,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class PersonalBuildPoolInstallation:
     pool_id: str
     platform: PersonalDevPlatform
+    executor_id: str
+    executor_incarnation: str
+    profile_id: str
+    node_ids: tuple[str, ...]
     controller_authority_sha256: str
     launch_profile_sha256: str
     builder_image: str
@@ -36,6 +43,8 @@ class PersonalBuildPoolInstallation:
 @dataclass(frozen=True, slots=True)
 class PersonalBuildRuntimeInstallation:
     candidate: CandidateBindingV2
+    execution_manifest_sha256: str
+    trusted_fleet_release_sha256: str
     template_sha256: str
     release_evidence_sha256: str
     profiles: tuple[ProfileReferenceV1, ...]
@@ -94,9 +103,14 @@ eligible domains. Neither a matching image alone nor a partial policy is enough.
         ):
             raise ValueError("build installation native image, resources or authority differs")
         result.append(PersonalBuildPoolInstallation(pool_id=policy.pool_id, platform=platform,
+            executor_id=executor.executor_id, executor_incarnation=str(executor.executor_incarnation),
+            profile_id=profile.profile_id,
+            node_ids=tuple(sorted({node for domain in profile.resource_domains for node in domain.node_ids})),
             controller_authority_sha256=executor.controller_authority_sha256,
             launch_profile_sha256=full_launch_profile_digest(profile),
             builder_image=images.builder_image, agent_image=images.agent_image))
     return PersonalBuildRuntimeInstallation(candidate=publication.candidate,
+        execution_manifest_sha256=canonical_executable_digest(preparation),
+        trusted_fleet_release_sha256=preparation.trusted_fleet_release_sha256,
         template_sha256=canonical_digest(template), release_evidence_sha256=publication.release_evidence_sha256,
         profiles=template.profiles, pools=tuple(result))
