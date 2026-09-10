@@ -6,7 +6,7 @@ import math
 import re
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 from uuid import UUID
 
 from pydantic import (
@@ -20,7 +20,14 @@ from pydantic import (
 )
 
 from loom.models.task import TaskConfig, TaskSidecarConfig
-from loom.task_image_materialization import required_task_image_architectures
+from loom.task_image_materialization import (
+    required_task_image_architectures,
+    task_bundle_content_manifest_digest,
+    task_image_materialization_key,
+)
+
+if TYPE_CHECKING:
+    from loom.task_bundle_source import TaskBundleSourceSpecV1
 
 MAX_TASK_IMAGE_BUILD_BUNDLE_FILES = 2_000
 MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES = 512 * 1024 * 1024
@@ -389,16 +396,37 @@ def _derived_components(
 def derive_task_image_build_plan(
     row: _MaterializationRow,
     authorization: _BuildSessionAuthorization,
-) -> TaskImageBuildPlanV1:
-    """Derive all task-authored build inputs from one immutable database row."""
+    *,
+    admitted_source: TaskBundleSourceSpecV1 | None = None,
+) -> TaskImageBuildPlan:
+    """Derive frozen inputs; V2 callers must hold the admitted source authority.
+
+    This pure function verifies the complete source binding, not availability.
+    Transaction-owning callers admit and retain that exact source before use.
+    """
 
     if authorization.authority_version != 2 or authorization.builder_release_sha256 is None:
         raise ValueError("task-image build plan requires V2 release authority")
-    if "bundle_content_manifest_sha256" in row.task_source_provenance:
-        # Never drop stronger registration authority into a schema that cannot
-        # carry it. The manifest-bearing capability/Go reader is a separate
-        # integration boundary; production rootless admission remains disabled.
-        raise ValueError("content manifest requires a manifest-bearing native build plan")
+    manifest = task_bundle_content_manifest_digest(row.task_source_provenance)
+    if manifest and admitted_source is None:
+        raise ValueError("content manifest requires an admitted source for a manifest-bearing native build plan")
+    if getattr(row, "bundle_content_manifest_sha256", "") != manifest:
+        raise ValueError("source manifest differs from materialization identity")
+    if admitted_source is not None:
+        if (
+            not manifest
+            or admitted_source.manifest.digest != manifest
+            or admitted_source.catalog_task_id != row.task_id
+            or admitted_source.manifest.task_checksum != row.task_checksum
+            or admitted_source.source_uri != row.task_source
+            or admitted_source.task_config != row.task_config
+            or any(row.task_source_provenance.get(key) != value for key, value in admitted_source.provenance.items())
+            or getattr(row, "materialization_key", None) != task_image_materialization_key(
+                task_id=row.task_id, task_checksum=row.task_checksum, cpu_arch=row.cpu_arch,
+                bundle_content_manifest_sha256=manifest,
+            )
+        ):
+            raise ValueError("admitted source differs from the frozen materialization")
     if row.cpu_arch not in {"x86_64", "arm64"} or row.cpu_arch != authorization.cpu_arch:
         raise ValueError("task-image materialization and session architecture disagree")
 
@@ -424,7 +452,7 @@ def derive_task_image_build_plan(
     if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS:
         raise ValueError("task-image build_timeout_sec is outside the allocation limit")
 
-    plan = TaskImageBuildPlanV1(
+    plan: TaskImageBuildPlan = TaskImageBuildPlanV1(
         grant_id=authorization.grant_id,
         session_id=authorization.session_id,
         session_generation=authorization.session_generation,
@@ -447,6 +475,11 @@ def derive_task_image_build_plan(
         ),
         components=components,
     )
+    if admitted_source is not None:
+        plan = TaskImageBuildPlanV2(
+            **plan.model_dump(exclude={"schema_version"}),
+            bundle_content_manifest_sha256=manifest,
+        )
     if len(plan.model_dump_json().encode("utf-8")) > MAX_TASK_IMAGE_BUILD_PLAN_BYTES:
         raise ValueError("task-image build plan exceeds the authority response limit")
     return plan
