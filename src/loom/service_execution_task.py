@@ -175,7 +175,9 @@ def run_direct_completion(*, workspace: Path = Path("/workspace")) -> None:
             )
             started_at = datetime.now(UTC)
             try:
-                with urllib.request.urlopen(request, timeout=120) as response:
+                # This loopback request is bounded by the owning runtime phase;
+                # a shorter socket timeout can discard an allowed model response.
+                with urllib.request.urlopen(request, timeout=None) as response:
                     raw = response.read(16 * 1024 * 1024 + 1)
             except urllib.error.HTTPError as exc:
                 detail = exc.read(4096).decode("utf-8", errors="replace")

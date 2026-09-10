@@ -595,6 +595,16 @@ stay in primary canonical storage. Model calls go through the runtime's local
 proxy, which derives the public Gateway origin from its broker URL; immutable
 execution plans do not need an endpoint rewrite.
 
+Model requests wait within the admitted agent phase lifetime and the Gateway's
+existing deadline. The loopback agent and runtime proxy do not add a shorter
+whole-request timeout: a slow response within those budgets must still reach the
+agent. Phase cancellation stops the agent process and its upstream request.
+Connection/TLS bounds and finite token, input and output request timeouts remain
+in place. A failed bundle with `gateway unavailable` and a later successful LLM
+audit row can indicate an outer client abort; the audit timestamp alone does not
+measure provider latency. Inspect the phase timestamps and configured budgets
+before diagnosing a network failure or submitting another Trial.
+
 Secondary catalog targets require projected Pod identity with audience
 `loom-execution`, namespace-local ServiceAccount `loom-execution-attempt`, and
 native TokenReview at their own cluster. Primary execution retains the existing
