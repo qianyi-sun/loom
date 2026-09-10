@@ -172,3 +172,82 @@ def test_orphan_snapshot_before_anchor_is_reclaimed_on_restart(tmp_path, monkeyp
     with ExecutorJournal(path) as journal:
         assert journal.head.sequence == 0
         assert not tuple(tmp_path.glob("*.snapshot-*"))
+
+
+async def test_real_heartbeat_handshake_and_historical_chunked_inventory_survive_checkpoint(tmp_path):
+    from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
+    from loom_capacity_executor.inventory_journal import (
+        complete_inventory_request,
+        load_journal_inventory,
+        retain_inventory_request,
+    )
+    from tests.unit.test_capacity_executor_heartbeat import RecordingHeartbeatClient, _registration
+    from tests.unit.test_capacity_executor_inventory_journal import large_inventory
+
+    path = tmp_path / "journal"
+    client = RecordingHeartbeatClient()
+    with ExecutorJournal(path) as journal:
+        value = large_inventory()
+        retain_inventory_request(journal, value)
+        complete_inventory_request(journal, value, rejected=False)
+        inventory_record = journal.latest("inventory", str(value.executor_incarnation))
+        retained = tuple(range(1, journal.head.sequence + 1))
+        checkpoint = journal.prepare_checkpoint(retained_sequences=retained,
+            retained_anchors=(0,), reserved_bytes=4096)
+        heartbeat = await ExecutableHeartbeatLoop(_registration(), journal, client).heartbeat()
+        assert heartbeat.journal_sequence == checkpoint.sequence
+        readback = await client.executable_checkpoint()
+        journal.commit_checkpoint(central_sequence=readback.journal_sequence,
+            central_digest=readback.journal_digest)
+    with ExecutorJournal(path) as journal:
+        assert load_journal_inventory(journal, inventory_record) == value
+        next_heartbeat = await ExecutableHeartbeatLoop(_registration(), journal, client).heartbeat()
+        assert next_heartbeat.heartbeat_sequence == 2
+        with pytest.raises(JournalRegressionError, match="floor"):
+            journal.assert_covers(0, "0" * 64)
+
+
+def test_checkpoint_does_not_resurrect_resolved_requests(tmp_path):
+    with ExecutorJournal(tmp_path / "journal") as journal:
+        request = append(journal, "intent-close-requested", "closed", kind="intent")
+        append(journal, "intent-close-confirmed", "closed", kind="intent")
+        with pytest.raises(JournalRegressionError, match="resurrect"):
+            journal.prepare_checkpoint(retained_sequences=(request.sequence,),
+                retained_anchors=(), reserved_bytes=0)
+
+
+def test_checkpoint_header_obeys_record_size_bound_before_snapshot_read(tmp_path, monkeypatch):
+    from loom_capacity_executor.journal import JournalCorruptionError
+
+    path = tmp_path / "journal"
+    with ExecutorJournal(path) as journal:
+        checkpoint = journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+            central_digest=checkpoint.record_digest)
+    monkeypatch.setattr("loom_capacity_executor.journal._MAX_RECORD_BYTES", path.stat().st_size - 2)
+    with pytest.raises(JournalCorruptionError, match="record bound"):
+        with ExecutorJournal(path):
+            pass
+
+
+@pytest.mark.parametrize("mutation", ("symlink", "permissions", "hardlink"))
+def test_checkpoint_snapshot_rejects_unsafe_files(tmp_path, mutation):
+    from loom_capacity_executor.journal import JournalCorruptionError
+
+    path = tmp_path / "journal"
+    with ExecutorJournal(path) as journal:
+        checkpoint = journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+            central_digest=checkpoint.record_digest)
+    snapshot, = tmp_path.glob("*.snapshot-*")
+    if mutation == "permissions":
+        snapshot.chmod(0o644)
+    elif mutation == "hardlink":
+        (tmp_path / "alias").hardlink_to(snapshot)
+    else:
+        target = tmp_path / "target"
+        snapshot.rename(target)
+        snapshot.symlink_to(target)
+    with pytest.raises(JournalCorruptionError):
+        with ExecutorJournal(path):
+            pass
