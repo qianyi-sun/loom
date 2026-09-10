@@ -123,3 +123,21 @@ def test_retired_origin_rejects_inconsistent_structural_claims(boundary):
         anchor["schema_version"] = 1.0
     with pytest.raises(ValueError):
         parse(payload)
+
+
+@pytest.mark.parametrize("build", (False, True))
+@pytest.mark.parametrize("boundary", ("zero-earlier-root", "float-root-version"))
+def test_retired_origin_rejects_malformed_original_root(build, boundary):
+    payload = origin_payload(build=build)
+    if boundary == "zero-earlier-root":
+        _value, _request, _result, first = event_row(build=build)
+        second = _next_build_row(first, build=build)
+        payload["anchor"].update(revision=second.revision, head_sha256=second.head_sha256,
+            member=second.result_payload["member"])
+        payload["source"].update(revision=second.revision, head_sha256=second.head_sha256)
+        assert parse(payload).original_origin.generation < second.configuration_generation
+        payload["original_origin"]["digest"] = "0" * 64
+    else:
+        payload["original_origin"]["schema_version"] = 1.0
+    with pytest.raises(ValueError):
+        parse(payload)
