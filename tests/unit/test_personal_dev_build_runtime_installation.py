@@ -11,6 +11,7 @@ from loom_capacity_executor.launch_policy_set import (
     canonical_pool_launch_policy_digest,
     full_launch_profile_digest,
 )
+from loom_capacity_manager.contracts import canonical_digest_excluding
 from tests.unit.test_capacity_build_membership import build_membership_input
 from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
 from tests.unit.test_personal_dev_build_runtime_publication import _load
@@ -110,4 +111,29 @@ def test_even_pinned_policy_cannot_substitute_template_or_publication(tmp_path, 
     sets[pool_index] = (policy, (build, app))
     preparation, configs = pin_sets(preparation, sets)
     with pytest.raises(ValueError):
+        resolve(publication, preparation, configs)
+
+
+def test_join_requires_every_allocator_eligible_domain(tmp_path):
+    publication, preparation, configs = installation_input(tmp_path)
+    reference = preparation.personal_builds.profiles[0]
+    shape = reference.worker_shapes[0].model_copy(update={
+        "compatible_domain_ids": (*reference.worker_shapes[0].compatible_domain_ids, "extra-domain")})
+    reference = reference.model_copy(update={"worker_shapes": (shape,),
+        "eligible_resource_domains": (*reference.eligible_resource_domains, "extra-domain")})
+    reference = reference.model_copy(update={"profile_digest": canonical_digest_excluding(reference, "profile_digest")})
+    preparation = preparation.model_copy(update={"personal_builds": preparation.personal_builds.model_copy(update={
+        "profiles": (reference, preparation.personal_builds.profiles[1])})})
+    sets = []
+    for policy, profiles in configs:
+        if policy.pool_id == reference.pool_id:
+            build = profiles[0].model_copy(update={"profile_digest": reference.profile_digest})
+            policy = policy.model_copy(update={"entries": (
+                PurposeLaunchPolicyV3(purpose="personal-build-worker", profile_sha256=full_launch_profile_digest(build)),
+                PurposeLaunchPolicyV3(purpose="application-worker", profile_sha256=full_launch_profile_digest(profiles[1])),
+            )})
+            profiles = (build, profiles[1])
+        sets.append((policy, profiles))
+    preparation, configs = pin_sets(preparation, sets)
+    with pytest.raises(ValueError, match="authority differs"):
         resolve(publication, preparation, configs)
