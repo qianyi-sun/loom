@@ -3200,17 +3200,34 @@ def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledge
 
 
 @pytest.mark.parametrize("version", ("v2", "v3"))
+@pytest.mark.parametrize("typed", (False, True))
 def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
     api_context_v2_executor_generation: tuple[
         TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
     ],
     monkeypatch: pytest.MonkeyPatch,
     version: str,
+    typed: bool,
 ) -> None:
     """A reporter for another subject or an executor must not read recovery proof."""
 
     client, app, _settings, _allocator = api_context_v2_executor_generation
     evidence = _v2_terminal_inventory_evidence()
+    from loom_capacity_manager.typed_inventory_contracts import parse_terminal_inventory_evidence
+
+    if typed:
+        payload = evidence.model_dump(mode="json")
+        proof = payload["record"]["ownership_proof"]
+        metadata = proof["metadata"]
+        for node in (payload, payload["record"], proof, metadata):
+            node["schema_version"] = 3
+        metadata["launch_profile_sha256"] = "a" * 64
+        metadata["subject_authority"] = dict(schema_version=3, source="immutable-base",
+            purpose="application-worker", membership=None, acknowledgement_sha256="b" * 64,
+            configuration=dict(schema_version=1, scope="subject", generation=1, digest="c" * 64,
+                subject_id=str(evidence.binding.subject_id),
+                subject_incarnation=str(evidence.binding.subject_incarnation)))
+        evidence = parse_terminal_inventory_evidence(json.dumps(payload))
     calls: list[tuple[UUID, UUID, UUID, UUID]] = []
 
     async def terminal_evidence(
@@ -3241,10 +3258,11 @@ def test_v2_terminal_inventory_evidence_route_is_exact_subject_only(
 
     response = client.get(endpoint, headers=reporter_headers)
 
-    assert response.status_code == 200, response.text
-    assert ExecutableTerminalInventoryEvidenceV2.model_validate_json(
-        response.content
-    ) == evidence
+    if typed and version == "v2":
+        assert response.status_code == 409, response.text
+    else:
+        assert response.status_code == 200, response.text
+        assert parse_terminal_inventory_evidence(response.content) == evidence
     missing = client.get(
         f"/{version}/subjects/{SUBJECT_ID}/intents/{UUID(int=999)}/"
         "terminal-inventory-evidence",

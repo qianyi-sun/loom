@@ -81,6 +81,7 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/versions/guard_0029_protected_pending_cancellation.py",
     "capacity_guard_migrations/versions/guard_0030_application_trigger_schema_usage.py",
     "capacity_guard_migrations/versions/guard_0031_native_reader_fence.py",
+    "capacity_guard_migrations/versions/guard_0031_typed_terminal_inventory.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64

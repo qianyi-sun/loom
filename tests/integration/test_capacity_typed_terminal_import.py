@@ -5,7 +5,6 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -51,54 +50,50 @@ def typed_payload(seeded, *, owner=None):
     if owner is not None:
         metadata["subject_authority"].update(
             source="personal-membership",
-            membership=dict(schema_version=3, namespace_id=str(UUID(int=990012)),
-                owner_id=str(owner), revision=1, head_sha256="d" * 64,
-                execution_manifest_sha256=binding["execution"]["execution_manifest_sha256"]),
+            membership=dict(
+                schema_version=3,
+                namespace_id=str(UUID(int=990012)),
+                owner_id=str(owner),
+                revision=1,
+                head_sha256="d" * 64,
+                execution_manifest_sha256=binding["execution"]["execution_manifest_sha256"],
+            ),
         )
     return parse_terminal_inventory_evidence(json.dumps(value)).model_dump(mode="json")
 
 
 def seed_delegated_claim(database, monkeypatch, tmp_path, *, owner):
-    from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
-    from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
     from tests.integration import test_capacity_protected_worker_session as worker_module
-    from tests.integration.test_capacity_agent_executable_admission import (
-        _assign_protected_attempt,
-        _seed_protected_attempt,
-        _serializable_executor_session,
-    )
 
     # Change fixture inputs before its real protected registration/claim writes;
     # never mutate a live claim or manufacture an admitted database row.
     original_bootstrap = worker_module._bootstrap
     original_seed = worker_module._seed_protected_worker
+    original_projection = worker_module._public_registration_payload
 
     def bootstrap(*args):
         value = original_bootstrap(*args)
-        return value.model_copy(update={"binding": value.binding.model_copy(update={
-            "account_id": f"dev-owner-{owner.hex}",
-        })})
+        return value.model_copy(
+            update={
+                "binding": value.binding.model_copy(
+                    update={
+                        "account_id": f"dev-owner-{owner.hex}",
+                    }
+                )
+            }
+        )
+
+    async def seed(database):
+        return await original_seed(database, environment_id="dev-alice", tier_id="development")
 
     monkeypatch.setattr(worker_module, "_bootstrap", bootstrap)
-
-    async def seed():
-        worker = await original_seed(database, tier_id="development")
-        attempt = UUID(int=990020)
-        await _seed_protected_attempt(database, protected_attempt_id=attempt,
-            execution_generation=14, requirements_digest="8" * 64)
-        await _assign_protected_attempt(database, registration=worker.registration,
-            request=worker.bootstrap, protected_attempt_id=attempt,
-            execution_generation=14, requirements_digest="8" * 64)
-        async with _serializable_executor_session(database) as session:
-            receipt = await ExecutableAdmissionStore(session, registration=worker.registration).admit_claim(
-                ExecutableClaimProposalV2(operation_id=UUID(int=990021),
-                    protected_attempt_id=attempt, execution_generation=14, requirements_digest="8" * 64,
-                    worker_id=worker.worker.worker_id, worker_incarnation=worker.worker.worker_incarnation,
-                    expected_claim_high_water=0))
-            assert receipt is not None
-        return SimpleNamespace(worker=worker, first_attempt={"protected_attempt_id": attempt})
-
-    return asyncio.run(seed())
+    monkeypatch.setattr(worker_module, "_seed_protected_worker", seed)
+    monkeypatch.setattr(
+        worker_module,
+        "_public_registration_payload",
+        lambda: original_projection(sandbox_identity="loom-dev-alice"),
+    )
+    return _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("delegated", (False, True))
@@ -109,8 +104,11 @@ def test_typed_terminal_sql_import_preserves_exact_bytes_and_restart_idempotence
     delegated,
 ):
     owner = UUID(int=990011) if delegated else None
-    seeded = (seed_delegated_claim(capacity_guard_database, monkeypatch, tmp_path, owner=owner)
-              if delegated else _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path))
+    seeded = (
+        seed_delegated_claim(capacity_guard_database, monkeypatch, tmp_path, owner=owner)
+        if delegated
+        else _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path)
+    )
     payload = typed_payload(seeded, owner=owner)
     first = asyncio.run(
         _import_terminal_inventory_payload(capacity_guard_database, seeded, payload)
@@ -202,7 +200,9 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
 
 
 def test_downgrade_fences_an_import_already_executing_the_old_function_body(
-    capacity_guard_database, monkeypatch, tmp_path,
+    capacity_guard_database,
+    monkeypatch,
+    tmp_path,
 ):
     seeded = _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path)
     payload = typed_payload(seeded)
@@ -213,18 +213,27 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
             with engine.begin() as lock:
                 # The importer has already validated the typed payload before
                 # waiting here, but has not reached the evidence table yet.
-                lock.execute(text("SELECT 1 FROM loom_capacity_guard.agent_runtime_authority "
-                                  "WHERE singleton_id=1 FOR UPDATE"))
-                future = workers.submit(asyncio.run, _import_terminal_inventory_payload(
-                    capacity_guard_database, seeded, payload))
+                lock.execute(
+                    text(
+                        "SELECT 1 FROM loom_capacity_guard.agent_runtime_authority "
+                        "WHERE singleton_id=1 FOR UPDATE"
+                    )
+                )
+                future = workers.submit(
+                    asyncio.run,
+                    _import_terminal_inventory_payload(capacity_guard_database, seeded, payload),
+                )
                 deadline = time.monotonic() + 10
                 while True:
                     with engine.connect() as observer:
-                        waiting = observer.execute(text(
-                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE "
-                            "usename=:agent AND wait_event_type='Lock' AND "
-                            "query LIKE '%import_executable_terminal_inventory_evidence%')"
-                        ), {"agent": _value(capacity_guard_database, "agent_role")}).scalar_one()
+                        waiting = observer.execute(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE "
+                                "usename=:agent AND wait_event_type='Lock' AND "
+                                "query LIKE '%import_executable_terminal_inventory_evidence%')"
+                            ),
+                            {"agent": _value(capacity_guard_database, "agent_role")},
+                        ).scalar_one()
                     if waiting:
                         break
                     assert not future.done(), "importer completed before the intended lock fence"
@@ -236,9 +245,14 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
             with pytest.raises(DBAPIError, match="guard_terminal_inventory_schema_check"):
                 future.result(timeout=10)
         with engine.connect() as connection:
-            assert connection.execute(text(
-                "SELECT count(*) FROM loom_capacity_guard.executable_terminal_inventory_evidence"
-            )).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM loom_capacity_guard.executable_terminal_inventory_evidence"
+                    )
+                ).scalar_one()
+                == 0
+            )
     finally:
         engine.dispose()
 
@@ -251,8 +265,11 @@ def test_typed_terminal_sql_rejects_purpose_and_provenance_substitution_without_
     delegated,
 ):
     owner = UUID(int=990011) if delegated else None
-    seeded = (seed_delegated_claim(capacity_guard_database, monkeypatch, tmp_path, owner=owner)
-              if delegated else _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path))
+    seeded = (
+        seed_delegated_claim(capacity_guard_database, monkeypatch, tmp_path, owner=owner)
+        if delegated
+        else _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path)
+    )
     original = typed_payload(seeded, owner=owner)
     for tamper in (
         "build",
