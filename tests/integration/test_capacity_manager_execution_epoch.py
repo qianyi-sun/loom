@@ -30,6 +30,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationPolicyV2,
     ExecutionRetirementExecutorCheckpointV2,
     ExecutionRetirementV2,
+    PreparedExecutorBindingV2,
     canonical_executable_digest,
     canonical_inventory_confirmation_journal_head,
 )
@@ -498,12 +499,12 @@ async def _retained_active_context(
 async def _publish_final_safe_evidence(
     capacity_session: AsyncSession,
     drained: ExecutionContextV2,
+    *, bindings: tuple[PreparedExecutorBindingV2, ...] | None = None,
 ) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
     execution_store = CapacityExecutionStore()
     checkpoints = []
     retained_execution = await _retained_active_context(capacity_session, drained)
-    for pool_id in ("gb10", "oldlab"):
-        binding = _executor_binding(pool_id)
+    for binding in bindings or tuple(_executor_binding(pool_id) for pool_id in ("gb10", "oldlab")):
         runtime = (
             await capacity_session.execute(
                 select(CapacityExecutableExecutorState).where(

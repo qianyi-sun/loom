@@ -11,8 +11,14 @@ from loom_capacity_manager.executable_contracts import ExecutableExecutorHeartbe
 from loom_capacity_manager.models import CapacityConfigGeneration, CapacityExecutionEpoch
 from loom_capacity_manager.retired_application_import import _reference
 from loom_capacity_manager.retired_member_export import _origins_from_authenticated_history
-from loom_capacity_manager.retired_member_origin_contracts import RetiredMembershipSnapshotReferenceV1
-from loom_capacity_manager.store import CapacityManagementStore, ConfigurationConflictError, WriterFence
+from loom_capacity_manager.retired_member_origin_contracts import (
+    RetiredMembershipSnapshotReferenceV1,
+)
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    ConfigurationConflictError,
+    WriterFence,
+)
 from loom_capacity_manager.typed_membership_store import _load_base_configurations
 from tests.capacity_build_membership_fixtures import seed_typed_sql_execution
 from tests.capacity_execution_fixtures import PreparedExecutionFixture, execution_policy
@@ -21,7 +27,7 @@ from tests.integration.test_capacity_manager_execution_epoch import (
     _publish_final_safe_evidence,
     _retirement_request,
 )
-from tests.integration.test_capacity_successor_source_verification import successor
+from tests.integration.test_capacity_successor_source_verification import successor, verify
 
 
 async def seed_empty_successor(session, candidate, *, epoch):
@@ -60,7 +66,7 @@ async def seed_empty_successor(session, candidate, *, epoch):
             journal_sequence=0, journal_digest="0" * 64))
     drained = await management.begin_execution_drain(session, _drain_request(active),
         actor="test-retirement", idempotency_key=UUID(int=984000 + epoch * 10))
-    checkpoints = await _publish_final_safe_evidence(session, drained)
+    checkpoints = await _publish_final_safe_evidence(session, drained, bindings=candidate.executors)
     await management.retire_execution_epoch(session, _retirement_request(drained, checkpoints),
         actor="test-retirement", idempotency_key=UUID(int=984001 + epoch * 10))
     return candidate, RetiredMembershipSnapshotReferenceV1(namespace_id=candidate.personal_membership.namespace_id,
@@ -90,6 +96,7 @@ async def test_graph_authenticates_repeated_empty_rollovers_without_losing_owner
         candidate = candidate.model_copy(update={"configuration_epoch": candidate.configuration_epoch + 1,
             "retired_source": source, "managed_application_origins": exported.applications,
             "managed_build_origins": exported.builds})
+        assert await verify(capacity_session, candidate, epoch=epoch + 1) == exported
 
 
 async def test_graph_rejects_forged_reference_even_when_epoch_exists(capacity_session):
@@ -97,3 +104,41 @@ async def test_graph_rejects_forged_reference_even_when_epoch_exists(capacity_se
     candidate, source = await seed_empty_successor(capacity_session, candidate, epoch=43)
     with pytest.raises(ConfigurationConflictError):
         await load(capacity_session, source.model_copy(update={"execution_manifest_sha256": "f" * 64}))
+
+
+@pytest.mark.parametrize("omission", ("application", "build", "all"))
+async def test_graph_rejects_self_consistent_omission_in_an_intermediate_epoch(capacity_session, omission):
+    from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
+    candidate, _initial = await successor(capacity_session)
+    apps = () if omission in {"application", "all"} else candidate.managed_application_origins
+    builds = () if omission in {"build", "all"} else candidate.managed_build_origins
+    kept = {origin.configuration.subject_id for origin in (*apps, *builds)}
+    removed = set(candidate.personal_membership.managed_base_subject_ids) - kept
+    candidate = ExecutionPreparationV4.model_validate(candidate.model_dump(mode="python") | {
+        "managed_application_origins": apps, "managed_build_origins": builds,
+        "personal_membership": candidate.personal_membership.model_copy(update={"managed_base_subject_ids": tuple(kept)}),
+        "subject_acknowledgements": tuple(ack for ack in candidate.subject_acknowledgements if ack.subject_id not in removed)})
+    _candidate, source = await seed_empty_successor(capacity_session, candidate, epoch=43)
+    with pytest.raises(ConfigurationConflictError, match="complete retired source"):
+        await load(capacity_session, source)
+
+
+@pytest.mark.parametrize("bound", ("MAX_RETIRED_SOURCE_EPOCHS", "MAX_RETIRED_SOURCE_BYTES"))
+async def test_graph_work_is_bounded_before_loading_unbounded_history(capacity_session, monkeypatch, bound):
+    candidate, _initial = await successor(capacity_session)
+    _candidate, source = await seed_empty_successor(capacity_session, candidate, epoch=43)
+    module = import_module("loom_capacity_manager.retired_source_graph")
+    monkeypatch.setattr(module, bound, 1)
+    with pytest.raises(ConfigurationConflictError, match="work bound"):
+        await load(capacity_session, source)
+
+
+async def test_graph_historical_installations_do_not_require_current_reporter_rows(capacity_session):
+    from sqlalchemy import text
+    candidate, initial = await successor(capacity_session)
+    candidate, source = await seed_empty_successor(capacity_session, candidate, epoch=43)
+    subject = initial.builds[0].configuration
+    await capacity_session.execute(text("UPDATE capacity_demand_reporters SET state='fenced', configuration_generation=configuration_generation+1 WHERE reporter_incarnation=:reporter"),
+        {"reporter": subject.demand_reporter_incarnation})
+    history = await load(capacity_session, source)
+    assert _origins_from_authenticated_history(history).builds[0].configuration == subject
