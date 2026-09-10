@@ -18,7 +18,7 @@ from tests.unit.test_capacity_executor_typed_journal import facts, typed_executo
 
 
 @pytest.mark.parametrize("typed", (False, True))
-@pytest.mark.parametrize("tamper", ("none", "sequence", "digest", "live", "binding"))
+@pytest.mark.parametrize("tamper", ("none", "sequence", "digest", "live", "binding", "duplicate-terminal"))
 async def test_delayed_release_requires_exact_historical_terminal_and_protected_fences(tmp_path, typed, tamper):
     if typed:
         runtime, journal, context = typed_executor(tmp_path)
@@ -55,10 +55,17 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
             protected_release_sha256=protected_digest)
         if tamper == "live":
             runtime.slurm.jobs = [job]
+        if tamper == "duplicate-terminal":
+            runtime.slurm.terminal_jobs = (terminal, terminal)
         if tamper == "binding":
             item = release.releases[0]
             release = release.model_copy(update={"releases": (item.model_copy(update={
                 "binding": item.binding.model_copy(update={"deployment_generation": 999})}),)})
+        if tamper == "duplicate-terminal":
+            with pytest.raises(ValueError, match="duplicate Slurm terminal job"):
+                await runtime._release(release)
+            assert not runtime.client.releases
+            return
         result = await runtime._release(release)
         assert result.status == ("released" if tamper == "none" else "quarantined")
         assert len(runtime.client.releases) == (tamper == "none")
