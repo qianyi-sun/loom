@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 from uuid import uuid4
 
+import pytest
+
 from loom_service.debug_evidence import (
     _next_actions_for_trial,
     _summary_from_trials,
@@ -21,6 +23,90 @@ class _URL(str):
 class _Request:
     def url_for(self, name: str, **values: object) -> _URL:
         return _URL(f"http://test/{name}/{values.get('trial_id', '')}")
+
+
+@pytest.mark.parametrize(
+    ("states", "result_status", "message", "category"),
+    [
+        (["cancelled"], "all_failed", "All child trials were cancelled.", "cancelled"),
+        (
+            ["failed", "cancelled"],
+            "all_failed",
+            "Child trials: 0 succeeded, 1 failed, 1 cancelled.",
+            "aggregate",
+        ),
+        (
+            ["succeeded", "cancelled"],
+            "partial_failed",
+            "Child trials: 1 succeeded, 0 failed, 1 cancelled.",
+            "aggregate",
+        ),
+        (
+            ["succeeded", "failed", "cancelled"],
+            "partial_failed",
+            "Child trials: 1 succeeded, 1 failed, 1 cancelled.",
+            "aggregate",
+        ),
+        (["failed"], "all_failed", "All child trials failed.", "aggregate"),
+        (
+            ["succeeded", "failed"],
+            "partial_failed",
+            "Some child trials failed.",
+            "aggregate",
+        ),
+    ],
+)
+def test_batch_debug_evidence_distinguishes_cancellation_from_failure(
+    states: list[str], result_status: str, message: str, category: str
+) -> None:
+    now = datetime.now(UTC)
+    batch = SimpleNamespace(
+        id=uuid4(),
+        team_id=uuid4(),
+        state="finished",
+        result_status=result_status,
+        failure_reason=None,
+        failure_message=None,
+        created_at=now,
+        finished_at=now,
+        backend="nebius",
+        trial_config={},
+        combinations=[],
+        provider_connection_id=None,
+        provider_model_id=None,
+        task_filter={},
+        expected_trial_count=len(states),
+        n_per_task=1,
+        fanout_errors=None,
+    )
+    trials = [
+        SimpleNamespace(
+            id=uuid4(),
+            task_id=f"cancel-display/{index}",
+            state=state,
+            failure_reason=None,
+            failure_message=None,
+            result=None,
+            config={},
+            provider_connection_id=None,
+            provider_model_id=None,
+            worker_id=None,
+            claimed_at=now,
+            started_at=None,
+            sample_idx=0,
+            combination_idx=0,
+        )
+        for index, state in enumerate(states)
+    ]
+    evidence = build_batch_debug_evidence(batch, trials=trials, llm_calls=[])  # type: ignore[arg-type]
+
+    assert evidence["lifecycle"]["terminal_status"] == result_status
+    assert evidence["failure"]["message"] == message
+    assert evidence["failure"]["category"] == category
+    assert evidence["trials"]["summary"]["cancelled"] == states.count("cancelled")
+    if "failed" not in states:
+        assert not any("failed child" in action for action in evidence["next_actions"])
+        assert any("cancellation" in action for action in evidence["next_actions"])
 
 
 def test_protected_pending_debug_evidence_is_active() -> None:

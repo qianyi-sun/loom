@@ -256,6 +256,18 @@ function renderBatchDetail(): void {
 }
 
 describe("BatchDetail run plan", () => {
+  it.each([
+    ["all_failed", { cancelled: 1 }, "All trials cancelled"],
+    ["all_failed", { cancelled: 1, failed: 1 }, "Failed and cancelled"],
+    ["partial_failed", { succeeded: 1, cancelled: 1 }, "Succeeded and cancelled"],
+    ["partial_failed", { succeeded: 1, failed: 1, cancelled: 1 }, "Succeeded, failed and cancelled"],
+  ])("distinguishes cancellation in %s outcomes", async (result, summary, label) => {
+    mockBatch({ ...BATCH_BODY, state: "finished", result_status: result, trial_summary: summary });
+    renderBatchDetail();
+    expect(await screen.findByText(label as string)).toBeInTheDocument();
+    expect(screen.queryByText(result as string)).not.toBeInTheDocument();
+  });
+
   beforeEach(() => {
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");

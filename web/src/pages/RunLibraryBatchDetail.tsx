@@ -26,7 +26,7 @@ import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
-import { batchStateVariant } from "../lib/statusVariant";
+import { batchResultPresentation, batchStateVariant } from "../lib/statusVariant";
 
 const GROUP_LABELS: Record<ArtifactGroup, string> = {
   reports: "Reports",
@@ -372,6 +372,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     effectiveCombinationSummary.length > 0
       ? effectiveCombinationSummary
       : (batch.combination_summary ?? []);
+  const result = batch.result_status ? batchResultPresentation(batch.result_status, batch.trial_summary) : null;
   const rewardZeroPlatformSuccess =
     batch.aggregate_reward === 0 &&
     (batch.trial_summary.failed ?? 0) === 0 &&
@@ -396,8 +397,8 @@ export default function RunLibraryBatchDetail(): JSX.Element {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <StatusPill variant={batchStateVariant(batch.state)}>
-                {batch.result_status ?? batch.state}
+              <StatusPill variant={result?.variant ?? batchStateVariant(batch.state)}>
+                {result?.label ?? batch.state}
               </StatusPill>
               <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-700">
                 {batch.backend}
