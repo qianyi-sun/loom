@@ -773,6 +773,15 @@ Imported disabled members still cannot be recreated as the first successor event
 that transition requires explicit cross-epoch predecessor evidence, not a rewritten
 epoch-local certificate. These prefix checks alone do not open durable consumers.
 
+`PersonalInheritedReincarnationEvidenceV2` is a standalone value for the pending
+cross-epoch recreation path. It keeps the predecessor's real own epoch, manifest,
+revision and head, the immediate retired source, the original root and the current
+admission epoch/revision. It permits own revision N followed by successor revision
+1 only through strictly descending source epochs; it does not authenticate a source
+or release itself. Legacy V1 instance validation and serialization reject this
+newer evidence instead of dropping its fields. Member carriers, SQL and runtime
+consumers do not accept it yet, so imported-disabled first-create remains closed.
+
 Pure allocation also resolves inherited build bases using the pinned build template
 and native profiles, including empty successor snapshots. Build and application
 overlays replace their own base reference once and retain a common owner ceiling;

@@ -117,3 +117,40 @@ def test_new_evidence_equal_generation_root_is_exact(field):
     payload["origin"][field] = "e" * 64 if field == "digest" else str(UUID(int=99702))
     with pytest.raises(ValueError):
         parse(payload)
+
+
+def test_legacy_nested_member_rejects_actual_new_evidence_instance():
+    from loom_capacity_manager.contracts import SubjectConfigurationV1
+    from loom_capacity_manager.executable_contracts import SubjectExecutionAcknowledgementV2
+    from loom_capacity_manager.membership_contracts import PersonalApplicationMemberV1
+    origin = successor_payload(build=False, operation="destroy")
+    payload = inherited_evidence_payload(build=False)
+    payload["admission_revision"] = 3
+    evidence = parse(payload)
+    config = SubjectConfigurationV1.model_validate_json(json.dumps(origin["configuration"])).model_copy(update={
+        "lifecycle_state": "active", "configuration_generation": 3,
+        "subject_incarnation": evidence.successor_incarnation, "demand_reporter_incarnation": UUID(int=99703)})
+    ack = SubjectExecutionAcknowledgementV2.model_validate_json(json.dumps(origin["acknowledgement"])).model_copy(update={
+        "configuration_generation": 3, "subject_incarnation": config.subject_incarnation,
+        "reporter_incarnation": config.demand_reporter_incarnation})
+    with pytest.raises(ValueError):
+        PersonalApplicationMemberV1(revision=3, owner_id=UUID(origin["base_projection"]["owner_id"]),
+            configuration=config, acknowledgement=ack, reincarnation=evidence)
+
+
+def test_legacy_evidence_bytes_remain_exact():
+    payload = inherited_evidence_payload()
+    for field in ("source", "execution_epoch", "predecessor_execution_epoch", "predecessor_execution_manifest_sha256"):
+        del payload[field]
+    payload.update(schema_version=1, admission_revision=3)
+    value = PersonalReincarnationEvidenceV1.model_validate_json(json.dumps(payload))
+    assert value.model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize("field", ("origin", "predecessor"))
+@pytest.mark.parametrize("version", (1.0, True))
+def test_new_evidence_rejects_inexact_nested_versions(field, version):
+    payload = inherited_evidence_payload()
+    payload[field]["schema_version"] = version
+    with pytest.raises(ValueError):
+        parse(payload)

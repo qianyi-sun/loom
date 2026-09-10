@@ -7,8 +7,6 @@ values never rewrite an old member's epoch-local recreation certificate.
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from pydantic import field_validator, model_validator
 
 from loom_capacity_manager.build_value_contracts import (
@@ -20,35 +18,14 @@ from loom_capacity_manager.contracts import (
     ConfigurationGenerationRefV1,
     Digest,
     PositiveQuantity,
-    Quantity,
-    StrictV1Model,
     canonical_digest,
 )
-
-
-class _StrictOriginV1(StrictV1Model):
-    @field_validator("schema_version", mode="before")
-    @classmethod
-    def _exact_version(cls, value: object) -> object:
-        if type(value) is not int or value != 1:
-            raise ValueError("retired origin schema must be integer 1")
-        return value
-
-
-class RetiredMembershipSnapshotReferenceV1(_StrictOriginV1):
-    namespace_id: UUID
-    execution_epoch: PositiveQuantity
-    execution_manifest_sha256: Digest
-    revision: Quantity
-    head_sha256: Digest
-
-    @model_validator(mode="after")
-    def _exact_snapshot(self) -> RetiredMembershipSnapshotReferenceV1:
-        if self.namespace_id.int == 0 or self.execution_manifest_sha256 == "0" * 64:
-            raise ValueError("retired source identity must be nonzero")
-        if (self.revision == 0) != (self.head_sha256 == "0" * 64):
-            raise ValueError("retired source snapshot head differs from revision")
-        return self
+from loom_capacity_manager.retired_source_reference import (
+    RetiredMembershipSnapshotReferenceV1 as RetiredMembershipSnapshotReferenceV1,
+)
+from loom_capacity_manager.retired_source_reference import (
+    _StrictOriginV1 as _StrictOriginV1,
+)
 
 
 class PersonalMemberEventAnchorV1(_StrictOriginV1):
