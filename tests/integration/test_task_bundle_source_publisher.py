@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom.data_lifecycle_gc_s3 import S3ExactObjectDeleter
 from loom.task_bundle_registration import prepare_task_bundle_registration
@@ -53,11 +54,13 @@ async def _publish(journal, ticket, owner="catalog"):
         )
 
 
+@pytest.mark.parametrize("factory_isolation", ["READ COMMITTED", "SERIALIZABLE", "AUTOCOMMIT"])
 async def test_publisher_commits_intent_before_put_and_attaches_only_with_catalog_transaction(
     journal,
     tmp_path,
     minio_tls,
     monkeypatch,
+    factory_isolation,
 ):
     task_dir, spec, store = _prepare(tmp_path, minio_tls)
     original = store.put_object_with_metadata
@@ -94,7 +97,10 @@ async def test_publisher_commits_intent_before_put_and_attaches_only_with_catalo
         return await original(**kwargs)
 
     monkeypatch.setattr(store, "put_object_with_metadata", checked_put)
-    publisher = TaskBundleSourcePublisher(journal, store, clock=lambda: NOW)
+    writer_sessions = async_sessionmaker(
+        journal.kw["bind"].execution_options(isolation_level=factory_isolation), expire_on_commit=False
+    )
+    publisher = TaskBundleSourcePublisher(writer_sessions, store, clock=lambda: NOW)
     ticket = await publisher.prepare(spec, task_dir)
     assert observed == [intent.id for intent in ticket.intents]
     async with journal() as session:
