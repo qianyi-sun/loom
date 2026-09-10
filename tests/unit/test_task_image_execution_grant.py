@@ -41,7 +41,15 @@ def sign_grant(payload, private, *, domain=GRANT_DOMAIN):
     )
 
 
-def fixture(*, arch="arm64", kind="legacy"):
+def fixture(
+    *,
+    arch="arm64",
+    kind="legacy",
+    purpose="production",
+    sidecar_only=False,
+    plan_change=None,
+    publication_change=None,
+):
     m = module()
     c, s, private, key, state, distribution, original, _ = setup_signing()
     task = _task_config(
@@ -78,6 +86,12 @@ def fixture(*, arch="arm64", kind="legacy"):
             ),
         ],
     )
+    if sidecar_only:
+        task["environment"]["dockerfile"] = None
+        task["environment"]["docker_image"] = "registry.example/prebuilt@sha256:" + "e" * 64
+        plan["components"] = [dict(plan["components"][1], oci_output_path="oci/0000.tar")]
+    if plan_change is not None:
+        plan_change(plan)
     plan_wire = rfc8785.dumps(plan)
     materialization_key = task_image_materialization_key(
         task_id=plan["task_id"],
@@ -113,7 +127,7 @@ def fixture(*, arch="arm64", kind="legacy"):
         execution,
     )
     wires, components = [], []
-    for name in ("task", "sidecar:db"):
+    for name in ("sidecar:db",) if sidecar_only else ("task", "sidecar:db"):
         unsigned = original.model_dump(mode="json", by_alias=True, exclude_none=True)
         unsigned.update(
             component=name,
@@ -132,6 +146,14 @@ def fixture(*, arch="arm64", kind="legacy"):
             attempt_id=UUID(original.attempt_id),
             component=name,
         )
+        if purpose == "shadow":
+            unsigned.update(purpose="shadow", shadow_campaign_id=IDENTITY)
+            unsigned["repository"] = unsigned["repository"].replace(
+                "loom-task-image-attempts/",
+                f"loom-task-image-shadow/{IDENTITY}/",
+            )
+        if publication_change is not None:
+            publication_change(unsigned)
         statement = s.prepare_publication_statement(
             c.decode_unsigned_input(rfc8785.dumps(unsigned)),
             key=key,
@@ -173,7 +195,7 @@ def fixture(*, arch="arm64", kind="legacy"):
         revision=1,
         claim=claim,
         environment="production",
-        purpose="production",
+        purpose=purpose,
         materialization_id=plan["materialization_id"],
         materialization_key=materialization_key,
         task_checksum=plan["task_checksum"],
@@ -194,6 +216,8 @@ def fixture(*, arch="arm64", kind="legacy"):
         issued_at=_time(NOW),
         expires_at=_time(NOW + timedelta(minutes=2)),
     )
+    if purpose == "shadow":
+        payload["shadow_campaign_id"] = IDENTITY
     kwargs = dict(
         wire=sign_grant(payload, execution),
         plan_wire=plan_wire,
@@ -201,8 +225,8 @@ def fixture(*, arch="arm64", kind="legacy"):
         keyset_wire=keyset,
         trust_root=root,
         expected_claim=m.decode_execution_claim(rfc8785.dumps(claim)),
-        expected_purpose="production",
-        expected_shadow_campaign_id=None,
+        expected_purpose=purpose,
+        expected_shadow_campaign_id=IDENTITY if purpose == "shadow" else None,
         now=NOW,
     )
     return payload, execution, kwargs
@@ -217,7 +241,7 @@ def test_complete_signed_evidence_accepts_historical_build_and_returns_no_start(
         (item["component"], item["image"]) for item in payload["components"]
     )
     assert result.grant.claim.kind == kind
-    assert result.grant_sha256 == hashlib.sha256(kwargs["wire"]).hexdigest()
+    assert result.envelope_sha256 == hashlib.sha256(kwargs["wire"]).hexdigest()
     assert not hasattr(result, "start_authorization")
     assert not hasattr(result, "ready")
     with pytest.raises(ValueError):
@@ -401,4 +425,73 @@ def test_caller_constructed_claim_cannot_bypass_validation():
     object.__setattr__(claim, "worker_lease_epoch", True)
     kwargs["expected_claim"] = claim
     with pytest.raises(ValueError):
+        module().verify_execution_grant(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("receipt_sha256", "b" * 64),
+        ("worker_incarnation", "22222222-2222-4222-8222-222222222222"),
+    ],
+)
+def test_protected_receipt_and_process_identity_are_independently_bound(field, value):
+    payload, private, kwargs = fixture(kind="protected")
+    payload["claim"][field] = value
+    kwargs["wire"] = sign_grant(payload, private)
+    with pytest.raises(ValueError, match="claim, lifetime or attachment binding"):
+        module().verify_execution_grant(**kwargs)
+
+
+def test_shadow_evidence_verifies_only_with_independent_shadow_expectation():
+    _, _, kwargs = fixture(purpose="shadow")
+    result = module().verify_execution_grant(**kwargs)
+    assert result.grant.purpose == "shadow"
+    assert all(f"/loom-task-image-shadow/{IDENTITY}/" in ref for _, ref in result.registry_images)
+    kwargs.update(expected_purpose="production", expected_shadow_campaign_id=None)
+    with pytest.raises(ValueError, match="claim, lifetime or attachment binding"):
+        module().verify_execution_grant(**kwargs)
+
+
+def test_sidecar_only_build_does_not_require_a_primary_publication():
+    _, _, kwargs = fixture(sidecar_only=True)
+    result = module().verify_execution_grant(**kwargs)
+    assert tuple(name for name, _ in result.registry_images) == ("sidecar:db",)
+
+
+def test_mutating_snapshot_copies_does_not_change_verified_authority():
+    payload, _, kwargs = fixture()
+    result = module().verify_execution_grant(**kwargs)
+    task, provenance = result.grant.snapshots()
+    task["environment"]["sidecars"][0]["dockerfile"] = "changed"
+    provenance["bundle_content_manifest_sha256"] = "f" * 64
+    assert result.grant.snapshots() == (
+        json.loads(payload["canonical_task_config"]),
+        json.loads(payload["canonical_source_provenance"]),
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value", [("dockerfile_path", "db/Otherfile"), ("context_path", ".")]
+)
+def test_plan_path_mismatch_is_refused_even_when_all_publications_pin_that_exact_plan(field, value):
+    def mutate(plan):
+        plan["components"][1][field] = value
+
+    _, _, kwargs = fixture(plan_change=mutate)
+    with pytest.raises(ValueError, match="frozen source, task or component plan differs"):
+        module().verify_execution_grant(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("grant_id", IDENTITY),
+        ("original_claim_session_id", IDENTITY),
+        ("original_claim_session_generation", 4),
+    ],
+)
+def test_matching_signed_publication_pins_do_not_replace_plan_claim_bindings(field, value):
+    _, _, kwargs = fixture(publication_change=lambda unsigned: unsigned.update({field: value}))
+    with pytest.raises(ValueError, match="publication build authority differs"):
         module().verify_execution_grant(**kwargs)
