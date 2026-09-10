@@ -2081,6 +2081,22 @@ def test_staged_start_never_acquires_guard_after_admission_publication_failure(t
     assert bundle.systemd.backup_starts == []
 
 
+def test_staged_start_still_releases_guard_when_failure_event_cannot_be_saved(tmp_path, monkeypatch):
+    bundle, dependencies, store, guard = _guarded_staged_start(tmp_path, epochs=(7, 8))
+    append_event = store.append_event
+
+    def fail_terminal(event):
+        if event.event == "launch_failed":
+            raise RequestStoreError("injected failure event publication error")
+        append_event(event)
+
+    monkeypatch.setattr(store, "append_event", fail_terminal)
+    assert broker_main(["start"], dependencies=dependencies) == 1
+    assert guard.acquired == guard.released == ["req-guarded001"]
+    assert bundle.systemd.backup_starts == []
+    assert store.read_events("req-guarded001")[-1].event == "requested"
+
+
 def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:
     deps = fakes(tmp_path, backup=FailingBackup([]))
     assert broker_main(["start"], dependencies=deps.dependencies) == 1
