@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from loom.db.schema import TaskImageMaterializationAttempt
 from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1
 from loom.task_bundle_source_journal import publish_task_bundle_source
@@ -17,6 +18,7 @@ from loom.task_image_materialization import ensure_task_image_materializations
 from loom_task_image_authority.api import create_app
 from loom_task_image_authority.bundle_capability import TaskImageBundleCapabilityV2
 from loom_task_image_authority.bundle_s3_backend import MinioTaskImageBundleBackend
+from loom_task_image_authority.contracts import TaskImageBuildSessionV2, TaskImageSessionRenewalV1
 from loom_task_image_authority.http_contracts import TaskImageMaterializationClaimResponseV1
 from tests.integration import test_task_image_authority_api as api_helpers
 from tests.integration import test_task_image_projection_store as projection_helpers
@@ -123,3 +125,26 @@ async def test_registered_native_http_bundle_rechecks_source_and_preserves_exact
             assert claim_replay.status_code == 200
             assert TaskImageMaterializationClaimResponseV1.model_validate_json(claim_replay.content) == claim
         assert len(reads) == 1, "retained bundle replay re-read storage"
+        if source_loss == "none":
+            renewal = TaskImageSessionRenewalV1(
+                renewal_id=uuid4(), grant_id=projection_helpers.GRANT_ID,
+                session_id=build_session.session_id, session_generation=build_session.generation,
+                session_token=build_session.session_token,
+                attestation=projection_helpers._attestation(
+                    projection_helpers._proof(), generation=3, attestation_id=uuid4(),
+                ),
+                observed_at=epoch + timedelta(seconds=13),
+            )
+            renewed = api_helpers._put(context, f"/v1/projections/{projection_helpers.GRANT_ID}/sessions/{build_session.generation}/renew", renewal)
+            assert renewed.status_code == 200, renewed.text
+            successor = TaskImageBuildSessionV2.model_validate_json(renewed.content)
+            response = api_helpers._put(context, path, api_helpers._operation_request(successor, claim, operation_id=uuid4()))
+            assert response.status_code == 200, response.text
+            continued = TaskImageBundleCapabilityV2.model_validate_json(response.content)
+            assert continued.session_id == successor.session_id
+            assert continued.session_generation == successor.generation
+            assert continued.content_manifest == capability.content_manifest
+            assert continued.capability_id != capability.capability_id
+            async with journal() as session:
+                retained = await session.get(TaskImageMaterializationAttempt, claim.attempt_id)
+                assert retained.claim_plan_json == claim.plan.model_dump(mode="json")

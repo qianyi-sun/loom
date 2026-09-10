@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 import rfc8785
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom.db.schema import Task, TaskBundleSourceReference, TaskImageMaterialization
@@ -271,3 +271,19 @@ async def test_validly_hashed_retained_receipt_must_match_admitted_frozen_inputs
                 method = native.start_session_materialization if operation.startswith("start") else native.heartbeat_session_materialization
                 await method(session, operation_id=operation_id, **arguments)
         await session.rollback()
+
+
+async def test_native_claim_refreshes_cached_materialization_epoch(journal, tmp_path):
+    authorization, _spec, _ticket, image_id = await _setup(journal, tmp_path)
+    async with journal() as stale:
+        cached = await stale.get(TaskImageMaterialization, image_id)
+        assert cached.lease_epoch == 0
+        async with journal.begin() as current:
+            await current.execute(update(TaskImageMaterialization).where(
+                TaskImageMaterialization.id == image_id,
+            ).values(lease_epoch=3))
+        claimed, _plan = await _claim(stale, authorization)
+        assert claimed.lease_epoch == 4
+        await stale.commit()
+    async with journal() as session:
+        assert (await session.get(TaskImageMaterialization, image_id)).lease_epoch == 4
