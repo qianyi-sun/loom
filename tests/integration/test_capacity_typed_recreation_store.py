@@ -96,7 +96,7 @@ async def test_typed_recreation_cannot_replace_an_active_predecessor(capacity_se
 
 
 @pytest.mark.parametrize("build", (False, True))
-@pytest.mark.parametrize("tamper", (None, "release_set_sha256", "predecessor_revision", "predecessor_head_sha256", "origin", "missing", "charged"))
+@pytest.mark.parametrize("tamper", (None, "release_set_sha256", "predecessor_revision", "predecessor_head_sha256", "origin", "missing", "charged", "foreign-candidate", "foreign-reporter"))
 async def test_sql_recreation_checks_certificate_independently_of_python(capacity_session, build, tamper):
     management, preparation, fleet, execution = await typed_sql_execution(capacity_session)
     request = (build_request if build else application_request)(preparation, execution)
@@ -112,7 +112,17 @@ async def test_sql_recreation_checks_certificate_independently_of_python(capacit
         previous_head=disabled.head_sha256, previous=disabled.member, previous_request=disabled_request,
         idempotency_key=UUID(int=940002), reincarnation=proof)
     certificate = row.result_payload["member"]["reincarnation"]
-    if tamper == "charged":
+    if tamper in {"foreign-candidate", "foreign-reporter"}:
+        model = CapacityCandidate if tamper == "foreign-candidate" else CapacityDemandReporter
+        retained = (await capacity_session.scalars(select(model).where(
+            model.subject_incarnation == recreated_request.command.projection.subject_incarnation))).one()
+        fields = {column.name: getattr(retained, column.name) for column in model.__table__.columns if column.name != "id"}
+        fields["subject_id"] = UUID(int=960001)
+        if tamper == "foreign-reporter":
+            fields.update(reporter_incarnation=UUID(int=960002), token_sha256="e" * 64)
+        capacity_session.add(model(**fields))
+        await capacity_session.flush()
+    elif tamper == "charged":
         await retain_physical_charge(capacity_session, management, disabled.member.configuration)
     elif tamper == "missing":
         row.result_payload["member"]["reincarnation"] = None
@@ -164,3 +174,74 @@ async def test_retired_import_cannot_flatten_recreation_lineage(capacity_session
     await retire(capacity_session, management, preparation, execution)
     with pytest.raises(ConfigurationConflictError, match="recreation lineage"):
         await import_apps(capacity_session, management, execution, snapshot)
+
+
+@pytest.mark.parametrize("build", (False, True))
+async def test_store_cannot_recycle_a_predecessor_incarnation(capacity_session, build):
+    _management, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    request = (build_request if build else application_request)(preparation, execution)
+    await apply(capacity_session, request)
+    disabled_request = transition(request, "destroy", revision=1)
+    await apply(capacity_session, disabled_request, key=940001)
+    successor = recreate(disabled_request, revision=2)
+    incarnation = request.command.projection.subject_incarnation
+    successor = successor.model_copy(update={"command": successor.command.model_copy(update={
+        "projection": successor.command.projection.model_copy(update={"subject_incarnation": incarnation}),
+        "acknowledgement": successor.command.acknowledgement.model_copy(update={"subject_incarnation": incarnation}),
+    })})
+    with pytest.raises(ConfigurationConflictError, match="incarnation was already used"):
+        await apply(capacity_session, successor, key=940002)
+
+
+async def test_concurrent_recreation_keeps_only_one_successor(isolated_capacity_postgres_url):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_capacity_manager.models import CapacityPersonalMembershipEvent
+    from loom_capacity_manager.store import CapacityStoreError
+
+    engine = create_async_engine(isolated_capacity_postgres_url, isolation_level="SERIALIZABLE")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session, session.begin():
+            _management, preparation, _fleet, execution = await typed_sql_execution(session)
+            request = build_request(preparation, execution)
+            await apply(session, request)
+            disabled_request = transition(request, "destroy", revision=1)
+            await apply(session, disabled_request, key=940001)
+        first = recreate(disabled_request, revision=2)
+        second = first.model_copy(update={"command": first.command.model_copy(update={
+            "projection": first.command.projection.model_copy(update={
+                "subject_incarnation": UUID(int=950000), "operation_id": UUID(int=950001),
+                "demand_reporter_incarnation": UUID(int=950002), "demand_reporter_token_sha256": "f" * 64}),
+            "acknowledgement": first.command.acknowledgement.model_copy(update={
+                "subject_incarnation": UUID(int=950000), "reporter_incarnation": UUID(int=950002)}),
+        })})
+        barrier = asyncio.Barrier(2)
+
+        async def submit(index, successor):
+            try:
+                async with sessions() as session, session.begin():
+                    await session.scalar(select(func.count()).select_from(CapacityPersonalMembershipEvent))
+                    await barrier.wait()
+                    return await apply(session, successor, key=940002 + index)
+            except (CapacityStoreError, DBAPIError) as error:
+                return error
+
+        async with asyncio.timeout(30):
+            outcomes = await asyncio.gather(submit(0, first), submit(1, second))
+        assert sum(not isinstance(value, Exception) for value in outcomes) == 1
+        failure = next(value for value in outcomes if isinstance(value, Exception))
+        if isinstance(failure, DBAPIError):
+            assert failure.orig.sqlstate == "40001"
+        else:
+            assert "must be retried" in str(failure)
+        async with sessions() as session:
+            snapshot = await CapacityTypedMembershipStore().snapshot(session, execution.execution_epoch)
+            assert snapshot.revision == 3 and len(snapshot.members) == 1
+            candidates = (await session.scalars(select(CapacityCandidate).where(
+                CapacityCandidate.subject_id == request.command.acknowledgement.subject_id))).all()
+            assert len(candidates) == 2
+    finally:
+        await engine.dispose()
