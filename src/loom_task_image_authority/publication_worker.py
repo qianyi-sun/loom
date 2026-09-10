@@ -1,6 +1,7 @@
 """Bounded inactive verification service, composed only by trusted application code.
 
-There is deliberately no production signer/distribution adapter or runtime default.
+The dedicated signer transport is available for explicit trusted composition,
+but there is no production signer/distribution composition or runtime default.
 Callers submit fixed operation IDs; they never select dependencies or destinations.
 Each admitted operation has one work task and one independently transacted renewal.
 """

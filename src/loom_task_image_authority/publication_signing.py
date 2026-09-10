@@ -1,6 +1,7 @@
 """Dedicated publication signer boundary; no production private keys or DB I/O.
 
-The transport and signed-keyset distribution adapter are deliberately uncomposed.
+The dedicated mutual-TLS client lives in publication_transport; production
+transport and signed-keyset distribution remain deliberately uncomposed.
 Evidence returned here is NOT readiness: the final transaction must lock the
 durable publication singleton first, then keys, grant, projection, current
 session, materialization, attempt, candidate/job and (later) trial-start rows.
