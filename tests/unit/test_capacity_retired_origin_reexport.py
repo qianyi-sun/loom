@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4, PersonalMembershipSnapshotV2
+from loom_capacity_manager.build_membership_contracts import (
+    ExecutionPreparationV4,
+    PersonalMembershipSnapshotV2,
+)
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from tests.unit.test_capacity_successor_preparation_origins import preparation_payload
 

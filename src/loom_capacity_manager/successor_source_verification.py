@@ -14,9 +14,10 @@ from loom_capacity_manager.build_membership_contracts import ExecutionPreparatio
 from loom_capacity_manager.contracts import canonical_bytes
 from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 from loom_capacity_manager.models import CapacityAuthorityState
+from loom_capacity_manager.retired_application_import import _require_retired
 from loom_capacity_manager.retired_member_export import (
     RetiredMemberOrigins,
-    export_retired_member_origins,
+    _origins_from_authenticated_history,
 )
 from loom_capacity_manager.store import ConfigurationConflictError, _write_transaction
 from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
@@ -55,9 +56,10 @@ async def verify_successor_source(
                 or preparation.personal_membership.namespace_id != old.personal_membership.namespace_id
                 or preparation.personal_membership.development_template_sha256 != old.personal_membership.development_template_sha256):
                 raise ConfigurationConflictError("successor source authority, configuration or runtime changed")
-            # The exporter independently checks retirement and actual installations.
-            exported = await export_retired_member_origins(session, execution_epoch=source.execution_epoch,
-                expected_snapshot=history.snapshot())
+            # The immutable reader already authenticated installations under this
+            # authority lock. Do not load and authenticate the entire log twice.
+            _require_retired(history.epoch)
+            exported = _origins_from_authenticated_history(history)
             if exported.source != source:
                 raise ConfigurationConflictError("successor source manifest or final snapshot changed")
             actual = {origin.configuration.subject_id: canonical_bytes(origin)
