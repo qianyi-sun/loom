@@ -303,3 +303,28 @@ async def test_checkpoint_handshake_requires_durable_readback_not_just_heartbeat
         with pytest.raises(JournalRegressionError, match="acknowledged"):
             await ExecutableHeartbeatLoop(_registration(), journal, Client()).finish_checkpoint()
         assert journal.pending_checkpoint() == checkpoint
+
+
+async def test_checkpoint_retries_readback_without_growing_acknowledged_tail(tmp_path):
+    from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
+    from tests.unit.test_capacity_executor_heartbeat import RecordingHeartbeatClient, _registration
+
+    class Client(RecordingHeartbeatClient):
+        reads = 0
+
+        async def executable_checkpoint(self):
+            self.reads += 1
+            if self.reads == 2:
+                raise ConnectionError("readback lost")
+            return await super().executable_checkpoint()
+
+    client = Client()
+    with ExecutorJournal(tmp_path / "journal") as journal:
+        journal.prepare_checkpoint(retained_sequences=(), retained_anchors=(), reserved_bytes=0)
+        loop = ExecutableHeartbeatLoop(_registration(), journal, client)
+        with pytest.raises(ConnectionError):
+            await loop.finish_checkpoint()
+        confirmed_head = journal.head
+        assert await loop.finish_checkpoint()
+        assert journal.head == confirmed_head
+        assert len(client.heartbeats) == 1
