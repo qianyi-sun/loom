@@ -2758,7 +2758,8 @@ class ExecutablePoolExecutor:
         requested = self.journal.latest("inventory", str(inventory.executor_incarnation))
         if (requested is None or requested.event_kind != "inventory-publish-requested"
             or requested.sequence != self.journal.head.sequence
-            or load_journal_inventory(self.journal, requested) != inventory):
+            or canonical_executable_bytes(load_journal_inventory(self.journal, requested))
+            != canonical_executable_bytes(inventory)):
             raise JournalRegressionError("inventory publication differs from pending request")
         try:
             await self.client.ingest_executable_inventory(inventory)

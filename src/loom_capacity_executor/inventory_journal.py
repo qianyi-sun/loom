@@ -58,7 +58,8 @@ def complete_inventory_request(
     requested = journal.latest("inventory", str(inventory.executor_incarnation))
     if (requested is None or requested.event_kind != "inventory-publish-requested"
         or requested.sequence != journal.head.sequence
-        or load_journal_inventory(journal, requested) != inventory):
+        or canonical_executable_bytes(load_journal_inventory(journal, requested))
+        != canonical_executable_bytes(inventory)):
         raise JournalRegressionError("inventory response differs from pending request")
     event, kind, object_id, payload = _frames(inventory)[-1]
     _append(journal, ("inventory-publish-rejected" if rejected else event, kind, object_id, payload))

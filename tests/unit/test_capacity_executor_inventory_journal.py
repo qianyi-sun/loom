@@ -149,6 +149,12 @@ async def test_publication_matches_wire_bytes_with_active_authority_subclass(tmp
         # declared base class from JSON. Wire-equal requests remain exact replay.
         assert retained != value
         runtime.client.ingest_executable_inventory = AsyncMock()
+        changed = value.model_copy(update={"inventory_sequence": value.inventory_sequence + 1})
+        with pytest.raises(JournalRegressionError, match="pending request"):
+            await runtime._send_inventory(changed)
+        with pytest.raises(JournalRegressionError, match="pending request"):
+            module.complete_inventory_request(journal, changed, rejected=False)
+        runtime.client.ingest_executable_inventory.assert_not_awaited()
         result = await runtime._send_inventory(value)
         assert result.status == "inventory-published"
         runtime.client.ingest_executable_inventory.assert_awaited_once_with(value)
