@@ -4,21 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
+import secrets
 from dataclasses import replace
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 import rfc8785
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import TaskImagePublicationKey
 from loom_task_image_authority.publication_keyset import verify_publication_keyset
 from loom_task_image_authority.publication_keyset_store import finalize_keyset, prepare_keyset
-from loom_task_image_authority.publication_signing import PublicationState, verify_historical_publication
-from tests.integration.test_task_image_publication_keyset_store import database  # noqa: F401
+from loom_task_image_authority.publication_signing import (
+    PublicationState,
+    verify_historical_publication,
+)
 from tests.unit.test_task_image_publication_keyset import fixture
 from tests.unit.test_task_image_publication_signing import NOW, setup_signing
+
+
+@pytest.fixture
+async def database(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        yield engine, async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 def module():
@@ -137,7 +153,7 @@ async def test_signing_releases_database_locks_and_fences_authority_change(datab
     ("environment", "staging"), ("pool_id", "wrong-pool"),
     ("registry_origin", "https://other.example"), ("build_policy_sha256", "b" * 64),
     ("builder_release_sha256", "c" * 64), ("supervisor_executable_sha256", "d" * 64),
-    ("containment_attestation_sha256", "e" * 64), ("slurm_cluster_id", "other"),
+    ("slurm_cluster_id", "other"),
 ])
 async def test_publication_rejects_unconfigured_selection_before_provider(database, field, value):
     result = await setup(database)
@@ -147,6 +163,18 @@ async def test_publication_rejects_unconfigured_selection_before_provider(databa
     with pytest.raises(ValueError):
         await policy.sign_publication(c.canonical_publication_bytes(changed))
     assert not publication_provider.preimages
+
+
+async def test_new_allocation_attestation_uses_same_stable_release_selection(database):
+    result = await setup(database)
+    policy, _, _, _, key, unsigned, c, provider, _ = result
+    await commit_keyset(database, result)
+    for digest in ("8" * 64, "e" * 64):
+        changed = unsigned.model_copy(update={"containment_attestation_sha256": digest})
+        wire = await policy.sign_publication(c.canonical_publication_bytes(changed))
+        statement = verify_historical_publication(wire, key=key).statement
+        assert statement.containment_attestation_sha256 == digest
+    assert len(provider.preimages) == 2
 
 
 @pytest.mark.parametrize("operation", ["keyset", "publication"])
@@ -184,3 +212,100 @@ async def test_signer_rechecks_own_clock_after_provider(database, operation):
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_real_minimal_login_can_lock_and_sign_but_cannot_mutate_authority(database):
+    result = await setup(database)
+    _, request, _, root, key, unsigned, c, publication_provider, execution_provider = result
+    await commit_keyset(database, result)
+    role, password = "signer_" + uuid4().hex, secrets.token_hex(24)
+    # Only the test-container administrator provisions this disposable role.
+    async with database[0].begin() as connection:
+        await connection.execute(text(f"CREATE ROLE {role} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '{password}'"))
+        await connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {role}"))
+        await connection.execute(text(f"GRANT SELECT ON task_image_publication_state, task_image_publication_keys, task_image_publication_keysets, task_image_publication_keyset_members TO {role}"))
+        await connection.execute(text(f"GRANT UPDATE(singleton_id) ON task_image_publication_state TO {role}"))
+        await connection.execute(text(f"GRANT UPDATE(key_id) ON task_image_publication_keys TO {role}"))
+    engine = create_async_engine(database[0].url.set(username=role, password=password))
+    try:
+        m = module()
+        policy = m.SignerPolicy(
+            engine, trust_root=root, publication_key_id=key.key_id,
+            publication_provider=publication_provider, execution_provider=execution_provider,
+            selections=(m.PublicationSelection.from_unsigned(unsigned),), clock=lambda: NOW,
+        )
+        reply = await policy.sign_publication(c.canonical_publication_bytes(unsigned))
+        assert verify_historical_publication(reply, key=key).statement.unsigned_input() == unsigned
+        refresh = json.loads(request)
+        refresh.update(previous_keyset_version=1, proposed_keyset_version=2)
+        signed = await policy.sign_keyset(rfc8785.dumps(refresh))
+        assert verify_publication_keyset(signed, trust_root=root, expected_state=PublicationState(keyset_version=2), now=NOW)
+        async with engine.begin() as connection:
+            assert await connection.scalar(text("SELECT current_user = session_user")) is True
+            assert await connection.scalar(text("SELECT count(*) FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user)")) == 0
+            assert await connection.scalar(text("SELECT has_schema_privilege(current_user, 'public', 'CREATE')")) is False
+            await connection.execute(text("UPDATE task_image_publication_state SET singleton_id=singleton_id"))
+            await connection.execute(text("UPDATE task_image_publication_keys SET key_id=key_id"))
+        refused = [
+            "UPDATE task_image_publication_state SET singleton_id=2",
+            "UPDATE task_image_publication_state SET keyset_version=keyset_version+1",
+            "UPDATE task_image_publication_state SET revocation_epoch=revocation_epoch+1",
+            "UPDATE task_image_publication_keys SET key_id='substitution'",
+            "UPDATE task_image_publication_keys SET public_key=decode(repeat('00',32),'hex')",
+            "UPDATE task_image_publication_keys SET status='revoked', revoked_at=now()",
+            "DELETE FROM task_image_publication_keys",
+            "TRUNCATE task_image_publication_state",
+            "UPDATE task_image_publication_keysets SET expires_at=expires_at + interval '1 hour'",
+            "DELETE FROM task_image_publication_keyset_members",
+            "INSERT INTO task_image_publication_keysets SELECT * FROM task_image_publication_keysets",
+            "ALTER TABLE task_image_publication_keys DISABLE TRIGGER ALL",
+            "SET session_replication_role='replica'",
+            "CREATE TABLE public.signer_escalation(id int)",
+            "SET ROLE postgres",
+        ]
+        for sql in refused:
+            with pytest.raises(DBAPIError):
+                async with engine.begin() as connection:
+                    await connection.execute(text(sql))
+    finally:
+        await engine.dispose()
+        async with database[0].begin() as connection:
+            # Explicit disposable role; drops its grants, not any product tables.
+            await connection.execute(text(f"DROP OWNED BY {role}"))
+            await connection.execute(text(f"DROP ROLE {role}"))
+
+
+@pytest.mark.parametrize("change", ["environment", "state", "key-bytes", "missing-key"])
+async def test_keyset_request_must_equal_independent_preparation(database, change):
+    policy, request, _, _, _, _, _, _, provider = await setup(database)
+    data = json.loads(request)
+    if change == "environment":
+        data["environment"] = "staging"
+    elif change == "state":
+        data.update(previous_keyset_version=1, proposed_keyset_version=2)
+    elif change == "key-bytes":
+        data["keys"][0]["public_key"] = "A" * 43
+    else:
+        data["keys"][0]["key_id"] = "missing"
+    with pytest.raises(ValueError):
+        await policy.sign_keyset(rfc8785.dumps(data))
+    assert not provider.preimages
+
+
+@pytest.mark.parametrize("bad", ["short", "wrong-key", "wrong-domain"])
+@pytest.mark.parametrize("operation", ["keyset", "publication"])
+async def test_provider_result_is_independently_authenticated_before_return(database, bad, operation):
+    result = await setup(database)
+    policy, request, _, _, _, unsigned, c, publication, execution = result
+    if operation == "publication":
+        await commit_keyset(database, result)
+    provider = publication if operation == "publication" else execution
+    async def invalid(preimage):
+        if bad == "short":
+            return b"x"
+        if bad == "wrong-key":
+            return Ed25519PrivateKey.generate().sign(preimage)
+        return provider.private.sign(b"wrong-domain" + preimage)
+    provider.sign = invalid
+    with pytest.raises(ValueError):
+        await (policy.sign_publication(c.canonical_publication_bytes(unsigned)) if operation == "publication" else policy.sign_keyset(request))

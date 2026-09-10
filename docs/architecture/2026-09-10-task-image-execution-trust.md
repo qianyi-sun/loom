@@ -1,7 +1,8 @@
 # Task-image execution trust
 
-Status: signed-keyset verification and durable distribution adapter implemented;
-runtime distribution, complete execution grants and online start remain uncomposed.
+Status: signed-keyset verification, durable distribution adapter and dedicated
+signer policy/client implemented; host signing service provisioning, runtime
+distribution, complete execution grants and online start remain uncomposed.
 
 This increment implements the keyset wire described by the
 [Phase 2 production design](2026-09-02-task-image-builder-phase2-production.md).
@@ -127,7 +128,52 @@ The adapter is **not runtime-composed**. Database authentication and the executi
 root remain operator-configured. Retention is not proof of fleet readiness: the
 authenticated claim path must deliver these exact envelopes to root-pinned capable
 workers, and the serialized online one-use start gate must exist before activation.
-No private signing key, signer service or worker capability is installed here.
+No private signing key, live signer service or worker capability is installed here.
+
+## Dedicated signer policy and fixed clients
+
+`loom_task_image_signer.policy` is a separate process-owned policy package, not an
+in-process authority private-key provider. It has two fixed operations. Keyset
+signing accepts a closed canonical preparation request containing environment,
+previous/proposed version, revocation epoch and the complete ordered public-key
+snapshot. It independently reads the durable authority, stamps its own clock,
+signs with the configured execution root, rechecks the authority and verifies
+the provider's returned signature. Version zero needs no previous artifact;
+retaining the returned artifact remains a separately fenced transaction.
+
+Publication signing requires a current committed authenticated keyset. It selects
+the operator-configured publication key and checks stable environment, registry,
+pool/architecture, cluster, build policy, release, supervisor and purpose/campaign
+configuration. Per-allocation attestation, grant/job and image facts are supplied
+by the authenticated publication verifier and remain signed and checked by the
+existing publication completion authority. A per-allocation attestation digest
+is deliberately not a static release setting: new legitimate allocations must
+not require signer reconfiguration. The signer does not claim to re-fetch OCI
+graphs or grant readiness from a signature alone.
+
+Both operations use separate bounded READ COMMITTED transactions before and
+after provider I/O, with no database locks retained while signing. Server-side
+statement/idle limits complement an outer checkout/provider/cleanup-inclusive
+deadline. The original signed issue/expiry and exact retained artifact are
+rechecked before return. Publication and execution key bytes must differ;
+providers and handles come only from trusted service composition, not requests.
+
+The service database role needs SELECT on publication state, keys, keysets and
+members, plus UPDATE on only `state.singleton_id` and `keys.key_id` to obtain
+the required locks. Existing immutable-identity triggers and column grants
+prevent authority mutation. This is not SQL read-only: same-value identity
+updates can take locks and create row versions. A real disposable restricted
+login test exercises both signing operations and rejects changes to counters,
+key bytes/lifecycle, audit rows, trigger state, schema ownership and roles.
+Production provisioning must verify effective privileges, no broad inherited
+grants/ownership and the required immutable/state-lock triggers.
+
+`HTTPSKeysetSigner` and `HTTPSPublicationSigner` reuse one bounded mTLS transport
+but expose separate fixed operation paths. TLS identities remain operator-owned;
+neither client accepts an arbitrary signing domain, key or endpoint path. The
+keyset response is still untrusted until the existing cryptographic verifier and
+durable finalizer accept it. This increment supplies no enabled listener,
+production key loader, identity ceremony or worker delivery evidence.
 
 ## Evidence and remaining activation gates
 
