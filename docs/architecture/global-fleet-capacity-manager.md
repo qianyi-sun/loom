@@ -180,6 +180,17 @@ expansion therefore requires a separately reviewed execution epoch, not a
 larger activation request against the initial preparation. Preparation remains
 non-launching at an effective ceiling of zero until all activation gates pass.
 
+The installed rollout manager client exposes typed `activate_execution`,
+`drain_execution`, and `retire_execution` transports for those existing APIs.
+Each uses its own execution credential, requires a nonzero idempotency key, and
+rejects response epochs or manifests that differ from the request. Activation
+must return the exact requested ceiling and rate; drain must return zero for
+both. Transport errors are not automatically retried: the caller must reconcile
+the exact operation and retain its idempotency key. These methods do not run a
+cutover, create freeze evidence, or install/start executors. The protected
+activation composition still owns foundation-generation binding, the complete
+writer and workload inventory, its operation journal, and #906's acceptance gates.
+
 ## Controller-local Slurm inventory and active execution
 
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
