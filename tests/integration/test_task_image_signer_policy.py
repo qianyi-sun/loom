@@ -309,3 +309,23 @@ async def test_provider_result_is_independently_authenticated_before_return(data
     provider.sign = invalid
     with pytest.raises(ValueError):
         await (policy.sign_publication(c.canonical_publication_bytes(unsigned)) if operation == "publication" else policy.sign_keyset(request))
+
+
+async def test_real_tls_policy_database_bootstrap_commit_and_publication_chain(database, tmp_path):
+    from loom_task_image_authority.publication_transport import HTTPSKeysetSigner, HTTPSPublicationSigner
+    from tests.unit.test_task_image_signer_server import service
+
+    result = await setup(database)
+    policy, request, plan, root, key, unsigned, c, _, _ = result
+    async with service(tmp_path, operations=policy) as (_, _, identities):
+        async with HTTPSKeysetSigner(**identities["keyset"]) as client:
+            wire = await client.sign_keyset(request, maximum_reply_bytes=131072)
+        checked = verify_publication_keyset(wire, trust_root=root, expected_state=plan.proposed_state, now=NOW)
+        assert checked.keyset.keys == plan.keys
+        async with HTTPSPublicationSigner(**identities["publication"]) as client:
+            with pytest.raises(ValueError):
+                await client.sign_publication(c.canonical_publication_bytes(unsigned), maximum_reply_bytes=131072)
+            async with database[1].begin() as session:
+                await finalize_keyset(session, preparation=plan, wire=wire, trust_root=root, clock=lambda: NOW)
+            reply = await client.sign_publication(c.canonical_publication_bytes(unsigned), maximum_reply_bytes=131072)
+        assert verify_historical_publication(reply, key=key).statement.unsigned_input() == unsigned

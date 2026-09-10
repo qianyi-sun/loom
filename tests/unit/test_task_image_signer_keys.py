@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import stat
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -87,3 +88,22 @@ def test_wrong_owner_is_refused_without_requiring_privileged_test_user(tmp_path,
     monkeypatch.setattr(os, "geteuid", lambda: 123456789)
     with pytest.raises(ValueError, match="signer key"):
         m.load_signing_key(path, expected_public_key=private.public_key().public_bytes_raw())
+
+
+def test_file_owner_is_checked_after_safe_directory_traversal(tmp_path, monkeypatch):
+    m = module()
+    path, private = material(tmp_path)
+    original = os.fstat
+    checked = []
+    def fstat(fd):
+        info = original(fd)
+        if stat.S_ISREG(info.st_mode):
+            checked.append(info.st_ino)
+            values = list(info)
+            values[4] = info.st_uid + 1
+            return os.stat_result(values)
+        return info
+    monkeypatch.setattr(os, "fstat", fstat)
+    with pytest.raises(ValueError, match="signer key"):
+        m.load_signing_key(path, expected_public_key=private.public_key().public_bytes_raw())
+    assert checked == [path.stat().st_ino]

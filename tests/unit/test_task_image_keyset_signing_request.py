@@ -130,3 +130,13 @@ async def test_keyset_client_rejects_reply_limit_before_network(tmp_path, maximu
             with pytest.raises(ValueError):
                 await client.sign_keyset(rfc8785.dumps(payload()), maximum_reply_bytes=maximum)
         assert not requests
+
+
+@pytest.mark.parametrize("hidden", [b"Content-Length: 2", b" folded"])
+async def test_signer_client_rejects_bare_lf_response_normalization(tmp_path, hidden):
+    t = importlib.import_module("loom_task_image_authority.publication_transport")
+    response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Test: ok\n" + hidden + b"\r\n\r\n{}"
+    async with signer_server(tmp_path, response=response) as (options, _, _, _, _):
+        async with t.HTTPSKeysetSigner(**options) as client:
+            with pytest.raises(ValueError):
+                await client.sign_keyset(rfc8785.dumps(payload()), maximum_reply_bytes=131072)

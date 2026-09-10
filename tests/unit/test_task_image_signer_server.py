@@ -45,7 +45,7 @@ class Policy:
 
 
 @asynccontextmanager
-async def service(tmp_path, *, limits=None):
+async def service(tmp_path, *, limits=None, operations=None):
     m = module()
     ca_key, ca = _new_ca()
     ca_path = tmp_path / "ca.pem"
@@ -58,7 +58,7 @@ async def service(tmp_path, *, limits=None):
         if name != "stranger":
             der = x509.load_pem_x509_certificate(cert.read_bytes()).public_bytes(serialization.Encoding.DER)
             grants[hashlib.sha256(der).hexdigest()] = frozenset({name})
-    policy = Policy()
+    policy = Policy() if operations is None else operations
     server = m.SignerServer(
         policy, ca_file=ca_path, certificate_file=server_cert, private_key_file=server_key,
         peer_operations=grants, **({"limits": limits} if limits else {}),
@@ -106,12 +106,17 @@ async def test_real_peer_certificate_pins_separate_the_two_fixed_operations(tmp_
     b"Transfer-Encoding: chunked\r\n", b"Content-Length: 2\r\n Folded: value\r\n",
     b"Content-Length: 2\r\nContent-Encoding: gzip\r\n", b"Content-Length: 2\r\nExpect: 100-continue\r\n",
     b"Content-Length: 2\r\nUpgrade: websocket\r\n", b"Content-Length: 2\r\nX-Forwarded-Client-Cert: trusted\r\n",
+    b"Content-Length: 2\r\nX-Test: ok\nContent-Length: 2\r\n",
+    b"Content-Length: 2\r\nX-Test: ok\n folded\r\n",
+    b"Content-Length: 2\r\nX-Test: ok\nX-Forwarded-Client-Cert: trusted\r\n",
 ])
 async def test_raw_framing_and_forwarded_identity_refused_before_policy(tmp_path, extra):
     async with service(tmp_path) as (server, policy, identities):
         reader, writer = await connect(server, identities["keyset"])
         try:
-            writer.write(b"POST /v1/keysets/sign HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" + extra + b"\r\n{}")
+            body = rfc8785.dumps(payload())
+            extra = extra.replace(b"2", str(len(body)).encode())
+            writer.write(b"POST /v1/keysets/sign HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" + extra + b"\r\n" + body)
             await writer.drain()
             response = await asyncio.wait_for(reader.read(), 2)
             assert response.startswith(b"HTTP/1.1 400 ")
@@ -182,5 +187,93 @@ async def test_prehandshake_admission_is_bounded_and_recovers(tmp_path):
                 assert server.active_connections <= 1
                 assert not policy.calls
                 assert await asyncio.wait_for(task, 2) == b'{}'
+        finally:
+            writer.transport.abort()
+
+
+async def test_cancel_before_handler_first_instruction_releases_socket_and_capacity(tmp_path, monkeypatch):
+    m = module()
+    original = asyncio.create_task
+    cancelled = asyncio.Event()
+    def create(coroutine, **kwargs):
+        task = original(coroutine, **kwargs)
+        if coroutine.__qualname__ == "SignerServer._serve" and not cancelled.is_set():
+            cancelled.set()
+            task.cancel()
+        return task
+    async with service(tmp_path, limits=m.SignerServerLimits(maximum_connections=1)) as (server, _, identities):
+        monkeypatch.setattr(asyncio, "create_task", create)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        try:
+            await asyncio.wait_for(cancelled.wait(), 1)
+            assert await asyncio.wait_for(reader.read(), 1) == b""
+            t = importlib.import_module("loom_task_image_authority.publication_transport")
+            async with t.HTTPSKeysetSigner(**identities["keyset"]) as client:
+                assert await client.sign_keyset(rfc8785.dumps(payload()), maximum_reply_bytes=131072) == b'{}'
+        finally:
+            writer.transport.abort()
+
+
+async def test_operation_queue_consumes_connection_deadline_and_close_joins(tmp_path):
+    m = module()
+    t = importlib.import_module("loom_task_image_authority.publication_transport")
+    async with service(tmp_path, limits=m.SignerServerLimits(maximum_operations=1, total_seconds=0.4)) as (server, policy, identities):
+        policy.release.clear()
+        async with t.HTTPSKeysetSigner(**identities["keyset"]) as client:
+            first = asyncio.create_task(client.sign_keyset(rfc8785.dumps(payload()), maximum_reply_bytes=131072))
+            await asyncio.wait_for(policy.entered.wait(), 1)
+            second = asyncio.create_task(client.sign_keyset(rfc8785.dumps(payload()), maximum_reply_bytes=131072))
+            try:
+                for pending in (first, second):
+                    with pytest.raises(ConnectionError):
+                        await asyncio.wait_for(pending, 1)
+                await server.aclose()
+                assert not server.active_connections
+            finally:
+                first.cancel()
+                second.cancel()
+                await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.parametrize("mode", ["no-certificate", "wrong-ca", "wrong-hostname", "plaintext"])
+async def test_untrusted_tls_or_plaintext_never_dispatches_policy(tmp_path, mode):
+    async with service(tmp_path) as (server, policy, identities):
+        options = identities["keyset"]
+        tls = context(options)
+        if mode == "no-certificate":
+            tls = ssl.create_default_context(cafile=options["ca_file"])
+        elif mode == "wrong-ca":
+            ca_key, ca = _new_ca()
+            cert, key = _identity(tmp_path, "foreign", ca_key, ca, server=False)
+            tls.load_cert_chain(cert, key)
+        writer = None
+        try:
+            try:
+                reader, writer = await asyncio.open_connection(
+                    "127.0.0.1", server.port, ssl=None if mode == "plaintext" else tls,
+                    server_hostname=None if mode == "plaintext" else "invalid.example" if mode == "wrong-hostname" else "localhost",
+                )
+                writer.write(b"POST /v1/keysets/sign HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                await writer.drain()
+                assert await asyncio.wait_for(reader.read(), 1) == b""
+            except (OSError, ssl.SSLError):
+                pass
+            assert not policy.calls
+        finally:
+            if writer is not None:
+                writer.transport.abort()
+
+
+async def test_cancelled_close_retains_shutdown_owner_until_joined(tmp_path):
+    async with service(tmp_path) as (server, _, _):
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        try:
+            closing = asyncio.create_task(server.aclose())
+            await asyncio.sleep(0)
+            closing.cancel()
+            await asyncio.gather(closing, return_exceptions=True)
+            await asyncio.wait_for(server.aclose(), 1)
+            assert await asyncio.wait_for(reader.read(), 1) == b""
+            assert not server.active_connections
         finally:
             writer.transport.abort()

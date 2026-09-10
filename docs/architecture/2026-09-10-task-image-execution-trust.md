@@ -172,8 +172,30 @@ grants/ownership and the required immutable/state-lock triggers.
 but expose separate fixed operation paths. TLS identities remain operator-owned;
 neither client accepts an arbitrary signing domain, key or endpoint path. The
 keyset response is still untrusted until the existing cryptographic verifier and
-durable finalizer accept it. This increment supplies no enabled listener,
-production key loader, identity ceremony or worker delivery evidence.
+durable finalizer accept it.
+
+`SignerServer` explicitly binds TLS 1.3 with required client certificates and
+maps the actual socket peer's DER-certificate SHA-256 to permitted operations.
+CA membership alone is insufficient. Its raw socket accept loop reserves a
+connection slot before accepting and allocating a TLS handshake; excess
+connections remain in the finite OS backlog. Each accepted socket has a single
+deadline for handshake, bounded headers/body, operation queue, policy and reply.
+It executes at most one operation and closes the connection. Raw CRLF framing
+is checked before h11 normalization, including rejection of bare CR/LF, duplicate
+headers, ambiguous lengths, transfer encodings, folding, upgrades and forwarded
+identity. Shutdown cancels and joins both handshake and policy tasks; a retained
+completion callback owns socket/slot cleanup even if a task never starts.
+
+`load_signing_key` loads an explicitly provisioned 32-byte Ed25519 seed from an
+owner-only directory and regular single-link file. Descriptor-relative no-follow
+traversal rejects symlink components and writable ancestors. File ownership,
+mode, size and before/after metadata are checked; the derived public key must
+match the configured pin. There is no missing-file generation fallback, exported
+private-key API or detached signing thread. Key bytes live only in the dedicated
+signer process; service-account isolation and protected key installation remain
+operator prerequisites. The module does not provision them. There is still no
+enabled service, completed startup privilege validation, identity ceremony or
+worker delivery evidence.
 
 ## Evidence and remaining activation gates
 
