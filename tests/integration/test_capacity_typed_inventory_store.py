@@ -2,8 +2,8 @@
 
 import pytest
 
-from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.executable_contracts import ExecutableExecutorHeartbeatV2
+from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.store import CapacityStoreError
 from loom_capacity_manager.typed_inventory_contracts import ExecutableExecutorInventoryV3
 from tests.capacity_build_membership_fixtures import typed_sql_execution
@@ -12,8 +12,9 @@ from tests.integration.test_capacity_typed_membership_execution import typed_man
 
 @pytest.mark.parametrize("pool", ("oldlab", "gb10"))
 @pytest.mark.parametrize("wrong_policy", (False, True))
-async def test_typed_inventory_admission_preserves_operator_and_executor_fences(capacity_session, pool, wrong_policy):
-    legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+@pytest.mark.parametrize("activate", (False, True))
+async def test_typed_inventory_admission_preserves_operator_and_executor_fences(capacity_session, pool, wrong_policy, activate):
+    legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session, activate=activate)
     management = legacy if wrong_policy else typed_management(preparation)
     binding = next(item for item in preparation.executors if item.pool_id == pool)
     store = CapacityExecutionStore()
