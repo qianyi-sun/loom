@@ -101,7 +101,7 @@ def test_manifest_identity_preserves_legacy_and_versions_uniqueness(
         with pytest.raises(DBAPIError, match="manifest-qualified materializations"):
             command.downgrade(config, "0135")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0138"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0140"
             assert connection.scalar(text(f"SELECT count(*) FROM {TABLE}")) == 3
     finally:
         engine.dispose()
@@ -264,7 +264,7 @@ def test_manifest_identity_downgrade_refuses_one_strong_row_without_collision(
                 row_id,
                 "b" * 64,
             )
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0138"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0140"
     finally:
         engine.dispose()
 

@@ -410,15 +410,15 @@ async def test_successor_migration_preserves_history_and_rejects_lossy_downgrade
                 )
         before = await snapshot()
         if with_successor:
-            with pytest.raises(DBAPIError, match="cannot downgrade 0136 with membership successor history"):
-                await asyncio.to_thread(command.downgrade, cfg, "0135")
+            with pytest.raises(DBAPIError, match="cannot downgrade 0139 with membership successor history"):
+                await asyncio.to_thread(command.downgrade, cfg, "0138")
         else:
-            await asyncio.to_thread(command.downgrade, cfg, "0135")
-            await asyncio.to_thread(command.upgrade, cfg, "0136")
-            await asyncio.to_thread(command.upgrade, cfg, "0137")
+            await asyncio.to_thread(command.downgrade, cfg, "0138")
+            await asyncio.to_thread(command.upgrade, cfg, "0139")
+            await asyncio.to_thread(command.upgrade, cfg, "0140")
         assert await snapshot() == before
         async with sessions() as session:
-            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0137"
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0140"
             # Existing historical outcomes never gain invented successor authority.
             parent = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(claim.operation.id)
             assert (parent.membership_successor_operation_id is not None) is with_successor

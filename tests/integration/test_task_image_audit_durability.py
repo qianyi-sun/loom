@@ -100,7 +100,7 @@ async def test_downgrade_cannot_remove_first_credential_protection(
         await session.rollback()
         with pytest.raises(DBAPIError, match="publication authority cannot be discarded"):
             command.downgrade(_config(isolated_migration_postgres_url), "0134")
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0138"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0140"
         assert (
             await session.execute(text("SELECT * FROM task_image_registry_credentials"))
         ).one() == before
@@ -147,7 +147,7 @@ async def test_busy_audit_refuses_downgrade_without_blocking_publication(
             await session.execute(
                 text("LOCK TABLE task_image_publication_jobs IN ROW SHARE MODE NOWAIT")
             )
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0138"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0140"
         finally:
             await session.rollback()
             await asyncio.gather(task, return_exceptions=True)
