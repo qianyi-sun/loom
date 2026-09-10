@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from loom_capacity_executor.journal import ExecutorJournal, JournalError, JournalRegressionError
-from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorInventoryV2,
+    ExecutionAuthorityV2,
+    canonical_executable_bytes,
+)
 from loom_capacity_manager.typed_inventory_contracts import inventory_confirmation_journal_head
 from tests.unit.test_capacity_executor_executable import _job_from_launch, _terminal_from_job
 from tests.unit.test_capacity_executor_typed_journal import facts, typed_executor
@@ -123,6 +127,34 @@ def test_small_typed_inventory_keeps_existing_inline_chain(tmp_path):
         assert len(records) == 2
         assert all(record.durable_payload() == payload and record.payload_digest == sha256(payload).hexdigest()
             for record in records)
+
+
+@pytest.mark.parametrize("version", (2, 3))
+async def test_publication_matches_wire_bytes_with_active_authority_subclass(tmp_path, version):
+    module = import_module("loom_capacity_executor.inventory_journal")
+    runtime, journal, _context = typed_executor(tmp_path)
+    try:
+        value = typed_inventory().model_copy(update={"records": (),
+            "execution": ExecutionAuthorityV2.model_validate(runtime.registration.execution.model_dump()),
+            "executor_id": runtime.registration.executor_id,
+            "executor_incarnation": runtime.registration.executor_incarnation})
+        if version == 2:
+            value = ExecutableExecutorInventoryV2.model_validate(value.model_dump() | {"schema_version": 2})
+            value = value.model_copy(update={"execution": ExecutionAuthorityV2.model_validate(value.execution.model_dump())})
+        module.retain_inventory_request(journal, value)
+        requested = journal.latest("inventory", str(value.executor_incarnation))
+        retained = module.load_journal_inventory(journal, requested)
+        assert canonical_executable_bytes(retained) == canonical_executable_bytes(value)
+        # Pydantic preserves nested subclasses in memory but reconstructs the
+        # declared base class from JSON. Wire-equal requests remain exact replay.
+        assert retained != value
+        runtime.client.ingest_executable_inventory = AsyncMock()
+        result = await runtime._send_inventory(value)
+        assert result.status == "inventory-published"
+        runtime.client.ingest_executable_inventory.assert_awaited_once_with(value)
+        assert not journal.pending_requests()
+    finally:
+        journal.close()
 
 
 @pytest.mark.parametrize("crash_after", (1, 3))
