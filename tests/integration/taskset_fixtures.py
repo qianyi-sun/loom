@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
@@ -73,7 +74,8 @@ def _manifest_bytes(*, intents: str = "", verifier: str = "", display_name: str 
 
 @pytest.fixture(scope="module")
 def tasksets_minio() -> MinioContainer:
-    with MinioContainer() as m:
+    # The pinned MinIO image reports liveness before its object layer is writable.
+    with MinioContainer().waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 
