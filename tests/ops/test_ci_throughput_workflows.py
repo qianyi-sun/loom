@@ -106,7 +106,6 @@ CI_SELECTOR_LABELS = (
     "staging-smoke",
     "ci:coverage-summary",
 )
-CI_SELECTOR_LABELS_JSON = json.dumps(CI_SELECTOR_LABELS, separators=(",", ":"))
 
 SOURCE_PLAN_CONTRACTS = {
     ".github/workflows/ci.yml": ("workflow-plan", "plan"),
@@ -352,9 +351,9 @@ def test_source_workflows_share_native_run_identity() -> None:
 
         assert "github.event.pull_request.draft" in run_name
         assert "github.event.action == 'converted_to_draft'" in run_name
-        assert "github.event.action == 'edited'" in run_name
-        assert "github.event.changes.base == null" in run_name
-        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in run_name
+        assert "github.event.action == 'edited'" not in run_name
+        assert "github.event.changes.base == null" not in run_name
+        assert "fromJSON(" not in run_name
         for label in CI_SELECTOR_LABELS:
             assert label in run_name
             assert (
@@ -388,7 +387,7 @@ def test_source_workflows_have_no_publisher_generation_contract() -> None:
         assert "authoritative-gates.yml" not in plan_step["run"]
 
 
-def test_draft_and_irrelevant_metadata_events_finish_before_checkout_or_gate() -> None:
+def test_only_draft_events_finish_before_checkout_or_gate() -> None:
     for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         jobs = workflow["jobs"]
@@ -406,11 +405,11 @@ def test_draft_and_irrelevant_metadata_events_finish_before_checkout_or_gate() -
         filtered_event = _normalized_expression(event_step["env"]["FILTERED_EVENT"])
         assert "github.event.pull_request.draft" in filtered_event
         assert "github.event.action == 'converted_to_draft'" in filtered_event
-        assert "github.event.action == 'edited'" in filtered_event
-        assert "github.event.changes.base == null" in filtered_event
-        assert "github.event.action == 'labeled'" in filtered_event
-        assert "github.event.action == 'unlabeled'" in filtered_event
-        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in filtered_event
+        assert filtered_event == (
+            "${{ github.event_name == 'pull_request' && "
+            "(github.event.pull_request.draft || "
+            "github.event.action == 'converted_to_draft') }}"
+        )
         assert "checkout_required=false" in event_step["run"]
         assert "gate_mode=filtered" in event_step["run"]
         assert checkout_step["if"] == "steps.event.outputs.checkout_required == 'true'"
@@ -2073,11 +2072,11 @@ def test_protected_workflows_cancel_only_authoritative_pr_runs() -> None:
         assert "github.event_name == 'pull_request'" in cancel
         assert "github.event.pull_request.draft" in cancel
         assert "github.event.action == 'converted_to_draft'" in cancel
-        assert "github.event.action == 'edited'" in cancel
-        assert "github.event.changes.base == null" in cancel
-        assert "github.event.action == 'labeled'" in cancel
-        assert "github.event.action == 'unlabeled'" in cancel
-        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in cancel
+        assert cancel == (
+            "${{ github.event_name == 'pull_request' && "
+            "!(github.event.pull_request.draft || "
+            "github.event.action == 'converted_to_draft') }}"
+        )
 
     assert len(normalized_cancellations) == 1
 
@@ -2093,9 +2092,9 @@ def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
         assert "authoritative" in group
         assert "github.event.pull_request.draft" in group
         assert "github.event.action == 'converted_to_draft'" in group
-        assert "github.event.action == 'edited'" in group
-        assert "github.event.changes.base == null" in group
-        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in group
+        assert "github.event.action == 'edited'" not in group
+        assert "github.event.changes.base == null" not in group
+        assert "fromJSON(" not in group
         assert "admission" not in group
         assert "background" not in group
 

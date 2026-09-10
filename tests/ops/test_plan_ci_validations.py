@@ -47,12 +47,22 @@ def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
         ("labeled", ""),
     ],
 )
-def test_unrelated_pr_metadata_event_is_filtered(
+@pytest.mark.parametrize(
+    "changed_paths",
+    [
+        ["docs/user-guide.md"],
+        ["tests/ops/test_plan_ci_validations.py"],
+        ["src/loom/config.py"],
+        ["unknown-runtime/new-component.bin"],
+    ],
+)
+def test_metadata_event_preserves_current_head_validation(
     action: str,
     action_label: str,
+    changed_paths: list[str],
 ) -> None:
     plan = plan_validations(
-        changed_paths=["src/loom/config.py"],
+        changed_paths=changed_paths,
         labels={"ci:images"},
         event_name="pull_request",
         pull_request_action=action,
@@ -60,9 +70,19 @@ def test_unrelated_pr_metadata_event_is_filtered(
         pull_request_base_changed=False,
     )
 
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
+    current_head_plan = plan_validations(
+        changed_paths=changed_paths,
+        labels={"ci:images"},
+        event_name="pull_request",
+        pull_request_action="synchronize",
+    )
+
+    # A newer metadata suite must report the same protected gates and selected
+    # work as the successful head suite it supersedes, including unknown paths.
+    assert plan == current_head_plan
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
 @pytest.mark.parametrize(
