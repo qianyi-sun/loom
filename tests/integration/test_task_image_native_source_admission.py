@@ -1,6 +1,7 @@
 """Native lease operations retain registered inputs through fresh and replay paths."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,10 @@ from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_task_image_authority import materializations as native
+from loom_task_image_authority.registry_credentials import (
+    issue_session_registry_credential,
+    record_session_publication_candidate,
+)
 from tests.integration.test_task_bundle_source_admission import _task
 from tests.integration.test_task_bundle_source_admission import journal as journal
 from tests.integration.test_task_bundle_source_journal import _module, _publish, _receipts, _upload
@@ -20,6 +25,15 @@ from tests.integration.test_task_image_authority_materializations import (
     NOW,
     _active_authorization,
     _attempt,
+)
+from tests.integration.test_task_image_projection_store import _MemorySecretStore
+from tests.integration.test_task_image_registry_credentials import (
+    CREDENTIAL_ID,
+    _candidate_request,
+    _credential_request,
+)
+from tests.integration.test_task_image_registry_credentials import (
+    registry_issuer as registry_issuer,
 )
 from tests.unit.test_task_bundle_registration import _bundle
 
@@ -160,3 +174,55 @@ async def test_cleanup_remains_usable_after_source_retirement_in_serializable_tr
             lease_epoch=attempt.lease_epoch, operation_id=uuid4(), now=NOW + timedelta(seconds=12),
         )
         assert result.state == "queued"
+
+
+@pytest.mark.parametrize("operation", ["credential", "candidate"])
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("isolation", ["READ COMMITTED", "AUTOCOMMIT", "REPEATABLE READ", "SERIALIZABLE"])
+async def test_registry_consumers_recheck_source_and_preflight_before_autoflush(
+    journal, tmp_path, registry_issuer, operation, replay, isolation,
+):
+    authorization, spec, ticket, image_id = await _setup(journal, tmp_path)
+    secrets = _MemorySecretStore()
+    async with journal.begin() as session:
+        image, _plan = await _claim(session, authorization)
+        attempt = await _attempt(session)
+    # The direct service receives already-authenticated authorization; this is the
+    # same session token issued by _active_authorization, not a bypassed HTTP path.
+    build_session = SimpleNamespace(session_token="loom_tibs_" + "B" * 64)
+    credential = _credential_request(authorization, build_session, image, attempt)
+    candidate = _candidate_request(authorization, build_session, image, attempt)
+
+    async def issue(session):
+        return await issue_session_registry_credential(
+            session, authorization=authorization, request=credential, now=NOW + timedelta(seconds=11),
+            issuer=registry_issuer, secret_store=secrets, credential_id_factory=lambda: CREDENTIAL_ID,
+        )
+
+    async def admit(session):
+        if operation == "credential":
+            return await issue(session)
+        return await record_session_publication_candidate(
+            session, authorization=authorization, request=candidate,
+            now=NOW + timedelta(seconds=12), candidate_id_factory=uuid4,
+        )
+
+    if operation == "candidate":
+        async with journal.begin() as session:
+            await issue(session)
+    if replay:
+        async with journal.begin() as session:
+            await admit(session)
+    await _release_source(journal, spec, ticket, image_id, retire=True)
+    sessions = async_sessionmaker(journal.kw["bind"].execution_options(isolation_level=isolation), expire_on_commit=False)
+    pending = Task(id="pending-" + uuid4().hex, checksum="f" * 64, config={})
+    async with sessions() as session:
+        if isolation != "READ COMMITTED":
+            session.add(pending)
+        with pytest.raises(native.TaskImageSessionMaterializationConflictError, match="source" if isolation == "READ COMMITTED" else "READ COMMITTED"):
+            await admit(session)
+        if isolation != "READ COMMITTED":
+            assert pending in session.new
+        await session.rollback()
+    async with journal() as session:
+        assert await session.get(Task, pending.id) is None
