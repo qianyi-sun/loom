@@ -108,7 +108,7 @@ class FakeManager:
             executable=True,
         )
 
-    async def next_executable_work(self, command_sequence: int) -> object | None:
+    async def next_executable_work(self, command_sequence: int, *, cleanup_only: bool = False) -> object | None:
         assert command_sequence == self.command_sequence
         if self.reject_work_fetch:
             raise AssertionError("durable central request must replay before work fetch")

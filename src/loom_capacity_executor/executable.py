@@ -130,7 +130,9 @@ class _ManagerClient(Protocol):
 
     async def executable_checkpoint(self) -> ExecutableCheckpointReceiptV2: ...
 
-    async def next_executable_work(self, command_sequence: int) -> ExecutablePoolWorkV2 | None: ...
+    async def next_executable_work(
+        self, command_sequence: int, *, cleanup_only: bool = False,
+    ) -> ExecutablePoolWorkV2 | None: ...
 
     async def accept_executable_reservation(
         self, value: ExecutableReservationAcceptanceV2
@@ -1017,6 +1019,28 @@ class ExecutablePoolExecutor:
         if self.typed_policy is not None:
             raise RuntimeAssemblyError("typed runtime operation consumers are not ready")
 
+    async def replay_pending_only(self, *, drain_only: bool) -> ExecutorTickResult:
+        """Resolve durable work before a new heartbeat can enter the journal.
+
+        Never fetch fresh work here: replay and ambiguous-submit recovery retain
+        their original authority and exact payloads, including drain-only fences.
+        """
+        self._assert_operation_consumers_ready()
+        checkpoint = await self._checkpoint()
+        replayed = await self._replay_local_request(checkpoint)
+        if replayed is not None:
+            return replayed
+        replayed = (await self._replay_drain_only_central_request(checkpoint) if drain_only
+            else await self._replay_central_request(checkpoint))
+        if replayed is not None:
+            return replayed
+        replayed = await self._replay_inventory_request(checkpoint)
+        if replayed is not None:
+            return replayed
+        if self._has_recovering_launch():
+            return await self.recover()
+        raise JournalRegressionError("unrecognized pending runtime work")
+
     async def tick(self) -> ExecutorTickResult:
         self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
@@ -1075,7 +1099,7 @@ class ExecutablePoolExecutor:
         replayed_inventory = await self._replay_inventory_request(checkpoint)
         if replayed_inventory is not None:
             return replayed_inventory
-        work = await self.client.next_executable_work(checkpoint.command_sequence)
+        work = await self.client.next_executable_work(checkpoint.command_sequence, cleanup_only=True)
         if work is None:
             return await self._publish_inventory(checkpoint)
         if isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):

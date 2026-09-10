@@ -25,6 +25,7 @@ from loom_capacity_executor.config import ExecutorConfigError, PoolExecutorConfi
 from loom_capacity_executor.executable import ExecutablePoolExecutor
 from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
 from loom_capacity_executor.journal import ExecutorJournal, JournalRecord
+from loom_capacity_executor.journal_retention import maintain_runtime_journal
 from loom_capacity_executor.runtime import (
     build_executable_runtime,
     load_activation_runtime_artifact,
@@ -229,9 +230,23 @@ async def run_executor_once(
         raise ExecutorConfigError("current authority requires an executable runtime")
     _assert_executable_runtime(config, authority, executor)
     await executor.slurm.validate_authority()
+    maintenance = await maintain_runtime_journal(executor)
+    if maintenance == "compacted":
+        return ExecutorOnceResult("drain-only" if authority.execution_state == "drain-only" else "scale-up")
     heartbeats = ExecutableHeartbeatLoop(executor.registration, executor.journal, executor.client)
+    drain_only = authority.execution_state == "drain-only" or maintenance == "capacity-constrained"
+    if any(record.object_kind != "heartbeat" for record in executor.journal.pending_requests()):
+        await executor.replay_pending_only(drain_only=drain_only)
+        if not executor.journal.pending_requests():
+            await heartbeats.heartbeat()
+        return ExecutorOnceResult("drain-only" if drain_only else "scale-up")
     await heartbeats.heartbeat()
-    if authority.execution_state == "drain-only":
+    if executor._has_recovering_launch():
+        await executor.replay_pending_only(drain_only=drain_only)
+        if not executor.journal.pending_requests():
+            await heartbeats.heartbeat()
+        return ExecutorOnceResult("drain-only" if drain_only else "scale-up")
+    if drain_only:
         result = await executor.tick_drain_only()
         mode: Literal["drain-only", "scale-up"] = "drain-only"
     else:

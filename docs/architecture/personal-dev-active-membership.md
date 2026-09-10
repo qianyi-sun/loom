@@ -1147,11 +1147,21 @@ cleanup and stale selections refuse compaction. Atomic old/new generations and
 recovery reserve count toward the same bound; unreferenced protocol files are
 reclaimed under the stable journal lock.
 
-Automatic runtime orchestration and capacity-pressure behavior remain under
-validation; these primitives alone are not steady-state GC or native readiness.
-Compaction must precede a freshly confirmed final inventory to preserve retirement
-ordering. Recovery publication can spend reserved headroom, while new launch-fact
-retention must preserve it.
+The controller runs maintenance before ordinary work when the append-only journal
+has grown to 16 MiB; retained snapshot bytes remain in the capacity budget but do
+not retrigger maintenance. Compaction is followed by a freshly confirmed inventory
+and heartbeat to preserve retirement ordering. Lost final-inventory replies replay
+even below the ordinary trigger. A preflight capacity refusal retains the original
+journal and restricts polling to authenticated cleanup-only work. The manager's
+`GET /v2/executors/{pool_id}/work?cleanup_only=true` preserves current proposals
+without issuing new reservations, bootstrap work or permits, while still selecting
+eligible closure and release work. An older manager's increase response is rejected
+by the client, not executed. Pending commands replay before a new heartbeat;
+ambiguous submissions recover without fetching unrelated new work.
+
+Recovery publication can spend reserved headroom, while new launch-fact retention
+must preserve it. These paths require protected integration/rollout and live
+acceptance before they are evidence of native multi-owner readiness.
 
 Terminal recovery has an explicit versioned read endpoint:
 `GET /v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence`

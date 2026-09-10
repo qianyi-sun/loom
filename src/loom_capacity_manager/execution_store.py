@@ -1131,6 +1131,8 @@ class CapacityExecutionStore:
         self,
         session: AsyncSession,
         executor: PreparedExecutorBindingV2,
+        *,
+        cleanup_only: bool = False,
     ) -> (
         ExecutableReservationProposalV2
         | ExecutableIntentBindingV2
@@ -1139,6 +1141,8 @@ class CapacityExecutionStore:
         | ExecutablePartialReleaseV2
         | None
     ):
+        if type(cleanup_only) is not bool:
+            raise ValueError("cleanup-only work selection must be boolean")
         async with _write_transaction(session):
             authority = await self._lock_authority(session)
             if authority.execution_state == "shadow":
@@ -1273,7 +1277,7 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
-                        if increase_allowed:
+                        if increase_allowed and not cleanup_only:
                             proposal = await self._create_next_proposal(session, context)
                             if proposal is not None:
                                 return proposal
@@ -1282,6 +1286,8 @@ class CapacityExecutionStore:
                             current.state = "released"
                             current.released_at = now
                             released_any = True
+                            continue
+                        if cleanup_only:
                             continue
                         return ExecutableReservationProposalV2.model_validate_json(
                             json.dumps(current.proposal_payload)
@@ -1293,6 +1299,8 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
+                        if cleanup_only:
+                            continue
                         bootstrap = await self._latest_bootstrap_proposal(
                             session, current.intent_id, lock=True
                         )
@@ -1316,6 +1324,8 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
+                        if cleanup_only:
+                            continue
                         await self._assert_increase_eligible(session, context, current=current)
                         if (
                             current.permit_payload is None
@@ -1389,7 +1399,8 @@ class CapacityExecutionStore:
                 if released_any:
                     continue
                 if (
-                    authority.execution_state == "active"
+                    not cleanup_only
+                    and authority.execution_state == "active"
                     and authority.executable_new_capacity_ceiling > 0
                     and not authority.increase_freeze
                     and latest_increase_allowed
@@ -1405,7 +1416,8 @@ class CapacityExecutionStore:
                         return proposal
                 return None
             if (
-                authority.execution_state != "active"
+                cleanup_only
+                or authority.execution_state != "active"
                 or authority.executable_new_capacity_ceiling <= 0
                 or not latest_increase_allowed
             ):

@@ -48,7 +48,8 @@ async def test_cleanup_only_work_query_rejects_increase_from_older_manager(unsaf
 
     def handler(request):
         assert request.url.params.get("cleanup_only") == "true"
-        return httpx.Response(200, json=binding.model_dump(mode="json") if unsafe_response else None)
+        return (httpx.Response(200, json=binding.model_dump(mode="json")) if unsafe_response
+            else httpx.Response(200, content=b"null"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = ExecutableCapacityExecutorClient(_executable_registration(),

@@ -45,6 +45,10 @@ class JournalError(RuntimeError):
     """Base class for bounded local-journal failures."""
 
 
+class JournalCapacityError(JournalError):
+    """A preflight or append cannot fit the configured durable-state bound."""
+
+
 class JournalLockError(JournalError):
     """Another controller-local executor already holds the journal lock."""
 
@@ -389,7 +393,7 @@ class ExecutorJournal:
         if (len(self._history) + len(payload_sizes) > _MAX_RECORDS
             or self._head.sequence + len(payload_sizes) > (1 << 63) - 1
             or self._footprint() + sum(encoded_sizes) + reserved_bytes > _MAX_JOURNAL_BYTES):
-            raise JournalError("executor journal capacity cannot preserve recovery reserve")
+            raise JournalCapacityError("executor journal capacity cannot preserve recovery reserve")
 
     def append(
         self,
@@ -435,9 +439,9 @@ class ExecutorJournal:
         if len(encoded) > _MAX_RECORD_BYTES:
             raise ValueError("journal record exceeds its size bound")
         if len(self._history) >= _MAX_RECORDS or self._head.sequence >= (1 << 63) - 1:
-            raise JournalError("executor journal exceeds its record bound")
+            raise JournalCapacityError("executor journal exceeds its record bound")
         if self._footprint() + len(encoded) > _MAX_JOURNAL_BYTES:
-            raise JournalError("executor journal exceeds its size bound")
+            raise JournalCapacityError("executor journal exceeds its size bound")
         offset = 0
         while offset < len(encoded):
             written = os.write(self._journal_fd, encoded[offset:])
@@ -618,7 +622,7 @@ class ExecutorJournal:
         # Account for both checkpoint framing and a complete heartbeat response
         # tail while old and new generations coexist, in addition to recovery.
         if self._footprint() + len(encoded) + reserved_bytes + 4 * _MAX_RECORD_BYTES > _MAX_JOURNAL_BYTES:
-            raise JournalError("checkpoint capacity cannot preserve atomic replacement reserve")
+            raise JournalCapacityError("checkpoint capacity cannot preserve atomic replacement reserve")
         snapshot_path = self._snapshot_path(digest)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
@@ -683,7 +687,7 @@ class ExecutorJournal:
             + b"\n" for record in tail)
         reserve = snapshot.reserved_bytes
         if self._footprint() + len(encoded) + reserve > _MAX_JOURNAL_BYTES:
-            raise JournalError("checkpoint capacity cannot preserve atomic replacement reserve")
+            raise JournalCapacityError("checkpoint capacity cannot preserve atomic replacement reserve")
         descriptor, temporary = tempfile.mkstemp(prefix=f"{self.path.name}.checkpoint-tmp-", dir=self.path.parent)
         try:
             self._write_all(descriptor, encoded)

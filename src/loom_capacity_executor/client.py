@@ -812,13 +812,18 @@ class ExecutableCapacityExecutorClient:
     async def next_executable_work(
         self,
         command_sequence: int,
+        *,
+        cleanup_only: bool = False,
     ) -> ExecutablePoolWorkV2 | None:
         if type(command_sequence) is not int or command_sequence < 0:
             raise ValueError("executable command high-water is invalid")
+        if type(cleanup_only) is not bool:
+            raise ValueError("cleanup-only work selection must be boolean")
         status_code, response_content = await _stream_response_bounded(
             self._http,
             "GET",
-            f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
+            f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work"
+            + ("?cleanup_only=true" if cleanup_only else ""),
             headers={"Authorization": f"Bearer {self._bearer_token}"},
             body_label="work",
         )
@@ -836,6 +841,8 @@ class ExecutableCapacityExecutorClient:
             work = _EXECUTABLE_WORK.validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager work is invalid") from exc
+        if cleanup_only and not isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
+            raise ExecutorTransportError("capacity manager returned new work to cleanup-only executor")
         self._assert_contract_binding(work)
         work_sequence = getattr(work, "command_sequence", None)
         if work_sequence is not None and work_sequence != command_sequence + 1:

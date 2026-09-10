@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
+from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
 from loom_capacity_executor.inventory_journal import load_journal_inventory
 from loom_capacity_executor.journal import (
     ExecutorJournal,
+    JournalCapacityError,
     JournalHead,
     JournalRecord,
     JournalRegressionError,
@@ -28,6 +30,8 @@ from loom_capacity_manager.executable_contracts import ExecutablePartialReleaseV
 
 if TYPE_CHECKING:
     from loom_capacity_executor.executable import ExecutablePoolExecutor
+
+CHECKPOINT_TRIGGER_BYTES = 16 * 1024 * 1024
 
 _CENTRAL_EVENTS = {
     f"{operation}-{result}"
@@ -65,6 +69,44 @@ class RuntimeCheckpointPlan:
             raise JournalRegressionError("checkpoint selection head changed")
         return journal.prepare_checkpoint(retained_sequences=self.retained_sequences,
             retained_anchors=self.retained_anchors, reserved_bytes=self.reserved_bytes)
+
+
+async def maintain_runtime_journal(
+    executor: ExecutablePoolExecutor,
+) -> Literal["not-needed", "compacted", "capacity-constrained"]:
+    """Serialize checkpoint recovery before ordinary executor work.
+
+    A preflight capacity refusal leaves the original journal usable for drain
+    work. Once preparation succeeds, failures must finish that checkpoint before
+    any ordinary operation can enter its heartbeat-only tail.
+    """
+    journal = executor.journal
+    latest_inventory = journal.latest("inventory", str(executor.registration.executor_incarnation))
+    needs_final_inventory = journal._compaction_floor > 0 and (
+        latest_inventory is None or latest_inventory.event_kind != "inventory-publish-confirmed"
+        or latest_inventory.sequence <= journal._compaction_floor
+    )
+    if journal.pending_checkpoint() is None and not needs_final_inventory:
+        # Snapshot bytes are irreducible retained baseline, not reclaimable
+        # growth. Total footprint still bounds every atomic capacity preflight.
+        if journal.path.stat().st_size < CHECKPOINT_TRIGGER_BYTES or journal.pending_requests() or any(
+            record.event_kind == "heartbeat-received" for record in journal.latest_records("heartbeat")
+        ):
+            return "not-needed"
+        plan = plan_runtime_checkpoint(executor, await executor._checkpoint())
+        if len(plan.retained_sequences) >= len(journal._history):
+            return "capacity-constrained"
+        try:
+            plan.prepare(journal)
+        except JournalCapacityError:
+            return "capacity-constrained"
+    heartbeats = ExecutableHeartbeatLoop(executor.registration, journal, executor.client)
+    await heartbeats.finish_checkpoint()
+    # Checkpoint acknowledgement advanced the journal beyond the old inventory.
+    # Republish before returning so the next retirement sees exact final evidence.
+    await executor._publish_inventory(await executor._checkpoint())
+    await heartbeats.heartbeat()
+    return "compacted"
 
 
 def plan_runtime_checkpoint(

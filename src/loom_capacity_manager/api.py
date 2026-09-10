@@ -1634,13 +1634,15 @@ def create_app(
     async def next_executable_pool_work(
         pool_id: str,
         request: Request,
+        cleanup_only: bool = False,
         actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
     ) -> Any:
         binding = executor_binding(actor, pool_id=pool_id)
         session_factory, executions = execution_runtime(request)
         try:
             async with session_factory() as session:
-                result = await executions.next_pool_work(session, binding)
+                result = (await executions.next_pool_work(session, binding, cleanup_only=True)
+                    if cleanup_only else await executions.next_pool_work(session, binding))
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc

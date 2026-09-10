@@ -139,3 +139,24 @@ async def test_runtime_checkpoint_capacity_pressure_preserves_history_for_drain(
         assert not tuple(tmp_path.glob("*.snapshot-*"))
     finally:
         journal.close()
+
+
+async def test_pressure_drain_poll_publishes_inventory_without_requesting_new_admission(tmp_path):
+    runtime, journal, manager, _, slurm, _ = executor_fixture(tmp_path, work=None)
+    try:
+        calls = []
+
+        async def select(command_sequence, *, cleanup_only=False):
+            calls.append(cleanup_only)
+            if not cleanup_only:
+                raise AssertionError("new admission would hide cleanup inventory")
+            return None
+
+        manager.next_executable_work = select
+        result = await runtime.tick_drain_only()
+        assert result.status == "inventory-published"
+        assert calls == [True]
+        assert len(manager.inventories) == 1
+        assert slurm.submit_count == 0
+    finally:
+        journal.close()
