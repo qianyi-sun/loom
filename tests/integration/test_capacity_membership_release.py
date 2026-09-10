@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import ObservedCommitmentV1, SubjectConfigurationV1
@@ -76,6 +76,17 @@ from tests.integration.test_capacity_membership import (
 )
 
 
+async def assert_sql_release_matches(
+    session: AsyncSession, predecessor: SubjectConfigurationV1
+) -> None:
+    expected = await release_digest(session, predecessor)
+    actual = await session.scalar(
+        text("SELECT public.capacity_personal_predecessor_release_digest(:subject, :incarnation)"),
+        {"subject": predecessor.subject_id, "incarnation": predecessor.subject_incarnation},
+    )
+    assert actual == expected
+
+
 async def test_empty_release_set_is_stable_and_identity_bound(
     capacity_session: AsyncSession,
 ) -> None:
@@ -89,6 +100,7 @@ async def test_empty_release_set_is_stable_and_identity_bound(
     assert first == await release_digest(capacity_session, subject)
     changed = subject.model_copy(update={"subject_incarnation": UUID(int=21001)})
     assert first != await release_digest(capacity_session, changed)
+    await assert_sql_release_matches(capacity_session, subject)
 
 
 @pytest.mark.parametrize("pending", ("new", "dirty", "deleted"))
@@ -266,6 +278,9 @@ async def test_never_accepted_proposal_uses_existing_release_path(
 
     # Keep the released ORM instance alive while the actual ledger changes.
     # A retained session must not authorize recreation from its identity map.
+    await assert_sql_release_matches(
+        capacity_session, SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload))
+    )
     await _test_only_update_without_guard(
         capacity_session,
         table_name="capacity_executable_intents",
@@ -357,6 +372,7 @@ async def test_accepted_release_requires_exact_durable_witnesses(
     configuration = SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload))
     if tamper is None:
         original_digest = await release_digest(capacity_session, configuration)
+        await assert_sql_release_matches(capacity_session, configuration)
         assert original_digest != "0" * 64
         await store.acknowledge_protected_release(
             capacity_session,
@@ -428,6 +444,7 @@ async def test_closed_unaccepted_legacy_proposal_needs_no_worker_receipt(
             ),
         )
     assert await release_digest(capacity_session, configuration) != "0" * 64
+    await assert_sql_release_matches(capacity_session, configuration)
 
 
 @pytest.mark.parametrize("tamper", (None, "release", "protected", "inventory"))
@@ -518,6 +535,7 @@ async def test_released_legacy_reservation_requires_its_durable_evidence(
                 await release_digest(capacity_session, configuration)
     else:
         assert await release_digest(capacity_session, configuration) != "0" * 64
+        await assert_sql_release_matches(capacity_session, configuration)
 
 
 @pytest.mark.parametrize("tamper", (None, "classification", "ownership"))
@@ -634,6 +652,7 @@ async def test_legacy_physical_release_retains_authenticated_inventory(
     original = await release_digest(capacity_session, configuration)
     if tamper is None:
         assert original == await release_digest(capacity_session, configuration)
+        await assert_sql_release_matches(capacity_session, configuration)
         return
     observation = (await capacity_session.scalars(select(CapacityExecutorObservation))).one()
     if tamper == "classification":
