@@ -74,6 +74,35 @@ def test_typed_runtime_refuses_changed_complete_policy_root(tmp_path):
             "entries": (policy.entries[0].model_copy(update={"purpose": "application-worker"}),)}))
 
 
+async def test_typed_launch_preparation_fetches_and_retains_before_consumption(tmp_path):
+    from unittest.mock import AsyncMock
+    runtime, journal, context = typed_executor(tmp_path)
+    try:
+        runtime.client.launch_subject = AsyncMock(return_value=facts(context))
+        envelope = await runtime._prepare_launch(context.binding, bootstrap_registration_epoch=1)
+        runtime.client.launch_subject.assert_awaited_once_with(context.binding)
+        assert envelope.launch_subject == facts(context)
+        assert envelope.rendered.ownership_proof.metadata.binding == context.binding
+        assert journal.head.sequence > 0
+        assert runtime.client.central_requests == []
+        assert journal.pending_requests() == ()
+    finally:
+        journal.__exit__(None, None, None)
+
+
+async def test_typed_runtime_operations_remain_closed_until_consumers_are_ready(tmp_path):
+    from loom_capacity_executor.runtime_profiles import RuntimeAssemblyError
+    from tests.unit.test_capacity_executor_executable import permit_fixture
+    runtime, journal, context = typed_executor(tmp_path)
+    try:
+        with pytest.raises(RuntimeAssemblyError, match="consumers"):
+            await runtime._apply_one(permit_fixture(context.binding), await runtime.client.executable_checkpoint())
+        assert journal.head.sequence == 0
+        assert runtime.client.central_requests == []
+    finally:
+        journal.__exit__(None, None, None)
+
+
 @pytest.mark.parametrize("tamper", ("request", "reference", "proof", "schema"))
 def test_typed_runtime_replay_rejects_tampered_envelope(tmp_path, tamper):
     from hashlib import sha256
