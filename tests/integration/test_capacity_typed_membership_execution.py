@@ -3,20 +3,55 @@
 import json
 from importlib import import_module
 
+import pytest
+from loom_capacity_manager.build_membership_contracts import ExecutionPreparationPolicyV4
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import allocate_shadow
 from loom_capacity_manager.models import CapacityAllocationEpoch
 from loom_capacity_manager.reconciler import _commit_reconciled_epoch
-from loom_capacity_manager.store import WriterFence
+from loom_capacity_manager.store import AuthorityRecoveryError, CapacityManagementStore, WriterFence
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
     typed_sql_execution,
 )
 from tests.capacity_fixtures import pool_observation
+from tests.capacity_execution_fixtures import execution_policy
 from tests.integration.test_capacity_mixed_membership_store import apply
 from tests.integration.test_capacity_typed_membership_demand import report
+
+
+def typed_management(preparation):
+    policy = ExecutionPreparationPolicyV4.model_validate(execution_policy().model_dump(mode="python") | {
+        "schema_version": 4,
+        **{name: getattr(preparation, name) for name in (
+            "personal_membership", "personal_builds", "managed_application_origins",
+            "managed_build_origins", "retired_source", "subject_acknowledgements", "executors",
+        )},
+    })
+    return CapacityManagementStore(execution_policy=policy)
+
+
+@pytest.mark.parametrize("tamper", ("none", "legacy-policy", "build-policy", "executor-policy"))
+async def test_typed_allocation_authority_requires_exact_operator_and_executor_evidence(capacity_session, tamper):
+    legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    management = typed_management(preparation)
+    if tamper == "legacy-policy":
+        management = legacy
+    elif tamper == "build-policy":
+        management = typed_management(preparation.model_copy(update={
+            "personal_builds": preparation.personal_builds.model_copy(update={"max_slots_per_subject": 1}),
+        }))
+    elif tamper == "executor-policy":
+        management = typed_management(preparation.model_copy(update={
+            "executors": tuple(executor.model_copy(update={"signing_key_sha256": "f" * 64}) for executor in preparation.executors),
+        }))
+    if tamper == "none":
+        assert await management.execution_authority(capacity_session) == execution
+    else:
+        with pytest.raises(AuthorityRecoveryError):
+            await management.execution_authority(capacity_session)
 
 
 async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership(isolated_capacity_postgres_url):
@@ -26,6 +61,7 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
     try:
         async with sessions() as session, session.begin():
             management, preparation, _fleet, execution = await typed_sql_execution(session)
+            management = typed_management(preparation)
             builds = []
             for index, owner in enumerate((88010, 88011)):
                 build = await apply(session, build_request(preparation, execution, owner=owner, revision=index * 2), key=111000 + index * 2)
