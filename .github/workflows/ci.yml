@@ -18,13 +18,7 @@ run-name: >-
              github.event.pull_request.number || 'none') ||
       github.event_name == 'pull_request' &&
       (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (github.event.action == 'edited' &&
-        github.event.changes.base == null) ||
-       ((github.event.action == 'labeled' ||
-         github.event.action == 'unlabeled') &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
-                  github.event.label.name))) &&
+       github.event.action == 'converted_to_draft') &&
       format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.event.pull_request.head.sha,
              github.event.pull_request.base.sha,
@@ -80,26 +74,20 @@ on:
         type: boolean
         default: false
 
-# Authoritative PR events supersede older admission runs for that PR. Draft and
-# unrelated metadata events use a unique slot so they cannot evict a running or
-# pending head/base/selector validation when GitHub delivers events out of order.
+# Every non-draft PR event supersedes older admission runs, including metadata
+# edits: a newer filtered suite can strand older green required checks. Draft
+# events keep a unique slot so a delayed draft event cannot cancel a Ready run.
 concurrency:
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
       github.event_name == 'pull_request' &&
       (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (github.event.action == 'edited' && github.event.changes.base == null) ||
-       ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
+       github.event.action == 'converted_to_draft') &&
       format('filtered-{0}', github.run_id) || 'authoritative' }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' &&
         !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft' ||
-          (github.event.action == 'edited' && github.event.changes.base == null) ||
-          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
-           !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
+          github.event.action == 'converted_to_draft') }}
 
 permissions:
   contents: read
@@ -131,13 +119,7 @@ jobs:
           FILTERED_EVENT: >-
             ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft' ||
-                 (github.event.action == 'edited' &&
-                  github.event.changes.base == null) ||
-                 ((github.event.action == 'labeled' ||
-                   github.event.action == 'unlabeled') &&
-                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
-                            github.event.label.name))) }}
+                 github.event.action == 'converted_to_draft') }}
         run: |
           set -euo pipefail
           if [[ "$FILTERED_EVENT" == "true" ]]; then
