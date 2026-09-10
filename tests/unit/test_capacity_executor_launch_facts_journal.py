@@ -1,7 +1,7 @@
 """Retain exact launch facts within the existing bounded, locked journal."""
 
-from importlib import import_module
 from hashlib import sha256
+from importlib import import_module
 
 import pytest
 
@@ -10,9 +10,12 @@ from loom_capacity_manager.launch_subject_contracts import canonical_launch_subj
 from tests.unit.test_capacity_launch_subject_contract import response
 
 
-def test_launch_facts_survive_restart_without_manager_and_are_idempotent(tmp_path):
+@pytest.mark.parametrize("large", (False, True))
+def test_launch_facts_survive_restart_without_manager_and_are_idempotent(tmp_path, large):
     module = import_module("loom_capacity_executor.launch_facts_journal")
-    value = response()
+    value = response(large=large)
+    if large:
+        assert len(canonical_launch_subject_bytes(value)) > 64 * 1024
     path = tmp_path / "executor.journal"
     with ExecutorJournal(path) as journal:
         reference = module.retain_launch_facts(journal, value)
@@ -59,8 +62,12 @@ def test_launch_facts_reject_changed_reference(tmp_path, tamper):
     module = import_module("loom_capacity_executor.launch_facts_journal")
     with ExecutorJournal(tmp_path / "executor.journal") as journal:
         reference = module.retain_launch_facts(journal, response())
-        fields = {"digest": {"sha256": "f" * 64}, "count": {"chunk_count": 0},
-                  "bytes": {"byte_count": reference.byte_count + 1}, "schema": {"schema_version": 3.0}}
+        fields = {
+            "digest": {"sha256": "f" * 64},
+            "count": {"chunk_count": 0},
+            "bytes": {"byte_count": reference.byte_count + 1},
+            "schema": {"schema_version": 3.0},
+        }
         changed = reference.model_copy(update=fields[tamper])
         with pytest.raises((ValueError, JournalRegressionError)):
             module.load_launch_facts(journal, changed)
@@ -71,8 +78,13 @@ def test_launch_facts_reject_corrupt_retained_chunk_without_overwriting(tmp_path
     value = response()
     digest = sha256(canonical_launch_subject_bytes(value)).hexdigest()
     with ExecutorJournal(tmp_path / "executor.journal") as journal:
-        journal.append("launch-facts-retained", sha256(b"wrong").hexdigest(),
-            object_kind="executor", object_id=f"launch-facts:{digest}:0", payload=b"wrong")
+        journal.append(
+            "launch-facts-retained",
+            sha256(b"wrong").hexdigest(),
+            object_kind="executor",
+            object_id=f"launch-facts:{digest}:0",
+            payload=b"wrong",
+        )
         head = journal.head
         with pytest.raises(JournalRegressionError):
             module.retain_launch_facts(journal, value)
@@ -89,6 +101,11 @@ def test_launch_facts_capacity_rejection_preserves_head_and_cleanup_space(tmp_pa
             module.retain_launch_facts(journal, response())
         assert journal.head == head
         payload = b"cleanup evidence"
-        journal.append("intent-close-requested", sha256(payload).hexdigest(),
-            object_kind="intent", object_id="cleanup", payload=payload)
+        journal.append(
+            "intent-close-requested",
+            sha256(payload).hexdigest(),
+            object_kind="intent",
+            object_id="cleanup",
+            payload=payload,
+        )
         assert journal.head.sequence == 1

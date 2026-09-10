@@ -8,14 +8,52 @@ import pytest
 from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
 
 
-def response():
+def response(*, large=False):
     module = import_module("loom_capacity_manager.launch_subject_contracts")
     context = typed_context()
-    return module.ExecutableLaunchSubjectV3(
+    value = module.ExecutableLaunchSubjectV3(
         binding=context.binding,
         configuration=context.subject.configuration,
         acknowledgement=context.subject.acknowledgement,
         authority=context.subject.authority,
+    )
+    if not large:
+        return value
+    from loom_capacity_manager.contracts import canonical_digest
+
+    profile = value.configuration.profiles[0]
+    shapes = tuple(
+        sorted(
+            (
+                *profile.worker_shapes,
+                *(
+                    profile.worker_shapes[0].model_copy(update={"shape_id": f"extra-{index:04d}"})
+                    for index in range(200)
+                ),
+            ),
+            key=lambda shape: shape.shape_id,
+        )
+    )
+    configuration = value.configuration.model_copy(
+        update={
+            "profiles": (
+                profile.model_copy(update={"worker_shapes": shapes}),
+                *value.configuration.profiles[1:],
+            )
+        }
+    )
+    authority = value.authority.model_copy(
+        update={
+            "configuration": value.authority.configuration.model_copy(
+                update={"digest": canonical_digest(configuration)}
+            )
+        }
+    )
+    return module.ExecutableLaunchSubjectV3(
+        binding=value.binding,
+        configuration=configuration,
+        acknowledgement=value.acknowledgement,
+        authority=authority,
     )
 
 

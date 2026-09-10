@@ -6,7 +6,11 @@ from importlib import import_module
 import pytest
 
 from loom_capacity_executor.typed_launch_renderer import render_typed_signed_launch
-from loom_capacity_manager.executable_contracts import ExecutableExecutorInventoryV2, ExecutionContextV2, canonical_executable_bytes
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorInventoryV2,
+    ExecutionContextV2,
+    canonical_executable_bytes,
+)
 from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
 
 
@@ -77,6 +81,7 @@ def test_inventory_parser_keeps_legacy_version_and_rejects_duplicate_version():
 
 def test_typed_inventory_confirmation_matches_actual_journal(tmp_path):
     from hashlib import sha256
+
     from loom_capacity_executor.journal import ExecutorJournal
     module = import_module("loom_capacity_manager.typed_inventory_contracts")
     value = typed_inventory()
@@ -86,3 +91,10 @@ def test_typed_inventory_confirmation_matches_actual_journal(tmp_path):
             journal.append(event, sha256(payload).hexdigest(), object_kind="inventory",
                 object_id=str(value.executor_incarnation), payload=payload)
         assert module.typed_inventory_confirmation_journal_head(value) == (journal.head.sequence, journal.head.digest)
+
+
+async def test_legacy_inventory_store_rejects_typed_contract_before_database_access():
+    from loom_capacity_manager.execution_store import CapacityExecutionStore
+    from loom_capacity_manager.store import ExecutionConflictError
+    with pytest.raises(ExecutionConflictError, match="inventory contract"):
+        await CapacityExecutionStore().ingest_executor_inventory(None, typed_inventory())
