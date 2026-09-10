@@ -106,7 +106,7 @@ def load_journal_inventory(journal: ExecutorJournal, record: JournalRecord) -> E
             raise ValueError("invalid inventory event")
         if record.sequence != inventory.journal_sequence + len(frames):
             raise ValueError("inventory batch sequence changed")
-        journal.assert_covers(inventory.journal_sequence, inventory.journal_digest)
+        journal.assert_evidence_covers(inventory.journal_sequence, inventory.journal_digest)
         previous = inventory.journal_digest
         for sequence, frame in enumerate(frames, start=inventory.journal_sequence + 1):
             event, kind, object_id, expected = frame
