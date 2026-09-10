@@ -1243,6 +1243,15 @@ an acknowledgement: the protected store must lock and persist it, then recheck
 authority before publication. Capability issuance additionally requires actual
 launch/bootstrap authority. Application trial lifecycles are not synthesized.
 
+Subject-agent HTTP authentication accepts exact V4 typed reporter history as
+well as legacy V3 applications. Build services use their own reporter token,
+not the management delegation credential. Identity authentication leaves pending
+build deployments pending and does not grant pool, operator or cross-owner scope.
+Rotated reporters retain identity for store-fenced cleanup. A retired epoch's
+retained admission closure permits only archive cleanup and exact receipt replay;
+it cannot deliver a fresh admission proposal or authorize a new acknowledgement.
+Source-bearing successor epochs retain their existing graph-consumer interlock.
+
 Submit a Slurm job held, durably bind it, then release under the exact current
 fence. Reconcile ambiguous submissions before retrying. The allocation grant
 binds owner, service subject, intent/slot, source candidate, attempt/lease,

@@ -273,6 +273,11 @@ async def authenticate_personal_subject_agent(
                     raise AuthorizationError("invalid capacity credentials")
                 epoch = current_epoch
                 management._execution_context(authority, epoch)
+            if epoch.manifest_payload.get("schema_version") == 4:
+                return await _authenticate_typed_reporter(
+                    session, epoch, reporter, token_sha256=token_sha256,
+                    archive_only=retained is not None,
+                )
             preparation = management._execution_preparation_from_row(epoch)
             if not isinstance(preparation, ExecutionPreparationV3):
                 raise AuthorizationError("invalid capacity credentials")
@@ -369,3 +374,51 @@ async def authenticate_personal_subject_agent(
             )
     except (CapacityStoreError, ValueError, KeyError) as exc:
         raise AuthorizationError("invalid capacity credentials") from exc
+
+
+async def _authenticate_typed_reporter(
+    session: AsyncSession, epoch: CapacityExecutionEpoch, reporter: CapacityDemandReporter,
+    *, token_sha256: str, archive_only: bool,
+) -> CapacityPrincipal:
+    """Authenticate V4 installation history without granting build readiness.
+
+    The immutable reader authenticates lifecycle transitions and historical
+    installation facts. Only this target reporter's state is checked here;
+    another owner's equivocation must not disable cleanup for this identity.
+    Source-bearing epochs remain closed until their graph consumer is connected.
+    """
+    from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
+
+    history = await _load_typed_immutable_history(session, epoch.execution_epoch)
+    binding = history.reporter_bindings.get(reporter.reporter_incarnation)
+    if binding is None:
+        raise AuthorizationError("invalid capacity credentials")
+    subject, token = binding
+    if (
+        token != token_sha256
+        or subject.subject_id != reporter.subject_id
+        or subject.subject_incarnation != reporter.subject_incarnation
+        or subject.configuration_generation != reporter.configuration_generation
+        or subject.deployment_generation != reporter.deployment_generation
+    ):
+        raise AuthorizationError("invalid capacity credentials")
+    tips = {origin.configuration.subject_id: origin.configuration
+        for origin in history.preparation.managed_application_origins}
+    tips.update({origin.configuration.subject_id: origin.configuration
+        for origin in history.preparation.managed_build_origins})
+    tips.update({identity: result.member.configuration for identity, result in history.latest.items()})
+    tip = tips.get(reporter.subject_id)
+    if tip is None or (
+        not archive_only and reporter.state != (
+            "current" if tip.demand_reporter_incarnation == reporter.reporter_incarnation else "fenced"
+        )
+    ):
+        raise AuthorizationError("invalid capacity credentials")
+    return CapacityPrincipal(
+        principal_id=f"personal-agent-{reporter.subject_id}-{reporter.reporter_incarnation}",
+        scopes=frozenset() if archive_only else frozenset({"capacity:report:demand"}),
+        subject_id=reporter.subject_id, subject_incarnation=reporter.subject_incarnation,
+        demand_reporter_incarnation=reporter.reporter_incarnation,
+        pool_id=None, pool_reporter_incarnation=None, executor_id=None,
+        executor_incarnation=None, executor_pool_generation=None,
+    )
