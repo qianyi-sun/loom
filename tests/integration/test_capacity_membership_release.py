@@ -1,11 +1,13 @@
 """Read-only predecessor release evidence for personal recreation."""
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import ObservedCommitmentV1, SubjectConfigurationV1
@@ -43,6 +45,7 @@ from loom_capacity_manager.models import (
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, sign_ownership
 from loom_capacity_manager.store import CapacityManagementStore, ConfigurationConflictError
+from loom_capacity_manager.store import _canonical_json_digest
 from tests.capacity_execution_fixtures import EXECUTOR_KEYS, executor_binding
 from tests.capacity_fixtures import demand_snapshot
 from tests.integration.test_capacity_grant_store import (
@@ -85,6 +88,34 @@ async def assert_sql_release_matches(
         {"subject": predecessor.subject_id, "incarnation": predecessor.subject_incarnation},
     )
     assert actual == expected
+
+
+async def assert_sql_release_rejected(
+    session: AsyncSession, predecessor: SubjectConfigurationV1
+) -> None:
+    with pytest.raises(DBAPIError) as failure:
+        async with session.begin_nested():
+            await session.scalar(
+                text("SELECT public.capacity_personal_predecessor_release_digest(:subject, :incarnation)"),
+                {"subject": predecessor.subject_id, "incarnation": predecessor.subject_incarnation},
+            )
+    assert failure.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.parametrize("microsecond", (0, 1, 100000, 999999))
+async def test_sql_release_timestamp_and_key_order_match_wire_encoding(
+    capacity_session: AsyncSession, microsecond: int
+) -> None:
+    at = datetime(2026, 9, 10, 12, 0, 0, microsecond, tzinfo=UTC)
+    await capacity_session.execute(text("SET LOCAL TIME ZONE 'America/Toronto'"))
+    assert await capacity_session.scalar(
+        text("SELECT public.capacity_personal_release_timestamp(:at)"), {"at": at}
+    ) == at.isoformat()
+    payload = {"released_at": at.isoformat(), "release_digest": "a" * 64}
+    assert await capacity_session.scalar(
+        text("SELECT public.capacity_personal_release_json_digest(CAST(:payload AS jsonb))"),
+        {"payload": json.dumps(payload)},
+    ) == _canonical_json_digest(payload)
 
 
 async def test_empty_release_set_is_stable_and_identity_bound(
@@ -190,6 +221,7 @@ async def test_quarantined_payload_attribution_blocks_only_its_exact_predecessor
     if same_predecessor:
         with pytest.raises(ConfigurationConflictError, match="unreleased observed commitments"):
             await release_digest(capacity_session, predecessor)
+        await assert_sql_release_rejected(capacity_session, predecessor)
     else:
         assert await release_digest(capacity_session, predecessor) != "0" * 64
 
@@ -238,6 +270,9 @@ async def test_every_unreleased_predecessor_intent_blocks_proof(
             capacity_session,
             SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload)),
         )
+    await assert_sql_release_rejected(
+        capacity_session, SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload))
+    )
 
 
 async def test_never_accepted_proposal_uses_existing_release_path(
@@ -305,6 +340,8 @@ async def test_never_accepted_proposal_uses_existing_release_path(
         (True, None),
         (True, "protected"),
         (True, "terminal"),
+        (True, "resealed-resource"),
+        (True, "resealed-execution"),
     ),
 )
 async def test_accepted_release_requires_exact_durable_witnesses(
@@ -370,7 +407,26 @@ async def test_accepted_release_requires_exact_durable_witnesses(
         )
     ).scalar_one()
     configuration = SubjectConfigurationV1.model_validate_json(json.dumps(subject.payload))
-    if tamper is None:
+    if tamper is not None and tamper.startswith("resealed-"):
+        terminal = (await capacity_session.scalars(select(CapacityExecutableTerminalInventoryEvidence))).one()
+        payload = deepcopy(terminal.evidence_payload)
+        if tamper == "resealed-resource":
+            payload["record"]["resources"]["memory_bytes"] += 1
+        else:
+            payload["inventory_execution"]["writer_epoch"] += 1
+        await _test_only_update_without_guard(
+            capacity_session,
+            table_name="capacity_executable_terminal_inventory_evidence",
+            trigger_name="capacity_executable_terminal_inventory_append_only_guard",
+            statement=update(CapacityExecutableTerminalInventoryEvidence)
+            .where(CapacityExecutableTerminalInventoryEvidence.id == terminal.id)
+            .values(evidence_payload=payload, evidence_digest=_canonical_json_digest(payload))
+            .execution_options(synchronize_session=False),
+        )
+        with pytest.raises(ConfigurationConflictError, match="terminal release witness is invalid"):
+            await release_digest(capacity_session, configuration)
+        await assert_sql_release_rejected(capacity_session, configuration)
+    elif tamper is None:
         original_digest = await release_digest(capacity_session, configuration)
         await assert_sql_release_matches(capacity_session, configuration)
         assert original_digest != "0" * 64
@@ -388,6 +444,7 @@ async def test_accepted_release_requires_exact_durable_witnesses(
             idempotency_key=UUID(int=21021),
         )
         assert await release_digest(capacity_session, configuration) == original_digest
+        await assert_sql_release_matches(capacity_session, configuration)
     else:
         if tamper == "protected":
             row = (
@@ -538,7 +595,7 @@ async def test_released_legacy_reservation_requires_its_durable_evidence(
         await assert_sql_release_matches(capacity_session, configuration)
 
 
-@pytest.mark.parametrize("tamper", (None, "classification", "ownership"))
+@pytest.mark.parametrize("tamper", (None, "classification", "ownership", "duplicate-classification"))
 async def test_legacy_physical_release_retains_authenticated_inventory(
     capacity_session: AsyncSession, tamper: str | None
 ) -> None:
@@ -655,6 +712,18 @@ async def test_legacy_physical_release_retains_authenticated_inventory(
         await assert_sql_release_matches(capacity_session, configuration)
         return
     observation = (await capacity_session.scalars(select(CapacityExecutorObservation))).one()
+    if tamper == "duplicate-classification":
+        await capacity_session.execute(
+            update(CapacityExecutorObservation).where(CapacityExecutorObservation.id == observation.id)
+            .values(classification_payload=[
+                {"physical_identity": "job-predecessor-terminal", "classification": "foreign"},
+                {"physical_identity": "job-predecessor-terminal", "classification": "authenticated"},
+            ]).execution_options(synchronize_session=False)
+        )
+        with pytest.raises(ConfigurationConflictError, match="legacy predecessor"):
+            await release_digest(capacity_session, configuration)
+        await assert_sql_release_rejected(capacity_session, configuration)
+        return
     if tamper == "classification":
         observation.classification_payload = [
             {

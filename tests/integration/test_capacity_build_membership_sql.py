@@ -39,12 +39,19 @@ async def test_sql_build_identity_rejects_absent_or_zero_owners(capacity_session
     assert error.value.orig.sqlstate == "23514"
 
 
-async def test_sql_build_identity_helper_has_fixed_path_and_no_public_execute(capacity_session):
+@pytest.mark.parametrize("signature", (
+    "capacity_personal_build_subject_id(uuid,uuid)",
+    "capacity_personal_predecessor_release_digest(uuid,uuid)",
+    "capacity_personal_release_timestamp(timestamptz)",
+    "capacity_personal_release_json_text(jsonb)",
+    "capacity_personal_release_json_digest(jsonb)",
+))
+async def test_sql_build_identity_helper_has_fixed_path_and_no_public_execute(capacity_session, signature):
     row = (await capacity_session.execute(text(
         "SELECT prosecdef, proconfig, EXISTS (SELECT 1 FROM aclexplode(coalesce(proacl, acldefault('f', proowner))) "
         "WHERE grantee = 0 AND privilege_type = 'EXECUTE') FROM pg_proc "
-        "WHERE oid = 'public.capacity_personal_build_subject_id(uuid,uuid)'::regprocedure"
-    ))).one()
+        "WHERE oid = CAST(:signature AS regprocedure)"
+    ), {"signature": "public." + signature})).one()
     assert not row[0]
     assert "search_path=pg_catalog" in row[1]
     assert not row[2]
