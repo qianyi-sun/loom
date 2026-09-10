@@ -50,6 +50,8 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
             checkpoint = plan.prepare(journal)
             journal.commit_checkpoint(central_sequence=checkpoint.sequence,
                 central_digest=checkpoint.record_digest)
+            runtime.client.journal_sequence = checkpoint.sequence
+            runtime.client.journal_digest = checkpoint.record_digest
             journal.close()
             journal.__enter__()
         protected_digest = "1" * 64
@@ -79,5 +81,14 @@ async def test_delayed_release_requires_exact_historical_terminal_and_protected_
         result = await runtime._release(release)
         assert result.status == ("released" if tamper == "none" else "quarantined")
         assert len(runtime.client.releases) == (tamper == "none")
+        if compact and tamper == "none":
+            plan = plan_runtime_checkpoint(runtime, await runtime.client.executable_checkpoint())
+            retained = set(plan.retained_sequences)
+            assert not any(record.sequence in retained for record in journal.latest_records("job"))
+            assert not any(record.sequence in retained for record in journal.latest_records("bootstrap"))
+            checkpoint = plan.prepare(journal)
+            journal.commit_checkpoint(central_sequence=checkpoint.sequence,
+                central_digest=checkpoint.record_digest)
+            assert runtime._load_launch(context.binding.intent_id) is None
     finally:
         journal.close()
