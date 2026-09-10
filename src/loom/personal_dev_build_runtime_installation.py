@@ -19,7 +19,7 @@ from loom_capacity_executor.launch_policy_set import (
 )
 from loom_capacity_executor.launch_renderer import OperatorLaunchProfileV2
 from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
-from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.contracts import ProfileReferenceV1, canonical_digest
 from loom_capacity_manager.executable_contracts import CandidateBindingV2
 
 
@@ -38,6 +38,7 @@ class PersonalBuildRuntimeInstallation:
     candidate: CandidateBindingV2
     template_sha256: str
     release_evidence_sha256: str
+    profiles: tuple[ProfileReferenceV1, ...]
     pools: tuple[PersonalBuildPoolInstallation, ...]
 
 
@@ -98,4 +99,4 @@ eligible domains. Neither a matching image alone nor a partial policy is enough.
             builder_image=images.builder_image, agent_image=images.agent_image))
     return PersonalBuildRuntimeInstallation(candidate=publication.candidate,
         template_sha256=canonical_digest(template), release_evidence_sha256=publication.release_evidence_sha256,
-        pools=tuple(result))
+        profiles=template.profiles, pools=tuple(result))

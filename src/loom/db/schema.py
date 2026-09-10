@@ -1114,6 +1114,37 @@ class PersonalDevCandidateBuildAttempt(Base):
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
+class PersonalDevBuildPlatformRequest(Base):
+    """Retained cold platform demand; not an assignment or physical grant."""
+
+    __tablename__ = "personal_dev_build_platform_requests"
+    __table_args__ = (
+        CheckConstraint("platform IN ('linux/amd64', 'linux/arm64') AND attempt_lease_epoch > 0 "
+            "AND deployment_generation > 0", name="personal_build_request_identity_check"),
+        CheckConstraint("bucket_id ~ '^build-[0-9a-f]{64}$' "
+            "AND source_binding_sha256 ~ '^[0-9a-f]{64}$' AND source_binding_sha256 <> repeat('0',64) "
+            "AND runtime_installation_sha256 ~ '^[0-9a-f]{64}$' AND runtime_installation_sha256 <> repeat('0',64)",
+            name="personal_build_request_digest_check"),
+        CheckConstraint("cancelled_at IS NULL OR cancelled_at >= created_at", name="personal_build_request_time_check"),
+        UniqueConstraint("attempt_id", "attempt_lease_epoch", "platform", name="personal_build_request_attempt_uidx"),
+        Index("personal_build_request_owner_pending_idx", "owner_user_id", "subject_id", "subject_incarnation", "cancelled_at"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    owner_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    candidate_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("personal_dev_candidates.id", ondelete="RESTRICT"), nullable=False)
+    attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("personal_dev_candidate_build_attempts.id", ondelete="RESTRICT"), nullable=False)
+    attempt_lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bucket_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_binding_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_installation_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    cancelled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
 class PersonalDevNativeBuilderAgent(Base):
     """Durable signed identity and secret-free inventory for one native agent."""
 

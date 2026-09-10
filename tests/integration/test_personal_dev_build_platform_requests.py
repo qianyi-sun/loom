@@ -216,14 +216,15 @@ async def test_expired_lease_tombstone_does_not_cancel_next_lease(sessions, tmp_
     registration = await _seed_running_attempt(sessions, now=_NOW)
     member, runtime = build_service(tmp_path, registration)
     expired = registration.build_attempt.lease_expires_at
+    next_epoch = registration.build_attempt.lease_epoch + 1
     async with sessions.begin() as session:
         assert await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
             platforms=("linux/arm64",), now=expired) == 1
         await session.execute(update(PersonalDevCandidateBuildAttempt).where(
             PersonalDevCandidateBuildAttempt.id == registration.build_attempt.id).values(
-                lease_epoch=2, lease_expires_at=expired + timedelta(seconds=60)))
+                lease_epoch=next_epoch, lease_expires_at=expired + timedelta(seconds=60)))
         renewed = replace(registration, build_attempt=replace(registration.build_attempt,
-            lease_epoch=2, lease_expires_at=expired + timedelta(seconds=60)))
+            lease_epoch=next_epoch, lease_expires_at=expired + timedelta(seconds=60)))
         rows = await module.stage_platform_requests(session, renewed, member=member, runtime=runtime,
             platforms=("linux/arm64",), now=expired)
         assert rows[0].cancelled_at is None

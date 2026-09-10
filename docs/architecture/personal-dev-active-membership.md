@@ -1211,6 +1211,27 @@ the durable caller must select unassigned platform requests under the current
 fence and include assignments and cleanup-unproven commitments in the same
 snapshot. Removing pending demand is not physical release. Intake stays disabled.
 
+Migration `0141` adds management-owned durable platform requests. Staging locks
+and re-reads the whole build lease and source candidate, binds the exact owner,
+build-service incarnation/deployment, approved runtime installation and native
+platform, and atomically retains both requested platforms. Concurrent retries
+reuse the same IDs. Unrelated membership revisions and capacity-only changes do
+not replace the installation; a new deployment cannot reuse an old request.
+The bounded reader revalidates source/installation facts and emits only current,
+uncancelled requests. It is not yet the complete assignment/commitment snapshot.
+Cancellation remains available after service disablement, closes only the exact
+lease's demand and cannot resurrect it. A parent-serialized tombstone closes even
+a platform not yet staged; cancellation therefore cannot race a late insertion
+back into pending demand. Expired-lease cleanup derives identity without inventing
+a live lease, and does not cancel a later lease. Cancellation rejects never-issued
+future epochs and requires the current claimant for the current epoch.
+SQL preserves identities and prevents
+deletion/truncation; downgrade refuses retained requests. This queue neither
+requires a native agent nor creates a grant. Assignment consumption, protected
+build admission, capability issuance and readiness remain interlocked until
+their integrated lifecycle exists. Retention reclamation must eventually require
+authoritative cleanup; cancelled rows are not proof of physical release.
+
 Submit a Slurm job held, durably bind it, then release under the exact current
 fence. Reconcile ambiguous submissions before retrying. The allocation grant
 binds owner, service subject, intent/slot, source candidate, attempt/lease,
