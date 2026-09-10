@@ -132,6 +132,17 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                     proof = render_typed_signed_launch(context).ownership_proof
                     assert proof.metadata.subject_authority == resolved.authority
                     assert proof.metadata.binding.candidate == member.acknowledgement.candidate
+                    from loom_capacity_manager.execution_store import CapacityExecutionStore
+
+                    verifier = CapacityExecutionStore()
+                    assert await verifier._inventory_subject_authority_matches(
+                        reader, epoch, context.binding, proof)
+                    changed_authority = proof.metadata.subject_authority.model_copy(update={
+                        "membership": proof.metadata.subject_authority.membership.model_copy(update={"head_sha256": "f" * 64})})
+                    changed_proof = proof.model_copy(update={"metadata": proof.metadata.model_copy(update={
+                        "subject_authority": changed_authority})})
+                    assert not await verifier._inventory_subject_authority_matches(
+                        reader, epoch, context.binding, changed_proof)
                 if member.revision != sealed.membership.revision:
                     assert resolved.authority.membership.head_sha256 != sealed.membership.head_sha256
                 if member.purpose == "personal-build-worker":
@@ -161,5 +172,11 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                 subject_id=selected.configuration.subject_id, require_current=False)
             assert historical.configuration == selected.configuration
             assert historical.authority.membership.revision == selected.revision
+            # Cleanup authenticates the retained event after another generation
+            # becomes current; it must not reinterpret it using today's member.
+            old_context = typed_context(purpose="application-worker", resolved=historical, execution=sealed.execution)
+            old_proof = render_typed_signed_launch(old_context).ownership_proof
+            assert await CapacityExecutionStore()._inventory_subject_authority_matches(
+                reader, epoch, old_context.binding, old_proof)
     finally:
         await engine.dispose()
