@@ -65,8 +65,8 @@ def application_origin_payload(configuration, acknowledgement, *, configuration_
         base_projection=projection, acknowledgement=acknowledgement)
 
 
-async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None, activate=True, retired_source=None):
-    fleet = fleet_with_development_template()
+async def typed_sql_execution(session, *, max_subjects=8, managed_projection=None, activate=True, retired_source=None, owner_submission_rate_per_minute=0):
+    fleet = fleet_with_development_template(owner_submission_rate_per_minute=owner_submission_rate_per_minute)
     fixture = await setup_execution(session, execution_policy=execution_policy(), fleet=fleet)
     origins = ()
     if managed_projection is not None:

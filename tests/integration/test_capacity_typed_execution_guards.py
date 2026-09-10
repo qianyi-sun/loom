@@ -1,26 +1,41 @@
 """Typed SQL execution reads must preserve real mixed owner allocation history."""
 
+import json
+
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from loom_capacity_manager.models import CapacityAllocationEpoch, CapacityAuthorityState
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorHeartbeatV2,
+    ExecutableReservationProposalV2,
+    ExecutionFenceV2,
+)
+from loom_capacity_manager.execution_store import CapacityExecutionStore
+from loom_capacity_manager.models import (
+    CapacityAccountPolicy,
+    CapacityAllocationEpoch,
+    CapacityAuthorityState,
+    CapacityCandidate,
+)
 from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import WriterFence
+from loom_capacity_manager.store import ExecutionConflictError, ReportEquivocationError, WriterFence
+from loom_capacity_manager.typed_inventory_contracts import ExecutableExecutorInventoryV3
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
     typed_sql_execution,
 )
 from tests.capacity_fixtures import pool_observation
-from tests.integration.test_capacity_mixed_membership_store import apply
+from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_typed_membership_demand import report
 from tests.integration.test_capacity_typed_membership_execution import typed_management
 
 
-async def sealed_owners(session):
-    _legacy, preparation, _fleet, execution = await typed_sql_execution(session)
+async def sealed_owners(session, *, owner_rate=8):
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(session,
+        owner_submission_rate_per_minute=owner_rate)
     management = typed_management(preparation)
     authority = await session.get(CapacityAuthorityState, 1)
     authority.increase_freeze = False
@@ -59,7 +74,8 @@ async def test_typed_sql_pinned_and_current_reads_preserve_application_and_build
         """), parameters)
         assert pinned["configuration"] == member.configuration.model_dump(mode="json")
         assert pinned["acknowledgement"] == member.acknowledgement.model_dump(mode="json")
-        assert pinned["purpose"] == member.purpose
+        assert pinned["purpose"] == (
+            "application-worker" if member.purpose == "personal-application" else "personal-build-worker")
         query = text("SELECT public.capacity_membership_target_current(:allocation, :subject, :incarnation)")
         if member.purpose == "personal-application":
             assert await capacity_session.scalar(query, parameters) is True
@@ -68,3 +84,78 @@ async def test_typed_sql_pinned_and_current_reads_preserve_application_and_build
             with pytest.raises(DBAPIError):
                 async with capacity_session.begin_nested():
                     await capacity_session.scalar(query, parameters)
+
+
+@pytest.mark.parametrize("change", ("equivocal", "update", "destroy", "candidate"))
+async def test_typed_sql_currentness_isolates_owner_changes_without_swallowing_corruption(capacity_session, change):
+    preparation, execution, allocation, members = await sealed_owners(capacity_session)
+    selected, other = members[1], members[3]
+    if change == "equivocal":
+        with pytest.raises(ReportEquivocationError):
+            await typed_management(preparation).ingest_demand_snapshot(capacity_session,
+                report(selected.configuration).model_copy(update={"pending_unassigned": ()}), actor="owner-a")
+    elif change == "candidate":
+        await capacity_session.execute(update(CapacityCandidate).where(
+            CapacityCandidate.subject_id == selected.configuration.subject_id).values(
+                source_payload={"publication_sha256": "f" * 64}))
+    else:
+        original = application_request(preparation, execution, owner=88010, revision=1)
+        await apply(capacity_session, transition(original, change, revision=4), key=121010)
+    query = text("SELECT public.capacity_membership_target_current(:allocation, :subject, :incarnation)")
+    parameters = {"allocation": allocation.allocation_epoch, "subject": selected.configuration.subject_id,
+        "incarnation": selected.configuration.subject_incarnation}
+    if change == "candidate":
+        with pytest.raises(DBAPIError, match="candidate evidence changed"):
+            async with capacity_session.begin_nested():
+                await capacity_session.scalar(query, parameters)
+        return
+    assert await capacity_session.scalar(query, parameters) is False
+    assert await capacity_session.scalar(query, {**parameters,
+        "subject": other.configuration.subject_id,
+        "incarnation": other.configuration.subject_incarnation}) is True
+    if change == "update":
+        from loom_capacity_manager.membership_launch_authority import (
+            resolve_allocation_launch_subject,
+        )
+        from loom_capacity_manager.models import CapacityExecutionEpoch
+        from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
+
+        epoch = await capacity_session.get(CapacityExecutionEpoch, execution.execution_epoch)
+        resolved = await resolve_allocation_launch_subject(capacity_session, epoch, allocation,
+            subject_id=selected.configuration.subject_id, require_current=False)
+        context = typed_context(purpose="application-worker", resolved=resolved,
+            execution=ExecutionFenceV2.model_validate_json(json.dumps(allocation.complete_payload["execution"])))
+        assert await capacity_session.scalar(text(
+            "SELECT public.capacity_membership_cleanup_reporter(CAST(:binding AS jsonb), :reporter)"),
+            {"binding": json.dumps(context.binding.model_dump(mode="json")),
+             "reporter": selected.acknowledgement.reporter_incarnation}) is True
+
+
+@pytest.mark.parametrize("owner_rate", (0, 8))
+async def test_typed_manager_can_create_real_application_reservation_without_build_admission(capacity_session, owner_rate):
+    preparation, execution, allocation, members = await sealed_owners(capacity_session, owner_rate=owner_rate)
+    first = allocation.complete_payload["hypothetical_launch_rank"][0]
+    executor = next(item for item in preparation.executors if item.pool_id == first["pool_id"])
+    store = CapacityExecutionStore()
+    common = dict(execution=execution, executor_id=executor.executor_id,
+        executor_incarnation=executor.executor_incarnation, pool_id=executor.pool_id,
+        pool_generation=executor.pool_generation, journal_sequence=0, journal_digest="0" * 64)
+    await store.heartbeat_executor(capacity_session, ExecutableExecutorHeartbeatV2(**common, heartbeat_sequence=1))
+    await store.ingest_typed_executor_inventory(capacity_session,
+        ExecutableExecutorInventoryV3(**common, inventory_sequence=1), management=typed_management(preparation))
+    authority = await capacity_session.get(CapacityAuthorityState, 1)
+    assert authority.global_submission_rate_ceiling > 0
+    for member in members:
+        account = await capacity_session.scalar(select(CapacityAccountPolicy).where(
+            CapacityAccountPolicy.configuration_epoch == execution.configuration_epoch,
+            CapacityAccountPolicy.account_id == member.configuration.account_id))
+        assert account is not None, member.configuration.account_id
+        assert account.submission_rate_per_minute == owner_rate
+    if owner_rate == 0:
+        with pytest.raises(ExecutionConflictError, match="launch rate is exhausted"):
+            await store.next_pool_work(capacity_session, executor)
+        return
+    proposal = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    assert proposal.subject_id in {item.configuration.subject_id for item in members
+        if item.purpose == "personal-application"}
