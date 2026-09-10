@@ -78,7 +78,10 @@ def verify_publication_set(
         raise ValueError("publication set exceeds aggregate byte ceiling")
     # Revalidate frozen models: dataclass/model construction and model_copy can
     # otherwise bypass validators. Use the copied validated snapshot throughout.
-    task = TaskConfig.model_validate(task.model_dump(mode="python"))
+    task = TaskConfig.model_validate(task.model_dump(mode="python", warnings=False))
+    sidecar_names = tuple(sidecar.name for sidecar in task.environment.sidecars)
+    if task.environment.os != "linux" or len(set(sidecar_names)) != len(sidecar_names):
+        raise ValueError("publication set requires Linux and unambiguous sidecar names")
     unsigneds: list[PublicationUnsignedInput] = []
     for entry in expected:
         if type(entry) is not ExpectedPublication:

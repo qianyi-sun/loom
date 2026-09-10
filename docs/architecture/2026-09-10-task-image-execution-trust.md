@@ -244,7 +244,9 @@ the exact Dockerfile-backed component set derived from a frozen `TaskConfig`.
 Its expected full unsigned identities, original envelope SHA-256 pins, task
 snapshot and keyset counters/digest must come from an independently authenticated
 execution grant; they are not inferred from the envelopes under examination.
-Prebuilt-only sidecars are not extra builder components.
+Prebuilt-only sidecars are not extra builder components. Duplicate sidecar names,
+including Dockerfile/prebuilt collisions, and non-Linux task snapshots are refused
+before the expected set is derived.
 
 The bounded inputs require unique lexical component ordering and common native
 task/materialization, attempt/lease/grant/session, frozen-plan, environment,
