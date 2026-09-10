@@ -224,3 +224,14 @@ def test_matching_digest_pins_do_not_replace_cryptographic_verification(target):
         data["expected_snapshot_sha256"] = hashlib.sha256(data["keyset_wire"]).hexdigest()
     with pytest.raises(ValueError):
         module().verify_publication_set(**data)
+
+
+def test_existing_publication_producer_task_first_order_is_accepted():
+    data = fixture()
+    pairs = {entry.unsigned.component: (entry, wire) for entry, wire in zip(data["expected"], data["publication_wires"], strict=True)}
+    # PublicationSnapshot and TaskImageBuildPlan both emit task first, then
+    # lexical sidecars. The execution reader must accept that exact sequence.
+    data["expected"] = tuple(pairs[name][0] for name in ("task", "sidecar:db"))
+    data["publication_wires"] = tuple(pairs[name][1] for name in ("task", "sidecar:db"))
+    result = module().verify_publication_set(**data)
+    assert tuple(item.statement.component for item in result.publications) == ("task", "sidecar:db")
