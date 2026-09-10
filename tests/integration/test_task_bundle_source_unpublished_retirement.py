@@ -5,13 +5,25 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy.exc import DBAPIError
 
-from loom.db.schema import Task, TaskBundleSourceReference, TaskImageMaterialization
+from loom.db.schema import (
+    Task,
+    TaskBundleSourceReference,
+    TaskImageMaterialization,
+    Trial,
+    TrialTaskImageMaterialization,
+)
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.task_image_materializations import (
+    TaskImageLeaseConflictError,
     claim_task_image_materialization,
+    claim_task_image_registry_gc,
+    complete_task_image_registry_gc,
     fail_task_image_materialization,
+    record_task_image_publication,
 )
+from tests.integration.test_service_execution_leases import _reserve, _seed_ready_trial
 from tests.integration.test_task_bundle_source_admission import _task
 from tests.integration.test_task_bundle_source_admission import journal as journal
 from tests.integration.test_task_bundle_source_journal import (
@@ -120,3 +132,130 @@ async def test_recorded_publication_stays_with_registry_cleanup(journal, tmp_pat
         assert await session.get(TaskBundleSourceReference, (
             spec.id, "materialization", str(image_id),
         )) is not None
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_trial_or_unreleased_execution_pins_unpublished_source(journal, tmp_path, terminal):
+    spec, image_id = await _image(journal, tmp_path)
+    async with journal.begin() as session:
+        # A historical image link is authoritative independently of the current
+        # catalog's config/source (the seed inserts a different current revision).
+        trial_id, target = await _seed_ready_trial(session, now=NOW, task_id=spec.catalog_task_id)
+        session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image_id))
+        if terminal:
+            await _reserve(session, trial_id=trial_id, target=target, now=NOW)
+            trial = await session.get(Trial, trial_id)
+            trial.state = "succeeded"
+            trial.result = {"reward": 1.0}
+    assert await _observe(journal, image_id) == "pinned"
+    assert await _observe(journal, image_id, INSTANT + timedelta(days=2)) == "pinned"
+
+
+async def test_source_release_failure_rolls_back_retirement(journal, tmp_path, monkeypatch):
+    spec, image_id = await _image(journal, tmp_path)
+    assert await _observe(journal, image_id) == "observing"
+    module = importlib.import_module("loom_control_plane.task_image_materializations")
+    release = module.release_task_image_source
+
+    async def fail_after_release(session, *, row):
+        await release(session, row=row)
+        raise RuntimeError("injected after source release")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "release_task_image_source", fail_after_release)
+        with pytest.raises(RuntimeError, match="injected"):
+            await _observe(journal, image_id, INSTANT + timedelta(days=1))
+    async with journal() as session:
+        image = await session.get(TaskImageMaterialization, image_id)
+        assert image.state == "queued" and image.unreferenced_at == INSTANT
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is not None
+    assert await _observe(journal, image_id, INSTANT + timedelta(days=1)) == "retired"
+
+
+async def test_busy_image_fence_leaves_source_for_the_claim_owner(journal, tmp_path):
+    spec, image_id = await _image(journal, tmp_path)
+    assert await _observe(journal, image_id) == "observing"
+    async with journal.begin() as owner:
+        image = await claim_task_image_materialization(owner, builder_id="builder", cpu_arch="x86_64")
+        assert image.id == image_id
+        with pytest.raises(DBAPIError, match="lock"):
+            await _observe(journal, image_id, INSTANT + timedelta(days=1))
+    assert await _observe(journal, image_id, INSTANT + timedelta(days=1)) == "ineligible"
+    async with journal() as session:
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is not None
+
+
+async def test_unpublished_retirement_rejects_backward_observation(journal, tmp_path):
+    _, image_id = await _image(journal, tmp_path)
+    assert await _observe(journal, image_id) == "observing"
+    with pytest.raises(ValueError, match="backward"):
+        await _observe(journal, image_id, INSTANT - timedelta(seconds=1))
+    async with journal() as session:
+        assert (await session.get(TaskImageMaterialization, image_id)).unreferenced_at == INSTANT
+
+
+async def test_late_publication_after_unpublished_retirement_remains_collectible(journal, tmp_path):
+    spec, image_id = await _image(journal, tmp_path)
+    async with journal.begin() as session:
+        image = await claim_task_image_materialization(session, builder_id="builder", cpu_arch="x86_64")
+        epoch = image.lease_epoch
+        await fail_task_image_materialization(
+            session, materialization_id=image_id, builder_id="builder", lease_epoch=epoch,
+            retryable=False, failure_reason="timeout", failure_message="unknown push", registry_images={},
+        )
+    assert await _observe(journal, image_id) == "observing"
+    assert await _observe(journal, image_id, INSTANT + timedelta(days=1)) == "retired"
+    async with journal.begin() as session:
+        await record_task_image_publication(
+            session, materialization_id=image_id, builder_id="builder", attempt_count=1,
+            lease_epoch=epoch, component="task", registry_image="registry/image@sha256:" + "a" * 64,
+        )
+    async with journal.begin() as session:
+        image = await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
+        assert image is not None and image.id == image_id
+        gc_epoch = image.lease_epoch
+        assert image.registry_image_history
+        assert await session.get(TaskBundleSourceReference, (
+            spec.id, "materialization", str(image_id),
+        )) is None
+    async with journal.begin() as session:
+        image = await complete_task_image_registry_gc(
+            session, materialization_id=image_id, gc_id="gc", lease_epoch=gc_epoch,
+        )
+        assert image.state == "retired" and not image.registry_image_history
+
+
+async def test_new_publication_during_gc_fences_old_cleanup_acknowledgement(journal, tmp_path):
+    _, image_id = await _image(journal, tmp_path)
+    async with journal.begin() as session:
+        image = await claim_task_image_materialization(session, builder_id="builder", cpu_arch="x86_64")
+        epoch = image.lease_epoch
+        await fail_task_image_materialization(
+            session, materialization_id=image_id, builder_id="builder", lease_epoch=epoch,
+            retryable=False, failure_reason="timeout", failure_message="partial push",
+            registry_images={"task": "registry/image@sha256:" + "a" * 64},
+        )
+    async with journal.begin() as session:
+        image = await claim_task_image_registry_gc(session, gc_id="gc", grace_hours=0)
+        gc_epoch = image.lease_epoch
+    async with journal.begin() as session:
+        await record_task_image_publication(
+            session, materialization_id=image_id, builder_id="builder", attempt_count=1,
+            lease_epoch=epoch, component="task", registry_image="registry/image@sha256:" + "b" * 64,
+        )
+    async with journal() as session:
+        with pytest.raises(TaskImageLeaseConflictError):
+            await complete_task_image_registry_gc(
+                session, materialization_id=image_id, gc_id="gc", lease_epoch=gc_epoch,
+            )
+        await session.rollback()
+    async with journal.begin() as session:
+        image = await claim_task_image_registry_gc(session, gc_id="gc2", grace_hours=0)
+        assert image is not None and image.id == image_id and image.lease_epoch > gc_epoch
+        assert {entry["registry_image"] for entry in image.registry_image_history} == {
+            "registry/image@sha256:" + "a" * 64, "registry/image@sha256:" + "b" * 64,
+        }
