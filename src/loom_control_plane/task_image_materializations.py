@@ -20,8 +20,10 @@ from loom.db.schema import (
 )
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    _assert_no_pending_task_image_writes,
     admit_task_image_source,
     current_task_image_reference,
+    release_task_image_source,
     required_task_image_components,
     validate_task_image_registry_images,
 )
@@ -233,6 +235,13 @@ async def claim_task_image_materialization(
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
 ) -> TaskImageMaterialization | None:
     """Atomically claim queued work or recover one expired lease."""
+    _assert_no_pending_task_image_writes(session)
+    # Queue maintenance writes precede candidate selection. Establish retained
+    # ownership before those writes, not only after learning the candidate's
+    # source kind. An AUTOCOMMIT lease cannot keep any admission lock atomic.
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     await session.execute(
         update(TaskImageMaterialization)
@@ -272,10 +281,12 @@ async def claim_task_image_materialization(
         )
         .order_by(TaskImageMaterialization.created_at, TaskImageMaterialization.id)
         .limit(1)
+        .execution_options(populate_existing=True)
         .with_for_update(skip_locked=True)
     )
     if row is None:
         return None
+    await admit_task_image_source(session, row=row)
     row.state = "claimed"
     row.claimed_by = builder_id
     row.lease_epoch += 1
@@ -310,9 +321,11 @@ async def _locked_owned_materialization(
     allowed_states: tuple[str, ...],
     now: datetime,
 ) -> TaskImageMaterialization:
+    _assert_no_pending_task_image_writes(session)
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if (
@@ -336,14 +349,17 @@ async def start_task_image_materialization(
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
 ) -> TaskImageMaterialization:
     now = datetime.now(UTC)
-    row = await _locked_owned_materialization(
-        session,
-        materialization_id=materialization_id,
-        builder_id=builder_id,
-        lease_epoch=lease_epoch,
-        allowed_states=("claimed",),
-        now=now,
-    )
+    _assert_no_pending_task_image_writes(session)
+    with session.no_autoflush:
+        row = await _locked_owned_materialization(
+            session,
+            materialization_id=materialization_id,
+            builder_id=builder_id,
+            lease_epoch=lease_epoch,
+            allowed_states=("claimed",),
+            now=now,
+        )
+    await admit_task_image_source(session, row=row)
     row.state = "running"
     row.started_at = now
     row.lease_expires_at = _lease_deadline(now=now, lease_seconds=lease_seconds)
@@ -659,6 +675,9 @@ async def complete_task_image_registry_gc(
     lease_epoch: int,
 ) -> TaskImageMaterialization:
     """Commit deletion only for the current owner, requeuing raced references."""
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     row = await _locked_owned_materialization(
         session,
@@ -669,6 +688,8 @@ async def complete_task_image_registry_gc(
         now=now,
     )
     referenced = bool(await session.scalar(select(_durable_reference_exists(row))))
+    if referenced:
+        await admit_task_image_source(session, row=row)
     row.registry_images = {}
     row.registry_image_history = []
     row.claimed_by = None
@@ -687,6 +708,7 @@ async def complete_task_image_registry_gc(
     else:
         row.state = "retired"
         row.finished_at = now
+        await release_task_image_source(session, row=row)
     await session.flush()
     return row
 

@@ -159,3 +159,20 @@ async def test_start_rechecks_current_owner_instead_of_cached_claim(journal, tmp
     async with journal() as session:
         image = await session.get(TaskImageMaterialization, image_id)
         assert (image.state, image.claimed_by, image.lease_epoch) == ("claimed", "replacement", 2)
+
+
+@pytest.mark.parametrize("isolation", ["READ COMMITTED", "AUTOCOMMIT"])
+async def test_missing_image_grant_lookup_does_not_flush_unrelated_pending_task(journal, isolation):
+    sessions = async_sessionmaker(
+        journal.kw["bind"].execution_options(isolation_level=isolation), expire_on_commit=False,
+    )
+    pending = Task(id="pending-" + uuid4().hex, checksum="f" * 64, config={})
+    async with sessions() as session:
+        session.add(pending)
+        assert await get_trial_task_image_execution_grant(
+            session, trial_id=uuid4(), cpu_arches=["x86_64"],
+        ) is None
+        assert pending in session.new
+        await session.rollback()
+    async with journal() as session:
+        assert await session.get(Task, pending.id) is None
