@@ -1,16 +1,24 @@
 """Typed SQL execution reads must preserve real mixed owner allocation history."""
 
+import hashlib
 import json
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from loom_capacity_manager.contracts import canonical_digest
 from loom_capacity_manager.executable_contracts import (
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
     ExecutableExecutorHeartbeatV2,
+    ExecutableIntentBindingV2,
+    ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
     ExecutionFenceV2,
 )
@@ -29,7 +37,6 @@ from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import ExecutionConflictError, ReportEquivocationError, WriterFence
 from loom_capacity_manager.typed_inventory_contracts import ExecutableExecutorInventoryV3
 from loom_capacity_manager.typed_membership_commands import (
-    PersonalMembershipMutationV2,
     PersonalMembershipResultV2,
 )
 from tests.capacity_build_membership_fixtures import (
@@ -57,7 +64,11 @@ async def sealed_owners(session, *, owner_rate=8):
         application = await apply(session, application_request(preparation, execution,
             owner=owner, revision=index * 2 + 1), key=121001 + index * 2)
         members.extend((build.member, application.member))
-        await management.ingest_demand_snapshot(session, report(application.member.configuration),
+        demand = report(application.member.configuration)
+        demand = demand.model_copy(update={"pending_unassigned": tuple(
+            item.model_copy(update={"attempt_ids": (str(UUID(int=owner * 100 + offset)),)})
+            for offset, item in enumerate(demand.pending_unassigned))})
+        await management.ingest_demand_snapshot(session, demand,
             actor="owner-agent")
     allocation = await seal_allocation(session, management, execution)
     return preparation, execution, allocation, members
@@ -149,8 +160,7 @@ async def test_typed_sql_currentness_isolates_owner_changes_without_swallowing_c
              "reporter": selected.acknowledgement.reporter_incarnation}) is True
 
 
-@pytest.mark.parametrize("owner_rate", (0, 8))
-async def test_typed_manager_can_create_real_application_reservation_without_build_admission(capacity_session, owner_rate):
+async def reservation_ready(capacity_session, *, owner_rate=8):
     preparation, execution, allocation, members = await sealed_owners(capacity_session, owner_rate=owner_rate)
     first = allocation.complete_payload["hypothetical_launch_rank"][0]
     executor = next(item for item in preparation.executors if item.pool_id == first["pool_id"])
@@ -169,6 +179,12 @@ async def test_typed_manager_can_create_real_application_reservation_without_bui
             CapacityAccountPolicy.account_id == member.configuration.account_id))
         assert account is not None, member.configuration.account_id
         assert account.submission_rate_per_minute == owner_rate
+    return store, executor, preparation, execution, members
+
+
+@pytest.mark.parametrize("owner_rate", (0, 8))
+async def test_typed_manager_can_create_real_application_reservation_without_build_admission(capacity_session, owner_rate):
+    store, executor, _preparation, _execution, members = await reservation_ready(capacity_session, owner_rate=owner_rate)
     if owner_rate == 0:
         with pytest.raises(ExecutionConflictError, match="launch rate is exhausted"):
             await store.next_pool_work(capacity_session, executor)
@@ -226,7 +242,7 @@ async def test_typed_sql_prefix_authenticates_lifecycle_after_rehashed_corruptio
         result["member"]["configuration"]["candidate_generation"] = 1
     else:
         request["command"]["projection"]["demand_reporter_token_sha256"] = "f" * 64
-    digest = canonical_digest(PersonalMembershipMutationV2.model_validate_json(json.dumps(request)))
+    digest = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
     member = PersonalMembershipResultV2.model_validate_json(json.dumps(result)).member
     head = canonical_membership_event_head(actor=row.actor, execution_epoch=row.execution_epoch,
         idempotency_key=row.idempotency_key, operation_id=row.operation_id,
@@ -245,3 +261,109 @@ async def test_typed_sql_prefix_authenticates_lifecycle_after_rehashed_corruptio
         with pytest.raises(DBAPIError, match="lifecycle"):
             async with capacity_session.begin_nested():
                 await capacity_session.scalar(query, {"epoch": execution.execution_epoch})
+
+
+async def test_typed_sql_admission_closure_accepts_membership_only_supersession(capacity_session):
+    from tests.integration.test_capacity_manager_execution_store import (
+        _insert_direct_admission_closure_acknowledgement,
+        _manager_closed_admission_closure_acknowledgement,
+    )
+
+    store, executor, preparation, execution, members = await reservation_ready(capacity_session)
+    proposal = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    await store.accept_reservation(capacity_session, ExecutableReservationAcceptanceV2(
+        execution=proposal.execution, tranche_id=proposal.tranche_id, proposal_digest=store.contract_digest(proposal),
+        pool_id=executor.pool_id, pool_generation=executor.pool_generation,
+        executor_id=executor.executor_id, executor_incarnation=executor.executor_incarnation, command_sequence=1))
+    binding = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(binding, ExecutableIntentBindingV2)
+    selected = next(member for member in members if member.configuration.subject_id == proposal.subject_id)
+    bootstrap = ExecutableBootstrapProposalV2(binding=binding, command_sequence=2, proposal_epoch=1,
+        bootstrap_sha256="7" * 64, expires_at=datetime.now(UTC) + timedelta(minutes=1))
+    await store.propose_bootstrap(capacity_session, bootstrap)
+    await store.acknowledge_bootstrap(capacity_session, ExecutableBootstrapAcknowledgementV2(
+        binding=binding, proposal_epoch=1, proposal_digest=store.contract_digest(bootstrap),
+        reporter_incarnation=selected.acknowledgement.reporter_incarnation, bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="8" * 64, protected_admission_sha256=selected.acknowledgement.protected_admission_sha256),
+        actor="owner-agent", idempotency_key=UUID(int=122001))
+    identity = dict(subject_id=selected.configuration.subject_id, subject_incarnation=selected.configuration.subject_incarnation,
+        reporter_incarnation=selected.acknowledgement.reporter_incarnation)
+    plan = await store.next_subject_admission_plan(capacity_session, **identity)
+    assert isinstance(plan, ExecutableAdmissionPlanProposalV2)
+    original = application_request(preparation, execution, owner=selected.owner_id.int, revision=selected.revision - 1)
+    await apply(capacity_session, transition(original, "capacity", revision=4), key=122002)
+    closure = await store.next_subject_admission_plan(capacity_session, **identity)
+    assert isinstance(closure, ExecutableAdmissionPlanClosureV2)
+    assert closure.close_reason == "allocation-superseded"
+    acknowledgement = _manager_closed_admission_closure_acknowledgement(plan).model_copy(update={
+        "closure_id": closure.closure_id, "close_reason": closure.close_reason})
+    with pytest.raises(DBAPIError):
+        async with capacity_session.begin_nested():
+            await _insert_direct_admission_closure_acknowledgement(capacity_session,
+                acknowledgement.model_copy(update={"reporter_incarnation": UUID(int=122003)}))
+    await _insert_direct_admission_closure_acknowledgement(capacity_session, acknowledgement)
+
+
+@pytest.mark.parametrize("retained", (False, True))
+async def test_typed_execution_reader_downgrade_preserves_intents_and_restores_legacy_functions(capacity_session, retained):
+    from alembic import command
+
+    from tests.integration.test_capacity_build_membership_sql import _config
+
+    if retained:
+        store, executor, _preparation, _execution, _members = await reservation_ready(capacity_session)
+        assert isinstance(await store.next_pool_work(capacity_session, executor), ExecutableReservationProposalV2)
+        with pytest.raises(RuntimeError, match="retained typed intents"):
+            async with capacity_session.begin_nested():
+                connection = await capacity_session.connection()
+                await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0019"))
+        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0020"
+    else:
+        original = await capacity_session.scalar(text("SELECT pg_get_functiondef('public.capacity_0020_legacy_target_current(bigint,uuid,uuid)'::regprocedure)"))
+        connection = await capacity_session.connection()
+        await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0019"))
+        restored = await capacity_session.scalar(text("SELECT pg_get_functiondef('public.capacity_membership_target_current(bigint,uuid,uuid)'::regprocedure)"))
+        assert restored == original.replace("FUNCTION public.capacity_0020_legacy_target_current(", "FUNCTION public.capacity_membership_target_current(")
+        await connection.run_sync(lambda sync: command.upgrade(_config(sync), "capacity_0020"))
+    permissions = (await capacity_session.execute(text("""
+        SELECT proname, proconfig, EXISTS (SELECT 1 FROM aclexplode(coalesce(proacl, acldefault('f', proowner)))
+          WHERE grantee=0 AND privilege_type='EXECUTE') AS public_execute
+        FROM pg_proc WHERE pronamespace='public'::regnamespace
+          AND (proname LIKE 'capacity_typed_membership_%' OR proname LIKE 'capacity_0020_%')
+    """))).all()
+    assert permissions
+    assert all("search_path=pg_catalog" in row.proconfig and not row.public_execute for row in permissions)
+
+
+@pytest.mark.parametrize("operation", ("capacity", "update", "destroy"))
+async def test_typed_sql_managed_lifecycle_keeps_original_installation_and_supersedes_pin(capacity_session, operation):
+    from tests.capacity_build_membership_fixtures import managed_application_request
+
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session,
+        managed_projection=development_projection(expected_configuration_epoch=1))
+    management = typed_management(preparation)
+    subject = preparation.managed_application_origins[0].configuration
+    await management.ingest_demand_snapshot(capacity_session, report(subject), actor="owner-agent")
+    allocation = await seal_allocation(capacity_session, management, execution)
+    await apply(capacity_session, managed_application_request(preparation, execution, operation=operation))
+    assert await capacity_session.scalar(text(
+        "SELECT public.capacity_membership_target_current(:allocation, :subject, :incarnation)"),
+        {"allocation": allocation.allocation_epoch, "subject": subject.subject_id,
+         "incarnation": subject.subject_incarnation}) is False
+
+
+@pytest.mark.parametrize("build", (False, True))
+async def test_typed_sql_prefix_keeps_same_purpose_recreation_and_original_root(capacity_session, build):
+    from tests.integration.test_capacity_typed_recreation_store import recreate
+
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    original = (build_request if build else application_request)(preparation, execution)
+    created = await apply(capacity_session, original)
+    disabled = transition(original, "destroy", revision=1)
+    await apply(capacity_session, disabled, key=100002)
+    successor = await apply(capacity_session, recreate(disabled, revision=2), key=100003)
+    prefix = await capacity_session.scalar(text("SELECT public.capacity_membership_event_prefix(:epoch, 3)"),
+        {"epoch": execution.execution_epoch})
+    assert prefix["members"][str(created.member.configuration.subject_id)] == successor.member.model_dump(mode="json")
+    assert successor.member.reincarnation.origin.subject_incarnation == created.member.configuration.subject_incarnation
