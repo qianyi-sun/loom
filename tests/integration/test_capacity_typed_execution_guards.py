@@ -1,33 +1,43 @@
 """Typed SQL execution reads must preserve real mixed owner allocation history."""
 
 import json
+from copy import deepcopy
 
 import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from loom_capacity_manager.contracts import canonical_digest
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorHeartbeatV2,
     ExecutableReservationProposalV2,
     ExecutionFenceV2,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
+from loom_capacity_manager.membership_digest import canonical_membership_event_head
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAllocationEpoch,
     CapacityAuthorityState,
     CapacityCandidate,
+    CapacityDemandReporter,
+    CapacityDeploymentGeneration,
+    CapacityPersonalMembershipEvent,
 )
 from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import ExecutionConflictError, ReportEquivocationError, WriterFence
 from loom_capacity_manager.typed_inventory_contracts import ExecutableExecutorInventoryV3
+from loom_capacity_manager.typed_membership_commands import (
+    PersonalMembershipMutationV2,
+    PersonalMembershipResultV2,
+)
 from tests.capacity_build_membership_fixtures import (
     application_request,
     build_request,
     typed_sql_execution,
 )
-from tests.capacity_fixtures import pool_observation
+from tests.capacity_fixtures import development_projection, pool_observation
 from tests.integration.test_capacity_mixed_membership_store import apply, transition
 from tests.integration.test_capacity_typed_membership_demand import report
 from tests.integration.test_capacity_typed_membership_execution import typed_management
@@ -49,6 +59,14 @@ async def sealed_owners(session, *, owner_rate=8):
         members.extend((build.member, application.member))
         await management.ingest_demand_snapshot(session, report(application.member.configuration),
             actor="owner-agent")
+    allocation = await seal_allocation(session, management, execution)
+    return preparation, execution, allocation, members
+
+
+async def seal_allocation(session, management, execution):
+    authority = await session.get(CapacityAuthorityState, 1)
+    authority.increase_freeze = False
+    authority.increase_freeze_reason = None
     for pool in ("gb10", "oldlab"):
         await management.ingest_pool_observation(session,
             pool_observation(sequence=1, pool_id=pool), actor=f"{pool}-reporter")
@@ -57,10 +75,10 @@ async def sealed_owners(session, *, owner_rate=8):
     result = await reconcile_shadow_once(sessions,
         WriterFence(authority_incarnation=execution.authority_incarnation,
             writer_epoch=execution.writer_epoch), store=management)
-    assert result.status == "committed"
+    assert result.status == "committed", result
     allocation = (await session.scalars(select(CapacityAllocationEpoch))).one()
     assert allocation.sealed and allocation.complete_payload["schema_version"] == 4
-    return preparation, execution, allocation, members
+    return allocation
 
 
 async def test_typed_sql_pinned_and_current_reads_preserve_application_and_build_purposes(capacity_session):
@@ -159,3 +177,71 @@ async def test_typed_manager_can_create_real_application_reservation_without_bui
     assert isinstance(proposal, ExecutableReservationProposalV2)
     assert proposal.subject_id in {item.configuration.subject_id for item in members
         if item.purpose == "personal-application"}
+
+
+@pytest.mark.parametrize("tamper", (None, "artifact", "architecture", "launcher", "protocol", "attestation", "token", "cutover"))
+async def test_typed_sql_managed_base_checks_pinned_installation_before_first_event(capacity_session, tamper):
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session,
+        managed_projection=development_projection(expected_configuration_epoch=1))
+    management = typed_management(preparation)
+    subject = preparation.managed_application_origins[0].configuration
+    await management.ingest_demand_snapshot(capacity_session, report(subject), actor="owner-agent")
+    allocation = await seal_allocation(capacity_session, management, execution)
+    parameters = {"allocation": allocation.allocation_epoch, "subject": subject.subject_id,
+        "incarnation": subject.subject_incarnation}
+    query = text("SELECT public.capacity_membership_target_current(:allocation, :subject, :incarnation)")
+    assert await capacity_session.scalar(query, parameters) is True
+    if tamper is None:
+        return
+    if tamper == "token":
+        statement = update(CapacityDemandReporter).where(
+            CapacityDemandReporter.subject_id == subject.subject_id).values(token_sha256="f" * 64)
+    elif tamper == "cutover":
+        statement = update(CapacityDeploymentGeneration).where(
+            CapacityDeploymentGeneration.subject_id == subject.subject_id).values(cutover_payload={})
+    else:
+        statement = update(CapacityCandidate).where(CapacityCandidate.subject_id == subject.subject_id).values(
+            **{f"{tamper}_payload": {}})
+    await capacity_session.execute(statement)
+    with pytest.raises(DBAPIError, match="evidence changed"):
+        async with capacity_session.begin_nested():
+            await capacity_session.scalar(query, parameters)
+
+
+@pytest.mark.parametrize("purpose", ("application", "build"))
+@pytest.mark.parametrize("operation", ("update", "capacity"))
+async def test_typed_sql_prefix_authenticates_lifecycle_after_rehashed_corruption(capacity_session, purpose, operation):
+    _legacy, preparation, _fleet, execution = await typed_sql_execution(capacity_session)
+    factory = application_request if purpose == "application" else build_request
+    original = factory(preparation, execution)
+    await apply(capacity_session, original)
+    await apply(capacity_session, transition(original, operation, revision=1), key=100002)
+    row = await capacity_session.scalar(select(CapacityPersonalMembershipEvent).where(
+        CapacityPersonalMembershipEvent.execution_epoch == execution.execution_epoch,
+        CapacityPersonalMembershipEvent.revision == 2))
+    request, result = deepcopy(row.request_payload), deepcopy(row.result_payload)
+    if operation == "update":
+        # Builds may redeploy the same runtime; applications must advance source generation.
+        request["command"]["projection"]["candidate_generation"] = 1
+        result["member"]["configuration"]["candidate_generation"] = 1
+    else:
+        request["command"]["projection"]["demand_reporter_token_sha256"] = "f" * 64
+    digest = canonical_digest(PersonalMembershipMutationV2.model_validate_json(json.dumps(request)))
+    member = PersonalMembershipResultV2.model_validate_json(json.dumps(result)).member
+    head = canonical_membership_event_head(actor=row.actor, execution_epoch=row.execution_epoch,
+        idempotency_key=row.idempotency_key, operation_id=row.operation_id,
+        previous_sha256=row.previous_sha256, request_digest=digest, request_payload=request,
+        member=member, revision=row.revision)
+    result["head_sha256"] = head
+    await capacity_session.execute(text("ALTER TABLE capacity_personal_membership_events DISABLE TRIGGER USER"))
+    await capacity_session.execute(update(CapacityPersonalMembershipEvent).where(
+        CapacityPersonalMembershipEvent.id == row.id).values(request_payload=request,
+        result_payload=result, request_digest=digest, head_sha256=head))
+    await capacity_session.execute(text("ALTER TABLE capacity_personal_membership_events ENABLE TRIGGER USER"))
+    query = text("SELECT public.capacity_membership_event_prefix(:epoch, 2)")
+    if purpose == "build" and operation == "update":
+        assert await capacity_session.scalar(query, {"epoch": execution.execution_epoch})
+    else:
+        with pytest.raises(DBAPIError, match="lifecycle"):
+            async with capacity_session.begin_nested():
+                await capacity_session.scalar(query, {"epoch": execution.execution_epoch})
