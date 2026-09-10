@@ -11,6 +11,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
+from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
+
 
 @pytest.fixture
 def build_guard_database(isolated_migration_postgres_url):
@@ -71,6 +73,49 @@ def test_build_guard_refuses_privileged_agent(build_guard_database):
         command.upgrade(config, "head")
 
 
+@pytest.mark.parametrize("surface", ["TABLES", "FUNCTIONS"])
+def test_build_guard_rejects_foreign_default_privileges(build_guard_database, surface):
+    config, engine, owner, _agent, _url = build_guard_database
+    foreign = f"build_foreign_{uuid4().hex}"
+    quote = engine.dialect.identifier_preparer.quote
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f"CREATE ROLE {quote(foreign)} NOLOGIN")
+            connection.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quote(owner)} GRANT ALL ON {surface} TO {quote(foreign)}")
+        with pytest.raises(RuntimeError, match="privilege"):
+            command.upgrade(config, "head")
+    finally:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f"DROP OWNED BY {quote(foreign)}")
+            connection.exec_driver_sql(f"DROP ROLE {quote(foreign)}")
+
+
+@pytest.mark.parametrize("surface", ["schema", "table", "column", "function"])
+def test_build_guard_at_head_rejects_privilege_drift(build_guard_database, surface):
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    target = {
+        "schema": "CREATE ON SCHEMA loom_capacity_build_guard",
+        "table": "INSERT ON loom_capacity_build_guard.installations",
+        "column": "INSERT (id) ON loom_capacity_build_guard.installations",
+        "function": "EXECUTE ON FUNCTION loom_capacity_build_guard.reject_evidence_mutation()",
+    }[surface]
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"GRANT {target} TO {engine.dialect.identifier_preparer.quote(agent)}")
+    with pytest.raises(RuntimeError, match="privilege"):
+        command.upgrade(config, "head")
+
+
+def test_build_guard_rejects_preexisting_schema_create_grant(build_guard_database):
+    config, engine, owner, agent, _url = build_guard_database
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"CREATE SCHEMA loom_capacity_build_guard AUTHORIZATION {quote(owner)}")
+        connection.exec_driver_sql(f"GRANT CREATE ON SCHEMA loom_capacity_build_guard TO {quote(agent)}")
+    with pytest.raises(RuntimeError, match="privilege"):
+        command.upgrade(config, "head")
+
+
 def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_database):
     config, engine, owner, _agent, _url = build_guard_database
     command.upgrade(config, "head")
@@ -94,3 +139,53 @@ def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_dat
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0001"
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 1
+
+
+async def test_only_one_exact_assignment_can_hold_a_platform_request(build_guard_database, sessions, tmp_path):
+    from loom.personal_dev_build_platform_requests import stage_platform_requests
+    from tests.integration.test_personal_dev_build_platform_requests import build_service
+    from tests.integration.test_personal_dev_native_builder_store import _NOW, _seed_running_attempt
+
+    config, engine, owner, _agent, agent_url = build_guard_database
+    command.upgrade(config, "head")
+    registration = await _seed_running_attempt(sessions, now=_NOW)
+    member, runtime = build_service(tmp_path, registration)
+    async with sessions.begin() as session:
+        requests = await stage_platform_requests(session, registration, member=member, runtime=runtime,
+            platforms=("linux/arm64",), now=_NOW)
+    request = requests[0]
+    installation_id, first, second = uuid4(), uuid4(), uuid4()
+    wire = {"wire": b"{}", "digest": sha256(b"{}").hexdigest()}
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"SET LOCAL ROLE {engine.dialect.identifier_preparer.quote(owner)}")
+        connection.execute(text("""INSERT INTO loom_capacity_build_guard.installations
+            (id, owner_user_id, subject_id, subject_incarnation, deployment_generation,
+             reporter_incarnation, payload, wire_payload, payload_sha256)
+            VALUES (:id, :owner, :subject, :incarnation, 1, :reporter, '{}'::jsonb, :wire, :digest)
+        """), {**wire, "id": installation_id, "owner": member.owner_id, "subject": request.subject_id,
+            "incarnation": request.subject_incarnation, "reporter": member.configuration.demand_reporter_incarnation})
+        for identity in (first, second):
+            connection.execute(text("""INSERT INTO loom_capacity_build_guard.plans
+                (id, installation_id, expires_at, payload, wire_payload, payload_sha256)
+                VALUES (:id, :installation, now(), '{}'::jsonb, :wire, :digest)
+            """), {**wire, "id": identity, "installation": installation_id})
+            connection.execute(text("""INSERT INTO loom_capacity_build_guard.assignments
+                (id, plan_id, request_id, submission_intent_id, shape_instance_id, shape_slot_index,
+                 payload, wire_payload, payload_sha256)
+                VALUES (:id, :id, :request, :id, 'native-shape', 0, '{}'::jsonb, :wire, :digest)
+            """), {**wire, "id": identity, "request": request.id})
+        insert = text("INSERT INTO loom_capacity_build_guard.request_holds VALUES (:request, :assignment)")
+        connection.execute(insert, {"request": request.id, "assignment": first})
+        with pytest.raises(DBAPIError, match="duplicate key"):
+            with connection.begin_nested():
+                connection.execute(insert, {"request": request.id, "assignment": second})
+        with pytest.raises(DBAPIError, match="foreign key"):
+            with connection.begin_nested():
+                connection.execute(insert, {"request": uuid4(), "assignment": second})
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+    agent_engine = create_engine(agent_url)
+    try:
+        with agent_engine.connect() as connection, pytest.raises(DBAPIError, match="permission denied"):
+            connection.execute(text("DELETE FROM loom_capacity_build_guard.request_holds"))
+    finally:
+        agent_engine.dispose()
