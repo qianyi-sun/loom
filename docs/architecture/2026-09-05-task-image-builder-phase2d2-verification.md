@@ -1460,7 +1460,8 @@ ownership token as the entire comment. That guard does not provision native
 protected-worker parents. Its presence inventory now uses the all-state node
 queue separately from its admission results: failed per-job readback, missing
 resource facts, suspended/completing jobs, and unknown comments do not authorize
-teardown of an existing slice. Only readable RUNNING legacy opt-ins acquire or
+teardown of an existing slice. Positively terminal legacy jobs do not keep their
+slices alive during Slurm's terminal-record retention interval. Only readable RUNNING legacy opt-ins acquire or
 resize a slice. This prevents an admission failure from disrupting an existing
 allocation; it neither authenticates a protected job nor proves positive runtime
 cleanup or permits an independent slice creator. A coordinated owner-authenticated guard adapter

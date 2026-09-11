@@ -17,7 +17,8 @@ the local node that opt in through the closed comment
 Only ``root`` can register a system slice, which is what lets the unprivileged
 worker trust a slice it did not create.  The guard only ever touches cgroups
 that carry the reviewed comment and slices named ``loom-job-<digits>.slice``;
-it tears a slice down once its job leaves the all-state node queue. Failed
+it tears a slice down once its job leaves the all-state node queue or a legacy
+opt-in is independently confirmed terminal. Failed
 per-job readback or an unrecognized comment is not job-absence evidence: such
 jobs cannot acquire a new slice, but their existing slice is preserved. It never edits
 ``slurm.conf``, ``cgroup.conf``, or any co-tenant cgroup.
@@ -43,6 +44,10 @@ _ALLOC_MEM_RE = re.compile(r"(?:^|,)mem=([0-9]+)([KMGT]?)(?:,|$)")
 _REQUIRED_CONTROLLERS = ("cpu", "memory", "pids")
 _MAX_WALK_DIRECTORIES = 200_000
 _MEM_UNIT_BYTES = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+_TERMINAL_JOB_STATES = frozenset({
+    "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY",
+    "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED",
+})
 
 
 @dataclass(frozen=True)
@@ -150,7 +155,15 @@ def discover_jobs(config: GuardConfig) -> JobDiscovery:
         except GuardError as exc:
             _log(f"job {job_id}: {exc}")
             continue
-        if fields.get("JobId") != job_id or fields.get("JobState") != "RUNNING":
+        if fields.get("JobId") != job_id:
+            continue
+        state = fields.get("JobState")
+        if state in _TERMINAL_JOB_STATES:
+            # Slurm may retain terminal rows for MinJobAge after releasing the
+            # allocation. Their presence must not keep an orphan runtime alive.
+            present_job_ids.discard(job_id)
+            continue
+        if state != "RUNNING":
             continue
         memory_bytes = _parse_alloc_memory_bytes(fields.get("AllocTRES", ""))
         if memory_bytes <= 0:
