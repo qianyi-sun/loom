@@ -703,6 +703,18 @@ terminal and cannot release the retained guard. The enclosing component still
 must prove harmful manager SQL retirement, external writer exclusion and workload
 recovery; the executable replacement receipt supplies none of those proofs.
 
+Lost-peer database completion has a distinct fixed runner operation. It publishes
+or resumes the next bounded peer-recovery intent before connecting. Maintenance
+observes the saved server and guard, rejects surviving or unknown privileged
+peers, and routes sealed recovery through reclosure, loss-drain and temporary
+reopening. An already-restored login permits only a replacement connection for
+full schema/credential verification. The observed replacement is journaled before
+completion SQL. A successful verified database outcome keeps admission open;
+uncertain failure still attempts guarded reclosure, which refuses an already
+restored login instead of silently resealing it. The original sealed-peer context
+continues to reclose unconditionally and must not enclose runtime restoration.
+Neither operation publishes the whole handoff's component terminal.
+
 The installed staging mutation guard is a necessary surviving connection, not an
 application worker to stop: it holds the database-local advisory lock that excludes
 lifecycle GC. Moving that lock to the maintenance database would lose coordination.

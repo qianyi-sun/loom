@@ -20,6 +20,7 @@ from loom.application_handoff_completion import (
 from loom.staging_mutation_coordination import rollout_guard_application_name
 
 from .final_gate_plan import FinalGatePlan
+from .protected_application_admission_recovery import ApplicationAdmissionRecoveryRecord
 from .protected_application_credential_recovery import (
     CredentialRecoveryRunner,
     recover_application_runtime_credential,
@@ -53,19 +54,8 @@ def complete_protected_application_database(
     Connection-loss recovery must durably admit its replacement before entering;
     this operation never discovers or adopts a peer, guard or successor primary.
     """
-    journal.require_application_guard_retained(plan, guard=guard)
-    original = journal.read_application_admission_recovery()
-    replacement = journal.read_application_manager_replacement()
-    if (original is None or original.coordination_guard is None
-            or original.target.database != "loom" or original.target.owner_role != "loom"
-            or original.coordination_guard.backend.pid != guard.database_backend_pid
-            or original.coordination_guard.application_name != rollout_guard_application_name(
-                request_id=guard.request_id, candidate_sha=guard.candidate_sha,
-                candidate_tree=guard.candidate_tree, generation=guard.generation,
-            )):
-        raise RuntimeError("application completion original guard identity changed")
-    if replacement is None or not replacement[1] or replacement[2] is None:
-        raise RuntimeError("application completion requires observed manager replacement")
+    original = _require_completion_authority(plan, journal=journal, guard=guard)
+    assert original.coordination_guard is not None
     peers = journal.read_application_handoff_recoveries()
     if peers and peers[-1][1] is None:
         raise RuntimeError("application completion cannot overlap pending peer recovery")
@@ -81,3 +71,22 @@ def complete_protected_application_database(
         )
     journal.require_application_guard_retained(plan, guard=guard)
     return outcome
+
+
+def _require_completion_authority(
+    plan: FinalGatePlan, *, journal: ProtectedApplyJournal, guard: MutationGuardEvidence,
+) -> ApplicationAdmissionRecoveryRecord:
+    journal.require_application_guard_retained(plan, guard=guard)
+    original = journal.read_application_admission_recovery()
+    replacement = journal.read_application_manager_replacement()
+    if (original is None or original.coordination_guard is None
+            or original.target.database != "loom" or original.target.owner_role != "loom"
+            or original.coordination_guard.backend.pid != guard.database_backend_pid
+            or original.coordination_guard.application_name != rollout_guard_application_name(
+                request_id=guard.request_id, candidate_sha=guard.candidate_sha,
+                candidate_tree=guard.candidate_tree, generation=guard.generation,
+            )):
+        raise RuntimeError("application completion original guard identity changed")
+    if replacement is None or not replacement[1] or replacement[2] is None:
+        raise RuntimeError("application completion requires observed manager replacement")
+    return original
