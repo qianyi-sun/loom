@@ -548,7 +548,10 @@ def _context(tmp_path: Path) -> InstallContext:
     )
 
 
-def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
+def _controller_request(tmp_path: Path, pool_id: str = "oldlab") -> ControllerPrerequisiteRequest:
+    architecture = "arm64" if pool_id == "gb10" else "amd64"
+    cluster = "trt-gb10" if pool_id == "gb10" else "trt-oldlab"
+    hostname = "gx10-01c7" if pool_id == "gb10" else "TRT-EAI-OLDLAB-1"
     executable_paths = {
         name: f"/usr/bin/{name}"
         for name in ("sacct", "sacctmgr", "sbatch", "scancel", "scontrol", "squeue")
@@ -562,7 +565,7 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
         executable_sha256[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     slurm_conf = tmp_path / "etc/slurm/slurm.conf"
     slurm_conf.parent.mkdir(parents=True)
-    slurm_conf.write_text("ClusterName=trt-oldlab\n", encoding="ascii")
+    slurm_conf.write_text(f"ClusterName={cluster}\n", encoding="ascii")
     slurm_conf.chmod(0o644)
     for directory in (
         tmp_path / "usr",
@@ -575,28 +578,32 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
     profile = load_capacity_pool_executor_profile(
         _REPO_ROOT / "deploy/dev-fleet/capacity-pool-executor.toml.example"
     )
-    template = profile.pools[1].model_dump(mode="python")
-    targets = tuple(f"trt-eai-oldlab-{index}" for index in range(3, 6))
+    template = next(pool for pool in profile.pools if pool.pool_id == pool_id).model_dump(mode="python")
+    targets = (
+        tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
+        if pool_id == "gb10"
+        else tuple(f"trt-eai-oldlab-{index}" for index in range(3, 6))
+    )
     exemplar = template["inventory"]["nodes"][0]
     template.update(
         {
             "controller_authority_sha256": "5" * 64,
-            "controller_host": "TRT-EAI-OLDLAB-1",
+            "controller_host": hostname,
             "local_uid": os.geteuid(),
             "partition": "loom-staging",
-            "slurm_cluster": "trt-oldlab",
+            "slurm_cluster": cluster,
             "slurm_executables": executable_paths,
         }
     )
     template["inventory"].update(
         {
-            "controller_cluster": "trt-oldlab",
+            "controller_cluster": cluster,
             "nodes": [
                 {
                     **exemplar,
                     "node_id": node_id,
-                    "pool_id": "oldlab",
-                    "features": ("amd64",),
+                    "pool_id": pool_id,
+                    "features": (architecture,),
                 }
                 for node_id in targets
             ],
@@ -607,20 +614,28 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
             "slurm_conf_sha256": configuration_sha256["slurm.conf"],
             "job_visibility_evidence_sha256": (
                 controller_job_visibility_evidence_sha256(
-                    pool_id="oldlab",
-                    partition_fields={"AllowGroups": "loom-rollout"},
-                    association_fields=(),
+                    pool_id=pool_id,
+                    partition_fields={
+                        "AllowGroups": "loom-rollout",
+                        "AllowAccounts": "loom-staging",
+                        "AllowQos": "loom-staging",
+                    },
+                    association_fields=(
+                        ("trt-gb10", "loom-staging", "loom_capacity_executor",
+                         "loom-staging", "loom-staging", "loom-staging")
+                        if pool_id == "gb10" else ()
+                    ),
                 )
             ),
         }
     )
     template["local_authority_sha256"] = controller_local_authority_sha256(
-        pool_id="oldlab",
-        architecture="amd64",
-        controller_hostname="TRT-EAI-OLDLAB-1",
+        pool_id=pool_id,
+        architecture=architecture,
+        controller_hostname=hostname,
         service_uid=os.geteuid(),
         service_gid=os.getegid(),
-        slurm_cluster="trt-oldlab",
+        slurm_cluster=cluster,
         partition="loom-staging",
         target_nodes=targets,
         executable_sha256=executable_sha256,
@@ -629,15 +644,15 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
     )
     binding = CapacityPoolExecutorBinding.model_validate(template)
     return ControllerPrerequisiteRequest(
-        pool_id="oldlab",
+        pool_id=pool_id,
         source_sha=_SOURCE_SHA,
-        architecture="amd64",
+        architecture=architecture,
         image=_IMAGE,
         service_user="loom_capacity_executor",
         binding=binding,
         credential_metadata_sha256={
-            "pool-executor-oldlab": "6" * 64,
-            "pool-ownership-oldlab": "7" * 64,
+            f"pool-executor-{pool_id}": "6" * 64,
+            f"pool-ownership-{pool_id}": "7" * 64,
         },
         transport_authority_sha256="8" * 64,
     )
@@ -1763,12 +1778,15 @@ def test_oldlab_discovery_rejects_partition_without_exact_group_admission(
         )
 
 
+@pytest.mark.parametrize("includes_builder", [False, True])
 def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
     tmp_path: Path,
+    includes_builder: bool,
 ) -> None:
     """Catch rejecting the dedicated executor's exact GB10 Slurm admission."""
-    _controller_request(tmp_path)
+    request = _controller_request(tmp_path, "gb10")
     targets = tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
+    partition_nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16)) if includes_builder else targets
     association = (
         "trt-gb10|loom-staging|loom_capacity_executor|loom-staging|loom-staging|loom-staging|"
     )
@@ -1776,9 +1794,9 @@ def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
         tmp_path,
         image_architecture="arm64",
         slurm_cluster="trt-gb10",
-        slurm_nodes=targets,
+        slurm_nodes=partition_nodes,
         slurm_metadata_cluster="trt-gb10",
-        slurm_metadata_nodes=targets,
+        slurm_metadata_nodes=partition_nodes,
         manager_route_source="192.168.60.11",
         partition_allow_groups="ALL",
         partition_allow_accounts="loom-staging",
@@ -1816,6 +1834,41 @@ def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
         )
     )
     assert not any(Path(call[0]).name == "usermod" for call in runner.calls)
+    assert "trt-gb10-2" not in evidence.target_nodes
+    # The consumer must accept the same partition without widening its binding.
+    assert installer.observe_prerequisite(request) is None
+
+
+@pytest.mark.parametrize("operation", ["discover", "observe"])
+@pytest.mark.parametrize("drift", ["missing-worker", "extra-node", "duplicate-builder"])
+def test_gb10_partition_drift_still_rejects(
+    tmp_path: Path, operation: str, drift: str,
+) -> None:
+    request = _controller_request(tmp_path, "gb10")
+    nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    if drift == "missing-worker":
+        nodes = nodes[1:]
+    elif drift == "extra-node":
+        nodes += ("trt-gb10-16",)
+    else:
+        nodes += ("trt-gb10-2",)
+    runner = FakeHostRunner(
+        tmp_path, image_architecture="arm64", slurm_cluster="trt-gb10",
+        slurm_nodes=nodes, partition_allow_groups="ALL",
+        partition_allow_accounts="loom-staging", partition_allow_qos="loom-staging",
+    )
+    runner.group_present = runner.user_present = True
+    installer = ControllerInstaller(
+        context=_context(tmp_path), runner=runner, machine="aarch64",
+        hostname="gx10-01c7", effective_uid=0,
+    )
+    with pytest.raises(CapacityExecutorInstallError, match="Slurm authority drifted"):
+        if operation == "discover":
+            installer.discover_controller(ControllerDiscoveryRequest(
+                schema_version=1, pool_id="gb10", transport_authority_sha256="8" * 64,
+            ))
+        else:
+            installer.observe_prerequisite(request)
 
 
 def test_gb10_discovery_requires_exact_executor_account_partition_and_qos(
