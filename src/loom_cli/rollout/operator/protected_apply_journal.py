@@ -873,6 +873,25 @@ class ComponentTerminalRecovery:
         return terminal
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationRecoveryView:
+    """Saved process recovery only; not live admission or a safe release outcome.
+
+    Classification must reconcile these exact identities with current authority.
+    An absent receipt preserves uncertainty, never permission to repeat a PUT.
+    Credential, policy, SQL and workload observations are separately required.
+    """
+
+    intent: ComponentIntent
+    admission: ApplicationAdmissionRecoveryRecord | None
+    handoff_recoveries: tuple[
+        tuple[ApplicationHandoffRecoveryIntent, ApplicationHandoffReplacementReceipt | None], ...
+    ]
+    manager_replacement: tuple[
+        CNPGManagerReplacementIntent, bool, CNPGManagerReplacementReceipt | None
+    ] | None
+
+
 class ProtectedApplyJournal:
     """Serialize and recover one exact ordered protected component chain."""
 
@@ -920,6 +939,11 @@ class ProtectedApplyJournal:
     def read_application_admission_recovery(self) -> ApplicationAdmissionRecoveryRecord | None:
         """Read saved identity inside active apply; never recapture closed state on retry."""
         root, intent = self._application_admission_context()
+        return self._read_application_admission(root, intent, durable=True)
+
+    def _read_application_admission(
+        self, root: Path, intent: ComponentIntent, *, durable: bool,
+    ) -> ApplicationAdmissionRecoveryRecord | None:
         try:
             payload = self._read(root / "application-admission.json")
         except FileNotFoundError:
@@ -932,8 +956,65 @@ class ProtectedApplyJournal:
             ) from None
         if record.intent_digest != intent.intent_digest:
             raise ProtectedApplyJournalError("application admission recovery intent changed")
-        self._sync_application_recovery(root, "application-admission.json")
+        if durable:
+            self._sync_application_recovery(root, "application-admission.json")
         return record
+
+    def read_application_recovery_view(
+        self, plan: FinalGatePlan, component: ProtectedApplyComponent, *, ordinal: int,
+    ) -> ApplicationRecoveryView | None:
+        """Read an exact handoff intent without creating or entering active apply.
+
+        Immutable records may form a partial prefix. They are NOT dispatch or
+        release authority. Active apply must re-read and flush them before any
+        mutation. Concurrent publication detected during this read fails closed.
+        """
+        if (plan.request_id != self.request_id or plan.attempt_number != self.attempt_number
+                or component.component_id != "application-ownership-handoff"
+                or type(ordinal) is not int or not 0 <= ordinal < 32):
+            raise ProtectedApplyJournalError("application recovery view binding is invalid")
+        try:
+            FinalGatePlan.from_dict(plan.to_dict())
+        except ValueError:
+            raise ProtectedApplyJournalError("application recovery view plan changed") from None
+        root = self.root / f"{ordinal:02d}-{component.component_id}"
+        for directory in (self.attempt_root, self.root):
+            try:
+                _require_directory(directory, uid=self.service_uid)
+            except FileNotFoundError:
+                return None
+        if any(
+            path.name.endswith("-application-ownership-handoff") and path != root
+            for path in self.root.iterdir()
+        ):
+            raise ProtectedApplyJournalError("application recovery view ordinal changed")
+        try:
+            _require_directory(root, uid=self.service_uid)
+        except FileNotFoundError:
+            return None
+        expected = ComponentIntent.build(plan, component, ordinal)
+        try:
+            observed = ComponentIntent.from_dict(self._read(root / "intent.json"))
+        except (FileNotFoundError, ValueError):
+            raise ProtectedApplyJournalError("application recovery view intent is invalid") from None
+        if observed != expected:
+            raise ProtectedApplyJournalError("application recovery view intent changed")
+        names = {path.name for path in root.iterdir() if path.name.startswith("application-")}
+        admission = self._read_application_admission(root, expected, durable=False)
+        if admission is None and any(
+            name.startswith(("application-handoff-", "application-manager-")) for name in names
+        ):
+            raise ProtectedApplyJournalError("application recovery view lacks original admission")
+        recoveries = (
+            self._read_application_handoff_recoveries(root, admission, durable=False)
+            if admission is not None else ()
+        )
+        manager = self._read_application_manager_replacement(
+            root, expected, admission, durable=False,
+        )
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during read")
+        return ApplicationRecoveryView(expected, admission, recoveries, manager)
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE
@@ -963,6 +1044,11 @@ class ProtectedApplyJournal:
         original = self.read_application_admission_recovery()
         if original is None:
             raise ProtectedApplyJournalError("application handoff recovery requires original admission")
+        return self._read_application_handoff_recoveries(root, original, durable=True)
+
+    def _read_application_handoff_recoveries(
+        self, root: Path, original: ApplicationAdmissionRecoveryRecord, *, durable: bool,
+    ) -> tuple[tuple[ApplicationHandoffRecoveryIntent, ApplicationHandoffReplacementReceipt | None], ...]:
         names = {path.name for path in root.iterdir() if path.name.startswith("application-handoff-")}
         allowed = {
             f"application-handoff-{ordinal:02d}-{kind}.json"
@@ -983,7 +1069,8 @@ class ProtectedApplyJournal:
                 intent = ApplicationHandoffRecoveryIntent.from_dict(self._read(root / intent_name))
                 if intent != ApplicationHandoffRecoveryIntent(ordinal, previous_digest):
                     raise ValueError("chain binding changed")
-                self._sync_application_recovery(root, intent_name)
+                if durable:
+                    self._sync_application_recovery(root, intent_name)
                 consumed.add(intent_name)
                 receipt = None
                 if peer_name in names:
@@ -991,7 +1078,8 @@ class ProtectedApplyJournal:
                     if receipt.recovery_intent_digest != intent.digest:
                         raise ValueError("receipt binding changed")
                     require_replacement_identity(original, prior_backends, receipt.handoff_backend)
-                    self._sync_application_recovery(root, peer_name)
+                    if durable:
+                        self._sync_application_recovery(root, peer_name)
                     consumed.add(peer_name)
                     previous_digest = receipt.digest
                     prior_backends.append(receipt.handoff_backend)
@@ -1219,6 +1307,12 @@ class ProtectedApplyJournal:
     ) -> tuple[CNPGManagerReplacementIntent, bool, CNPGManagerReplacementReceipt | None] | None:
         root, component = self._application_admission_context()
         admission = self.read_application_admission_recovery()
+        return self._read_application_manager_replacement(root, component, admission, durable=True)
+
+    def _read_application_manager_replacement(
+        self, root: Path, component: ComponentIntent,
+        admission: ApplicationAdmissionRecoveryRecord | None, *, durable: bool,
+    ) -> tuple[CNPGManagerReplacementIntent, bool, CNPGManagerReplacementReceipt | None] | None:
         names = (
             "application-manager-intent.json", "application-manager-dispatch.json",
             "application-manager-receipt.json",
@@ -1232,14 +1326,16 @@ class ProtectedApplyJournal:
                 or intent.component_intent_digest != component.intent_digest
                 or intent.admission_digest != admission_record_digest(admission.to_dict())):
             raise ProtectedApplyJournalError("CNPG manager replacement requires original admission guard")
-        self._sync_application_recovery(root, names[0])
+        if durable:
+            self._sync_application_recovery(root, names[0])
         dispatched = (root / names[1]).exists()
         if dispatched:
             marker = self._read(root / names[1])
             if (type(marker.get("schema_version")) is not int
                     or marker != {"schema_version": 1, "intent_digest": intent.digest}):
                 raise ProtectedApplyJournalError("CNPG manager dispatch binding changed")
-            self._sync_application_recovery(root, names[1])
+            if durable:
+                self._sync_application_recovery(root, names[1])
         receipt = None
         if (root / names[2]).exists():
             if not dispatched:
@@ -1247,7 +1343,8 @@ class ProtectedApplyJournal:
             receipt = CNPGManagerReplacementReceipt.from_dict(
                 self._read(root / names[2]), intent=intent,
             )
-            self._sync_application_recovery(root, names[2])
+            if durable:
+                self._sync_application_recovery(root, names[2])
         return intent, dispatched, receipt
 
     def prepare_application_manager_replacement(

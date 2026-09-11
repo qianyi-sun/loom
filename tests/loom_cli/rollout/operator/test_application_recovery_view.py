@@ -109,3 +109,37 @@ def test_classification_recovery_view_does_not_enable_mutation(tmp_path):
     with pytest.raises(RuntimeError, match="did not converge"):
         journal.execute(plan, [component])
     assert len(seen) == 2 and seen[0] == seen[1]
+
+
+@pytest.mark.parametrize("missing", ["intent.json", "application-admission.json", "application-manager-intent.json"])
+def test_readonly_recovery_refuses_orphaned_records(tmp_path, missing):
+    plan, journal, component = _interrupted(tmp_path)
+    root = journal.root / "00-application-ownership-handoff"
+    (root / missing).unlink()
+    with pytest.raises(RuntimeError):
+        journal.read_application_recovery_view(plan, component, ordinal=0)
+
+
+def test_readonly_recovery_refuses_symlink_directory(tmp_path):
+    plan, journal, component = _interrupted(tmp_path)
+    root = journal.root / "00-application-ownership-handoff"
+    moved = journal.root / "saved"
+    root.rename(moved)
+    root.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="directory authority"):
+        journal.read_application_recovery_view(plan, component, ordinal=0)
+
+
+def test_readonly_recovery_refuses_concurrent_publication(tmp_path, monkeypatch):
+    plan, journal, component = _interrupted(tmp_path)
+    read = journal._read_application_manager_replacement
+
+    def publish_during_read(root, *args, **kwargs):
+        result = read(root, *args, **kwargs)
+        # Model a concurrent authorized append, without granting this reader apply.
+        journal._publish_or_match(root / "application-cnpg-configuration.json", {})
+        return result
+
+    monkeypatch.setattr(journal, "_read_application_manager_replacement", publish_during_read)
+    with pytest.raises(RuntimeError, match="changed during read"):
+        journal.read_application_recovery_view(plan, component, ordinal=0)
