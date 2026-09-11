@@ -134,3 +134,43 @@ def test_renewal_has_fresh_challenge_and_conservative_new_deadline(deadline):
     clock[0] += 3_000_000_000
     guard.accept(receipt(second))
     assert guard.require_live() == 112_000_000_000
+
+
+def test_validation_time_cannot_bridge_expiry(deadline, monkeypatch):
+    guard, clock = deadline
+    request = guard.begin_request()
+    original = BuildExecutionPermitV1.model_validate_json
+    def delayed(wire):
+        result = original(wire)
+        clock[0] += 10_000_000_000
+        return result
+    monkeypatch.setattr(BuildExecutionPermitV1, "model_validate_json", delayed)
+    with pytest.raises(RuntimeError):
+        guard.accept(receipt(request))
+    assert guard.stopped_reason == "expired"
+
+
+def test_simultaneous_stop_and_renewal_always_ends_stopped(deadline):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    guard, _clock = deadline
+    guard.accept(receipt(guard.begin_request()))
+    reply = receipt(guard.begin_request())
+    barrier = Barrier(2)
+    def renew():
+        barrier.wait(timeout=5)
+        try:
+            guard.accept(reply)
+        except RuntimeError:
+            assert guard.stopped_reason == "cancelled"
+    def cancel():
+        barrier.wait(timeout=5)
+        guard.stop("cancelled")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = executor.submit(renew), executor.submit(cancel)
+        first.result(timeout=5)
+        second.result(timeout=5)
+    assert guard.stopped_reason == "cancelled"
+    with pytest.raises(RuntimeError):
+        guard.require_live()
