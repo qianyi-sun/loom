@@ -290,9 +290,9 @@ has `mode="prepare-bind-only"`, `"native-registration"`, or `"native-claims"`, o
 `principals_file` paths, and their SHA-256 digests. The database URL requires
 verified PostgreSQL TLS. Startup checks the restricted agent and protected
 admission procedures, and rejects incomplete inputs or privilege drift. The
-registration mode additionally verifies the private registration procedure and
-its exact privileges before enabling the `register` endpoint; preparation-only
-configuration keeps that endpoint closed.
+registration mode additionally verifies the private registration/drain procedures
+and their exact privileges before enabling `register` and `drain`; preparation-only
+configuration keeps those endpoints closed.
 The `native-claims` mode also verifies the private claim procedure and enables
 `claim`; registration-only configuration cannot claim work. Both operations
 retain pool/executor authentication. Claim exchange additionally presents the
@@ -502,7 +502,8 @@ as claim admission. An initial drain advances to epoch 3; exact replay retains
 one immutable receipt. Draining does not depend on fresh source authority and
 never deletes claims or capacity holds. New claims are fenced, while prior claim
 replay remains evidence recovery only. Observation exposes only committed drain.
-Held live claims report `cancel-pending`; outcome and release remain separate
+The pool-authenticated HTTP route and pinned purpose client expose committed drain
+without application fallback. Held live claims report `cancel-pending`; outcome and release remain separate
 unfinished steps. The schema refuses downgrade with retained drain evidence.
 
 Build-guard revision `build_guard_0017` adds an immutable claim of the exact

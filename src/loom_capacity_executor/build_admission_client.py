@@ -10,6 +10,8 @@ import httpx
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    DrainedExecutableWorkerV2,
+    ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
@@ -188,6 +190,18 @@ class BuildAdmissionClient:
             or receipt.protected_registration_epoch != request.protected_registration_epoch
             or receipt.request_digest != digest or receipt.registration_digest != digest):
             raise BuildAdmissionTransportError("build admission registration binding changed")
+        return receipt
+
+    async def begin_drain(self, request: ExecutableDrainRequestV2) -> DrainedExecutableWorkerV2:
+        request = ExecutableDrainRequestV2.model_validate_json(request.model_dump_json())
+        receipt = await self._post(request.binding, "drain", canonical_executable_bytes(request), DrainedExecutableWorkerV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
+            or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
+            or receipt.worker_incarnation != request.worker_incarnation or receipt.claim_high_water != request.expected_claim_high_water
+            or receipt.live_claim_count != request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
+            or receipt.request_digest != digest or receipt.drain_digest != digest):
+            raise BuildAdmissionTransportError("native drain receipt binding changed")
         return receipt
 
     async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:

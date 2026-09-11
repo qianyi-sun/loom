@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_capacity_agent.admission import (
+    ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
@@ -38,7 +39,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -46,7 +47,7 @@ async def _admit(
         verifier, CapacityPrincipalVerifier
     ):
         raise HTTPException(503, "build admission unavailable")
-    if operation_name == "register" and getattr(
+    if operation_name in {"register", "drain"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
     ) not in {"native-registration", "native-claims"}:
         raise HTTPException(503, "build registration unavailable")
@@ -98,6 +99,8 @@ async def _admit(
                     if operation_name == "revoke-bootstrap"
                     else ExecutableWorkerWithdrawalRequestV2.model_validate_json(bytes(body))
                     if operation_name == "withdraw"
+                    else ExecutableDrainRequestV2.model_validate_json(bytes(body))
+                    if operation_name == "drain"
                     else PhysicalJobBindingV2.model_validate_json(bytes(body))
                 )
             except ValueError:
@@ -141,6 +144,8 @@ async def _admit(
                     )
                 elif isinstance(operation, ExecutableWorkerWithdrawalRequestV2):
                     wire = canonical_executable_bytes(await store.withdraw_unregistered_worker(operation))
+                elif isinstance(operation, ExecutableDrainRequestV2):
+                    wire = canonical_executable_bytes(await store.begin_drain(operation))
                 else:
                     assert isinstance(operation, PhysicalJobBindingV2)
                     wire = canonical_executable_bytes(await store.bind_slurm_job(operation))
@@ -188,3 +193,8 @@ async def register_build_worker(request: Request, pool_id: str, intent_id: UUID)
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/claim")
 async def claim_build_platform(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="claim")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/drain")
+async def drain_build_worker(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="drain")

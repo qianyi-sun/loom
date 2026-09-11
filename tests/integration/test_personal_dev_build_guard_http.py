@@ -230,12 +230,17 @@ async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
     assert result.status_code == 503
 
 
-@pytest.mark.parametrize("operation", ["prepare", "register", "claim"])
+@pytest.mark.parametrize("operation", ["prepare", "register", "claim", "drain"])
 async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch,operation):
     from sqlalchemy import event
 
     factory, engine, _installation, _plan, _source, _request = prepared_input
-    if operation == "claim":
+    if operation == "drain":
+        from tests.integration.test_personal_dev_build_guard_drain import drain_input
+
+        registration, _claim = await drain_input(prepared_input, monkeypatch, claimed=True)
+        payload = registration.model_dump(mode="json")
+    elif operation == "claim":
         from tests.integration.test_personal_dev_build_guard_claims import claim_input
         from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 
@@ -259,7 +264,7 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
     reached_outer_commit = []
     store_completed = []
     store_type = import_module("loom_capacity_build_guard.execution_store").BuildGuardExecutionStore
-    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform"}[operation]
+    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform", "drain": "begin_drain"}[operation]
     original = getattr(store_type, method)
 
     async def prepare_then_observe(*args,**kwargs):
@@ -286,10 +291,12 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert reached_outer_commit == [True]
         assert "admission_digest" not in result.text
         assert "registration_digest" not in result.text
+        assert "drain_digest" not in result.text
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == (0 if operation == "prepare" else 2)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation == "claim" else 0)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation in {"claim", "drain"} else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if operation == "drain" else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == 0
     finally:
         event.remove(target,"before_commit",fail_commit)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
@@ -420,6 +427,15 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
                 assert claimed.request == claim
                 assert await client.claim_platform(claim, worker_credential="w" * 43) == claimed
                 assert (await client.observe_intent(binding)).claim_high_water == 1
+            from loom_capacity_agent.admission import ExecutableDrainRequestV2
+
+            drain = ExecutableDrainRequestV2(binding=binding, operation_id=uuid4(),
+                worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
+                expected_claim_high_water=int(register == "claim"), drain_epoch=3)
+            drained = await client.begin_drain(drain)
+            assert drained.live_claim_count == int(register == "claim")
+            assert await client.begin_drain(drain) == drained
+            assert (await client.observe_intent(binding)).drain == drained
         else:
             withdraw = withdrawal(physical_request)
             withdrawn = await client.withdraw_unregistered_worker(withdraw)
@@ -436,6 +452,7 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == (0 if register else 1)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if register else 0)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if register == "claim" else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == (1 if register else 0)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
     finally:
         if client is not None and hasattr(client,"aclose"):
