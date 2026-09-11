@@ -48,6 +48,10 @@ from .protected_application_admission_recovery import (
     require_replacement_identity,
 )
 from .protected_application_credential_recovery import ApplicationCredentialRecoveryBinding
+from .protected_application_owner_preparation import (
+    MAX_OWNER_CREATIONS,
+    ApplicationOwnerCreationIntent,
+)
 from .protected_application_workloads import ApplicationWorkload, validate_workload_inventory
 from .protected_cnpg_fence_recovery import (
     CNPGFenceCreateIntent,
@@ -1350,6 +1354,74 @@ class ProtectedApplyJournal:
         if json.dumps(observed, sort_keys=True) != json.dumps(record, sort_keys=True):
             raise ProtectedApplyJournalError("CNPG writer configuration readback changed")
         self._sync_application_recovery(root, path.name)
+
+    def read_application_owner_creations(
+        self, plan: FinalGatePlan,
+    ) -> tuple[tuple[ApplicationOwnerCreationIntent, int | None], ...]:
+        self.require_application_credential_context(plan)
+        root, component = self._application_admission_context()
+        names = {path.name for path in root.iterdir() if path.name.startswith("application-owner-")}
+        allowed = {f"application-owner-{i:02d}-{suffix}.json" for i in range(1, MAX_OWNER_CREATIONS + 1)
+                   for suffix in ("intent", "oid")}
+        if not names <= allowed:
+            raise ProtectedApplyJournalError("application owner creation layout changed")
+        previous, consumed = component.intent_digest, set()
+        records: list[tuple[ApplicationOwnerCreationIntent, int | None]] = []
+        for i in range(1, MAX_OWNER_CREATIONS + 1):
+            name, receipt = f"application-owner-{i:02d}-intent.json", f"application-owner-{i:02d}-oid.json"
+            if name not in names:
+                break
+            intent = ApplicationOwnerCreationIntent.from_dict(self._read(root / name))
+            if intent.ordinal != i or intent.previous_record_digest != previous:
+                raise ProtectedApplyJournalError("application owner creation chain changed")
+            consumed.add(name)
+            self._sync_application_recovery(root, name)
+            oid = None
+            if receipt in names:
+                value = self._read(root / receipt)
+                candidate = value.get("role_oid")
+                if (set(value) != {"schema_version", "intent_digest", "role_oid"}
+                        or type(value["schema_version"]) is not int or value["schema_version"] != 1
+                        or value["intent_digest"] != intent.digest or type(candidate) is not int
+                        or not 0 < candidate < 2**32 or candidate == intent.coordination_guard.role_oid):
+                    raise ProtectedApplyJournalError("application owner creation OID receipt changed")
+                oid = candidate
+                consumed.add(receipt)
+                self._sync_application_recovery(root, receipt)
+            records.append((intent, oid))
+            previous = admission_record_digest({"intent": intent.to_dict(), "role_oid": oid})
+        if names != consumed:
+            raise ProtectedApplyJournalError("application owner creation chain is incomplete")
+        return tuple(records)
+
+    def prepare_application_owner_creation(
+        self, plan: FinalGatePlan, *, backend: ApplicationDatabaseHandoffBackend,
+        coordination_guard: ApplicationDatabaseCoordinationGuard,
+    ) -> ApplicationOwnerCreationIntent:
+        records = self.read_application_owner_creations(plan)
+        root, component = self._application_admission_context()
+        if records and any(item.coordination_guard != coordination_guard for item, _ in records):
+            raise ProtectedApplyJournalError("application owner creation original guard changed")
+        if records and records[-1][1] is None and records[-1][0].backend == backend:
+            return records[-1][0]
+        previous = (admission_record_digest({"intent": records[-1][0].to_dict(), "role_oid": records[-1][1]})
+                    if records else component.intent_digest)
+        intent = ApplicationOwnerCreationIntent(len(records) + 1, previous, backend, coordination_guard)
+        name = f"application-owner-{intent.ordinal:02d}-intent.json"
+        self._publish_or_match(root / name, intent.to_dict())
+        if self.read_application_owner_creations(plan)[-1] != (intent, None):
+            raise ProtectedApplyJournalError("application owner creation intent readback changed")
+        return intent
+
+    def record_application_owner_oid(self, plan: FinalGatePlan, *, ordinal: int, role_oid: int) -> None:
+        records = self.read_application_owner_creations(plan)
+        if not records or records[-1][0].ordinal != ordinal or type(role_oid) is not int or not 0 < role_oid < 2**32:
+            raise ProtectedApplyJournalError("application owner creation requires its pending intent")
+        root, _ = self._application_admission_context()
+        name = f"application-owner-{ordinal:02d}-oid.json"
+        self._publish_or_match(root / name, {"schema_version": 1, "intent_digest": records[-1][0].digest, "role_oid": role_oid})
+        if self.read_application_owner_creations(plan)[-1][1] != role_oid:
+            raise ProtectedApplyJournalError("application owner creation OID readback changed")
 
     def prepare_application_cnpg_fence(
         self, plan: FinalGatePlan, *,
