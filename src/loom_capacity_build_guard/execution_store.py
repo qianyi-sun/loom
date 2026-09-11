@@ -22,12 +22,13 @@ from loom_capacity_agent.admission import (
     RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
+from loom_capacity_agent.build_admission import BuildClaimReceiptV1, BuildClaimRequestV1
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
     _identity,
 )
-from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
@@ -139,6 +140,25 @@ class BuildGuardExecutionStore:
                 or receipt.worker_incarnation != request.worker_incarnation or receipt.predecessor_worker_incarnation is not None
                 or receipt.protected_registration_epoch != 2 or receipt.request_digest != digest or receipt.registration_digest != digest):
                 raise ValueError("build registration receipt changed")
+            return receipt
+
+    async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        """Claim the allocated native request, not arbitrary application work."""
+        if not self._session.in_transaction():
+            raise ValueError("native claim requires an outer transaction")
+        request = BuildClaimRequestV1.model_validate_json(request.model_dump_json())
+        if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
+            raise ValueError("native claim credential is invalid")
+        wire, digest = canonical_bytes(request), canonical_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.claim_platform(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": digest, "credential": sha256(worker_credential.encode("ascii")).hexdigest()})
+            receipt = BuildClaimReceiptV1.model_validate_json(returned)
+            if (canonical_bytes(receipt).decode("ascii") != returned or receipt.request != request
+                or receipt.request_digest != digest):
+                raise ValueError("native claim receipt changed")
             return receipt
 
     async def revoke_prepared_bootstrap(self, request: ExecutablePreparedBootstrapRevocationV2) -> RevokedExecutableBootstrapV2:

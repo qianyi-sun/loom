@@ -176,7 +176,7 @@ async def test_registration_immutable_and_nondestructive_downgrade(prepared_inpu
             async with session.begin_nested():
                 await session.execute(text("SELECT * FROM loom_capacity_build_guard.worker_registrations"))
     for mutation in ("UPDATE loom_capacity_build_guard.worker_registrations SET payload=payload",
-        "DELETE FROM loom_capacity_build_guard.worker_registrations", "TRUNCATE loom_capacity_build_guard.worker_registrations"):
+        "DELETE FROM loom_capacity_build_guard.worker_registrations", "TRUNCATE loom_capacity_build_guard.worker_registrations CASCADE"):
         with engine.begin() as connection, pytest.raises(DBAPIError, match="append-only"):
             connection.execute(text(mutation))
     with pytest.raises(DBAPIError, match="retained evidence"):

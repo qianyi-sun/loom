@@ -492,6 +492,22 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0017` adds an immutable claim of the exact
+allocated platform request. It authenticates the registered worker's opaque
+credential against the private hash, requires prior registration commit, and
+rechecks current source/plan/lease authority after blocking operations. One
+registration can claim only its one assignment; no application claim tables or
+source grants are used. Exact replay recovers evidence without renewing authority.
+Committed observation advances that worker's claim high-water from zero to one.
+
+Demand capture now projects actual `FixedClaimV1` entries from held private claims
+using their allocated resources and registered worker incarnation. Current
+assignments may overlap fixed claims, but neither overlaps pending demand.
+Cancellation marks a claim `cancel-pending`; expired or terminal execution remains
+charged as `unknown`. Neither case releases holds or infers build success. Durable
+outcomes and registered drain/release remain required before live execution can
+be enabled. Retained claim evidence prevents lossy downgrade.
+
 Build-guard revision `build_guard_0016` adds the private native registration
 consumer for the existing sealed handoff. Only initial bootstrap epoch 1 to
 registration epoch 2 is admitted; predecessor rotation is unsupported. The
@@ -506,9 +522,10 @@ issue a source capability.
 Observation exposes only committed registration. Registration and unregistered
 withdrawal take the same installation/bootstrap/physical locks, so the withdrawal
 path cannot revoke a registered worker. Holds remain charged and retained native
-registration prevents lossy downgrade. Registered-worker claims, drain/release,
-per-platform outcomes, purpose-specific transport and allocation containment must
-be connected before public typed execution can be enabled.
+registration prevents lossy downgrade. Claims are now retained privately, and
+registration has a purpose-specific transport. Native claim transport, registered
+drain/release, per-platform outcomes and allocation containment must still be
+connected before public typed execution can be enabled.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
