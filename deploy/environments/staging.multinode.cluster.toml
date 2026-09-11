@@ -13,6 +13,9 @@ namespace = "loom-staging"
 container_registry = "192.168.50.13:5000"
 container_registry_push = "localhost:5000"
 image_tag = "staging-ce759bff"
+# Same running MinIO manifest, from its upstream Quay publication. Cold
+# replacement pods must not depend on the unavailable Docker Hub image source.
+minio_image = "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
 runtime_environment = "staging"
 ingress_host = "yylx.world"
 ingress_redirect_hosts = ["www.yylx.world"]

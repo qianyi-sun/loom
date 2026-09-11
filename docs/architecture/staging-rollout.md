@@ -45,6 +45,15 @@ store.
 
 ## Authority and persistence
 
+The multi-node staging preset pins MinIO to its upstream Quay publication by
+manifest digest. This preserves the existing release while allowing cold
+replacement pods to pull independently of Docker Hub. The four replicas,
+Longhorn data claims, peer-discovery service and disruption budget remain
+unchanged. Changing the image reference still changes the StatefulSet's pod
+template: it must enter through the protected, backed-up rollout, not a manual
+pod restart or image patch. Running pods being Ready does not prove that a
+replacement can retrieve its configured image.
+
 The installation owns its checkout, configuration, kubeconfig, credential
 sources, runtime directory, and state directory. Ordinary operators can use
 the client but cannot edit those inputs. Caller identity comes from the OS
