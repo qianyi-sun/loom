@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from loom.personal_dev_build_demand import personal_build_work_identity
 from loom.personal_dev_builder_artifact import (
     VerifiedPersonalDevBuildArtifact,
     VerifiedPersonalDevImageArtifact,
@@ -34,6 +35,8 @@ from loom.personal_dev_candidate_gc import (
     personal_dev_registry_repository,
     validate_personal_dev_registry_prefix,
 )
+from loom_capacity_agent.build_admission import BuildOutcomeReceiptV1, native_build_artifact_key
+from loom_capacity_manager.contracts import canonical_digest
 
 _ARTIFACT_CONTENT_TYPE = "application/vnd.loom.personal-dev-build.v1+tar"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -97,6 +100,10 @@ class PersonalDevRegistryPublisher(Protocol):
     ) -> tuple[str, str]: ...
 
 
+class PersonalDevAcceptedArtifactResolver(Protocol):
+    async def resolve(self, registration: CandidateRegistration, *, platform: PersonalDevPlatform) -> BuildOutcomeReceiptV1: ...
+
+
 def _canonical_bytes(value: object, *, label: str) -> bytes:
     try:
         return json.dumps(
@@ -142,6 +149,7 @@ class S3TrustedPersonalDevBuildPublicationExporter:
     trusted_launcher_profile_sha256: str
     protocol_versions: Mapping[str, str]
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    accepted_artifact_resolver: PersonalDevAcceptedArtifactResolver | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -193,11 +201,26 @@ class S3TrustedPersonalDevBuildPublicationExporter:
         *,
         platform: PersonalDevPlatform,
         destination: Path,
+        accepted: BuildOutcomeReceiptV1 | None = None,
     ) -> str:
         candidate = registration.candidate
         if candidate.object_bucket != self.expected_bucket:
             raise RuntimeError("personal-dev build artifact bucket binding is invalid")
-        key = personal_dev_build_artifact_key(registration, platform=platform)
+        if self.accepted_artifact_resolver is not None:
+            if not isinstance(accepted, BuildOutcomeReceiptV1):
+                raise ValueError("personal-dev accepted native artifact is unavailable")
+            accepted = BuildOutcomeReceiptV1.model_validate_json(accepted.model_dump_json())
+            request = accepted.request
+            if (request.result != "artifact-ready" or request.artifact is None
+                or accepted.request_digest != canonical_digest(request)
+                or request.claim.request_id != personal_build_work_identity(registration, platform)[1]
+                or request.claim.binding.pool_id != ("oldlab" if platform == "linux/amd64" else "gb10")):
+                raise ValueError("personal-dev accepted native artifact binding changed")
+            key = native_build_artifact_key(request.claim, request.artifact)
+            expected_archive = request.artifact
+        else:
+            key = personal_dev_build_artifact_key(registration, platform=platform)
+            expected_archive = None
         response = self.object_store.get_object(Bucket=self.expected_bucket, Key=key)
         body = response.get("Body")
         metadata = response.get("Metadata")
@@ -207,6 +230,7 @@ class S3TrustedPersonalDevBuildPublicationExporter:
             or not hasattr(body, "close")
             or type(content_length) is not int
             or not 0 < content_length <= self.max_artifact_bytes
+            or (expected_archive is not None and content_length != expected_archive.archive_size_bytes)
             or response.get("ContentType") != _ARTIFACT_CONTENT_TYPE
             or not isinstance(metadata, Mapping)
             or any(
@@ -246,6 +270,8 @@ class S3TrustedPersonalDevBuildPublicationExporter:
             typed_body.close()
         if observed != content_length:
             raise RuntimeError("personal-dev build artifact is truncated")
+        if expected_archive is not None and digest.hexdigest() != expected_archive.archive_sha256:
+            raise RuntimeError("personal-dev accepted native artifact archive digest changed")
         metadata_after = os.stat(destination, follow_symlinks=False)
         if (
             not stat.S_ISREG(metadata_after.st_mode)
@@ -348,6 +374,8 @@ class S3TrustedPersonalDevBuildPublicationExporter:
                     registration,
                     platform=platform,
                     destination=bundle,
+                    accepted=(await self.accepted_artifact_resolver.resolve(registration, platform=platform)
+                        if self.accepted_artifact_resolver is not None else None),
                 )
                 artifacts[platform] = await asyncio.to_thread(
                     verify_personal_dev_build_artifact,

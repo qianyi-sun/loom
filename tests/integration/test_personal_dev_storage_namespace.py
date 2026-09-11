@@ -22,16 +22,69 @@ from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 _K3S = "rancher/k3s@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9dfd0e9fa9e0cd"
 
 
+def _failure_category(stderr):
+    # Finite labels only: kubectl can quote Secret input, names or server URLs.
+    lowered = stderr.lower()
+    if 'namespaces "' in lowered and "not found" in lowered:
+        return "namespace-not-found"
+    for label, fragment in (
+        ("namespace-terminating", "namespace is being terminated"),
+        ("resource-conflict", "the object has been modified"),
+        ("already-exists", "already exists"),
+        ("not-found", "notfound"),
+        ("forbidden", "forbidden"),
+        ("service-unavailable", "serviceunavailable"),
+        ("internal-error", "internalerror"),
+        ("connection-refused", "connection refused"),
+        ("connection-reset", "connection reset"),
+        ("timeout", "timed out"),
+        ("timeout", "deadline exceeded"),
+        ("tls-error", "tls:"),
+        ("certificate-error", "x509:"),
+        ("container-stopped", "is not running"),
+        ("unexpected-eof", "unexpected eof"),
+    ):
+        if fragment in lowered:
+            return label
+    return "unclassified"
+
+
 class _ContainerKubectl:
     def __init__(self, container_id):
         self.container_id = container_id
 
     async def run(self, argv, *, stdin=None, timeout_seconds=120):
         assert argv[0] == "kubectl"
-        return await AsyncCommandRunner().run([
-            "docker", "exec", "-i", self.container_id, "kubectl",
-            "--kubeconfig=/etc/rancher/k3s/k3s.yaml", *argv[1:],
-        ], stdin=stdin, timeout_seconds=timeout_seconds)
+        diagnostic = "/tmp/loom-test-kubectl-" + uuid4().hex
+        # Preserve the production runner's exit handling and Conflict subtype.
+        # This wrapper executes kubectl exactly once. Its stderr copy exists only
+        # in this test-owned container and disappears when that container stops.
+        command = ["docker", "exec", "-i", self.container_id, "sh", "-c",
+            'loom_fixture_diag="$1"; shift; "$@" 2>"$loom_fixture_diag"; '
+            'loom_fixture_exit=$?; cat "$loom_fixture_diag" >&2; exit "$loom_fixture_exit"',
+            "loom-test-kubectl", diagnostic, "kubectl",
+            "--kubeconfig=/etc/rancher/k3s/k3s.yaml", *argv[1:]]
+        try:
+            return await AsyncCommandRunner().run(command, stdin=stdin, timeout_seconds=timeout_seconds)
+        except DevInstanceRuntimeError as error:
+            try:
+                captured = await AsyncCommandRunner().run(
+                    ["docker", "exec", self.container_id, "head", "-c", "8192", diagnostic], timeout_seconds=5)
+                error.add_note("disposable kubectl failure category: " + _failure_category(captured.stdout))
+            except DevInstanceRuntimeError:
+                error.add_note("disposable kubectl diagnostic unavailable")
+            try:
+                state = await AsyncCommandRunner().run(["docker", "inspect", "--format",
+                    '{"Running":{{.State.Running}},"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}}}',
+                    self.container_id], timeout_seconds=5)
+                value = json.loads(state.stdout)
+                if (isinstance(value, dict) and set(value) == {"Running", "OOMKilled", "ExitCode"}
+                    and type(value["Running"]) is bool and type(value["OOMKilled"]) is bool
+                    and type(value["ExitCode"]) is int):
+                    error.add_note("disposable container state: " + json.dumps(value, sort_keys=True))
+            except (DevInstanceRuntimeError, ValueError):
+                error.add_note("disposable container state unavailable")
+            raise
 
 
 @pytest.fixture

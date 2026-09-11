@@ -1393,6 +1393,8 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v1/personal-memberships/subjects/status/query", ("POST",)),
         ("/v1/personal-memberships/subjects/release/query", ("POST",)),
         ("/v1/personal-memberships/{subject_id}", ("PUT",)),
+        ("/v2/personal-memberships/checkpoint", ("GET",)),
+        ("/v2/personal-memberships/{subject_id}", ("PUT",)),
         ("/v1/reports/demand/{subject_id}", ("PUT",)),
         (
             "/v1/reports/protected-releases/{subject_id}/{shape_instance_id}",

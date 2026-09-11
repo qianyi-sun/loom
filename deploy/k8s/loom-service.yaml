@@ -138,6 +138,8 @@ spec:
           value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256
           value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILD_MANAGEMENT_CONFIG_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_DOCKER_PATH
           value: /usr/bin/docker
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED

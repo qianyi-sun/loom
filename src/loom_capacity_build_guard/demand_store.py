@@ -1,9 +1,9 @@
-"""Protected pending/held observation before native claim admission is installed.
+"""Protected pending, held and fixed native claim observations.
 
 The private guard loads current source snapshots; SQL independently checks
 that set, excludes holds from pending and derives assignments from retained plans.
-This is not worker readiness and must grow actual fixed-claim projection together
-with the purpose-specific native bootstrap/claim implementation.
+Committed private claims project the exact registered worker and allocated
+resources. This is accounting evidence, not runtime or source-access readiness.
 """
 
 from __future__ import annotations

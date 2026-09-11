@@ -38,7 +38,7 @@ class BuildGuardReleaseOutbox:
         release = value.release
         binding = release.binding
         installation = self._installation
-        if (value.event_kind not in {"withdrawn", "prepared-revoked"}
+        if (value.event_kind not in {"released", "withdrawn", "prepared-revoked"}
             or binding.subject_id != installation.subject_id or binding.subject_incarnation != installation.subject_incarnation
             or binding.deployment_generation != installation.deployment_generation
             or binding.candidate_generation != installation.candidate_generation

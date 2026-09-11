@@ -82,6 +82,21 @@ _COLUMNS = ("id", "owner_user_id", "subject_id", "subject_incarnation",
     "deployment_generation", "reporter_incarnation")
 
 
+def build_guard_installation_document(*, member: PersonalBuildMemberV1,
+    runtime: PersonalBuildRuntimeInstallation,
+) -> BuildGuardInstallationV1:
+    """Derive stable facts for preflight; only owner retention installs them."""
+    member = _member(member)
+    config = member.configuration
+    return BuildGuardInstallationV1(
+        id=_identity(config.subject_id, config.subject_incarnation, config.deployment_generation),
+        owner_user_id=member.owner_id, subject_id=config.subject_id,
+        subject_incarnation=config.subject_incarnation, deployment_generation=config.deployment_generation,
+        candidate_generation=config.candidate_generation, reporter_incarnation=config.demand_reporter_incarnation,
+        protected_admission_sha256=member.acknowledgement.protected_admission_sha256,
+        runtime_installation_sha256=_installation(member, runtime), runtime=runtime)
+
+
 class BuildGuardInstallationStore:
     """Retain and verify immutable facts inside the installer's outer transaction."""
 
@@ -115,15 +130,7 @@ class BuildGuardInstallationStore:
     ) -> RetainedBuildInstallation:
         """Exact replay survives capacity changes but never rebinds a deployment."""
         await self._assert_owner()
-        member = _member(member)
-        config = member.configuration
-        document = BuildGuardInstallationV1(
-            id=_identity(config.subject_id, config.subject_incarnation, config.deployment_generation),
-            owner_user_id=member.owner_id, subject_id=config.subject_id,
-            subject_incarnation=config.subject_incarnation, deployment_generation=config.deployment_generation,
-            candidate_generation=config.candidate_generation, reporter_incarnation=config.demand_reporter_incarnation,
-            protected_admission_sha256=member.acknowledgement.protected_admission_sha256,
-            runtime_installation_sha256=_installation(member, runtime), runtime=runtime)
+        document = build_guard_installation_document(member=member, runtime=runtime)
         wire = canonical_bytes(document)
         parameters = {field: getattr(document, field) for field in _COLUMNS}
         parameters.update(payload=wire.decode("ascii"), wire=wire, digest=sha256(wire).hexdigest())

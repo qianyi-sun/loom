@@ -157,6 +157,14 @@ def parse_typed_membership_result(payload: str | bytes) -> PersonalMembershipRes
     return _parse(payload, PersonalMembershipResultV2)
 
 
+def typed_membership_subject_id(request: PersonalMembershipMutationV2) -> UUID:
+    """Derive the transport target, never trust a build acknowledgement's path."""
+    request = parse_typed_membership_mutation(canonical_bytes(request))
+    if isinstance(request.command, PersonalBuildCommandV2):
+        return personal_build_subject_id(request.namespace_id, request.command.projection.owner_id)
+    return request.command.projection.subject_id
+
+
 def _checked_context(
     request: PersonalMembershipMutationV2, preparation: ExecutionPreparationV4, fleet: FleetManifestV1,
 ) -> tuple[PersonalMembershipMutationV2, ExecutionPreparationV4, FleetManifestV1, AccountPolicyV1]:

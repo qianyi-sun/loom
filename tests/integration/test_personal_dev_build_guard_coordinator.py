@@ -131,3 +131,40 @@ async def test_timeout_releases_publication_locks_without_losing_preparation(pre
         connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": request.id})
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions")) == 0
+
+
+@pytest.mark.parametrize("boundary", ["fresh", "prepared", "lost-reply", "changed-proposal", "cancelled"])
+async def test_convergence_loads_private_sources_and_replays_exact_plan(prepared_input, boundary):
+    coordinator_type = import_module("loom_capacity_build_guard.coordinator").BuildPlanCoordinator
+    factory, engine, installation, proposal, registration, request = prepared_input
+    calls = []
+
+    class Publisher:
+        async def publish_executable_admission_acknowledgement(self, ack, *, idempotency_key):
+            calls.append((ack, idempotency_key))
+            if boundary == "lost-reply" and len(calls) == 1:
+                raise ConnectionError("lost response")
+            return ExecutableAdmissionAcknowledgementReceiptV2(proposal_id=ack.proposal_id,
+                prepared_plan_digest=ack.prepared_plan_digest, receipt_digest=canonical_executable_digest(ack),
+                replayed=len(calls)>1, executable=True)
+
+    coordinator = coordinator_type(factory, installation=installation, publisher=Publisher())
+    if boundary in {"prepared", "changed-proposal", "cancelled"}:
+        await coordinator.prepare(proposal, sources={request.id: registration})
+    if boundary == "cancelled":
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": request.id})
+    if boundary == "changed-proposal":
+        proposal = proposal.model_copy(update={"proposal_id": uuid4()})
+    if boundary in {"changed-proposal", "cancelled", "lost-reply"}:
+        with pytest.raises((ValueError, DBAPIError, ConnectionError)):
+            await coordinator.converge(proposal)
+        if boundary != "lost-reply":
+            assert calls == []
+    if boundary not in {"changed-proposal", "cancelled"}:
+        result = await coordinator_type(factory, installation=installation, publisher=Publisher()).converge(proposal)
+        assert result.proposal_id == proposal.proposal_id
+        assert all(call == calls[0] for call in calls)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.assignments")) == 1

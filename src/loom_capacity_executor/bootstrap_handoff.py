@@ -9,7 +9,7 @@ import os
 import secrets
 import stat
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Protocol, cast
@@ -45,6 +45,13 @@ class _AdmissionRegistrationClient(Protocol):
 class BootstrapHandoffLease:
     reference: str
     bootstrap_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapLaunchedWorker:
+    registration: ExecutableWorkerRegistrationV2
+    physical: PhysicalJobBindingV2
+    worker_credential: str = field(repr=False)
 
 
 class BootstrapHandoffRecordV2(StrictV2Model):
@@ -818,14 +825,14 @@ async def consume_bootstrap_handoff(
     return credential.worker_credential
 
 
-def claim_bootstrap_handoff_launch(
+def claim_bootstrap_handoff_worker(
     directory: Path,
     reference: str,
     physical: PhysicalJobBindingV2,
     admission: object,
     *,
     now: Callable[[], datetime],
-) -> str:
+) -> BootstrapLaunchedWorker:
     """Atomically claim the candidate-exec boundary for a recovered credential."""
 
     _private_directory(directory)
@@ -878,7 +885,17 @@ def claim_bootstrap_handoff_launch(
     )
     if changed:
         _fsync_directory(directory)
-    return credential.worker_credential
+    return BootstrapLaunchedWorker(registration=credential.worker_registration,
+        physical=credential.physical, worker_credential=credential.worker_credential)
+
+
+def claim_bootstrap_handoff_launch(
+    directory: Path, reference: str, physical: PhysicalJobBindingV2, admission: object,
+    *, now: Callable[[], datetime],
+) -> str:
+    """Preserve the application's string credential API and one-time launch fence."""
+    return claim_bootstrap_handoff_worker(directory, reference, physical, admission,
+        now=now).worker_credential
 
 
 __all__ = [
@@ -890,8 +907,10 @@ __all__ = [
     "BootstrapHandoffOwnershipV2",
     "BootstrapHandoffRecordV2",
     "BootstrapHandoffStore",
+    "BootstrapLaunchedWorker",
     "bind_bootstrap_handoff_ownership",
     "claim_bootstrap_handoff_launch",
+    "claim_bootstrap_handoff_worker",
     "consume_bootstrap_handoff",
     "resolve_bootstrap_handoff_physical_binding",
 ]

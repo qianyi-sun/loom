@@ -487,6 +487,17 @@ python_type = "bool"
 default     = false
 description = "Enable the restricted personal candidate builder only after its immutable image, runtime class, scanner evidence, and registry publisher are installed."
 
+[service_config.personal_dev_build_management_config_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Optional owner-only pinned installed native build recovery scopes. Does not enable native build intake or readiness."
+
+[service_config.personal_dev_build_management_config_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Exact SHA-256 of the canonical native build management recovery configuration."
+
 [service_config.personal_dev_native_builder_enabled]
 used_by     = ["loom-service"]
 python_type = "bool"
