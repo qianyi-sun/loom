@@ -5,7 +5,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import subprocess
+import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -157,3 +160,69 @@ def test_preload_rejects_insufficient_capacity_before_writing_and_closes_pipe(
     for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
+
+
+_STARTUP_PROBE = """
+import ctypes, json, os, resource, stat, subprocess, sys
+from loom_capacity_executor.native_worker_bootstrap import (
+    consume_native_worker_bootstrap, NativeBootstrapError,
+)
+try:
+    bootstrap = consume_native_worker_bootstrap()
+except NativeBootstrapError as exc:
+    assert stat.S_ISCHR(os.fstat(0).st_mode)
+    assert os.read(0, 1) == b''
+    print(str(exc))
+    raise SystemExit(65)
+libc = ctypes.CDLL(None)
+child = subprocess.run(
+    [sys.executable, '-I', '-c', 'import os; assert os.read(0, 1) == b""'],
+    check=False, capture_output=True,
+)
+print(json.dumps({
+    'core_limits': resource.getrlimit(resource.RLIMIT_CORE),
+    'dumpable': libc.prctl(3, 0, 0, 0, 0),
+    'stdin_device': os.fstat(0).st_rdev,
+    'child_exit': child.returncode,
+    'credential_length': len(bootstrap.worker_credential),
+}))
+"""
+
+
+def _startup_wire(*, expired: bool = False) -> bytes:
+    bootstrap = _bootstrap()
+    now = datetime.now(UTC).replace(microsecond=0)
+    native = bootstrap.native_execution.model_copy(update={
+        "root_activated_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "root_expires_at": (now + timedelta(days=-1 if expired else 1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    return encode_native_bootstrap(NativeWorkerBootstrap(
+        native_execution=native, worker_credential=bootstrap.worker_credential,
+    ))
+
+
+def test_native_startup_hardens_before_handoff_and_detaches_stdin() -> None:
+    # Resource/dumpability changes are intentionally irreversible in this child,
+    # never applied to the test runner or another task's process.
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _STARTUP_PROBE],
+        input=_startup_wire(), capture_output=True, check=False, timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr.decode()
+    assert json.loads(completed.stdout) == {
+        "core_limits": [0, 0], "dumpable": 0, "stdin_device": os.makedev(1, 3),
+        "child_exit": 0, "credential_length": len(_bootstrap().worker_credential),
+    }
+    assert _bootstrap().worker_credential.encode() not in completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("kind", ["missing", "expired", "malformed"])
+def test_native_startup_refuses_without_recoverable_stdin(kind: str) -> None:
+    wire = _startup_wire(expired=True) if kind == "expired" else (b"" if kind == "missing" else b"invalid")
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _STARTUP_PROBE],
+        input=wire, capture_output=True, check=False, timeout=15,
+    )
+    assert completed.returncode == 65, completed.stderr.decode()
+    assert completed.stdout.strip() == b"native worker bootstrap unavailable or malformed"
+    assert completed.stderr == b""
