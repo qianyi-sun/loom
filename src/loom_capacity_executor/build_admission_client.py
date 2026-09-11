@@ -23,6 +23,10 @@ from loom_capacity_agent.client import (
     canonical_manager_origin,
     read_owner_only_bearer_token,
 )
+from loom_capacity_executor.pinned_admission_transport import (
+    PinnedBuildAdmissionConnectionV1,
+    load_pinned_admission_credentials,
+)
 from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import (
     Identifier,
@@ -95,6 +99,17 @@ class BuildAdmissionClient:
     async def aclose(self) -> None:
         if self._owns_http:
             await self._http.aclose()
+
+    @classmethod
+    def from_pinned_files(cls, identity: BuildAdmissionExecutorV1, connection: PinnedBuildAdmissionConnectionV1) -> BuildAdmissionClient:
+        identity = BuildAdmissionExecutorV1.model_validate_json(identity.model_dump_json())
+        connection = PinnedBuildAdmissionConnectionV1.model_validate_json(connection.model_dump_json())
+        tls, token = load_pinned_admission_credentials(connection)
+        _validate_connection(connection.origin,token,connection.timeout_seconds)
+        http = httpx.AsyncClient(verify=tls,timeout=httpx.Timeout(connection.timeout_seconds),
+            trust_env=False,follow_redirects=False)
+        return cls(identity,origin=connection.origin,bearer_token=token,http_client=http,
+            owns_http_client=True,timeout_seconds=connection.timeout_seconds)
 
     def _assert_binding(self, binding: ExecutableIntentBindingV2) -> None:
         identity = self.identity

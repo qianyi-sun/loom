@@ -259,7 +259,9 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
         if pinned:
             from hashlib import sha256
 
-            from loom_capacity_executor.pinned_admission_transport import PinnedBuildAdmissionConnectionV1
+            from loom_capacity_executor.pinned_admission_transport import (
+                PinnedBuildAdmissionConnectionV1,
+            )
 
             paths = {"bearer_token":token_path,"ca":ca_path,
                 "certificate":tls_files.certificate_file,"private_key":tls_files.private_key_file}

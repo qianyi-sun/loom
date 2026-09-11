@@ -11,7 +11,11 @@ from tests.unit.test_capacity_agent_client import _owner_file
 def pinned_inputs(tmp_path):
     from cryptography.hazmat.primitives import serialization
 
-    from tests.integration.test_capacity_manager_mtls import _new_ca, _private_key_bytes, _signed_certificate
+    from tests.integration.test_capacity_manager_mtls import (
+        _new_ca,
+        _private_key_bytes,
+        _signed_certificate,
+    )
 
     ca_key, ca = _new_ca("pinned-admission-ca")
     key, cert = _signed_certificate("pool-executor",ca_key,ca,server=False)
