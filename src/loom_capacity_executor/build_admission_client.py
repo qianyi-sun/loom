@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import TypeVar, cast
 from uuid import UUID
 
@@ -27,6 +28,7 @@ from loom_capacity_agent.admission import (
 from loom_capacity_agent.build_admission import (
     BuildAllocatedClaimExchangeV1,
     BuildAllocatedClaimRequestV1,
+    BuildArtifactV1,
     BuildClaimExchangeV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
@@ -39,6 +41,12 @@ from loom_capacity_agent.build_admission import (
     BuildSourceContextV1,
     BuildSourceReadExchangeV1,
     BuildSourceReadReceiptV1,
+)
+from loom_capacity_agent.build_artifact_stream import (
+    ARTIFACT_STREAM_CONTENT_TYPE,
+    BuildArtifactUploadReceiptV1,
+    BuildArtifactUploadV1,
+    encode_artifact_stream,
 )
 from loom_capacity_agent.client import (
     DemandReporterConnection,
@@ -141,14 +149,15 @@ class BuildAdmissionClient:
             or binding.executor_id != identity.executor_id or binding.executor_incarnation != identity.executor_incarnation):
             raise ValueError("build admission executor binding changed")
 
-    async def _post(self,binding: ExecutableIntentBindingV2,operation: str,payload: bytes,
+    async def _post(self,binding: ExecutableIntentBindingV2,operation: str,payload: bytes | AsyncIterator[bytes],
         receipt_type: type[_Receipt], *, max_response_bytes: int = _MAX_RESPONSE_BYTES,
+        content_type: str = "application/json", total_timeout: float | None = None,
     ) -> _Receipt:
         self._assert_binding(binding)
         url = f"{self._origin}/api/v1/internal/capacity-build/pools/{binding.pool_id}/intents/{binding.intent_id}/{operation}"
         try:
-            async with asyncio.timeout(self._timeout), self._http.stream("POST",url,content=payload,
-                headers={"Authorization":f"Bearer {self._token}","Content-Type":"application/json"},
+            async with asyncio.timeout(self._timeout if total_timeout is None else total_timeout), self._http.stream("POST",url,content=payload,
+                headers={"Authorization":f"Bearer {self._token}","Content-Type":content_type},
                 timeout=self._timeout,follow_redirects=False) as response:
                 if response.status_code != 200:
                     raise BuildAdmissionTransportError(f"build admission rejected request with status {response.status_code}")
@@ -167,6 +176,20 @@ class BuildAdmissionClient:
         except ValueError:
             raise BuildAdmissionTransportError("build admission receipt is invalid") from None
         return cast(_Receipt, receipt)
+
+    async def upload_artifact(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        artifact: BuildArtifactV1, chunks: AsyncIterator[bytes],
+    ) -> BuildArtifactUploadReceiptV1:
+        try:
+            envelope = BuildArtifactUploadV1.model_validate_json(BuildArtifactUploadV1(
+                claim=claim, worker_credential=worker_credential, artifact=artifact).model_dump_json())
+        except ValueError:
+            raise ValueError("native artifact upload envelope is invalid") from None
+        receipt = await self._post(envelope.claim.binding, "artifact", encode_artifact_stream(envelope, chunks),
+            BuildArtifactUploadReceiptV1, content_type=ARTIFACT_STREAM_CONTENT_TYPE, total_timeout=1800)
+        if receipt.claim_digest != canonical_digest(envelope.claim) or receipt.artifact != envelope.artifact:
+            raise BuildAdmissionTransportError("native artifact upload receipt binding changed")
+        return receipt
 
     async def read_source(self, claim: BuildClaimRequestV1, *, worker_credential: str,
         offset: int, length: int,

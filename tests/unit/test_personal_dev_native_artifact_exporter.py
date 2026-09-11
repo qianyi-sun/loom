@@ -63,7 +63,9 @@ async def test_native_exporter_requires_exact_accepted_artifact_before_scanning(
                     {"archive_sha256": "f" * 64} if boundary == "archive-digest" else {"archive_size_bytes": len(artifacts[platform])+1})})
             return receipt.model_copy(update={"request": outcome, "request_digest": canonical_digest(outcome)})
 
-    keys = {native_build_artifact_key(receipts[p].request.claim): p for p in PERSONAL_DEV_PLATFORMS}
+    keys = {native_build_artifact_key(receipts[p].request.claim,
+        receipts[p].request.artifact.model_copy(update={"archive_sha256": "f" * 64})
+        if boundary == "archive-digest" else receipts[p].request.artifact): p for p in PERSONAL_DEV_PLATFORMS}
 
     class Store(_ObjectStore):
         def get_object(self, **kwargs):

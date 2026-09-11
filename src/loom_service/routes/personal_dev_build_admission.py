@@ -30,10 +30,16 @@ from loom_capacity_agent.build_admission import (
     BuildSourceReadExchangeV1,
     BuildSourceReadReceiptV1,
 )
+from loom_capacity_agent.build_artifact_stream import (
+    ARTIFACT_STREAM_CONTENT_TYPE,
+    BuildArtifactUploadReceiptV1,
+    decode_artifact_stream,
+)
+from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
 from loom_capacity_build_guard.source_reader import BuildSourceReader
 from loom_capacity_manager.auth import AuthorizationError, CapacityPrincipalVerifier
-from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.executable_contracts import (
     ExecutableIntentBindingV2,
     canonical_executable_bytes,
@@ -58,17 +64,17 @@ async def _admit(
         raise HTTPException(503, "build admission unavailable")
     if operation_name in {"register", "drain", "release"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
-    ) not in {"native-registration", "native-claims", "native-source"}:
+    ) not in {"native-registration", "native-claims", "native-source", "native-artifacts"}:
         raise HTTPException(503, "build registration unavailable")
     if operation_name in {"claim", "outcome"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
-    ) not in {"native-claims", "native-source"}:
+    ) not in {"native-claims", "native-source", "native-artifacts"}:
         raise HTTPException(503, "native claims unavailable")
     source_reader = getattr(request.app.state, "personal_dev_build_source_reader", None)
-    if operation_name in {"context", "claim-assigned"} and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source":
+    if operation_name in {"context", "claim-assigned"} and getattr(request.app.state, "personal_dev_build_admission_mode", None) not in {"native-source", "native-artifacts"}:
         raise HTTPException(503, "native context unavailable")
     if operation_name == "source" and (
-        getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source"
+        getattr(request.app.state, "personal_dev_build_admission_mode", None) not in {"native-source", "native-artifacts"}
         or not isinstance(source_reader, BuildSourceReader)
     ):
         raise HTTPException(503, "native source unavailable")
@@ -225,6 +231,43 @@ async def _admit(
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/prepare")
 async def prepare_build(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="prepare")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/artifact")
+async def upload_build_artifact(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    writer = getattr(request.app.state, "personal_dev_build_artifact_writer", None)
+    verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
+    if (getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-artifacts"
+        or not isinstance(writer, BuildArtifactWriter) or not isinstance(verifier, CapacityPrincipalVerifier)):
+        raise HTTPException(503, "native artifact upload unavailable")
+    if request.url.scheme != "https":
+        raise HTTPException(403, "build admission requires TLS")
+    if len(request.headers.getlist("authorization")) != 1:
+        raise HTTPException(401, "invalid build admission credentials")
+    try:
+        principal = verifier.verify_bearer(request.headers.get("authorization"))
+    except AuthorizationError:
+        raise HTTPException(401, "invalid build admission credentials") from None
+    if principal.scopes != frozenset({"capacity:execute:pool"}) or principal.pool_id != pool_id:
+        raise HTTPException(403, "build admission identity changed")
+    if request.headers.getlist("content-type") != [ARTIFACT_STREAM_CONTENT_TYPE]:
+        raise HTTPException(415, "native artifact stream content type required")
+    try:
+        async with asyncio.timeout(30):
+            envelope, chunks = await decode_artifact_stream(request.stream())
+        binding = envelope.claim.binding
+        if (binding.intent_id != intent_id or binding.pool_id != pool_id
+            or not principal.matches_executor(pool_id=binding.pool_id, executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation, pool_generation=binding.pool_generation)):
+            raise HTTPException(403, "build admission identity changed")
+        artifact = await writer.write(envelope.claim, worker_credential=envelope.worker_credential,
+            artifact=envelope.artifact, chunks=chunks)
+        receipt = BuildArtifactUploadReceiptV1(claim_digest=canonical_digest(envelope.claim), artifact=artifact)
+        return Response(canonical_bytes(receipt), media_type="application/json", headers={"Cache-Control": "no-store"})
+    except (DBAPIError, ValueError):
+        raise HTTPException(409, "native artifact evidence unavailable or changed") from None
+    except (TimeoutError, PoolTimeoutError, BotoCoreError, ClientError, RuntimeError):
+        raise HTTPException(503, "native artifact IO did not complete") from None
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/source")

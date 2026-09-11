@@ -286,8 +286,8 @@ activation remain to be connected; endpoint presence does not enable build intak
 Service startup can install these private sessions with the optional
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
-has `mode="prepare-bind-only"`, `"native-registration"`, `"native-claims"`, or
-`"native-source"`, owner-only `database_url_file` and
+has `mode="prepare-bind-only"`, `"native-registration"`, `"native-claims"`,
+`"native-source"`, or `"native-artifacts"`, owner-only `database_url_file` and
 `principals_file` paths, and their SHA-256 digests. The database URL requires
 verified PostgreSQL TLS. Startup checks the restricted agent and protected
 admission procedures, and rejects incomplete inputs or privilege drift. The
@@ -668,12 +668,40 @@ still rejects finished requests. Accepted artifacts remain retrievable after
 worker release while their parent source authority is current.
 
 The trusted exporter can consume this resolver instead of legacy attempt object
-keys. In this mode it derives only the accepted claim-specific key, verifies the
+keys. In this mode it derives only the accepted claim- and artifact-digest-specific key, verifies the
 accepted full archive length and SHA-256, then retains existing OCI verification,
 scan-before-publish and final candidate fencing. Missing/mismatched evidence has
 no legacy fallback. An accepted archive is not verified candidate success. Native
 service wiring must select this resolver; adding the adapter does not enable
 native build intake or establish runtime readiness.
+
+Explicit `native-artifacts` admission mode extends the source/claim lifecycle with
+`POST /api/v1/internal/capacity-build/pools/{pool_id}/intents/{intent_id}/artifact`.
+The pinned pool client streams a versioned, bounded canonical envelope followed by
+archive chunks; the scoped worker credential stays inside the TLS body, never in
+a URL or artifact metadata. The service retains exact pool/executor authentication,
+bounded framing and two upload slots, the configured artifact size ceiling, and
+current committed-claim/source fences before storage IO, each multipart part and
+before/after completion. No database locks span storage IO. Metadata required by
+the exporter comes from authenticated source context, not worker assertions.
+
+The writer verifies the entire declared length and SHA-256 before completion and
+uses `personal-dev/native-claims/<request>/<intent>/<claim>/<artifact-sha256>/artifact.tar`.
+Different verified output cannot overwrite an accepted digest's bytes; concurrent
+same-digest writers contain identical verified bytes and metadata. Conditional
+multipart completion is additional protection only: the repository's real MinIO
+fixture was observed to ignore `If-None-Match`. Automated real-MinIO coverage
+checks concurrent identical uploads and distinct output isolation. Export uses
+the digest from the accepted outcome, without a mutable-key fallback.
+
+Cancellation settles outstanding IO and aborts unfinished multipart work,
+including uploads created after cancellation arrives. Service shutdown closes
+intake and drains uploads before disposing storage/database clients. Completion
+followed by lost authority leaves an unaccepted object; it never returns success
+or deletes a concurrent replay's object. Upload acknowledgment is not an outcome,
+OCI validation, publication or readiness. Native-claim object/multipart GC, the
+contained build consumer and whole-attempt runtime composition remain required
+before operational readiness.
 
 Build-guard revision `build_guard_0024` privately rediscovers committed plans
 without a publication or terminal disposition. This recovers lost acknowledgement
@@ -725,7 +753,7 @@ may requeue only after retirement; artifact-ready/cancelled requests remain
 ineligible for fresh admission. The pool-authenticated `/release` endpoint and
 pinned client require a transport-only worker credential and return only committed,
 canonical release evidence. Typed routing preserves application/build authority;
-only `native-registration`, `native-claims` and `native-source` modes expose native release.
+only `native-registration`, `native-claims`, `native-source` and `native-artifacts` modes expose native release.
 Terminal release without the credential remains management-only, with no pool
 route. Runtime recovery orchestration, source grants and verified artifact publication remain required
 before operational enablement.
@@ -745,7 +773,7 @@ steps.
 Build-guard revision `build_guard_0019` records immutable per-claim wrapper outcomes:
 `artifact-ready`, `failed`, or `cancelled`. Artifact-ready retains an archive hash
 and size, not verified image success or publication authority. Object identities
-derive from the exact request, intent and claim, separating retry uploads. The
+derive from the exact request, intent, claim and artifact digest, separating retry uploads. The
 management exporter must still verify full OCI contents and scan accepted images
 before publication. Results authenticate the registered worker credential and
 exact committed claim, with byte-exact replay even after source expiry.

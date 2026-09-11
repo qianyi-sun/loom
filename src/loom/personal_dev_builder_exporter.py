@@ -216,7 +216,7 @@ class S3TrustedPersonalDevBuildPublicationExporter:
                 or request.claim.request_id != personal_build_work_identity(registration, platform)[1]
                 or request.claim.binding.pool_id != ("oldlab" if platform == "linux/amd64" else "gb10")):
                 raise ValueError("personal-dev accepted native artifact binding changed")
-            key = native_build_artifact_key(request.claim)
+            key = native_build_artifact_key(request.claim, request.artifact)
             expected_archive = request.artifact
         else:
             key = personal_dev_build_artifact_key(registration, platform=platform)

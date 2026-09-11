@@ -27,7 +27,7 @@ from loom_service.config import LoomServiceSettings
 
 
 class BuildAdmissionServiceConfigV1(StrictV1Model):
-    mode: Literal["prepare-bind-only", "native-registration", "native-claims", "native-source"]
+    mode: Literal["prepare-bind-only", "native-registration", "native-claims", "native-source", "native-artifacts"]
     database_url_file: str
     database_url_sha256: Digest
     principals_file: str
@@ -54,7 +54,7 @@ class PersonalBuildAdmissionRuntime:
     engine: AsyncEngine
     sessions: async_sessionmaker[AsyncSession]
     verifier: CapacityPrincipalVerifier
-    mode: Literal["prepare-bind-only", "native-registration", "native-claims", "native-source"]
+    mode: Literal["prepare-bind-only", "native-registration", "native-claims", "native-source", "native-artifacts"]
 
     async def aclose(self) -> None:
         await self.engine.dispose()
@@ -171,11 +171,11 @@ async def build_personal_build_admission_runtime(
             await connection.execute(text("SET LOCAL statement_timeout='10000ms'"))
             await connection.execute(text("SET LOCAL lock_timeout='5000ms'"))
             await _assert_private_agent(connection, registration_enabled=config.mode != "prepare-bind-only",
-                claims_enabled=config.mode in {"native-claims", "native-source"},
+                claims_enabled=config.mode in {"native-claims", "native-source", "native-artifacts"},
                 additional_signatures=("authorize_source(uuid,jsonb,bytea,text,text)",
                     "read_source_context(uuid,jsonb,bytea,text,text)",
                     "claim_assigned_platform(uuid,jsonb,bytea,text,text)")
-                    if config.mode == "native-source" else ())
+                    if config.mode in {"native-source", "native-artifacts"} else ())
     except BaseException:
         await engine.dispose()
         raise

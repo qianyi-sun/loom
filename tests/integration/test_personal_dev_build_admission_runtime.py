@@ -15,7 +15,7 @@ from tests.unit.test_personal_dev_build_admission_runtime import inputs, setting
 
 
 @pytest.mark.parametrize("privileged", [False, True])
-@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims", "native-source"])
+@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims", "native-source", "native-artifacts"])
 async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, privileged, mode
 ):

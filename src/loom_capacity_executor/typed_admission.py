@@ -8,7 +8,7 @@ native lifecycle consumers never fall back to application database authority.
 from __future__ import annotations
 
 import hmac
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Any, Self
@@ -26,12 +26,14 @@ from loom_capacity_agent.admission import (
 )
 from loom_capacity_agent.build_admission import (
     BuildAllocatedClaimRequestV1,
+    BuildArtifactV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
     BuildOutcomeRequestV1,
     BuildSourceContextV1,
     BuildSourceReadReceiptV1,
 )
+from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_agent.client import read_owner_only_bytes
 from loom_capacity_executor.admission_client import DatabaseExecutableAdmissionClient
@@ -100,7 +102,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
-    "read_source", "read_source_context", "claim_assigned_platform",
+    "read_source", "read_source_context", "claim_assigned_platform", "upload_artifact",
 })
 
 
@@ -237,6 +239,17 @@ class TypedAdmissionRouter:
         receipt = await self._call(claim.binding, "read_source_context", claim, worker_credential=worker_credential)
         if not isinstance(receipt, BuildSourceContextV1):
             raise ValueError("native context route returned an invalid receipt")
+        return receipt
+
+    async def upload_artifact(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        artifact: BuildArtifactV1, chunks: AsyncIterator[bytes],
+    ) -> BuildArtifactUploadReceiptV1:
+        if self.purpose(claim.binding) != "personal-build-worker":
+            raise ValueError("native artifact upload requires a build-purpose route")
+        receipt = await self._call(claim.binding, "upload_artifact", claim,
+            worker_credential=worker_credential, artifact=artifact, chunks=chunks)
+        if not isinstance(receipt, BuildArtifactUploadReceiptV1):
+            raise ValueError("native artifact route returned an invalid receipt")
         return receipt
 
     async def claim_assigned_platform(self, request: BuildAllocatedClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:

@@ -187,7 +187,8 @@ class BuildReleaseExchangeV1(StrictV1Model):
         pattern=r"^[A-Za-z0-9_-]+$", repr=False)
 
 
-def native_build_artifact_key(claim: BuildClaimRequestV1) -> str:
-    """A retry cannot overwrite another assignment's accepted archive identity."""
+def native_build_artifact_key(claim: BuildClaimRequestV1, artifact: BuildArtifactV1) -> str:
+    """Distinct verified output cannot address another accepted archive's bytes."""
     claim = BuildClaimRequestV1.model_validate_json(claim.model_dump_json())
-    return f"personal-dev/native-claims/{claim.request_id}/{claim.binding.intent_id}/{claim.operation_id}/artifact.tar"
+    artifact = BuildArtifactV1.model_validate_json(artifact.model_dump_json())
+    return f"personal-dev/native-claims/{claim.request_id}/{claim.binding.intent_id}/{claim.operation_id}/{artifact.archive_sha256}/artifact.tar"

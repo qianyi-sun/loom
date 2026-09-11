@@ -13,8 +13,8 @@ from loom_service.config import LoomServiceSettings
 @pytest.mark.parametrize("boundary", ["normal", "later-failure", "admission-failure", "unconfigured"])
 @pytest.mark.parametrize("mode", ["native-registration", "native-source", "native-artifacts"])
 def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch, boundary, mode):
-    from loom_capacity_build_guard.source_reader import BuildSourceReader
     from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
+    from loom_capacity_build_guard.source_reader import BuildSourceReader
 
     events = []
     original_close = BuildSourceReader.aclose

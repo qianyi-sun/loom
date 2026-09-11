@@ -3,13 +3,13 @@
 import asyncio
 import hashlib
 from importlib import import_module
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from botocore.exceptions import ClientError
 
 from loom_capacity_agent.build_admission import BuildArtifactV1, native_build_artifact_key
+from tests.unit.test_native_build_context import context_for
 from tests.unit.test_personal_dev_build_source_reader import reader_input
 
 
@@ -59,7 +59,14 @@ def inputs(monkeypatch, data=b"artifact"):
         max_artifact_bytes=16 * 1024 * 1024)
     authorize = AsyncMock(return_value=source)
     monkeypatch.setattr(writer, "_authorize", authorize)
+    context = context_for(claim).model_copy(update={"source_binding_sha256": source.source_binding_sha256,
+        "archive_sha256": source.archive_sha256, "archive_size_bytes": source.archive_size_bytes})
+    monkeypatch.setattr(writer, "_context", AsyncMock(return_value=context))
     artifact = BuildArtifactV1(archive_size_bytes=len(data), archive_sha256=hashlib.sha256(data).hexdigest())
+    objects.expected_metadata = {"claim-sha256": source.claim_digest, "artifact-sha256": artifact.archive_sha256,
+        "attestation-scope": "personal-dev-only", "build-attempt-id": str(context.attempt_id),
+        "build-lease-epoch": str(context.lease_epoch), "candidate-sha256": context.candidate_sha,
+        "platform": context.platform}
     return module, writer, claim, source, authorize, objects, artifact
 
 
@@ -85,7 +92,7 @@ async def test_artifact_stream_checks_full_content_fences_and_conditional_identi
     elif boundary == "lost-completion":
         objects.lose_completion = True
     elif boundary.startswith("existing-"):
-        objects.object = {"Body": b"artifact", "Metadata": {"claim-sha256": source.claim_digest,
+        objects.object = {"Body": b"artifact", "Metadata": {**objects.expected_metadata,
             "artifact-sha256": artifact.archive_sha256 if boundary == "existing-exact" else "f" * 64}}
     async def chunks():
         if boundary == "oversized-chunk":
@@ -102,7 +109,7 @@ async def test_artifact_stream_checks_full_content_fences_and_conditional_identi
             await writer.write(claim, worker_credential="x" * 43, artifact=artifact, chunks=chunks())
     for _operation, kwargs in objects.calls:
         assert kwargs["Bucket"] == source.object_bucket
-        assert kwargs["Key"] == native_build_artifact_key(claim)
+        assert kwargs["Key"] == native_build_artifact_key(claim, artifact)
         assert "x" * 43 not in repr(kwargs)
     operations = [operation for operation, _ in objects.calls]
     if boundary == "before":
@@ -116,6 +123,18 @@ async def test_artifact_stream_checks_full_content_fences_and_conditional_identi
     if boundary == "multipart":
         assert len(objects.parts) == 2
         assert all(len(part) >= 5 * 1024 * 1024 for part in objects.parts[:-1])
+
+
+@pytest.mark.parametrize("field,value", [("claim_digest", "f" * 64), ("archive_size_bytes", 999),
+    ("source_binding_sha256", "f" * 64), ("platform", "linux/amd64")])
+async def test_artifact_metadata_requires_exact_authoritative_context(monkeypatch, field, value):
+    _module, writer, claim, _source, _authorize, objects, artifact = inputs(monkeypatch)
+    writer._context.return_value = writer._context.return_value.model_copy(update={field: value})
+    async def chunks():
+        yield b"artifact"
+    with pytest.raises(ValueError, match="context changed"):
+        await writer.write(claim, worker_credential="x" * 43, artifact=artifact, chunks=chunks())
+    assert objects.calls == []
 
 
 @pytest.mark.parametrize("phase", ["create", "part", "complete"])
