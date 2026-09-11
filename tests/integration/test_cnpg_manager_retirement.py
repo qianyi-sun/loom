@@ -182,7 +182,7 @@ def cnpg_probe(tmp_path, pinned_manager, request):
                      "bootstrap": {"initdb": {"database": "loom", "owner": "loom"}}},
         }).encode())
         kube("wait", "--for=condition=Ready", f"cluster/{cluster_name}", "--timeout=300s", timeout=310)
-        pods = json.loads(kube("get", "pods", "-l", f"cnpg.io/cluster={cluster_name}", "-o", "json"))["items"]
+        pods = json.loads(kube("get", "pods", "-l", f"cnpg.io/cluster={cluster_name},cnpg.io/podRole=instance", "-o", "json"))["items"]
         assert len(pods) == 1
         bootstrap = [entry for entry in pods[0]["spec"]["initContainers"]
                      if entry["name"] == "bootstrap-controller"]
@@ -466,7 +466,6 @@ def test_cnpg_effective_sql_admission_rejects_unconfigured_database_writers(cnpg
     from loom_cli.rollout.operator.protected_cnpg_sql_admission import (
         require_cnpg_effective_sql_profile,
     )
-
     from loom_cli.rollout.operator.protected_peer_database_connection import PeerDatabaseConnection
     from tests.integration.test_application_database_admission import _handoff
 
@@ -508,3 +507,71 @@ def test_cnpg_effective_sql_admission_rejects_unconfigured_database_writers(cnpg
         with maintenance.transaction():
             maintenance.execute('RESET session_preload_libraries')
         assert check()
+
+
+@pytest.mark.skipif(platform.machine() not in {'x86_64', 'amd64'}, reason='protected primary profile is amd64')
+def test_cnpg_postgres_references_come_from_independent_pinned_image():
+    import shlex
+
+    import docker
+
+    from loom_cli.rollout.operator.protected_cnpg_runtime_admission import CNPG_POSTGRES_SHA256
+    from loom_cli.rollout.operator.protected_cnpg_sql_admission import CNPG_NATIVE_C_CATALOG_SHA256
+
+    client = docker.from_env(timeout=120)
+    container = None
+    try:
+        subprocess.run(['docker', 'pull', _POSTGRES], check=True, capture_output=True, timeout=120)
+        image = client.images.get(_POSTGRES)
+        assert image.attrs['Architecture'] == 'amd64'
+        container = client.containers.create(image.id, network_disabled=True)
+        payloads = {}
+        for path in ['/usr/lib/postgresql/17/bin/postgres', '/usr/share/postgresql/17/postgres.bki',
+                     '/usr/share/postgresql/17/snowball_create.sql', '/usr/share/postgresql/17/extension/plpgsql--1.0.sql']:
+            stream, _ = container.get_archive(path)
+            content = io.BytesIO()
+            for chunk in stream:
+                assert content.tell() + len(chunk) < 16 * 1024 * 1024
+                content.write(chunk)
+            content.seek(0)
+            with tarfile.open(fileobj=content) as archive:
+                members = archive.getmembers()
+                assert len(members) == 1 and members[0].isfile()
+                with archive.extractfile(members[0]) as source:
+                    payloads[path.rsplit('/', 1)[1]] = source.read()
+        assert len(payloads['postgres']) == 9963336
+        assert hashlib.sha256(payloads['postgres']).hexdigest() == CNPG_POSTGRES_SHA256
+        for name, expected in {
+            'postgres.bki': '0416a5b74d7daf4a51c49c64df34a0f7cf42a3ff17173b155c352176ba85e889',
+            'snowball_create.sql': '7f51d5e9443b605950dd3db2469cc1e32af94b48ea47410771667002ccbaa24b',
+            'plpgsql--1.0.sql': 'f4e7e05438808ac0da0b3801397d16e36102969af7e2ffc982def5b7524fb557',
+        }.items():
+            assert hashlib.sha256(payloads[name]).hexdigest() == expected
+        bki = payloads['postgres.bki'].decode()
+        assert 'insert ( 2280 language_handler ' in bki
+        rows = []
+        for line in bki.split('close pg_proc')[0].splitlines():
+            if not line.startswith('insert ( '):
+                continue
+            row = shlex.split(line)[2:-1]
+            assert len(row) == 30
+            if row[4] == '13':
+                assert row[28] == '_null_'
+                rows.append([int(row[0]), row[1], int(row[2]), int(row[3]), int(row[4]),
+                             row[25], row[26], row[10] == 't', None, row[19], int(row[18]), row[12] == 't'])
+        assert len(rows) == 84
+        # Function declarations in the two independently hash-checked scripts.
+        for name, lib, args, result, strict in [
+            ('dsnowball_init', 'dict_snowball', '2281', 2281, True),
+            ('dsnowball_lexize', 'dict_snowball', '2281 2281 2281 2281', 2281, True),
+            ('plpgsql_call_handler', 'plpgsql', '', 2280, False),
+            ('plpgsql_inline_handler', 'plpgsql', '2281', 2278, True),
+            ('plpgsql_validator', 'plpgsql', '26', 2278, True),
+        ]:
+            rows.append([0, name, 11, 10, 13, name, '$libdir/' + lib, False, None, args, result, strict])
+        digest = hashlib.sha256(json.dumps(sorted(rows, key=lambda row: row[1]), separators=(',', ':')).encode()).hexdigest()
+        assert digest == CNPG_NATIVE_C_CATALOG_SHA256
+    finally:
+        if container is not None:
+            container.remove(v=True)
+        client.close()
