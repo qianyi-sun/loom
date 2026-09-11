@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
+    ServiceExecutionLease,
+    TaskImageAttemptRetention,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
     TaskImagePublicationEvidence,
@@ -20,8 +23,10 @@ from loom.db.schema import (
 )
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    _assert_no_pending_task_image_writes,
     admit_task_image_source,
     current_task_image_reference,
+    release_task_image_source,
     required_task_image_components,
     validate_task_image_registry_images,
 )
@@ -156,10 +161,15 @@ async def record_task_image_publication(
     registry_image: str,
 ) -> TaskImageMaterialization:
     """Append cleanup evidence without granting stale builders readiness authority."""
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    _assert_no_pending_task_image_writes(session)
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if row is None:
@@ -183,6 +193,7 @@ async def record_task_image_publication(
         )
     except ValueError as exc:
         raise TaskImageCompletionError(str(exc)) from exc
+    previous_history = list(row.registry_image_history or [])
     await _record_attempt_publication_evidence(
         session,
         row,
@@ -192,6 +203,16 @@ async def record_task_image_publication(
         registry_images=images,
         now=now,
     )
+    if row.registry_image_history != previous_history:
+        if row.state == "retiring":
+            # A collector only deleted the inventory returned by its claim.
+            # New evidence invalidates that acknowledgement and makes the full
+            # retained history immediately reclaimable under a newer epoch.
+            row.lease_epoch += 1
+            row.lease_expires_at = now
+        elif row.state == "retired":
+            # Late physical cleanup debt never restores build/source authority.
+            row.unreferenced_at = now
     if (
         row.state in {"claimed", "running"}
         and row.claimed_by == builder_id
@@ -233,6 +254,13 @@ async def claim_task_image_materialization(
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
 ) -> TaskImageMaterialization | None:
     """Atomically claim queued work or recover one expired lease."""
+    _assert_no_pending_task_image_writes(session)
+    # Queue maintenance writes precede candidate selection. Establish retained
+    # ownership before those writes, not only after learning the candidate's
+    # source kind. An AUTOCOMMIT lease cannot keep any admission lock atomic.
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     await session.execute(
         update(TaskImageMaterialization)
@@ -272,10 +300,12 @@ async def claim_task_image_materialization(
         )
         .order_by(TaskImageMaterialization.created_at, TaskImageMaterialization.id)
         .limit(1)
+        .execution_options(populate_existing=True)
         .with_for_update(skip_locked=True)
     )
     if row is None:
         return None
+    await admit_task_image_source(session, row=row)
     row.state = "claimed"
     row.claimed_by = builder_id
     row.lease_epoch += 1
@@ -310,9 +340,11 @@ async def _locked_owned_materialization(
     allowed_states: tuple[str, ...],
     now: datetime,
 ) -> TaskImageMaterialization:
+    _assert_no_pending_task_image_writes(session)
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(TaskImageMaterialization.id == materialization_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if (
@@ -336,14 +368,17 @@ async def start_task_image_materialization(
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
 ) -> TaskImageMaterialization:
     now = datetime.now(UTC)
-    row = await _locked_owned_materialization(
-        session,
-        materialization_id=materialization_id,
-        builder_id=builder_id,
-        lease_epoch=lease_epoch,
-        allowed_states=("claimed",),
-        now=now,
-    )
+    _assert_no_pending_task_image_writes(session)
+    with session.no_autoflush:
+        row = await _locked_owned_materialization(
+            session,
+            materialization_id=materialization_id,
+            builder_id=builder_id,
+            lease_epoch=lease_epoch,
+            allowed_states=("claimed",),
+            now=now,
+        )
+    await admit_task_image_source(session, row=row)
     row.state = "running"
     row.started_at = now
     row.lease_expires_at = _lease_deadline(now=now, lease_seconds=lease_seconds)
@@ -562,6 +597,9 @@ async def claim_task_image_registry_gc(
         for row in (*session.new, *session.dirty, *session.deleted)
     ):
         raise ValueError("task image GC has pending materialization writes")
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=grace_hours)
     legacy_owned = TaskImageMaterialization.ready_publication_operation_id.is_(None)
@@ -569,7 +607,7 @@ async def claim_task_image_registry_gc(
         update(TaskImageMaterialization)
         .where(
             legacy_owned,
-            TaskImageMaterialization.state.in_(("ready", "failed")),
+            TaskImageMaterialization.state.in_(("ready", "failed", "retired")),
             _registry_publication_exists(TaskImageMaterialization),
             _durable_reference_exists(TaskImageMaterialization),
         )
@@ -583,7 +621,7 @@ async def claim_task_image_registry_gc(
         update(TaskImageMaterialization)
         .where(
             legacy_owned,
-            TaskImageMaterialization.state.in_(("ready", "failed")),
+            TaskImageMaterialization.state.in_(("ready", "failed", "retired")),
             _registry_publication_exists(TaskImageMaterialization),
             TaskImageMaterialization.unreferenced_at.is_(None),
             ~_durable_reference_exists(TaskImageMaterialization),
@@ -620,7 +658,7 @@ async def claim_task_image_registry_gc(
             legacy_owned,
             or_(
                 and_(
-                    TaskImageMaterialization.state.in_(("ready", "failed")),
+                    TaskImageMaterialization.state.in_(("ready", "failed", "retired")),
                     _registry_publication_exists(TaskImageMaterialization),
                     TaskImageMaterialization.unreferenced_at <= cutoff,
                 ),
@@ -659,6 +697,9 @@ async def complete_task_image_registry_gc(
     lease_epoch: int,
 ) -> TaskImageMaterialization:
     """Commit deletion only for the current owner, requeuing raced references."""
+    from loom.task_bundle_source_journal import require_task_bundle_transaction
+
+    await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     row = await _locked_owned_materialization(
         session,
@@ -669,6 +710,8 @@ async def complete_task_image_registry_gc(
         now=now,
     )
     referenced = bool(await session.scalar(select(_durable_reference_exists(row))))
+    if referenced:
+        await admit_task_image_source(session, row=row)
     row.registry_images = {}
     row.registry_image_history = []
     row.claimed_by = None
@@ -687,8 +730,111 @@ async def complete_task_image_registry_gc(
     else:
         row.state = "retired"
         row.finished_at = now
+        await release_task_image_source(session, row=row)
     await session.flush()
     return row
+
+
+async def observe_unpublished_task_image_retirement(
+    engine: AsyncEngine,
+    *,
+    materialization_id: UUID,
+    now: datetime,
+    grace: timedelta = timedelta(hours=24),
+) -> Literal["absent", "ineligible", "pinned", "observing", "retired"]:
+    """Retire one abandoned strong-image owner without registry or object I/O.
+
+    Own a short READ COMMITTED transaction so no caller's pending writes or
+    fixed snapshot can cross the image/source fence. The caller's bounded,
+    fair inventory chooses IDs; busy catalog/image locks abort for a later pass.
+    Grace measures observations, not proof of continuous absence. Native
+    attempt retirement must independently finish before releasing its input.
+    This primitive is not scheduled or enabled by its presence.
+    """
+    if now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise ValueError("retirement time must be UTC")
+    if not timedelta(0) < grace <= timedelta(days=365):
+        raise ValueError("retirement grace outside bounds")
+    async with asyncio.timeout(5):
+        async with engine.connect() as connection:
+            await connection.execution_options(isolation_level="READ COMMITTED")
+            async with (
+                AsyncSession(connection, expire_on_commit=False, autoflush=False) as session,
+                session.begin(),
+            ):
+                await session.execute(text("SET LOCAL statement_timeout = '1s'"))
+                await session.execute(text("SET LOCAL idle_in_transaction_session_timeout = '1s'"))
+                # Legacy catalog producers do not all acquire image locks.
+                # Match attempt retention's conservative catalog fence until
+                # every producer has converged on the shared admission API.
+                await session.execute(text("LOCK TABLE public.tasks IN SHARE MODE NOWAIT"))
+                row = await session.scalar(
+                    select(TaskImageMaterialization)
+                    .where(TaskImageMaterialization.id == materialization_id)
+                    .with_for_update(nowait=True)
+                )
+                if row is None:
+                    return "absent"
+                if not row.bundle_content_manifest_sha256:
+                    return "ineligible"
+                if row.state == "retired":
+                    return "retired"
+                if (
+                    row.state not in ("queued", "failed")
+                    or row.claimed_by is not None
+                    or row.registry_images
+                    or row.registry_image_history
+                    or row.ready_publication_operation_id is not None
+                ):
+                    return "ineligible"
+                if now < row.updated_at:
+                    raise ValueError("retirement observation time moved backward")
+                publication = exists().where(
+                    TaskImagePublicationEvidence.materialization_id == row.id,
+                )
+                unretired_native_attempt = (
+                    select(TaskImageMaterializationAttempt.id)
+                    .outerjoin(
+                        TaskImageAttemptRetention,
+                        TaskImageAttemptRetention.attempt_id == TaskImageMaterializationAttempt.id,
+                    )
+                    .where(
+                        TaskImageMaterializationAttempt.materialization_id == row.id,
+                        TaskImageMaterializationAttempt.grant_id.is_not(None),
+                        TaskImageAttemptRetention.retired_at.is_(None),
+                    )
+                    .exists()
+                )
+                execution = exists().where(
+                    TrialTaskImageMaterialization.materialization_id == row.id,
+                    ServiceExecutionLease.trial_id == TrialTaskImageMaterialization.trial_id,
+                    or_(
+                        ServiceExecutionLease.deleted_at.is_(None),
+                        ServiceExecutionLease.cleanup_state != "complete",
+                    ),
+                )
+                if await session.scalar(select(publication)):
+                    return "ineligible"
+                pinned = bool(await session.scalar(select(or_(
+                    _durable_reference_exists(row), execution, unretired_native_attempt,
+                )))) or (row.lease_expires_at is not None and row.lease_expires_at > now)
+                row.updated_at = now
+                if pinned:
+                    row.last_referenced_at = now
+                    row.unreferenced_at = None
+                    return "pinned"
+                if row.unreferenced_at is None:
+                    row.unreferenced_at = now
+                if now - row.unreferenced_at < grace:
+                    return "observing"
+                row.state = "retired"
+                row.lease_epoch += 1
+                row.claimed_by = None
+                row.lease_expires_at = None
+                row.next_attempt_at = None
+                row.finished_at = now
+                await release_task_image_source(session, row=row)
+                return "retired"
 
 
 def task_image_materialization_payload(

@@ -1288,9 +1288,51 @@ exact object versions rather than attempting prefix cleanup. Tests exercise this
 real producer against PostgreSQL and TLS MinIO, including authored/catalog IDs,
 two-architecture enqueue, reuse, upload failure and publication rollback.
 
+Build claim, start and historical execution-grant lookup also validate and pin
+the exact selected image source before returning authority. Locked reads refresh
+cached ownership and refuse pending materialization edits. Initial reads suppress
+autoflush until strong-source transaction preflight has succeeded. Queue claim
+and registry-GC claim/completion require retained READ COMMITTED ownership even
+for legacy images: queue-maintenance writes precede knowing the candidate's source
+kind. Unsafe transaction modes are rejected before flushing unrelated caller Task
+writes. These are normal-session APIs; the separately configured protected
+SERIALIZABLE runtime still needs an explicit source-admission composition.
+
+Completing legacy registry GC releases only the retired image's materialization
+source pin in the same transaction. A raced catalog/trial reference requeues and
+re-admits the source instead; catalog and trial pins remain independently owned.
+Rollback restores both image state and its source reference. This is reference
+release, not storage deletion or native-attempt retirement.
+
+Delayed legacy publication remains cleanup evidence after image retirement;
+retired rows with newly reported history reenter registry GC without reviving
+their source. New history during an outstanding GC claim advances its epoch and
+expires the claim, so an old acknowledgement cannot discard objects missing from
+its deletion inventory. Exact repeated evidence does not invalidate an unchanged
+claim. Publication reporting also refreshes locked state and requires retained
+READ COMMITTED ownership. These fences cover reported artifacts, not proof that
+an unreported writer can never finish; native writer-quiescence requirements are
+unchanged.
+
+`observe_unpublished_task_image_retirement` provides a separate, unscheduled
+per-image retirement operation for strong-source queued/failed images with no
+recorded publication. It owns a READ COMMITTED transaction, takes `tasks SHARE
+NOWAIT` before the image lock, and applies one-second SQL/idle and five-second
+transaction deadlines. Catalog contention aborts without observing or releasing
+a pin. Current catalog references, nonterminal linked trials, execution leases
+without positive deletion and cleanup, unretired native attempts and live build
+leases reset the observation grace. The default grace is 24 hours; observations
+must not move backward. Retirement advances the image lease epoch and releases
+only its source pin atomically. Registry publication/history remains owned by
+registry GC, and rootless attempts must pass their separate retirement fence.
+The operation performs no object/registry I/O and neither schedules reconciliation
+nor establishes later terminal-verifier/start admission safety. Those composition
+gates remain necessary before enabling any source deletion.
+
 The local CLI and Python default remain legacy. Adapter and taskset producer
-integration, trial admission and reference release, both taskset GC paths,
-and scheduled reconciliation remain required. Taskset quota
+integration, historical/prebuilt-only trial source snapshots and release, rootless
+trial-start admission, both taskset GC paths, and scheduled reconciliation remain
+required. Native builder source admission is implemented below. Taskset quota
 accounting must include retained historical source objects outside generation
 roots before that producer switches. These APIs do not activate native builders.
 

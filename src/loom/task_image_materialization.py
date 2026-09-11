@@ -373,6 +373,29 @@ async def admit_task_image_source(
     )
 
 
+async def release_task_image_source(
+    session: AsyncSession, *, row: TaskImageMaterialization
+) -> None:
+    """Release only this retired image's input pin under its owning row lock.
+
+    Catalog and trial references have separate lifecycle owners. Releasing this
+    reference does not delete storage or retire another source incarnation.
+    """
+    digest = task_bundle_content_manifest_digest(row.task_source_provenance)
+    if not digest:
+        return
+    if row.state != "retired" or row.bundle_content_manifest_sha256 != digest or not row.task_source:
+        raise ValueError("source release requires an exact retired materialization")
+    from loom.task_bundle_source_journal import release_task_bundle_reference
+
+    await release_task_bundle_reference(
+        session,
+        source_id=hashlib.sha256(row.task_source.encode()).hexdigest(),
+        reference_kind="materialization",
+        owner_id=str(row.id),
+    )
+
+
 async def get_trial_task_image_execution_grant(
     session: AsyncSession,
     *,
@@ -380,21 +403,24 @@ async def get_trial_task_image_execution_grant(
     cpu_arches: list[str],
 ) -> TaskImageExecutionGrantV1 | None:
     """Lock and return the exact ready image snapshot selected for a claim."""
-    row = await session.scalar(
-        select(TaskImageMaterialization)
-        .join(
-            TrialTaskImageMaterialization,
-            TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
+    _assert_no_pending_task_image_writes(session)
+    with session.no_autoflush:
+        row = await session.scalar(
+            select(TaskImageMaterialization)
+            .join(
+                TrialTaskImageMaterialization,
+                TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
+            )
+            .where(
+                TrialTaskImageMaterialization.trial_id == trial_id,
+                TaskImageMaterialization.cpu_arch.in_(cpu_arches),
+                TaskImageMaterialization.state == "ready",
+            )
+            .order_by(TaskImageMaterialization.cpu_arch, TaskImageMaterialization.id)
+            .limit(1)
+            .execution_options(populate_existing=True)
+            .with_for_update()
         )
-        .where(
-            TrialTaskImageMaterialization.trial_id == trial_id,
-            TaskImageMaterialization.cpu_arch.in_(cpu_arches),
-            TaskImageMaterialization.state == "ready",
-        )
-        .order_by(TaskImageMaterialization.cpu_arch, TaskImageMaterialization.id)
-        .limit(1)
-        .with_for_update()
-    )
     if row is None:
         has_prerequisite = bool(
             await session.scalar(
@@ -404,6 +430,10 @@ async def get_trial_task_image_execution_grant(
         if has_prerequisite:
             raise RuntimeError("claimed trial no longer has a ready task-image materialization")
         return None
+    try:
+        await admit_task_image_source(session, row=row)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     return TaskImageExecutionGrantV1(
         schema_version="loom.task-image-execution-grant.v1",
         materialization_id=row.id,
