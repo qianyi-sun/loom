@@ -40,13 +40,20 @@ def main():
             archive.extractall(rootfs, filter="fully_trusted")
     for name in ("input", "output", "var/run/loom-buildkit", "var/lib/loom-buildkit"):
         (rootfs / name).mkdir(parents=True, exist_ok=True)
-    for name, value in {
-        "newuidmap": "0100000280000000000000000000000000000000",
-        "newgidmap": "0100000240000000000000000000000000000000",
-    }.items():
-        target = rootfs / "usr/bin" / name
-        os.setxattr(target, "security.capability", bytes.fromhex(value))
-        assert os.getxattr(target, "security.capability").hex() == value
+    if prepare_only:
+        from loom_capacity_executor.native_mapper_capabilities import (
+            restore_native_mapper_capabilities,
+        )
+
+        restore_native_mapper_capabilities(rootfs)
+    else:
+        for name, value in {
+            "newuidmap": "0100000280000000000000000000000000000000",
+            "newgidmap": "0100000240000000000000000000000000000000",
+        }.items():
+            target = rootfs / "usr/bin" / name
+            os.setxattr(target, "security.capability", bytes.fromhex(value))
+            assert os.getxattr(target, "security.capability").hex() == value
     # Exercise current production Python, not the older published wrapper.
     for path in (fixtures / "client-modules").iterdir():
         shutil.copyfile(path, rootfs / "opt/loom-personal-dev-builder/loom" / path.name)

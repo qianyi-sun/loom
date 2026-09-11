@@ -2096,9 +2096,15 @@ Fresh private-parent ownership, descriptor-anchored writes and final inode/type/
 owner/mode checks prevent accepting replaced material; failure cleanup touches
 only tracked inodes, including restoring writable modes on owned directories.
 Abrupt process death may retain partial attempt scratch and is not release proof.
-The KVM outer fixture uses this unpacker under the actual mapped UID/GID namespace,
-but capability restoration and trusted current-source overlays are still fixture
-steps. The unpack result is not an installed runtime-readiness certificate.
+The KVM outer fixture uses this unpacker under the actual mapped UID/GID namespace.
+`restore_native_mapper_capabilities` then requires mapped UID/GID zero backed by
+single nonzero outer identities, validates both fixed regular mapper executables
+before writing either, and restores only their published SETUID/SETGID capability
+bytes. Readback rechecks exact directory/file identities, metadata and capabilities;
+unexpected existing capabilities or unsafe paths fail closed. It never modifies
+host mapping helpers or grants an arbitrary capability request. A partial failure
+does not make the material ready. Trusted current-source overlays remain fixture
+steps; neither helper is an installed runtime-readiness certificate.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
