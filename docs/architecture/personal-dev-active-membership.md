@@ -2182,6 +2182,14 @@ blocks authority renewal while a restricted client is live; expiry stops that
 client and rejects a late start. Cleanup waits for successful stopped/absent
 runtime readback before exact deletion, then checks empty state. Broker reaping
 alone is insufficient, and neither result proves physical capacity release.
+`reconcile_native_runtime_cleanup` implements that ordering outside the live
+monitor: it requires a terminated/reaped broker, rejects unknown or duplicate
+runtime identities, waits for terminal state, performs each exact deletion once,
+then requires a successful empty inventory. Failed reads are not absence, and
+failed deletions or leftover state return cleanup uncertainty. The supervised
+fixture consumes this production result before artifact verification; it does
+not retry partial runtime deletion on failure. Its outer container is disposed
+separately as test-resource cleanup.
 These fixtures remain rootful and offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC

@@ -16,6 +16,7 @@ from loom_capacity_agent.build_admission import (
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
 from loom_capacity_executor.native_runsc import NativeRunscLayout
 from loom_capacity_executor.native_runtime_broker import NativeBrokerReady
+from loom_capacity_executor.native_runtime_cleanup import reconcile_native_runtime_cleanup
 from loom_capacity_executor.native_supervisor import (
     NativeAuthorityPermission,
     NativeAuthorityRequest,
@@ -68,6 +69,9 @@ def supervised_build(expiry=False):
         else:
             assert result.client_succeeded, result
             print("native-supervised-build-completed", flush=True)
+        cleanup = reconcile_native_runtime_cleanup(layout, broker_process=broker)
+        assert cleanup.confirmed, cleanup
+        print("native-supervised-cleanup-confirmed", flush=True)
     finally:
         for peer in (authority, auth_child, channel, broker_child):
             peer.close()

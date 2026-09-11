@@ -173,11 +173,13 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
     if root_stop == "monitored-expiry":
         assert "native-supervised-expiry-stopped-live-client" in output.stdout
+        assert "native-supervised-cleanup-confirmed" in output.stdout
         assert not (result_dir / "artifacts.tar").exists()
         return
     assert "native-allocated-client-artifact-ok" in output.stdout
     if root_stop == "monitored":
         assert "native-supervised-build-completed" in output.stdout
+        assert "native-supervised-cleanup-confirmed" in output.stdout
     else:
         assert "native-client-isolation-probes-ok" in output.stdout
         assert "native-root-stop-children-and-late-start-ok" in output.stdout

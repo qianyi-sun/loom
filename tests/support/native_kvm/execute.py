@@ -61,22 +61,13 @@ def main():
         if identity["root_stop"].startswith("monitored"):
             from supervised import supervised_build
 
-            started.extend((sandbox_id, buildkit_id, client_id))
+            # Production reconciliation owns these IDs even if it returns
+            # uncertain after a partial delete. Do not put them in the fixture
+            # retry list: failure cleanup is outer-container disposal only.
             expiry = identity["root_stop"] == "monitored-expiry"
             supervised_build(expiry=expiry)
-            # Broker reaping does not prove sentry/gofer termination. In the
-            # disposable init-reaped fixture, observe complete stopped/absent
-            # runtime state before deletion; never retry a failed mutation.
-            deadline = time.monotonic() + 10
-            while True:
-                observed = json.loads(subprocess.run([*runtime, "list", "--format=json"],
-                    check=True, capture_output=True, text=True, timeout=5).stdout) or []
-                by_id = {item["id"]: item["status"] for item in observed}
-                if all(by_id.get(name, "absent") in {"stopped", "absent"} for name in started):
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("supervised broker stop left live runtime state")
-                time.sleep(0.05)
+            # Production reconciliation already deleted these exact IDs once.
+            # Keep independent final empty-list verification, not duplicate writes.
             if expiry:
                 pulse = output / "lifecycle-pulse"
                 stopped = pulse.read_bytes()
