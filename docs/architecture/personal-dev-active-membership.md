@@ -280,8 +280,19 @@ executor identity, derive the installation lookup from subject/incarnation/
 deployment, and let protected SQL resolve the actual native installation. Requests
 and transactions are bounded; receipts leave only after the outer commit. Database
 diagnostics and credentials never form response bodies. The legacy native-builder
-V1 router is unchanged. Deployment configuration and the pool client's authenticated
-typed route remain to be connected; endpoint presence does not enable build intake.
+V1 router is unchanged. The pool client's authenticated typed route and deployment
+activation remain to be connected; endpoint presence does not enable build intake.
+
+Service startup can install these private sessions with the optional
+`LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
+`LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
+has `mode="prepare-bind-only"`, owner-only `database_url_file` and
+`principals_file` paths, and their SHA-256 digests. The database URL requires
+verified PostgreSQL TLS. Startup checks the restricted agent and protected
+prepare/bind procedures, and rejects incomplete inputs or privilege drift.
+The service owns this independent connection pool through normal shutdown and
+partial startup failure; it removes admission access before disposing the pool.
+This configuration never sets builder availability or enables source intake.
 
 The pool-side build-admission client uses a separate controller-only bearer token
 and verified mTLS files. It pins pool generation and executor identity, bounds

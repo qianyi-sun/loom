@@ -60,6 +60,7 @@ from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
 )
+from loom_service.personal_dev_build_admission import build_personal_build_admission_runtime
 from loom_service.personal_dev_builder import (
     build_personal_dev_builder_runtime,
     personal_dev_builder_run_loop,
@@ -356,6 +357,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             lambda: _assert_secret_store_startup(session_factory),
             operation_name="service secret-store startup validation",
         )
+        build_admission = await build_personal_build_admission_runtime(settings)
+        app.state._owned_personal_dev_build_admission = build_admission
+        if build_admission is not None:
+            app.state.personal_dev_build_admission_sessions = build_admission.sessions
+            app.state.personal_dev_build_admission_verifier = build_admission.verifier
         admin_secret_verifier = _load_admin_secret_verifier(settings)
         if settings.pipeline_stage1_smoke_public_key_file is not None:
             app.state.pipeline_stage1_smoke_verifier = load_stage1_smoke_signature_verifier(
@@ -634,7 +640,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             async with _service_lifespan(app):
                 yield
         finally:
+            # SQLAlchemy engines can reconnect after dispose. Remove admission
+            # access before closing its resources, including failed startup.
+            app.state.personal_dev_build_admission_sessions = None
+            app.state.personal_dev_build_admission_verifier = None
             for attribute in (
+                "_owned_personal_dev_build_admission",
                 "_owned_service_gateway_client",
                 "_owned_service_http_client",
                 "_owned_personal_dev_capacity_projector",
