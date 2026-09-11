@@ -1457,8 +1457,13 @@ eligibility, authenticated native claims and one-use trial start remain unwired.
 The checked-in legacy Slurm cgroup guard recognizes only
 `loom-cgroup-v1:pids=<N>` comments, whereas the protected executor submits its
 ownership token as the entire comment. That guard does not provision native
-protected-worker parents, and its stale-slice sweep cannot be assumed to preserve
-parents created independently. A coordinated owner-authenticated guard adapter
+protected-worker parents. Its presence inventory now uses the all-state node
+queue separately from its admission results: failed per-job readback, missing
+resource facts, suspended/completing jobs, and unknown comments do not authorize
+teardown of an existing slice. Only readable RUNNING legacy opt-ins acquire or
+resize a slice. This prevents an admission failure from disrupting an existing
+allocation; it neither authenticates a protected job nor proves positive runtime
+cleanup or permits an independent slice creator. A coordinated owner-authenticated guard adapter
 is still required before host launch acceptance; neither the signed ownership
 comment nor the legacy guard's opt-in format may be silently replaced.
 Installed-image diagnostic tests cover transport, loader-environment clearing and
