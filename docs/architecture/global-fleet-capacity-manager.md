@@ -700,6 +700,16 @@ validated terminal at the expected mutation epoch restores ordinary release
 semantics. The terminal must represent the complete database, credential,
 workload and input-fence outcome; retention itself supplies none of that evidence.
 
+Broker and worker resume can select that same original guard only when the
+acknowledged pending component matches the exact advanced-epoch recovery plan,
+attempt, candidate, tree and original starting epoch. They compare the full live
+supervised guard evidence and separately require the database epoch at starting
+plus one. A failed resumed launch cannot release the retained guard. Ordinary
+resumes still acquire their own guard; completed retention restores those normal
+semantics. The installed composition still needs admission recovery before any
+fresh database connection when the application database is closed; guard selection
+alone does not provide that recovery or complete the ownership handoff.
+
 The manager and systemd stop transport both refuse pending retention, including
 cleanup of a failed launch. Orphan reconciliation retains the lifecycle CronJob
 freeze even if the guard has died. Lost locks, deadline expiry and missing or

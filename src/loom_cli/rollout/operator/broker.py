@@ -83,6 +83,7 @@ from .preflight_artifact_references import (
     resume_binding_matches,
 )
 from .preflight_diagnostics import PreflightDiagnosticContext, PreflightDiagnosticStore
+from .protected_application_guard_retention import retained_application_guard_for_resume
 from .protected_apply_journal import (
     ProtectedApplyJournalError,
     ReconciliationOutcomeStatus,
@@ -1445,7 +1446,8 @@ def _resume(
                 resume=True,
             )
         expected_mutation_epoch = original.mutation_epoch
-        if not recover_orphan:
+        recovery_attempt = None
+        if envelope.resume:
             recovery_attempt = find_advanced_epoch_attempt(
                 dependencies.config.state_root,
                 request_id=request_id,
@@ -1457,23 +1459,39 @@ def _resume(
             )
             if recovery_attempt is not None:
                 expected_mutation_epoch += 1
+        retained_guard = retained_application_guard_for_resume(
+            dependencies.config.state_root,
+            request_id=request_id, service_uid=os.geteuid(),
+            recovery_attempt=recovery_attempt,
+            candidate_sha=original.candidate.resolved_sha,
+            candidate_tree=original.candidate_tree,
+            attestation_digest=first.preflight_attestation_sha256,
+            starting_mutation_epoch=original.mutation_epoch,
+        )
+        expected_guard_epoch = (
+            original.mutation_epoch if retained_guard is not None else expected_mutation_epoch
+        )
         mutation_guard = dependencies.mutation_guard
         read_mutation_epoch = dependencies.read_mutation_epoch
         guard_acquired = False
         guard_transferred = False
         try:
-            guard_evidence = mutation_guard.acquire(
-                request_id,
-                candidate_config=effective_config,
-            )
-            guard_acquired = True
+            if retained_guard is not None:
+                guard_evidence = mutation_guard.assert_ready(request_id)
+                if guard_evidence != retained_guard:
+                    return _safe_error(dependencies, "original application mutation guard changed")
+            else:
+                guard_evidence = mutation_guard.acquire(
+                    request_id, candidate_config=effective_config,
+                )
+                guard_acquired = True
             observed_epoch = read_mutation_epoch()
             if (
                 type(observed_epoch) is not int
                 or guard_evidence.request_id != request_id
                 or guard_evidence.candidate_sha != original.candidate.resolved_sha
                 or guard_evidence.candidate_tree != original.candidate_tree
-                or guard_evidence.mutation_epoch != expected_mutation_epoch
+                or guard_evidence.mutation_epoch != expected_guard_epoch
                 or guard_evidence.state != "ready"
                 or observed_epoch != expected_mutation_epoch
             ):

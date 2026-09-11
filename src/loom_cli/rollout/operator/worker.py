@@ -60,6 +60,7 @@ from .model import (
     validate_safe_identifier,
 )
 from .policy import sanitized_child_environment
+from .protected_application_guard_retention import retained_application_guard_for_resume
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
 from .resume_runtime_upgrade import (
@@ -265,6 +266,7 @@ class WorkerDependencies:
     stderr: TextIO
     state_root: Path | None = None
     mutation_guard: Any | None = None
+    read_mutation_epoch: Callable[[], int] | None = None
     envelope_path: Callable[[DriverEnvelope], Path] | None = None
     load_envelope: Callable[[Path], DriverEnvelope] | None = None
     load_backup_job: Callable[[Path], PreflightBackupJobEnvelope] | None = None
@@ -761,6 +763,7 @@ def run_attempt(
         ):
             raise ValueError("staging mutation guard binding drifted")
         expected_mutation_epoch = original.mutation_epoch
+        retained_guard = None
         if envelope.resume and dependencies.state_root is not None:
             recovery_attempt = find_advanced_epoch_attempt(
                 dependencies.state_root,
@@ -773,6 +776,21 @@ def run_attempt(
             )
             if recovery_attempt is not None:
                 expected_mutation_epoch += 1
+            retained_guard = retained_application_guard_for_resume(
+                dependencies.state_root, request_id=envelope.request_id,
+                service_uid=os.geteuid(), recovery_attempt=recovery_attempt,
+                candidate_sha=envelope.resolved_sha, candidate_tree=envelope.resolved_tree,
+                attestation_digest=envelope.preflight_attestation_sha256,
+                starting_mutation_epoch=original.mutation_epoch,
+            )
+        if retained_guard is not None:
+            read_epoch = dependencies.read_mutation_epoch
+            if evidence != retained_guard or read_epoch is None:
+                raise ValueError("staging mutation guard original identity is unavailable")
+            observed_epoch = read_epoch()
+            if type(observed_epoch) is not int or observed_epoch != expected_mutation_epoch:
+                raise ValueError("staging mutation guard live epoch drifted")
+            expected_mutation_epoch = original.mutation_epoch
         if evidence.mutation_epoch != expected_mutation_epoch:
             raise ValueError("staging mutation guard binding drifted")
         return _run_attempt_owned(
@@ -1240,6 +1258,7 @@ def _default_dependencies(
         stderr=sys.stderr,
         state_root=config.state_root,
         mutation_guard=mutation_guard,
+        read_mutation_epoch=composition.read_mutation_epoch,
         envelope_path=lambda envelope: (
             config.state_root
             / "requests"
