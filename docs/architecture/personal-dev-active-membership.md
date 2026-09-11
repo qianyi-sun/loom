@@ -2139,6 +2139,23 @@ configs, empty runtime inventory, rejected late launch and no artifact publicati
 on expiry. This establishes offline runtime behavior, not Slurm death-chain or
 multi-owner installed acceptance.
 
+`verify_native_installed_release` provides the original-UID, read-only material
+check for the forthcoming installed entrypoint. A protected manifest digest binds
+source/platform, rootfs/profile bytes, the complete published runsc payload,
+closed Python/runtime trees, and explicitly inventoried system dependencies.
+Every path is reopened through root-owned, non-group/world-writable ancestors;
+files must be single-link readonly regular files with exact size/hash/mode.
+Bounded hashing and final path/metadata readback reject changes during the check.
+Unknown runtime entries, missing helpers, user-owned material and non-initial
+UID/GID maps fail closed. A disposable fixture provisions actual root-owned
+synthetic material, drops to the original worker UID, verifies it, then proves
+mapped consumption cannot re-establish host-root trust from overflow ownership.
+The protected launcher must authenticate the verifier before importing it, and
+the publisher must enumerate the complete imports/system dependencies; this is
+not automatic dependency discovery. The observation does not retain a release,
+install tooling, claim work, or enable intake. Fixed-entrypoint binding to the
+actual interpreter/RootlessKit and immutable release retention remain required.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained

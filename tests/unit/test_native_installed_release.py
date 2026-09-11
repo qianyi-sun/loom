@@ -23,7 +23,7 @@ def release(tmp_path, monkeypatch):
         fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
         fields["st_uid"] = fields["st_gid"] = 0
         if value.st_mode & 0o170000 == 0o040000 and Path(os.readlink(f"/proc/self/fd/{fd}")) not in (tmp_path, *tmp_path.rglob("*")):
-            fields["st_mode"] &= ~0o022  # pytest ancestors are not an installed root.
+            fields["st_mode"] &= ~0o7022  # pytest ancestors are not an installed root.
         return SimpleNamespace(**fields)
 
     monkeypatch.setattr(module.os, "fstat", root_metadata)
@@ -34,11 +34,15 @@ def release(tmp_path, monkeypatch):
         "rootlesskit", "rootfs.tar", "seccomp.json"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in (path.parent, *path.parent.parents):
+            if directory == tmp_path:
+                break
+            directory.chmod(0o755)
         content = b"{}" if name == "seccomp.json" else name.encode()
         path.write_bytes(content)
         mode = 0o444 if name.endswith((".tar", ".json", ".py")) else 0o555
         path.chmod(mode)
-        files[str(path)] = dict(path=str(path), sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content), mode=mode)
+        files[str(path)] = dict(schema_version=1, path=str(path), sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content), mode=mode)
     wire = dict(schema_version=1, source_sha="a" * 40, platform="linux/amd64",
         runsc_root=str(tmp_path / "gvisor"), python_root=str(tmp_path / "python"),
         python=str(tmp_path / "python/bin/python3"), rootlesskit=str(tmp_path / "rootlesskit"),
@@ -140,3 +144,46 @@ def test_original_identity_required_before_filesystem_reads(monkeypatch, fault):
     with pytest.raises(ValueError, match="original"):
         module.verify_native_installed_release(Path("/nonexistent"), expected_sha256="a" * 64,
             expected_source_sha="a" * 40, expected_platform="linux/amd64")
+
+
+@pytest.mark.parametrize("fault", ["file-owner", "parent-owner", "replace-file", "replace-parent", "rewrite", "extra-after-scan"])
+def test_observation_rejects_ownership_and_inflight_replacements(release, monkeypatch, fault):
+    module, root, check = release
+    helper = root / "gvisor/gvisor-bin/gvisor_sentry"
+    if fault in {"file-owner", "parent-owner"}:
+        before = module.os.fstat
+
+        def wrong_owner(fd):
+            metadata = before(fd)
+            if Path(os.readlink(f"/proc/self/fd/{fd}")) == (helper if fault == "file-owner" else helper.parent):
+                metadata.st_uid = 1000
+            return metadata
+
+        monkeypatch.setattr(module.os, "fstat", wrong_owner)
+    else:
+        before = module.os.read
+        changed = False
+
+        def racing_read(fd, count):
+            nonlocal changed
+            content = before(fd, count)
+            if not changed and Path(os.readlink(f"/proc/self/fd/{fd}")) == helper:
+                changed = True
+                if fault == "replace-file":
+                    helper.rename(helper.with_suffix(".original"))
+                    helper.write_bytes(content)
+                    helper.chmod(0o555)
+                elif fault == "replace-parent":
+                    helper.parent.rename(root / "old-helpers")
+                    helper.parent.mkdir(mode=0o755)
+                elif fault == "rewrite":
+                    helper.chmod(0o755)
+                    helper.write_bytes(b"x" * len(content))
+                    helper.chmod(0o555)
+                else:
+                    (helper.parent / "unlisted").write_bytes(b"late")
+            return content
+
+        monkeypatch.setattr(module.os, "read", racing_read)
+    with pytest.raises((ValueError, OSError)):
+        check()

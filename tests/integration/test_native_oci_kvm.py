@@ -128,6 +128,38 @@ def test_rootless_private_output_requires_mapped_reader():
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
+@pytest.mark.parametrize("mode", ["valid", "untrusted-owner"])
+def test_installed_release_requires_original_uid_and_real_root_ownership(mode):
+    """Root provisions only disposable synthetic material, then permanently drops UID."""
+    if platform.machine() != "x86_64":
+        pytest.skip("installed ownership fixture currently has AMD64-only dependencies")
+    built = checked("docker", "build", "--quiet", "-f", str(ROOT / "tests/support/native_kvm/Dockerfile.rootless"),
+        "--build-context", f"trusted-src={ROOT / 'src'}", str(ROOT / "tests/support/native_kvm"),
+        capture_output=True, text=True)
+    fixture_image = built.stdout.strip().splitlines()[-1]
+    assert fixture_image.startswith("sha256:")
+    name = "loom-installed-release-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=1", "--memory=256m", "--pids-limit=64",
+            "--user=0:0", "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=CHOWN",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=16m,mode=1777",
+            "--tmpfs=/opt/native-release-fixture:rw,nodev,size=16m,mode=0755",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            fixture_image, "python3", "-I", "/test-support/installed_release.py", mode,
+            capture_output=True, text=True)
+        if mode == "valid":
+            assert "original-uid-protected-release-verified" in result.stdout
+            assert "mapped-consumption-without-host-root-trust-ok" in result.stdout
+        else:
+            assert "owner-controlled-helper-rejected" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"installed release ownership fixture failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
 def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
     """Rootless outer runtime prerequisite, not complete native build acceptance.
 
