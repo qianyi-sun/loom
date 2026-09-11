@@ -90,3 +90,44 @@ def test_native_permission_acl_is_exact_and_verified(build_guard_database, bound
         connection.execute(text(statements[boundary]))
     with pytest.raises(RuntimeError, match=r"privilege|surface"):
         command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize("boundary", ["exact", "disabled", "credential", "cancelled", "controller", "http"])
+async def test_native_permission_http_boundary(prepared_input, tmp_path, monkeypatch, boundary):
+    import httpx
+
+    from tests.integration.test_personal_dev_build_guard_http import application
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    factory, engine, installation, _plan, _source, platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+    app = application(prepared_input, tmp_path)
+    # Production config deliberately rejects native-execution pending concrete
+    # installed-runtime prerequisites. This isolated route fixture tests SQL/HTTP.
+    app.state.personal_dev_build_admission_mode = "native-artifacts" if boundary == "disabled" else "native-execution"
+    if boundary == "cancelled":
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"),
+                {"id": platform.id})
+    request = BuildExecutionRequestV1(claim=claim, challenge=uuid4(), source_binding_sha256=platform.source_binding_sha256)
+    responses = []
+
+    async def capture(response):
+        responses.append(response)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), event_hooks={"response": [capture]}) as http:
+        client = client_for(http, claim)
+        client._token = "wrong" if boundary == "controller" else "executor-secret"
+        if boundary == "http":
+            client._origin = "http://management.test"
+        if boundary == "exact":
+            permit = await client.authorize_execution(request, worker_credential=CREDENTIAL)
+            assert permit.request == request
+            assert responses[0].headers["cache-control"] == "no-store"
+        else:
+            with pytest.raises(RuntimeError):
+                await client.authorize_execution(request,
+                    worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
+            assert responses[0].status_code == {"disabled": 503, "controller": 401, "http": 403}.get(boundary, 409)

@@ -48,3 +48,46 @@ def test_execution_credential_is_transport_only_and_hidden_from_repr():
     envelope = protocol.BuildExecutionExchangeV1(request=request, worker_credential="x" * 43)
     assert "x" * 43 not in repr(envelope)
     assert "worker_credential" not in request.model_dump_json()
+
+
+@pytest.mark.parametrize("boundary", ["exact", "challenge", "source", "claim", "noncanonical", "http"])
+async def test_permission_client_validates_fresh_request_not_only_receipt_shape(boundary):
+    import httpx
+
+    from loom_capacity_manager.contracts import canonical_bytes
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    request = execution_request()
+    now = datetime.now(UTC)
+
+    async def handle(incoming):
+        assert incoming.url.path.endswith("/execution")
+        received = protocol.BuildExecutionExchangeV1.model_validate_json(incoming.content)
+        assert received.request == request and received.worker_credential == "x" * 43
+        changed = request
+        if boundary == "challenge":
+            changed = request.model_copy(update={"challenge": uuid4()})
+        elif boundary == "source":
+            changed = request.model_copy(update={"source_binding_sha256": "f" * 64})
+        elif boundary == "claim":
+            changed = request.model_copy(update={"claim": execution_request().claim})
+        permit = protocol.BuildExecutionPermitV1(request=changed, request_digest=canonical_digest(changed),
+            issued_at=now, not_after=now + timedelta(seconds=10))
+        wire = canonical_bytes(permit) + (b" " if boundary == "noncanonical" else b"")
+        return httpx.Response(409 if boundary == "http" else 200, content=wire)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, request.claim)
+        if boundary == "exact":
+            assert (await client.authorize_execution(request, worker_credential="x" * 43)).request == request
+        else:
+            with pytest.raises(RuntimeError):
+                await client.authorize_execution(request, worker_credential="x" * 43)
+
+
+def test_production_config_cannot_enable_uninstalled_execution_runtime():
+    from loom_service.personal_dev_build_admission import BuildAdmissionServiceConfigV1
+
+    with pytest.raises(ValueError):
+        BuildAdmissionServiceConfigV1(mode="native-execution", database_url_file="/etc/loom/db",
+            database_url_sha256="a" * 64, principals_file="/etc/loom/principals", principals_sha256="b" * 64)
