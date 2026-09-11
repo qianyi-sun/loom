@@ -61,6 +61,7 @@ from loom_service.metrics import (
     HTTP_REQUESTS_TOTAL,
 )
 from loom_service.personal_dev_build_admission import build_personal_build_admission_runtime
+from loom_service.personal_dev_build_management import build_personal_build_management_runtime
 from loom_service.personal_dev_builder import (
     build_personal_dev_builder_runtime,
     personal_dev_builder_run_loop,
@@ -359,6 +360,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         )
         build_admission = await build_personal_build_admission_runtime(settings)
         app.state._owned_personal_dev_build_admission = build_admission
+        build_management = await build_personal_build_management_runtime(settings, admission=build_admission)
+        app.state._owned_personal_dev_build_management = build_management
         if build_admission is not None:
             app.state.personal_dev_build_admission_sessions = build_admission.sessions
             app.state.personal_dev_build_admission_verifier = build_admission.verifier
@@ -486,6 +489,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
         app.state.personal_dev_builder_available = personal_dev_builder_runtime is not None
         install_behavior_pipeline_public_adapter(app=app, settings=settings)
+        if build_management is not None:
+            build_management.start()
         if personal_dev_capacity_runtime is not None:
             app.state.personal_dev_capacity_status_reader = (
                 personal_dev_capacity_runtime.status_reader
@@ -647,6 +652,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             app.state.personal_dev_build_admission_verifier = None
             app.state.personal_dev_build_admission_mode = None
             for attribute in (
+                "_owned_personal_dev_build_management",
                 "_owned_personal_dev_build_admission",
                 "_owned_service_gateway_client",
                 "_owned_service_http_client",

@@ -107,7 +107,7 @@ async def test_withdrawal_evidence_blocks_destructive_downgrade(prepared_input, 
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(build_guard_database[0], "build_guard_0011")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0025"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0026"
 
 
 @pytest.mark.parametrize("boundary", ["schema", "extra", "executable", "noncanonical", "claims", "physical"])

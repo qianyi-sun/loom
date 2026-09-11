@@ -62,6 +62,7 @@ class PersonalBuildAdmissionRuntime:
 
 async def _assert_private_agent(connection: AsyncConnection, *, registration_enabled: bool = False,
     claims_enabled: bool = False,
+    additional_signatures: tuple[str, ...] = (),
 ) -> None:
     safe = await connection.scalar(
         text("""
@@ -115,7 +116,7 @@ async def _assert_private_agent(connection: AsyncConnection, *, registration_ena
             "acknowledge_release(uuid,jsonb,bytea,text,text)")
     if claims_enabled:
         signatures += ("claim_platform(uuid,jsonb,bytea,text,text)", "record_outcome(uuid,jsonb,bytea,text,text)")
-    for signature in signatures:
+    for signature in (*signatures, *additional_signatures):
         callable_safe = await connection.scalar(
             text("""
             SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace

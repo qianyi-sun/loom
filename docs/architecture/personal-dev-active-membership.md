@@ -497,6 +497,18 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+`LOOM_SVC_PERSONAL_DEV_BUILD_MANAGEMENT_CONFIG_FILE` and its paired SHA-256 enable
+service-owned **recovery-only** loops for explicitly installed native build
+scopes. Revision `build_guard_0026` checks each scope against exact committed
+installer evidence at startup. The configuration pins separate reporter and
+TLS inputs; clients consume the verified byte snapshots, not later path rereads.
+Parallel scope loops share the private admission connection pool. Shutdown stops
+all loops before closing their clients and then that private engine. Partial
+startup failure closes previously constructed clients too. Neither this
+configuration nor loop health changes builder availability or native readiness.
+Owner onboarding still needs the protected installer to retain and materialize
+these scopes; this is not automatic personal-namespace provisioning.
+
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
 and plan convergence. Each pass performs cleanup before new admission. Expected

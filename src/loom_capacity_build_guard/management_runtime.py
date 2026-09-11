@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as DatabasePoolTimeout
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_agent.client import DemandPublishError, DemandReporterClient
@@ -108,7 +109,7 @@ class BuildManagementRuntime:
                         success = await action()
                     if not success:
                         failures.append(name)
-                except (DemandPublishError, DBAPIError, ValueError, TimeoutError):
+                except (DemandPublishError, DBAPIError, DatabasePoolTimeout, ValueError, TimeoutError):
                     failures.append(name)
                 # Unexpected programming errors and cancellation propagate.
 
