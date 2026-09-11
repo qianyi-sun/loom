@@ -896,6 +896,7 @@ class ApplicationRecoveryView:
         CNPGManagerReplacementIntent, bool, CNPGManagerReplacementReceipt | None
     ] | None
     workloads: tuple[ApplicationWorkload, ...] = ()
+    workloads_restoring: bool = False
 
 
 class ProtectedApplyJournal:
@@ -1023,7 +1024,10 @@ class ProtectedApplyJournal:
         workloads = self._read_application_workloads(root, expected, durable=False)
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during workload read")
-        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads)
+        restoring = self._read_workload_restoration(root, expected, workloads, durable=False)
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during restoration read")
+        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring)
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE
@@ -1239,6 +1243,50 @@ class ProtectedApplyJournal:
         record = {"schema_version": 1, "intent_digest": intent.intent_digest, "workload": workload.to_dict()}
         self._publish_or_match(root / f"application-workload-job-{workload.uid}.json", record)
         self._read_application_workloads(root, intent, durable=True)
+
+    def _workload_restoration_record(
+        self, root: Path, intent: ComponentIntent, workloads: tuple[ApplicationWorkload, ...],
+    ) -> dict[str, object]:
+        admission = self._read_application_admission(root, intent, durable=False)
+        if not workloads or admission is None or admission.coordination_guard is None:
+            raise ProtectedApplyJournalError("application workload restoration lacks original authority")
+        return {"schema_version": 1, "intent_digest": intent.intent_digest,
+                "inventory_digest": _hash_json({"workloads": [value.to_dict() for value in workloads]}),
+                "target": asdict(admission.target), "coordination_guard": asdict(admission.coordination_guard)}
+
+    def _read_workload_restoration(
+        self, root: Path, intent: ComponentIntent, workloads: tuple[ApplicationWorkload, ...], *, durable: bool,
+    ) -> bool:
+        filename = "application-workload-restoration.json"
+        try:
+            observed = self._read(root / filename)
+        except FileNotFoundError:
+            return False
+        if (type(observed.get("schema_version")) is not int
+                or observed != self._workload_restoration_record(root, intent, workloads)):
+            raise ProtectedApplyJournalError("application workload restoration binding changed")
+        if durable:
+            self._sync_application_recovery(root, filename)
+        return True
+
+    def application_workloads_restoring(self, plan: FinalGatePlan) -> bool:
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        workloads = self._read_application_workloads(root, intent, durable=True)
+        return self._read_workload_restoration(root, intent, workloads, durable=True)
+
+    def begin_application_workload_restoration(self, plan: FinalGatePlan) -> None:
+        """Publish recovery direction before restoring the first owned workload.
+
+        The installed caller first repeats real database completion. This record
+        prevents re-pausing on retry; it is not a cached database safe-outcome.
+        """
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        workloads = self._read_application_workloads(root, intent, durable=True)
+        record = self._workload_restoration_record(root, intent, workloads)
+        self._publish_or_match(root / "application-workload-restoration.json", record)
+        self._read_workload_restoration(root, intent, workloads, durable=True)
 
     def retain_application_guard(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> None:
         """Publish retention before sealing; acknowledgement is separately required."""
