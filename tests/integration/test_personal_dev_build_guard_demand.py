@@ -72,3 +72,31 @@ async def test_capture_requires_outer_transaction_and_complete_current_sources(p
         with pytest.raises(DBAPIError, match=r"source|complete"):
             await store_type(session, installation=retained).capture(configuration_generation=1, sources={})
         assert await store_type(session, installation=retained).read_latest() is None
+
+
+async def test_capture_does_not_lock_finished_unheld_history(prepared_input):
+    store_type = import_module("loom_capacity_build_guard.demand_store").BuildGuardDemandStore
+    sessions, engine, retained, _proposal, registration, _request = prepared_input
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE personal_dev_candidate_build_attempts SET state='succeeded', finished_at=now(), lease_expires_at=NULL WHERE id=:id"),
+            {"id": registration.build_attempt.id})
+    with engine.begin() as connection:
+        connection.execute(text("SELECT id FROM personal_dev_candidate_build_attempts WHERE id=:id FOR UPDATE"),
+            {"id": registration.build_attempt.id})
+        async with sessions.begin() as session:
+            await session.execute(text("SET LOCAL lock_timeout='100ms'"))
+            result = await store_type(session, installation=retained).capture(configuration_generation=1, sources={})
+            assert result.pending_unassigned == result.current_assignments == ()
+
+
+async def test_capture_rejects_configuration_regression(prepared_input):
+    from sqlalchemy.exc import DBAPIError
+
+    store_type = import_module("loom_capacity_build_guard.demand_store").BuildGuardDemandStore
+    sessions, _engine, retained, _proposal, registration, request = prepared_input
+    async with sessions.begin() as session:
+        first = await store_type(session, installation=retained).capture(configuration_generation=2, sources={request.id: registration})
+    async with sessions.begin() as session:
+        with pytest.raises(DBAPIError, match="configuration"):
+            await store_type(session, installation=retained).capture(configuration_generation=1, sources={request.id: registration})
+        assert await store_type(session, installation=retained).read_latest() == first
