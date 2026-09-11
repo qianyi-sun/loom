@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
@@ -110,8 +111,12 @@ def _assert_native_docker_stdin_is_not_retained(image: str) -> None:
         "root_expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
     credential = "test-native-bootstrap-" + uuid4().hex
+    configuration_secret = "test-native-config-" + uuid4().hex
     wire = encode_native_bootstrap(NativeWorkerBootstrap(
         native_execution=native, worker_credential=credential,
+        canonical_worker_settings=json.dumps(
+            {"minio_secret_key": configuration_secret}, sort_keys=True, separators=(",", ":"),
+        ),
     ))
     image_id = subprocess.check_output(
         ["docker", "image", "inspect", "--format", "{{.Id}}", image],
@@ -129,6 +134,7 @@ assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
 assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
 assert os.fstat(0).st_rdev == os.makedev(1, 3)
 assert os.read(0, 1) == b''
+assert set(bootstrap.worker_settings()) == {'minio_secret_key'}
 print('accepted')
 """
     container = subprocess.check_output(
@@ -154,6 +160,7 @@ print('accepted')
         for command in (["docker", "inspect", container], ["docker", "logs", container]):
             retained = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
             assert credential.encode() not in retained
+            assert configuration_secret.encode() not in retained
     finally:
         subprocess.run(
             ["docker", "rm", "--force", container], capture_output=True, check=True, timeout=30,

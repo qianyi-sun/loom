@@ -22,6 +22,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
 from loom_task_image_authority.publication_contracts import _unique_object
@@ -33,6 +34,10 @@ _CREDENTIAL = re.compile(r"[A-Za-z0-9._~-]{43,512}", re.ASCII)
 _FAILURE = "native worker bootstrap unavailable or malformed"
 _PR_SET_DUMPABLE = 4
 _PR_GET_DUMPABLE = 3
+_MAX_WORKER_SETTINGS_BYTES = 2048
+_BOOTSTRAP_SETTING_NAMES = frozenset({
+    "executor_worker_credential", "LOOM_EXECUTOR_WORKER_CREDENTIAL", "native_execution",
+})
 
 
 class NativeBootstrapError(ValueError):
@@ -43,6 +48,7 @@ class NativeBootstrapError(ValueError):
 class NativeWorkerBootstrap:
     native_execution: NativeTaskImageExecutionV2
     worker_credential: str = field(repr=False)
+    canonical_worker_settings: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -51,6 +57,30 @@ class NativeWorkerBootstrap:
             or _CREDENTIAL.fullmatch(self.worker_credential) is None
         ):
             raise NativeBootstrapError(_FAILURE)
+        if self.canonical_worker_settings is not None:
+            _worker_settings_object(self.canonical_worker_settings)
+
+    def worker_settings(self) -> dict[str, Any]:
+        """Return a fresh settings copy; transport-only frames cannot start a worker."""
+
+        return _worker_settings_object(self.canonical_worker_settings)
+
+
+def _worker_settings_object(raw: str | None) -> dict[str, Any]:
+    try:
+        if type(raw) is not str or not 0 < len(raw.encode("ascii")) <= _MAX_WORKER_SETTINGS_BYTES:
+            raise ValueError
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+        if (
+            type(value) is not dict
+            or any(key.startswith("_") or key in _BOOTSTRAP_SETTING_NAMES for key in value)
+            or json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) != raw
+        ):
+            raise ValueError
+        result: dict[str, Any] = value
+        return result
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeBootstrapError(_FAILURE) from None
 
 
 def encode_native_bootstrap(bootstrap: NativeWorkerBootstrap) -> bytes:
@@ -64,13 +94,17 @@ def encode_native_bootstrap(bootstrap: NativeWorkerBootstrap) -> bytes:
                 bootstrap.native_execution.model_dump(mode="json")
             ),
             worker_credential=bootstrap.worker_credential,
+            canonical_worker_settings=bootstrap.canonical_worker_settings,
         )
+        document: dict[str, Any] = {
+            "schema": _SCHEMA,
+            "native_execution": checked.native_execution.model_dump(mode="json"),
+            "worker_credential": checked.worker_credential,
+        }
+        if checked.canonical_worker_settings is not None:
+            document["canonical_worker_settings"] = checked.canonical_worker_settings
         payload = json.dumps(
-            {
-                "schema": _SCHEMA,
-                "native_execution": checked.native_execution.model_dump(mode="json"),
-                "worker_credential": checked.worker_credential,
-            },
+            document,
             sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
         ).encode("ascii")
         if not 0 < len(payload) <= _MAX_FRAME_BYTES - _HEADER_BYTES:
@@ -139,15 +173,18 @@ def read_native_bootstrap(descriptor: int, *, timeout_seconds: float = 5) -> Nat
         if len(wire) <= _HEADER_BYTES or int.from_bytes(wire[:_HEADER_BYTES], "big") != len(wire) - _HEADER_BYTES:
             raise ValueError
         payload = json.loads(wire[_HEADER_BYTES:].decode("ascii"), object_pairs_hook=_unique_object)
+        required_fields = {"schema", "native_execution", "worker_credential"}
         if (
             type(payload) is not dict
-            or set(payload) != {"schema", "native_execution", "worker_credential"}
+            or set(payload) not in (required_fields, required_fields | {"canonical_worker_settings"})
             or payload["schema"] != _SCHEMA
+            or ("canonical_worker_settings" in payload and type(payload["canonical_worker_settings"]) is not str)
         ):
             raise ValueError
         bootstrap = NativeWorkerBootstrap(
             native_execution=NativeTaskImageExecutionV2.model_validate(payload["native_execution"]),
             worker_credential=payload["worker_credential"],
+            canonical_worker_settings=payload.get("canonical_worker_settings"),
         )
         if encode_native_bootstrap(bootstrap) != wire:
             raise ValueError

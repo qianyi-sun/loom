@@ -1402,10 +1402,25 @@ tests inject open, duplication and device-validation failures; installed-image
 tests exercise dumpability, stdin detachment and restart refusal. These are
 startup primitives, not yet the fixed launcher or worker settings composition.
 
-The complete native adapter remains unimplemented. It must connect one fixed,
-immutable-image launch to owner-projected profile eligibility and authenticated
-registration; disable dotenv/core dumps and ambient execution overrides; pass
-credentials directly into worker settings; and close stdin before child work.
+The worker-side `loom_worker.native_main` entrypoint consumes this handoff before
+constructing settings, metrics or the worker loop. Its optional canonical settings
+subdocument is limited to 2 KiB inside the unchanged 4 KiB total frame ceiling;
+frames without settings remain useful only for transport diagnostics and cannot
+start a worker. Reserved credential/root fields and external-source overrides
+are rejected. The native settings subclass uses initialization values only, with
+dotenv disabled; credentials pass directly into secret-valued fields and the
+public root stays in process settings, excluded from serialization. The ordinary
+worker entrypoint and its environment configuration remain unchanged. Subprocess
+tests exercise the production startup path with the worker-loop boundary replaced;
+they are not evidence of actual protected registration.
+
+The complete native adapter remains incomplete. The new entrypoint advertises no
+native capability and still uses the existing V1-only worker loop. It must be
+connected to one fixed, immutable-image launcher, owner-projected eligibility,
+authenticated native claims and one-use start. Init-only settings do not control
+the entire process environment: Docker SDK configuration and Slurm/GPU discovery
+also read ambient inputs. The fixed launcher must bind those inputs and the
+actual worker image; the startup entrypoint does not independently attest them.
 The worker container and all descendants require verified allocation containment.
 Docker client loss is not container termination. Unique in-memory execution
 ownership, durable grant finalization/start consumption and positive owned
