@@ -236,7 +236,9 @@ def _observe(plan: FinalGatePlan, runner: ApplicationWorkloadRunner, guard: Muta
             if owner[0] == "Job" and owner[2] in missing_jobs:
                 raise RuntimeError("application workload deleted Job still has an active Pod")
             active = True
-        elif _runtime_secret(document.get("spec")):
+        elif (_runtime_secret(document.get("spec"))
+              or _mapping(_mapping(document.get("metadata")).get("labels", {})).get("app")
+              in APPLICATION_DEPLOYMENTS | {APPLICATION_CRONJOB, "loom-migration"}):
             raise RuntimeError("application workload has an unowned live database client Pod")
     return objects, active
 
