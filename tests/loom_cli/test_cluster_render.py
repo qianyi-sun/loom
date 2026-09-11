@@ -1237,6 +1237,31 @@ def test_protected_profiles_declare_static_host_path_storage(
     assert cfg.persistent_storage_host_path_root == host_root
 
 
+def test_staging_minio_render_pins_reachable_source_without_changing_storage_topology() -> None:
+    cfg = load_cluster_config(
+        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
+    )
+    docs = _load_docs(render_manifests(cfg))
+    minio = next(
+        doc for doc in docs
+        if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "loom-minio"
+    )
+    assert minio["spec"]["template"]["spec"]["containers"][0]["image"] == (
+        "quay.io/minio/minio@sha256:"
+        "14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+    )
+    assert minio["spec"]["replicas"] == 4
+    assert minio["spec"]["serviceName"] == "loom-minio-headless"
+    claim = minio["spec"]["volumeClaimTemplates"][0]
+    assert claim["metadata"]["name"] == "data"
+    assert claim["spec"]["storageClassName"] == "longhorn"
+    pdb = next(
+        doc for doc in docs
+        if doc["kind"] == "PodDisruptionBudget" and doc["metadata"]["name"] == "loom-minio"
+    )
+    assert pdb["spec"]["minAvailable"] == 3
+
+
 def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     cfg = load_cluster_config(
         _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
