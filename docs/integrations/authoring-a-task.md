@@ -233,6 +233,15 @@ aggregate is computed from the steps that completed.
   set `docker_build_context` to that directory when those files should be
   available to Docker but hidden from the agent workspace. `build_timeout_sec`
   controls the per-task image build timeout and defaults to 1200 seconds.
+  Optional `docker_build_args = { PACKAGE_VERSION = "1.2" }` supplies string
+  Docker `ARG` values, and `docker_build_target = "runtime"` selects a stage
+  in a multi-stage Dockerfile (the default is its final stage). Both require
+  `dockerfile`. Argument names use letters, digits and underscores and cannot
+  start with a digit. These are public task inputs, never secret credentials.
+  Changing an argument value or target invalidates the cached image; argument
+  ordering does not. The legacy rootless build-plan v1 backend explicitly
+  rejects these options because it cannot execute them; the Docker builder
+  passes them to the native build API.
   Loom does not flatten or rewrite bundle directories: if the build context is
   the bundle root and the Dockerfile says `COPY . /app/`, a file stored at
   `environment/setup_repo.sh` lands at `/app/environment/setup_repo.sh`, not

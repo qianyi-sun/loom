@@ -31,6 +31,8 @@ def _task_config(
     docker_image: str | None = None,
     dockerfile: str | None = None,
     docker_build_context: str | None = None,
+    docker_build_args: dict[str, str] | None = None,
+    docker_build_target: str | None = None,
 ) -> TaskConfig:
     return TaskConfig(
         schema_version="1",
@@ -42,6 +44,8 @@ def _task_config(
             docker_build_context=(
                 PurePosixPath(docker_build_context) if docker_build_context else None
             ),
+            docker_build_args=docker_build_args or {},
+            docker_build_target=docker_build_target,
         ),
         agent=AgentDefaults(name="oracle"),
         verifier=VerifierDefaults(name="pytest"),
@@ -185,6 +189,8 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
         "forcerm": True,
         "pull": False,
         "platform": "linux/amd64",
+        "buildargs": {},
+        "target": None,
     }
     assert build["labels"] == {
         "loom.task-image": "true",
@@ -470,6 +476,41 @@ async def test_resolve_task_image_reuses_cached_dockerfile_image(
     assert image.startswith("loom-task:")
     assert fake_images.get_calls == [image]
     assert fake_images.build_calls == []
+
+
+async def test_docker_build_options_execute_and_reuse_only_matching_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / "Dockerfile").write_text(
+        "FROM scratch AS runtime\nARG VERSION\nLABEL version=$VERSION\n"
+        "FROM scratch AS alternate\nARG VERSION\nLABEL alternate=$VERSION\n"
+    )
+    fake_images = _FakeImages()
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: _FakeDockerClient(fake_images))
+
+    async def resolve(args: dict[str, str], target: str) -> str:
+        return await resolve_task_image(
+            task_config=_task_config(
+                dockerfile="Dockerfile", docker_build_args=args, docker_build_target=target
+            ),
+            task_dir=tmp_path,
+            task_checksum="same-source",
+        )
+
+    initial = await resolve({"VERSION": "1", "EXTRA": ""}, "runtime")
+    reordered = await resolve({"EXTRA": "", "VERSION": "1"}, "runtime")
+    changed_arg = await resolve({"VERSION": "2", "EXTRA": ""}, "runtime")
+    changed_target = await resolve({"VERSION": "1", "EXTRA": ""}, "alternate")
+
+    assert reordered == initial
+    assert len({initial, changed_arg, changed_target}) == 3
+    assert len(fake_images.build_calls) == 3
+    assert [(call["buildargs"], call["target"]) for call in fake_images.build_calls] == [
+        ({"VERSION": "1", "EXTRA": ""}, "runtime"),
+        ({"VERSION": "2", "EXTRA": ""}, "runtime"),
+        ({"VERSION": "1", "EXTRA": ""}, "alternate"),
+    ]
 
 
 async def test_resolve_task_image_rejects_oversized_build_context_files(
