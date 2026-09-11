@@ -190,7 +190,7 @@ def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
-@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry"])
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry", "monitored-rootless-outer", "monitored-rootless-outer-expiry"])
 def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
@@ -278,6 +278,8 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
                 "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID"]
             fixture_command = [fixture_image, "/usr/bin/rootlesskit", "--net=none",
                 "--state-dir=/tmp/rootless-probe", "python3", "/test-support/execute.py"]
+            if "-outer" in root_stop:
+                fixture_command = [fixture_image, "python3", "/test-support/rootless_full_io.py"]
         else:
             rootless_args = ["--user=0:0", "--cap-add=SYS_ADMIN", "--cap-add=SYS_PTRACE"]
             fixture_command = [EXECUTOR if root_stop.startswith("monitored") else PYTHON,
@@ -300,13 +302,15 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
+    if "-outer" in root_stop:
+        assert "native-outer-io-session-settled" in output.stdout
     if root_stop.endswith("expiry"):
         assert "native-supervised-expiry-stopped-live-client" in output.stdout
         assert "native-supervised-cleanup-confirmed" in output.stdout
         assert not (result_dir / "artifacts.tar").exists()
         return
     assert "native-allocated-client-artifact-ok" in output.stdout
-    if root_stop in {"monitored", "monitored-rootless"}:
+    if root_stop.startswith("monitored"):
         assert "native-supervised-build-completed" in output.stdout
         assert "native-supervised-cleanup-confirmed" in output.stdout
     else:

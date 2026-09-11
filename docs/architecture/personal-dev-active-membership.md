@@ -2240,6 +2240,17 @@ unreaped supervision or uncertain cleanup returns no artifact. The complete
 rootless success/expiry fixtures exercise this session, with fixture-only authority
 replies. It neither uploads nor records outcomes or releases capacity; trusted
 material, one-shot launch fencing and the outer IO lifecycle remain caller duties.
+The full IO-split fixture additionally keeps its synthetic authority client
+outside RootlessKit. The mapped monitor receives only the private execution
+socket; after successful cleanup and verification, it exports artifact bytes
+through a separate inherited stream. The original outer UID cannot traverse
+the mapped private output. `native_artifact_transfer` validates a bounded canonical
+claim/source/size/hash header, exact bytes and EOF, rejecting ancillary descriptors.
+The outer receiver stages a scoped private spool using descriptor-anchored paths
+and settled cancellation-safe writes. These are transport facts, not OCI
+publication authority. Upload must retain that scope and open directory descriptor;
+the `/proc/self/fd/...` path is not portable to another process. The expiry fixture
+still proves a live client stopped, exact cleanup and no exported artifact.
 These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
