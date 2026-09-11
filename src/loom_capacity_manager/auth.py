@@ -163,18 +163,24 @@ class _PrincipalDocument(_StrictModel):
         return self
 
 
-class _RegistryDocument(_StrictModel):
+class _UniqueRegistryDocument(_StrictModel):
     schema_version: Literal[1]
     principals: Annotated[tuple[_PrincipalDocument, ...], Field(min_length=1, max_length=4096)]
 
     @model_validator(mode="after")
-    def _unique_authority(self) -> _RegistryDocument:
+    def _unique_authority(self) -> _UniqueRegistryDocument:
         principal_ids = [principal.principal_id for principal in self.principals]
         if len(principal_ids) != len(set(principal_ids)):
             raise ValueError("duplicate principal id")
         token_hashes = [principal.token_sha256 for principal in self.principals]
         if len(token_hashes) != len(set(token_hashes)):
             raise ValueError("duplicate token hash")
+        return self
+
+
+class _RegistryDocument(_UniqueRegistryDocument):
+    @model_validator(mode="after")
+    def _manager_authority(self) -> _RegistryDocument:
         if not any(
             "capacity:reconcile" in principal.scopes
             and principal.subject_id is None
@@ -182,6 +188,14 @@ class _RegistryDocument(_StrictModel):
             for principal in self.principals
         ):
             raise ValueError("principal registry requires an unbound operator")
+        return self
+
+
+class _PoolExecutorRegistryDocument(_UniqueRegistryDocument):
+    @model_validator(mode="after")
+    def _executor_authority(self) -> _PoolExecutorRegistryDocument:
+        if any(principal.scopes != ("capacity:execute:pool",) for principal in self.principals):
+            raise ValueError("admission registry must be executor-only")
         return self
 
 
@@ -274,15 +288,26 @@ class CapacityPrincipalVerifier:
 
     @classmethod
     def from_file(cls, path: Path) -> CapacityPrincipalVerifier:
+        return cls._from_file(path, registry_type=_RegistryDocument)
+
+    @classmethod
+    def from_pool_executor_file(cls, path: Path) -> CapacityPrincipalVerifier:
+        """Load a separate controller-only admission registry, never operator keys."""
+        return cls._from_file(path, registry_type=_PoolExecutorRegistryDocument)
+
+    @classmethod
+    def _from_file(cls, path: Path, *, registry_type: type[_UniqueRegistryDocument]) -> CapacityPrincipalVerifier:
         raw = _read_owner_only_file(path)
         try:
-            document = _RegistryDocument.model_validate_json(raw)
+            document = registry_type.model_validate_json(raw)
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             message = str(exc).lower()
             if "duplicate principal" in message:
                 label = "duplicate principal"
             elif "duplicate token" in message:
                 label = "duplicate token"
+            elif "executor-only" in message:
+                label = "admission registry must be executor-only"
             elif "subject binding" in message:
                 label = "invalid subject binding"
             elif "executor binding" in message:

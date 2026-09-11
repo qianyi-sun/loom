@@ -265,6 +265,13 @@ executor protocol and a database-generated high-water sequence. Purpose-specific
 executor authentication, contained execution, claims and physical release remain
 unconnected; typed runtime activation and readiness stay interlocked.
 
+The build-admission credential loader accepts a separate executor-only registry:
+every entry must have the single pool-execution scope and complete pool generation,
+executor ID and incarnation. It reuses owner-only file and duplicate-identity
+checks, while the manager's original loader still requires its operator. This
+does not configure an endpoint or grant access by itself. Management database
+credentials and application-worker credentials must never reach build containers.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
