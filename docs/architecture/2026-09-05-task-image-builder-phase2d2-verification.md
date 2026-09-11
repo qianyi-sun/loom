@@ -1387,6 +1387,34 @@ The typed renderer applies the same pre-signing lifetime fence. Its policy set
 also rejects native task-image execution profiles assigned to personal-development
 build workers; those are a different purpose from application trial workers.
 
+Controller and node bootstrap storage are separate. Slurm carries only the
+handoff reference; the controller-local private directory is not implicitly
+shared with workers. The native delivery exporter emits only the original
+job-scoped bootstrap capability, ownership binding and physical reference.
+It never exports `.used`, `.credential` or `.launched` state, worker credentials,
+manager credentials or signing keys. A configured node receiver checks its
+node/pool/release and protected admission route, independently fetches current
+unused-bootstrap authority, and validates the exact physical identity, capability
+hash and original expiry. Delivery cannot extend bootstrap validity.
+
+The receiver stages private files and publishes a complete per-reference node
+directory with atomic no-replace semantics, including refusal to replace an
+empty concurrent destination. Durable non-secret receipts bind the original
+payload and physical reference. Retry reestablishes directory fsync and returns
+the same historical receipt even after the node consumed its capability; it must
+never recreate capability files after `.launched`. Worker credentials are generated
+and retained only on the node. Native trusted launch waits a bounded interval
+for complete local delivery and compares the receipt to its independently
+reconstructed physical reference before invoking the native runtime. Legacy
+launch retains its existing path. Two-filesystem and concurrent-receiver tests
+exercise this storage composition, not live host transport authentication.
+
+The fixed confidential controller-to-node transport, protected receiver installation,
+controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
+retirement still need integration. Do not infer them from local delivery success
+or mount the whole controller handoff directory to fill the gap. Delivery receipts
+are not root cgroup preparation, registration or runtime-start authority.
+
 The native bootstrap codec transfers the bounded credential/root document through
 a memory-only, EOF-terminated pipe, not container environment or retained files.
 Preloading checks the pipe's actual capacity and atomic-write limit. Reading
