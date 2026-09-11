@@ -19,6 +19,111 @@ from tests.integration.test_personal_dev_build_guard_registration import CREDENT
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 
 
+@pytest.mark.parametrize("boundary", ["exact", "mode", "credential", "pool", "corrupt", "cancel"])
+async def test_native_artifact_http_client_streams_through_committed_live_guard(prepared_input, tmp_path, monkeypatch, boundary):
+    import asyncio
+    import hashlib
+
+    import httpx
+
+    from loom_capacity_agent.build_admission import BuildArtifactV1
+    from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
+    from loom_capacity_executor.build_admission_client import BuildAdmissionTransportError
+    from tests.integration.test_personal_dev_build_guard_http import application
+    from tests.unit.test_capacity_build_admission_client import client_for
+    from tests.unit.test_native_build_artifact_writer import Objects
+
+    factory, _engine, installation, _plan, _source, _platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = "native-source" if boundary == "mode" else "native-artifacts"
+    objects = Objects()
+    writer = BuildArtifactWriter(session_factory=factory, object_store=objects, max_artifact_bytes=1024)
+    app.state.personal_dev_build_artifact_writer = writer
+    artifact = BuildArtifactV1(archive_size_bytes=8, archive_sha256=hashlib.sha256(b"artifact").hexdigest())
+    async def chunks():
+        if boundary == "cancel":
+            raise asyncio.CancelledError
+        yield b"wrong!!!" if boundary == "corrupt" else b"artifact"
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+            client = client_for(http, claim)
+            client._token = "wrong" if boundary == "pool" else "executor-secret"
+            async def send():
+                return await client.upload_artifact(claim, worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL,
+                    artifact=artifact, chunks=chunks())
+            if boundary == "exact":
+                assert (await send()).artifact == artifact
+                assert objects.object["Body"] == b"artifact"
+            elif boundary == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await send()
+            else:
+                with pytest.raises(BuildAdmissionTransportError):
+                    await send()
+        if boundary in {"mode", "credential", "pool"}:
+            assert objects.calls == []
+        if boundary in {"corrupt", "cancel"}:
+            assert objects.object is None and objects.calls[-1][0] == "abort"
+    finally:
+        await writer.aclose()
+
+
+@pytest.mark.parametrize("boundary", ["exact", "credential", "before", "part", "complete"])
+async def test_native_artifact_writer_uses_live_guard_without_holding_io_locks(prepared_input, monkeypatch, boundary):
+    import hashlib
+
+    from loom_capacity_agent.build_admission import BuildArtifactV1
+    from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
+    from tests.unit.test_native_build_artifact_writer import Objects
+
+    factory, engine, installation, _plan, source, platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+    def cancel():
+        with engine.begin() as connection:
+            connection.execute(text("SET LOCAL lock_timeout='1000ms'"))
+            connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": platform.id})
+    objects = Objects()
+    if boundary == "before":
+        cancel()
+    if boundary in {"part", "complete"}:
+        name = "upload_part" if boundary == "part" else "complete_multipart_upload"
+        original = getattr(objects, name)
+        def revoke(**kwargs):
+            result = original(**kwargs)
+            cancel()
+            return result
+        monkeypatch.setattr(objects, name, revoke)
+    artifact = BuildArtifactV1(archive_size_bytes=8, archive_sha256=hashlib.sha256(b"artifact").hexdigest())
+    writer = BuildArtifactWriter(session_factory=factory, object_store=objects, max_artifact_bytes=1024)
+    async def chunks():
+        yield b"artifact"
+    try:
+        if boundary == "exact":
+            assert await writer.write(claim, worker_credential=CREDENTIAL, artifact=artifact, chunks=chunks()) == artifact
+            metadata = objects.object["Metadata"]
+            assert metadata["candidate-sha256"] == source.candidate.candidate_sha
+            assert metadata["build-attempt-id"] == str(source.build_attempt.id)
+            assert metadata["build-lease-epoch"] == str(source.build_attempt.lease_epoch)
+            assert metadata["platform"] == platform.platform
+        else:
+            with pytest.raises((ValueError, DBAPIError)):
+                await writer.write(claim, worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL,
+                    artifact=artifact, chunks=chunks())
+        if boundary in {"before", "credential"}:
+            assert objects.calls == []
+        if boundary == "part":
+            assert objects.object is None
+        if boundary == "complete":
+            assert objects.object is not None  # unaccepted orphan, never a successful receipt
+    finally:
+        await writer.aclose()
+
+
 @pytest.mark.parametrize("boundary", ["exact", "missing", "uncommitted", "credential", "claim", "binding",
     "cancelled", "expired", "source", "drain", "outcome"])
 async def test_source_access_requires_exact_committed_live_claim(prepared_input, monkeypatch, boundary):
